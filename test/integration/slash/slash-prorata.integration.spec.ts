@@ -762,11 +762,9 @@ describe('pro-rata EVM slash, against a real database', () => {
       await services.execution.proposeDue(nowOf());
       chain.now += BigInt(73 * 3600);
       const proposal = await load(seeded);
-      await dataSource.query(
-        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
-           resolved_at = now() WHERE id = $1`,
-        [proposal.id],
-      );
+      await dataSource.query(`UPDATE slash_proposals SET status = 'CANCELLED' WHERE id = $1`, [
+        proposal.id,
+      ]);
       const parts = await services.partsRepository.findForEpoch(
         proposal.organizationId,
         proposal.id,
@@ -776,7 +774,7 @@ describe('pro-rata EVM slash, against a real database', () => {
         await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
       }
       const after = await load(seeded);
-      expect(after).toMatchObject({ status: 'OVERTURNED', chainStatus: 'EXECUTED' });
+      expect(after).toMatchObject({ status: 'CANCELLED', chainStatus: 'EXECUTED' });
       expect(after.executedAt).not.toBeNull();
       expect(await kinds(proposal.id)).toContain('EXECUTED_AFTER_CLOSURE');
     });

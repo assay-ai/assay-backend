@@ -227,7 +227,7 @@ describe('OperatorCaseService.brief manualActions', () => {
   const written = { chainProposedAt: new Date('2026-10-14T11:17:01Z'), penaltyAmount: '1000000' };
 
   it('a closed case whose record reads cancelled: close, and nothing else', async () => {
-    const ctx = build({ record: 'CANCELLED', proposal: { ...written, status: 'OVERTURNED' } });
+    const ctx = build({ record: 'CANCELLED', proposal: { ...written, status: 'CANCELLED' } });
     expect(await offered(ctx)).toEqual(['closeNothingStanding']);
   });
 

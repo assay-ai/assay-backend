@@ -18,7 +18,7 @@ export enum OperatorCaseStatus {
   CANCEL_REQUESTED = 'CANCEL_REQUESTED',
   /** The stake was taken. */
   EXECUTED = 'EXECUTED',
-  /** Cancelled, overturned, suspended or waived: nothing was taken. */
+  /** Cancelled or waived: nothing was taken. */
   CANCELLED = 'CANCELLED',
   /** Executed, then paid back into the provider's stake by the treasury. */
   COMPENSATED = 'COMPENSATED',
@@ -73,7 +73,7 @@ export function operatorCaseStatusOf(facts: OperatorCaseFacts): OperatorCaseStat
   ) {
     return OperatorCaseStatus.EXPIRED;
   }
-  if (chain === 'CANCELLED' || ['OVERTURNED', 'WAIVED', 'CANCELLED'].includes(status)) {
+  if (chain === 'CANCELLED' || ['WAIVED', 'CANCELLED'].includes(status)) {
     return OperatorCaseStatus.CANCELLED;
   }
   if (chain === 'DISPUTED' || (chain === 'PENDING' && facts.chainDisputedParts > 0)) {

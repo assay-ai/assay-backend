@@ -344,10 +344,10 @@ describe('SlashChainRulingService', () => {
   });
 
   it('keeps a decided case decided, and a requested cancel requested', async () => {
-    const { service, proposal } = build('OVERTURNED', 'CANCEL_REQUESTED');
+    const { service, proposal } = build('CANCELLED', 'CANCEL_REQUESTED');
     await service.recordDisputed(disputed(ID_A));
     expect(proposal).toMatchObject({
-      status: 'OVERTURNED',
+      status: 'CANCELLED',
       chainStatus: 'CANCEL_REQUESTED',
       chainDisputedAt: new Date('2026-10-15T00:00:00Z'),
     });

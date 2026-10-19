@@ -105,7 +105,6 @@ export type StuckCaseRefusal =
 
 /** Closed in the app with no penalty: the statuses a nothing-standing cancel may be closed under. */
 export const CLOSABLE_STATUSES: readonly string[] = [
-  SlashProposalStatus.OVERTURNED,
   SlashProposalStatus.CANCELLED,
   SlashProposalStatus.WAIVED,
 ];

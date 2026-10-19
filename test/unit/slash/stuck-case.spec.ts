@@ -20,7 +20,6 @@ const STATUSES = [
   'UNDER_REVIEW',
   'AWAITING_SECOND',
   'UPHELD',
-  'OVERTURNED',
   'EXECUTING',
   'EXECUTED',
   'REVERSED',
@@ -67,7 +66,7 @@ function facts(status: string, extra: Partial<StuckCaseFacts> = {}): StuckCaseFa
 
 /** What each action allows, by read and status; everything else is refused. */
 const ALLOWED: Record<StuckCaseAction, { read: string; statuses: readonly string[] }> = {
-  CLOSE_NOTHING_STANDING: { read: 'GONE', statuses: ['OVERTURNED', 'WAIVED', 'CANCELLED'] },
+  CLOSE_NOTHING_STANDING: { read: 'GONE', statuses: ['WAIVED', 'CANCELLED'] },
   RECORD_EXECUTION: {
     read: 'EXECUTED',
     statuses: STATUSES.filter((s) => !['EXECUTING', 'EXECUTED', 'REVERSED'].includes(s)),
@@ -150,7 +149,7 @@ describe('stuckCaseRefusal: the guard matrix', () => {
     expect(
       stuckCaseRefusal(
         'RECORD_EXECUTION',
-        facts('OVERTURNED', { executedAt: new Date() }),
+        facts('WAIVED', { executedAt: new Date() }),
         READS.EXECUTED,
       ),
     ).toBe('ALREADY_RECORDED');
@@ -169,7 +168,7 @@ describe('stuckCaseRefusal: the guard matrix', () => {
   it('m5: never records an execution whose agent share went to anyone but a harmed agent', () => {
     for (const beneficiaryIsAgent of [false, undefined]) {
       const read: StuckCaseRead = { ...(READS.EXECUTED as StuckCaseRead), beneficiaryIsAgent };
-      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), read)).toBe(
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('WAIVED'), read)).toBe(
         'BENEFICIARY_NOT_AN_AGENT',
       );
     }
@@ -182,12 +181,10 @@ describe('stuckCaseRefusal: the guard matrix', () => {
       harmedAgents,
     });
     it('one harmed agent, paid: passes', () => {
-      expect(
-        stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), executed(true, 1)),
-      ).toBeNull();
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('WAIVED'), executed(true, 1))).toBeNull();
     });
     it('two harmed agents, one paid: refused', () => {
-      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), executed(true, 2))).toBe(
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('WAIVED'), executed(true, 2))).toBe(
         'SPLIT_NOT_EXPRESSIBLE',
       );
     });
@@ -199,7 +196,7 @@ describe('stuckCaseRefusal: the guard matrix', () => {
     });
     it('unchecked agent count: refused', () => {
       const read = { ...(READS.EXECUTED as StuckCaseRead), harmedAgents: undefined };
-      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), read)).toBe(
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('WAIVED'), read)).toBe(
         'SPLIT_NOT_EXPRESSIBLE',
       );
     });

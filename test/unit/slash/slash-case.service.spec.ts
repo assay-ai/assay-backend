@@ -439,7 +439,7 @@ describe('SlashCaseService.buildCase — clocks', () => {
 });
 
 describe('SlashCaseService.restoration', () => {
-  it('marks strikes NOT_APPLICABLE for OVERTURNED_INSUFFICIENT_EVIDENCE — they stand', async () => {
+  it('marks strikes and the penalty NOT_APPLICABLE for an upheld outcome — they stand', async () => {
     const { service, proposals, windows } = build();
 
     windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
@@ -447,23 +447,18 @@ describe('SlashCaseService.restoration', () => {
       buildProposal({
         id: 'p1',
         organizationId: ORG,
-        status: 'OVERTURNED',
+        status: 'UPHELD',
         resolutionKind: 'ADJUDICATOR',
-        outcome: 'OVERTURNED_INSUFFICIENT_EVIDENCE',
+        outcome: 'UPHELD',
         resolvedAt: new Date('2026-08-11T00:00:00Z'),
-        countsAsFalsePositive: true,
       }),
     );
 
     const rows = await service.restoration(ORG, 'p1');
     const strikesRow = rows.find((row) => row.label.startsWith('Strikes removed'))!;
-
     expect(strikesRow.status).toBe('NOT_APPLICABLE');
-    // The penalty itself DID get cancelled — `penaltyStands: false` for this
-    // outcome — so that row must not also read `NOT_APPLICABLE`. The two
-    // fields diverge on purpose for exactly this outcome.
     const penaltyRow = rows.find((row) => row.label === 'Penalty cancelled')!;
-    expect(penaltyRow.status).toBe('RESTORED');
+    expect(penaltyRow.status).toBe('NOT_APPLICABLE');
   });
 
   it('reads ON_DECISION for every row while the case is still open', async () => {
