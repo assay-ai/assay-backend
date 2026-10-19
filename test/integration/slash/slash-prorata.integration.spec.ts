@@ -14,7 +14,6 @@ import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { CHAIN_DISPUTE_SETTLE_MS } from '@modules/slash/constants/slash.constants';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
-import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
@@ -32,7 +31,6 @@ import {
   buildProRataSlashServices,
   freshMigratedDatabase,
   ProRataSlashServices,
-  TEST_SLASH_CONFIG,
 } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
@@ -706,21 +704,16 @@ describe('pro-rata EVM slash, against a real database', () => {
       });
     });
 
-    it('closes the open in-app dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
+    it('closes the open dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
       const seeded = await seedWindow(250_001n);
       await services.execution.proposeDue(nowOf());
       const arbitration = new ArbitrationService(
         services.proposals,
         new DisputeRepository(dataSource),
-        new SlaStrikeRepository(dataSource),
         services.lifecycle,
-        {} as never,
-        { notify: async () => undefined } as never,
-        TEST_SLASH_CONFIG,
-        services.execution,
       );
       // On EVM the only dispute is the provider's `disputeSlash`; the watcher
-      // opens the case's dispute row from it (no in-app objection, 3a2b376).
+      // opens the case's dispute row from it.
       const [disputedPart] = await services.partsRepository.findForEpoch(
         seeded.organizationId,
         seeded.proposalId,

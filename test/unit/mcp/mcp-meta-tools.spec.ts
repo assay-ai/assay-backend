@@ -3,7 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
-import { X402_ERROR, X402_PRICE } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_ERROR, ASSAY_PRICE } from '@modules/mcp/constants/mcp.constants';
 import { SEARCH_RESPONSE_MAX_BYTES } from '@modules/mcp/domain/discovery';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { McpCatalogueService, reviewNote } from '@modules/mcp/services/mcp-catalogue.service';
@@ -207,7 +207,7 @@ function output<T = Record<string, any>>(result: CallToolResult): T {
 
 function errorCode(result: CallToolResult): string {
   expect(result.isError).toBe(true);
-  return (result._meta?.[X402_ERROR] as { code: string }).code;
+  return (result._meta?.[ASSAY_ERROR] as { code: string }).code;
 }
 
 describe('discovery modes over MCP (design spec §7.4)', () => {
@@ -582,7 +582,7 @@ describe('search_tools', () => {
     }
     const limited = await call(client, 'search_tools', { query: 'weather' });
     expect(errorCode(limited)).toBe(ToolAccessErrorCode.RATE_LIMITED);
-    expect((limited._meta?.[X402_ERROR] as { retryAfterMs: number }).retryAfterMs).toBeGreaterThan(
+    expect((limited._meta?.[ASSAY_ERROR] as { retryAfterMs: number }).retryAfterMs).toBeGreaterThan(
       0,
     );
     // The same agent on another URL shares the limit.
@@ -613,7 +613,7 @@ describe('get_tool', () => {
       price: { display: '$0.01' },
       freeCallsLeftToday: null,
     });
-    expect(described.annotations[X402_PRICE]).toBeDefined();
+    expect(described.annotations[ASSAY_PRICE]).toBeDefined();
   });
 
   it('answers TOOL_NOT_IN_TOOLSET alike for an unknown name, one outside access and one outside the view', async () => {
@@ -795,7 +795,7 @@ describe('"Not reviewed" wherever a provider tool is offered', () => {
       notReviewed: true,
     });
     expect(result._meta).toEqual({
-      [X402_ERROR]: { code: 'PAYMENT_REQUIRED' },
+      [ASSAY_ERROR]: { code: 'PAYMENT_REQUIRED' },
       'x402/paymentRequired': { rail: 'B', seq: 1 },
       'assay/notReviewed': true,
     });

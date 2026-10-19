@@ -28,7 +28,6 @@ import { SlashDisputeIntentService } from './services/slash-dispute-intent.servi
 import { SlashRequestLookupService } from './services/slash-request-lookup.service';
 import { ArbitrationService } from './services/arbitration.service';
 import { SlashCaseService } from './services/slash-case.service';
-import { SlashBeneficiaryService } from './services/slash-beneficiary.service';
 import { SlashCompensationService } from './services/slash-compensation.service';
 import { SlashExecutionService } from './services/slash-execution.service';
 import { SlashPartsService } from './services/slash-parts.service';
@@ -108,11 +107,6 @@ import { SlashProposalService } from './services/slash-proposal.service';
     SlashCaseService,
     SlashRequestLookupService,
     ArbitrationService,
-    // Resolves the on-chain collection account. Provided here rather
-    // than in `SlashOpenerModule` because it reads the chain through
-    // `SLASH_EXECUTOR` and `VaultPort`, and that binding exists only in the
-    // scheduler — the boundary that keeps the slash key out of the API.
-    SlashBeneficiaryService,
     // Writes SLASH_DISTRIBUTION and raises the agent-side notification.
     SlashCompensationService,
     SlashPartsService,

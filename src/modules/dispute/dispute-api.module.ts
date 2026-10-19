@@ -3,7 +3,6 @@ import { Module } from '@nestjs/common';
 import { McpModule } from '@modules/mcp/mcp.module';
 
 import { CallDisputesController } from './controllers/call-disputes.controller';
-import { DisputesController } from './controllers/disputes.controller';
 import { ProviderCallDisputesController } from './controllers/provider-call-disputes.controller';
 import { DisputeModule } from './dispute.module';
 
@@ -16,7 +15,7 @@ import { DisputeModule } from './dispute.module';
  */
 @Module({
   imports: [DisputeModule, McpModule],
-  controllers: [DisputesController, CallDisputesController, ProviderCallDisputesController],
+  controllers: [CallDisputesController, ProviderCallDisputesController],
   exports: [DisputeModule],
 })
 export class DisputeApiModule {}

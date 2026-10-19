@@ -76,30 +76,20 @@ export class PlatformHealthService {
   async getHealth(): Promise<PlatformHealthDto> {
     const now = new Date();
 
-    const [
-      intentRates,
-      backlog,
-      falsePositiveRate,
-      policies,
-      stake,
-      oldProcess,
-      chainState,
-      holds,
-      work,
-    ] = await Promise.all([
-      this.metrics.intentRateCounts(now),
-      this.metrics.verificationBacklog(now),
-      this.falsePositiveRate(now),
-      this.metrics.policyLifecycleCounts(),
-      this.stakeLocked(),
-      this.metrics.oldProcessCaseCounts(now),
-      this.chainState(now),
-      (this.slashHolds?.findAllHeld() ?? Promise.resolve([])).catch(() => []),
-      // The "Needs you" counts never fail the tiles: unreadable reads as unknown.
-      this.metrics
-        .operatorWorkCounts()
-        .catch(() => ({ pendingToolReviews: null, openCallDisputes: null })),
-    ]);
+    const [intentRates, backlog, falsePositiveRate, policies, stake, chainState, holds, work] =
+      await Promise.all([
+        this.metrics.intentRateCounts(now),
+        this.metrics.verificationBacklog(now),
+        this.falsePositiveRate(now),
+        this.metrics.policyLifecycleCounts(),
+        this.stakeLocked(),
+        this.chainState(now),
+        (this.slashHolds?.findAllHeld() ?? Promise.resolve([])).catch(() => []),
+        // The "Needs you" counts never fail the tiles: unreadable reads as unknown.
+        this.metrics
+          .operatorWorkCounts()
+          .catch(() => ({ pendingToolReviews: null, openCallDisputes: null })),
+      ]);
 
     return {
       intentsPerMinute: intentRates.lastMinute,
@@ -112,8 +102,6 @@ export class PlatformHealthService {
       policiesTotal: policies.total,
       stakeLocked: stake.locked,
       providersWithStake: stake.providersWithStake,
-      oldProcessCases: oldProcess.count,
-      oldestOldProcessCaseAgeSeconds: oldProcess.oldestAgeSeconds,
       chainState,
       pendingToolReviews: work.pendingToolReviews,
       openCallDisputes: work.openCallDisputes,

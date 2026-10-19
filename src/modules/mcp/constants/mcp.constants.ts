@@ -1,5 +1,5 @@
 /**
- * The `x402/*` vocabulary the MCP surface publishes.
+ * The `assay/*` vocabulary the MCP surface publishes.
  *
  * These strings are the contract with every agent that has ever read our
  * catalogue. Renaming one is a breaking change to clients we cannot see, so
@@ -10,34 +10,34 @@
  * The price the agent is quoted for one call: the most it can be charged, and
  * what it is held for. The charge is the price of the binding that serves.
  */
-export const X402_PRICE = 'x402/price';
+export const ASSAY_PRICE = 'assay/price';
 /** `unverified` | `verified` | `guaranteed` — the tool's verification tier. */
-export const X402_TIER = 'x402/tier';
+export const ASSAY_TIER = 'assay/tier';
 /** Whether a failed call costs the agent anything. Always `true` today. */
-export const X402_REFUND_ON_FAILURE = 'x402/refundOnFailure';
-export const X402_P95_LATENCY_MS = 'x402/p95LatencyMs';
-export const X402_QUALITY_RATE = 'x402/qualityRate';
+export const ASSAY_REFUND_ON_FAILURE = 'assay/refundOnFailure';
+export const ASSAY_P95_LATENCY_MS = 'assay/p95LatencyMs';
+export const ASSAY_QUALITY_RATE = 'assay/qualityRate';
 
 /**
  * `FREE` | `FREEMIUM` | `PAID` — `PricingMode`, as published (free tier).
  *
- * It is published alongside `x402/price`'s own `display: "free"`, which already tells a
- * model "this costs nothing" but not *why it might stop*. `x402/pricingMode`
+ * It is published alongside `assay/price`'s own `display: "free"`, which already tells a
+ * model "this costs nothing" but not *why it might stop*. `assay/pricingMode`
  * is what lets an agent's model distinguish "always free" from "free until a
- * quota", which `x402/freeQuota` alone cannot: a `FREE` tool with a quota and
+ * quota", which `assay/freeQuota` alone cannot: a `FREE` tool with a quota and
  * a `FREEMIUM` tool with a quota carry the same annotation otherwise, and only
  * one of them has a paid path to fall through to when it runs out.
  */
-export const X402_PRICING_MODE = 'x402/pricingMode';
+export const ASSAY_PRICING_MODE = 'assay/pricingMode';
 
 /**
  * `{ remaining, limit, resetsAt }` for this agent, on this tool (free tier).
  * Present only on a `FREE`/`FREEMIUM` tool with at least one `ACTIVE`
  * binding; a tool with no free path at all publishes no key rather than a
- * zeroed one, matching `x402/p95LatencyMs`'s "measured vs never measured"
+ * zeroed one, matching `assay/p95LatencyMs`'s "measured vs never measured"
  * rule.
  */
-export const X402_FREE_QUOTA = 'x402/freeQuota';
+export const ASSAY_FREE_QUOTA = 'assay/freeQuota';
 
 /**
  * The paid path past this tool's free quota (free tier).
@@ -46,27 +46,27 @@ export const X402_FREE_QUOTA = 'x402/freeQuota';
  * genuinely different, fuller paid tool (`"search_web_preview"` →
  * `"search_web"`). Nothing in this catalogue's data model records that
  * pairing — `Tool` and `ToolBinding` carry no field naming a sibling tool —
- * so a `FREE`-only tool publishes no `x402/paidAlternative` at all rather than
+ * so a `FREE`-only tool publishes no `assay/paidAlternative` at all rather than
  * a fabricated one; see `mcp-catalogue.service.ts`'s `describe()` for where
  * that gap is recorded.
  *
  * A `FREEMIUM` tool is the one case this catalogue *can* answer honestly: past
  * the quota, the paid path is simply **the same tool**, at the price
- * `x402/price` already quotes — that transition with no reconfiguration is
+ * `assay/price` already quotes — that transition with no reconfiguration is
  * `FREEMIUM`'s entire commercial point. So a `FREEMIUM` tool's
- * `x402/paidAlternative` is its own name.
+ * `assay/paidAlternative` is its own name.
  */
-export const X402_PAID_ALTERNATIVE = 'x402/paidAlternative';
+export const ASSAY_PAID_ALTERNATIVE = 'assay/paidAlternative';
 
 /**
  * `false` when the VIEWER's chain offers no paid rail (Solana today:
  * `rails: []`), so a priced tool cannot be bought from where this agent is:
  * a `PAID` tool's display says so, and a `FREEMIUM` tool advertises only its
- * free allowance (no "then $X", no `x402/paidAlternative`). Absent otherwise —
+ * free allowance (no "then $X", no `assay/paidAlternative`). Absent otherwise —
  * including with no viewer — so a missing key means paid calls are possible
  * (review 2026-10-15 #2, L6).
  */
-export const X402_PAID_ON_THIS_CHAIN = 'x402/paidOnThisChain';
+export const ASSAY_PAID_ON_THIS_CHAIN = 'assay/paidOnThisChain';
 
 /**
  * The platform's own id for the tool.
@@ -76,7 +76,7 @@ export const X402_PAID_ON_THIS_CHAIN = 'x402/paidOnThisChain';
  * agent reconciling its own spend against `assay_list_receipts` (or against the
  * REST API) has no other way to join the two.
  */
-export const X402_TOOL_ID = 'x402/toolId';
+export const ASSAY_TOOL_ID = 'assay/toolId';
 
 /**
  * Every chain a routable binding of this tool could settle on, CAIP-2.
@@ -90,32 +90,32 @@ export const X402_TOOL_ID = 'x402/toolId';
  * `PAYMENT_NO_SETTLEABLE_CHAIN` on a call it already decided to make.
  *
  * Empty means "no routable binding names a chain", which is a fact. It is
- * published rather than omitted for the opposite reason `x402/p95LatencyMs` is
+ * published rather than omitted for the opposite reason `assay/p95LatencyMs` is
  * omitted when unmeasured: a missing numeric field reads as zero, but a missing
  * *list* reads as "unconstrained", and unconstrained is the one reading that is
  * never true here.
  */
-export const X402_SETTLEMENT_CHAINS = 'x402/settlementChains';
+export const ASSAY_SETTLEMENT_CHAINS = 'assay/settlementChains';
 
 /** The receipt reference returned with every result. */
-export const X402_RECEIPT = 'x402/receipt';
+export const ASSAY_RECEIPT = 'assay/receipt';
 /** The machine-readable failure, so an agent can branch instead of parsing prose. */
-export const X402_ERROR = 'x402/error';
+export const ASSAY_ERROR = 'assay/error';
 /** The x402 `PaymentRequired` payload returned to an agent with no balance. */
 export const X402_PAYMENT_REQUIRED = 'x402/paymentRequired';
 
 /**
- * Request `_meta` (rail B). `x402/rail: "B"` asks for a voucher requirement on
+ * Request `_meta` (rail B). `assay/rail: "B"` asks for a voucher requirement on
  * a chain that also offers rail A; on a rail-B-only chain an unpaid call gets
  * one anyway.
  */
-export const X402_RAIL = 'x402/rail';
+export const ASSAY_RAIL = 'assay/rail';
 /**
  * Request `_meta` (rail B): `{ voucher, signature, providerId }` — the signed
  * voucher built from an `x402/paymentRequired`, plus the `providerId` that
  * requirement named so the retry is routed to the payee the voucher signs.
  */
-export const X402_VOUCHER = 'x402/voucher';
+export const ASSAY_VOUCHER = 'assay/voucher';
 
 /**
  * Request `_meta` (both rails, and free calls): a client-chosen key that names
@@ -133,7 +133,7 @@ export const X402_VOUCHER = 'x402/voucher';
  *   arguments is refused with `IDEMPOTENCY_KEY_REUSED`, and nothing is
  *   charged.
  * - **Replay**: a key whose call returned a result answers with that stored
- *   result, marked `_meta["x402/replayed"] = true`, and charges nothing again
+ *   result, marked `_meta["assay/replayed"] = true`, and charges nothing again
  *   — on rail B no new voucher is held or redeemed, and a free call takes no
  *   second quota place. The receipt's `status` is re-read, so it may have
  *   moved on (`VERIFYING` → `SETTLED`). Results are kept in Redis for
@@ -159,9 +159,9 @@ export const X402_VOUCHER = 'x402/voucher';
  *   call that fell through to a paid rail has a payment record and the paid
  *   backstop.)
  */
-export const X402_IDEMPOTENCY_KEY = 'x402/idempotency-key';
+export const ASSAY_IDEMPOTENCY_KEY = 'assay/idempotency-key';
 /** Result `_meta`: `true` when the result is a stored replay of an earlier attempt. */
-export const X402_REPLAYED = 'x402/replayed';
+export const ASSAY_REPLAYED = 'assay/replayed';
 
 /**
  * Why the price and the receipt are published **twice** — in `annotations` and
@@ -190,19 +190,19 @@ export const X402_REPLAYED = 'x402/replayed';
  * the copy — this list documents *which* keys the duplication exists for and
  * is what `mcp-catalogue.spec.ts` asserts against, so a key added to
  * `annotations` without a line here is a key nobody has confirmed still
- * survives the SDK. `x402/pricingMode`, `x402/freeQuota` and
- * `x402/paidAlternative` are on this list for that reason,
+ * survives the SDK. `assay/pricingMode`, `assay/freeQuota` and
+ * `assay/paidAlternative` are on this list for that reason,
  * even though the copy that saves them is unconditional today.
  */
 export const DUPLICATED_INTO_META = [
-  X402_PRICE,
-  X402_TIER,
-  X402_TOOL_ID,
-  X402_SETTLEMENT_CHAINS,
-  X402_PRICING_MODE,
-  X402_FREE_QUOTA,
-  X402_PAID_ALTERNATIVE,
-  X402_PAID_ON_THIS_CHAIN,
+  ASSAY_PRICE,
+  ASSAY_TIER,
+  ASSAY_TOOL_ID,
+  ASSAY_SETTLEMENT_CHAINS,
+  ASSAY_PRICING_MODE,
+  ASSAY_FREE_QUOTA,
+  ASSAY_PAID_ALTERNATIVE,
+  ASSAY_PAID_ON_THIS_CHAIN,
 ] as const;
 
 /** Written to `status_reason` when the MCP server hands a call to the router. */

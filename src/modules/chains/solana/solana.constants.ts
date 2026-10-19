@@ -24,7 +24,7 @@ export const SOLANA_PAYMENT_SCHEME = 'exact';
  * signature obtained for one purpose satisfy a security check it was never
  * meant to.
  */
-export const PAYOUT_PROOF_MESSAGE_VERSION = 'x402-payout-proof/v1';
+export const PAYOUT_PROOF_MESSAGE_VERSION = 'assay-payout-proof/v1';
 
 /**
  * Version tag on the stake-authority proof.
@@ -48,14 +48,14 @@ export const PAYOUT_PROOF_MESSAGE_VERSION = 'x402-payout-proof/v1';
  *   the message and is newline-delimited, so two messages are equal exactly
  *   when their two tags are: the two directions are logically equivalent, and
  *   neither is sensitive to a prefix. Verified by mutation — setting this to
- *   `'x402-payout-proof/v1X'` leaves both cross directions green, and the
+ *   `'assay-payout-proof/v1X'` leaves both cross directions green, and the
  *   whole unit suite fails in exactly one place: the
  *   `expect(text).not.toContain(PAYOUT_PROOF_MESSAGE_VERSION)` assertion in
  *   that spec's `leads the message with the version tag`. Nothing else covers
  *   a prefix collision, so that assertion is not the redundant one it looks
  *   like.
  */
-export const STAKE_AUTHORITY_MESSAGE_VERSION = 'x402-stake-authority/v1';
+export const STAKE_AUTHORITY_MESSAGE_VERSION = 'assay-stake-authority/v1';
 
 /** DI token for the Solana JSON-RPC client. */
 /**

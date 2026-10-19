@@ -104,22 +104,6 @@ const define = (d: OverrideDefinition): OverrideDefinition => Object.freeze(d);
 
 export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = Object.freeze({
   // ── S · Slashing and disputes ────────────────────────────────────────────
-  'S-1': define({
-    code: 'S-1',
-    family: OverrideFamily.SLASHING,
-    action: 'slash_proposal.suspended',
-    label: 'Suspend a pending slash proposal (pre-attestation)',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
-    // The floor. `ArbitrationService.suspend` raises an occurrence to
-    // TWO_PERSON when the case is `AWAITING_SECOND` or `UPHELD`: cancelling a
-    // penalty a second person has confirmed, or is confirming, is not one
-    // person's act. `approverRoles` applies to those occurrences — the checker
-    // must be able to read a case, which `SRE` cannot.
-    approval: ApprovalMode.SINGLE,
-    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    reversible: true,
-    implemented: true,
-  }),
   'S-2': define({
     code: 'S-2',
     family: OverrideFamily.SLASHING,
@@ -128,20 +112,6 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
     approverRoles: [OperatorRole.ADJL],
-    reversible: true,
-    implemented: true,
-  }),
-  'S-3': define({
-    code: 'S-3',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.decided',
-    label: 'Decide a dispute',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    // The mode on the *row* is the floor. `requiresSecondSignature` raises an
-    // individual case to TWO_PERSON on blast radius or materiality; below the
-    // threshold it is single review with a sampled audit, because a blanket
-    // two-person rule cannot be staffed.
-    approval: ApprovalMode.SINGLE,
     reversible: true,
     implemented: true,
   }),
@@ -158,46 +128,6 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     // "No — on-chain" in the register. The reversal itself is a new
     // transaction, and there is no un-reversal: the program refuses a second
     // one with `SlashAlreadyReversed`.
-    reversible: false,
-    implemented: true,
-  }),
-  'S-12': define({
-    code: 'S-12',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.countersigned',
-    label: 'Countersign or object to another adjudicator’s decision',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    approval: ApprovalMode.SINGLE,
-    reversible: false,
-    // Not in the original register, and added rather than folded into `S-3`.
-    // The second signature is a distinct act by a distinct person, and
-    // filing it under `S-3` would make the log read as though one case had been
-    // decided twice. It also carries a different evidentiary burden: `S-3`
-    // requires 120 characters because it is the decision, and a countersignature
-    // that agreed with a decision already argued at length does not.
-    implemented: true,
-  }),
-  'S-8': define({
-    code: 'S-8',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.deadline_extended',
-    label: 'Extend a dispute deadline',
-    roles: [OperatorRole.ADJL],
-    approval: ApprovalMode.SINGLE,
-    reversible: false,
-    implemented: true,
-  }),
-  'S-11': define({
-    code: 'S-11',
-    family: OverrideFamily.SLASHING,
-    action: 'fleet_sweep.opened',
-    label: 'Open a fleet sweep from a decided case',
-    roles: [OperatorRole.ADJL],
-    approval: ApprovalMode.TWO_PERSON,
-    // A sweep carries one conclusion to providers who never complained, so the
-    // checker has to be somebody who can read a case — not any operator who
-    // can authenticate.
-    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
     reversible: false,
     implemented: true,
   }),
@@ -224,7 +154,7 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
    * the call counts against the binding's quality) or reject, with a note.
    * Single review below `CALL_DISPUTE_TWO_PERSON_THRESHOLD_MINOR`; an upheld
    * decision owing at least that much is raised to two-person for that
-   * occurrence (`escalateToTwoPerson`), like `S-3`.
+   * occurrence (`escalateToTwoPerson`).
    */
   'S-14': define({
     code: 'S-14',

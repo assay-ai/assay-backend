@@ -10,18 +10,13 @@ import {
  * case (`case-flow.ts` `caseFacts`). The SQL the list runs is held to these
  * functions by `operator-case-list.integration.spec.ts`.
  */
-const EVM = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
-const SOLANA =
-  'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/spl:EPjFWdd5AufqSSqeM2qJxw2Ny5Mdc1qzE9CzXJqNnLuP';
 const TIMEOUT_MS = 30 * 86_400_000;
 const DISPUTED_AT = new Date('2026-10-01T00:00:00Z');
 const CHAIN_DOOR = new Date('2026-10-04T00:00:00Z');
 const FLOOR = new Date('2026-10-05T00:00:00Z');
-const PLATFORM_DUE = new Date('2026-10-08T00:00:00Z');
 
 function facts(patch: Partial<OperatorCaseFacts>): OperatorCaseFacts {
   return {
-    assetId: EVM,
     status: 'PROPOSED',
     chainStatus: 'PENDING',
     resolutionKind: null,
@@ -29,7 +24,6 @@ function facts(patch: Partial<OperatorCaseFacts>): OperatorCaseFacts {
     chainDisputedParts: 0,
     chainExecutableAt: CHAIN_DOOR,
     earliestExecutionAt: FLOOR,
-    platformDecisionDueAt: null,
     ...patch,
   };
 }
@@ -41,22 +35,14 @@ function read(patch: Partial<OperatorCaseFacts>) {
 }
 
 describe('operatorCaseStatusOf / operatorCaseDeadlineOf', () => {
-  it('D1: an EVM case left DISPUTED with no disputed part reads by its record, window open', () => {
+  it('D1: a case left DISPUTED with no disputed part reads by its record, window open', () => {
     // Part A was disputed and then cancelled (or expired) while part B stands
     // pending and undisputed: the case status stays DISPUTED, the chain mirror
-    // PENDING with 0 disputed parts, and no platform deadline runs on EVM.
-    for (const status of ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND']) {
-      expect(read({ status, chainDisputedAt: DISPUTED_AT, platformDecisionDueAt: null })).toEqual({
-        status: OperatorCaseStatus.PROPOSED,
-        deadline: CHAIN_DOOR,
-      });
-    }
-  });
-
-  it('keeps the off-chain DISPUTED, and its platform deadline, for a non-EVM case', () => {
-    expect(
-      read({ assetId: SOLANA, status: 'DISPUTED', platformDecisionDueAt: PLATFORM_DUE }),
-    ).toEqual({ status: OperatorCaseStatus.DISPUTED, deadline: PLATFORM_DUE });
+    // PENDING with 0 disputed parts, and no platform deadline runs.
+    expect(read({ status: 'DISPUTED', chainDisputedAt: DISPUTED_AT })).toEqual({
+      status: OperatorCaseStatus.PROPOSED,
+      deadline: CHAIN_DOOR,
+    });
   });
 
   it("D2: the PROPOSED deadline is the screen's executableAt: the chain's door, else the floor", () => {

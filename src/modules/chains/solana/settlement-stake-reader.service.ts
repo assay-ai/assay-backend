@@ -6,7 +6,7 @@ import {
   getConfigDecoder,
   getProviderStakeDecoder,
   PROVIDER_STAKE_DISCRIMINATOR,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -23,8 +23,8 @@ import { SETTLEMENT_PROGRAM_ID, SETTLEMENT_PROGRAM_ID_ENV } from './settlement-p
 
 /**
  * The two RPC calls this service makes, declared structurally so a test can
- * supply exactly them — the same trade `SquadsVaultRpcClient` and
- * `VerifierRegistryRpcClient` make next door.
+ * supply exactly them — the same trade `VerifierRegistryRpcClient` makes next
+ * door.
  */
 export interface SettlementStakeRpcClient {
   getAccountInfo(
@@ -73,7 +73,7 @@ export const MAX_ACCOUNTS_PER_RPC_BATCH = 100;
  * ## Decoded by the generated client, never by hand
  *
  * Seeds, discriminator, field order and field widths all come from
- * `@x402/settlement-client`, which is Codama output rendered from the program's
+ * `@assay/settlement-client`, which is Codama output rendered from the program's
  * IDL and held in step with it by `yarn client:check`. `SolanaVerifierRegistryService`
  * next door carries the longer version of this argument; it applies here with
  * the same force, because a `u64` read at the wrong offset is still a number

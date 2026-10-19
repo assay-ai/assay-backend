@@ -784,7 +784,7 @@ export interface McpHarnessOptions {
   readonly random?: () => number;
   /** What `FakeSettlement.enqueue` does after recording the call. Defaults to succeeding. */
   readonly settlementBehaviour?: (input: EnqueueVerificationInput) => Promise<void>;
-  /** Pre-set `x402/freeQuota` figures, keyed by tool id. */
+  /** Pre-set `assay/freeQuota` figures, keyed by tool id. */
   readonly freeQuota?: FakeFreeQuota;
   /** The spend-policy gate. Permits everything unless a test says otherwise. */
   readonly spendPolicy?: FakeSpendPolicy;
@@ -796,7 +796,7 @@ export interface McpHarnessOptions {
    */
   readonly escrow?: FakeEscrowReader;
   /**
-   * The Redis behind `x402/idempotency-key`. Pass one to share it between two
+   * The Redis behind `assay/idempotency-key`. Pass one to share it between two
    * harnesses — two tools, one agent, one Redis.
    */
   readonly idempotencyRedis?: FakeIdempotencyRedis;
@@ -817,7 +817,7 @@ export interface McpHarness {
   readonly toolCallRecords: FakeToolCallRecords;
   readonly escrow: FakeEscrowReader;
   readonly seqs: FakeEscrowSeqs;
-  /** The Redis behind `McpIdempotencyStore` (`x402/idempotency-key`). */
+  /** The Redis behind `McpIdempotencyStore` (`assay/idempotency-key`). */
   readonly idempotencyRedis: FakeIdempotencyRedis;
 }
 

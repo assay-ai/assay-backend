@@ -3,36 +3,30 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
-import { ArbitrationService } from '../services/arbitration.service';
 import { SlashChainRulingService } from '../services/slash-chain-ruling.service';
 import { SlashExecutionService } from '../services/slash-execution.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 
 /**
- * The seven steps, on a tick.
+ * The lifecycle steps, on a tick.
  *
  * Modelled on `SlaWindowSweepJob`, including the try/catch: a throw out of a
  * `@Cron` handler is an unhandled rejection that takes the scheduler process
- * down, and the next pass would never run. On this job that failure mode is
- * particularly bad — the pass that stops running is the one that overturns
- * cases we failed to decide, so a crash here would silently convert our own
- * missed deadlines into upheld penalties.
+ * down, and the next pass would never run.
  *
- * Each of the seven is a separate try/catch for the same reason: an RPC outage
- * that stops execution must not stop the two sweepers, and the sweeper that
- * *costs the platform money* must be the least stoppable thing in the file.
+ * Each step is a separate try/catch for the same reason: an RPC outage that
+ * stops execution must not stop the undisputed sweep or the cancel sweeps.
  *
  * ## Order within one tick
  *
- * `sweepUndisputed` → (EVM: `followOpenCasesPastDoor`) → `sweepPlatformMisses`
- * → `proposeDue` → `executeDue` → `requestCancelsForClosedCases` →
- * `sweepAdminCancels` → `sweepUnresolvedDisputes` → `reconcileExecuting` →
- * (EVM: one page of the start-up `reconcileOpenCases`), and the order is
- * load-bearing, not cosmetic:
+ * `sweepUndisputed` → `followOpenCasesPastDoor` → `proposeDue` → `executeDue` →
+ * `requestCancelsForClosedCases` → `sweepAdminCancels` → `sweepUnresolvedDisputes`
+ * → `reconcileExecuting` → (one page of the start-up `reconcileOpenCases`), and
+ * the order is load-bearing, not cosmetic:
  *
- * - The sweepers run first because either can change what is due for the
- *   chain steps below them on the very same tick: a case `sweepUndisputed`
- *   upholds becomes something `proposeDue` should see now, not next minute.
+ * - The sweeps run first because either can change what is due for the chain
+ *   steps below them on the very same tick: a case `sweepUndisputed` upholds
+ *   becomes something `proposeDue` should see now, not next minute.
  * - `proposeDue` before `executeDue`: a case upheld this tick has to reach the
  *   chain — start its 72h clock — before anything looks for it there. The
  *   on-chain clock starts as early as it honestly can, which is the point of
@@ -42,11 +36,9 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  *
  * ## Why every minute, and not less often
  *
- * The two sweepers act on deadlines measured in days, so a minute of latency is
- * irrelevant to correctness. What a short tick buys is that the queue an
- * operator is looking at agrees with the database they are about to write to:
- * a case that timed out four minutes ago and still shows as workable is a case
- * somebody will spend fifteen minutes deciding before losing the write.
+ * The sweeps act on deadlines measured in days, so a minute of latency is
+ * irrelevant to correctness. What a short tick buys is that the console an
+ * operator is looking at agrees with the chain it mirrors.
  *
  * - `sweepAdminCancels` after `executeDue`: it reads on-chain records, and
  *   reading them before the execute pass has finished moving them would mirror
@@ -56,7 +48,7 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  *
  * ## Why the chain steps live here and not in their own job
  *
- * They are strictly ordered against the two sweepers — a case upheld by
+ * They are strictly ordered against the undisputed sweep — a case upheld by
  * `sweepUndisputed` must reach the chain on the same tick — and they have no
  * cadence of their own: both are one-shot per row, driven by a column. A second
  * `@Cron` class would need its own copy of the try/catch discipline above and
@@ -94,12 +86,11 @@ export class SlashLifecycleJob {
   constructor(
     private readonly proposals: SlashProposalService,
     private readonly execution: SlashExecutionService,
-    private readonly arbitration: ArbitrationService,
     @Optional() private readonly rulings: SlashChainRulingService | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
-  /** Review N-3 / R2-5: the start-up pass over old open EVM cases has read its last page. */
+  /** Review N-3 / R2-5: the start-up pass over open cases has read its last page. */
   private openEvmCasesReconciled = false;
   /** Where that pass resumes on the next tick. */
   private openEvmCursor: { proposedAt: Date; id: string } | null = null;
@@ -172,7 +163,6 @@ export class SlashLifecycleJob {
     await this.sweepUndisputed();
     // Review R2-2: open EVM cases left open until their records settled.
     await this.followOpenEvmCasesPastDoor();
-    await this.sweepPlatformMisses();
     // Before `executeDue`, so a case upheld by the sweep above reaches the
     // chain on the same tick that decided it. The on-chain 72h starts as early
     // as it honestly can, which is the whole point of the parallel clock.
@@ -196,9 +186,9 @@ export class SlashLifecycleJob {
   }
 
   /**
-   * Once per scheduler process (review N-3): EVM cases still open from the
-   * in-app objection era are re-derived from their on-chain records, so each
-   * reaches a live or terminal state. Review R2-5: one page per tick, resumed
+   * Once per scheduler process (review N-3): open `DISPUTED` cases are
+   * re-derived from their on-chain records, so one whose event was missed
+   * while the process was down reaches a live or terminal state. Review R2-5: one page per tick, resumed
    * from a cursor until a page comes back empty (a failed page is read again
    * from the same cursor); a case whose re-read failed is retried on each of
    * the next {@link OPEN_EVM_CASE_RETRIES} ticks, then left with an error.
@@ -277,59 +267,6 @@ export class SlashLifecycleJob {
     }
   }
 
-  private async sweepPlatformMisses(): Promise<void> {
-    try {
-      const overturned = await this.proposals.sweepPlatformMisses();
-      if (overturned.length === 0) return;
-
-      // `warn`, not `log`. Every row is a case we were resourced to work and
-      // did not. The platform-miss rule puts this deadline on us precisely so
-      // that missing it is visible rather than absorbed, and a log line at
-      // `info` is absorbed.
-      this.logger.warn(
-        `${overturned.length} case(s) auto-overturned because we missed our own deadline.`,
-      );
-
-      // The chain does not know we missed a deadline. Until it is told the
-      // reservation stands and `execute_slash` stays open to anybody once
-      // `executable_at` passes — which, on a case the platform itself failed to
-      // work, is the worst possible moment for a stranger to be able to take a
-      // provider's stake.
-      //
-      // This only *records* the request: `cancel_slash` is signed
-      // by `Config.admin`, and {@link sweepAdminCancels} below is what carries
-      // it through — or expires the record itself once its seven-day grace has
-      // run, so a request nobody signs still releases the provider's capital.
-      //
-      // Guarded per row for the reason the steps are guarded separately: one
-      // unreadable case must not hold every other provider's released capital.
-      for (const row of overturned) {
-        try {
-          await this.execution.requestAdminCancel(row.organizationId, row.id, 'AUTO_PLATFORM_MISS');
-        } catch (error) {
-          this.logger.error(
-            `requesting the chain cancellation for ${row.id} failed: ` +
-              `${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-    } catch (error) {
-      this.logger.error(
-        `Platform-miss sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
-  /**
-   * Closed cases whose on-chain record nobody has asked to cancel.
-   *
-   * A suspension or an overturn asks once, after its transaction commits, and
-   * that request can be lost — or the record can land after the case was
-   * closed. Either way the row is `CANCELLED` / `OVERTURNED` with a `PENDING`
-   * mirror that no sweep selects, the stake stays reserved, and the record is
-   * anyone's to execute once its timelock passes. This asks again; the
-   * admin-cancel sweep below takes it from there.
-   */
   private async requestCancelsForClosedCases(): Promise<void> {
     try {
       const requested = await this.execution.requestCancelsForClosedCases();

@@ -76,33 +76,23 @@ You can confirm current state read-only with `redis-cli HGETALL verification:kil
 `HSET` directly; that skips the Postgres audit row `withdraw()` also writes and the DB lifecycle
 transition, leaving the row saying `ACTIVE` while nothing enforces it.
 
-## 3. Suspend pending slash proposals for affected windows
+## 3. Cancel pending slash cases for affected windows — on chain
 
-Real endpoint, this one has a controller: `POST /operator/cases/:proposalId/suspend`
-(`OperatorCasesController`, `src/modules/operator/controllers/operator-cases.controller.ts`), roles
-`ADJ` / `ADJL` / `SRE`, override code `S-1`. Body:
+There is no off-chain suspension. A slash case is an EVM case (Solana opens none), and its record
+is cancelled only by the arbiter's on-chain `cancelSlash`. Prepare it with
+`POST /operator/arbiter/ruling-intent` (roles `ADJL` / `TRE`, override code `S-13`):
 
 ```json
-{ "reasonCode": "verification_false_positive_spike", "note": "<at least 20 characters, what and why>" }
+{ "chainId": "eip155:<id>", "ruling": "CANCEL", "requestIds": ["0x…"], "reasonCode": "verification_false_positive_spike", "note": "<what and why>" }
 ```
 
-Find the affected `proposalId`s first — `slash_proposals` rows opened from `SLA_STRIKE` or a verdict
-tied to the suspect policy/version, still in a pending (`PROPOSED`) status, i.e. before
-`earliestExecutionAt`.
+It returns the unsigned `cancelSlashBatch` call for up to 64 records; the arbiter's wallet signs and
+sends it. Find the affected records first — `slash_proposals` rows opened from `SLA_STRIKE` for the
+suspect policy/version, still `PROPOSED` or `DISPUTED`, and their parts' `chain_request_id`s. The
+watcher mirrors the cancel, and the case closes `CANCELLED` (`CHAIN_ARBITER`).
 
-**A suspension is not finished when the call returns.** A case is proposed on chain about a minute
-after the provider is notified, so a suspended case normally has a `Pending` record standing with
-the provider's stake reserved. `suspend` sets the case to `CANCELLED` and then asks for the on-chain
-cancel the same way an overturn does: `chain_status` goes from `PENDING` to `CANCEL_REQUESTED`.
-Nothing is signed by this platform. The cancel still needs the settlement admin's signature, and it
-has a deadline — see step 4b. `EXECUTING` cases are refused (`SLASH_INVALID_TRANSITION`).
-
-**Who may suspend alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW` one operator suspends.
-From `AWAITING_SECOND` and `UPHELD` a second person has confirmed the penalty or is confirming it,
-so the suspension is two-person: the call answers `202 { approvalId }` and suspends nothing yet. A
-second operator holding `ADJ` or `ADJL`, with an authority limit that covers the penalty, approves
-it in the Approvals inbox (`POST /operator/approvals/:approvalId/approve`), which suspends it then —
-re-checking the case as it is at that moment. See `operator-access.md`.
+**The cancel has a deadline.** Executing a record is permissionless once its `chain_executable_at`
+has passed; the arbiter must cancel before then.
 
 ## 4. Compensate any slash that already executed — check `status`, not the clock
 
@@ -115,9 +105,9 @@ The doc frames this as "still inside the 72h dispute timelock." In this codebase
 `proposal.executedAt && proposal.appliedAmount && !proposal.reversedAt` — no elapsed-time guard at
 the application layer. So the real branch is:
 
-- **Still pending** (before `earliestExecutionAt`, `status = PROPOSED`) → step 3's `suspend`, then
-  get the cancel signed (step 4b). Nothing has moved on chain yet, so there is nothing to give
-  back — as long as the admin signs before the record becomes executable.
+- **Still pending** (before `earliestExecutionAt`, `status = PROPOSED`) → step 3's arbiter
+  cancel. Nothing has moved on chain yet, so there is nothing to give back — as long as the
+  arbiter cancels before the record becomes executable.
 - **Already `EXECUTED`** → **two calls, and a human with the treasury's keys between them.** Lean
   v3 deleted `reverse_slash`: there is no instruction that moves money back into a provider's
   stake on a verifier's say-so, because every door of that shape can be pushed the other way. What
@@ -141,9 +131,6 @@ the application layer. So the real branch is:
   must hold `ADJL` or `TRE`, and its own authority limit must cover the amount deposited. The
   deposit is verified again at approval. Step 1 is not two-person — it builds and writes nothing.
 
-  A **fleet sweep** (`POST /operator/cases/:proposalId/sweep`, override code `S-11`) is two-person
-  the same way (queued, `202`): its second approver must hold `ADJ` or `ADJL`.
-
   For every two-person action the approver must be an active operator other than the actor, hold
   one of the row's approver roles, and — when the action has an amount — have an authority limit at
   or above it. Otherwise the request is refused before anything is written:
@@ -151,8 +138,8 @@ the application layer. So the real branch is:
 
 ## 4b. The standing on-chain record, when nobody has executed it
 
-An overturn or a suspension asks for the on-chain cancel after it commits, which moves the case's
-`chain_status` from `PENDING` to `CANCEL_REQUESTED`. (A case with no record on chain yet stays at
+A case closed in the app while its record stands asks for the on-chain cancel, which moves the
+case's `chain_status` from `PENDING` to `CANCEL_REQUESTED`. (A case with no record on chain yet stays at
 `NONE` and needs nothing: a closed case is never proposed.) The record is still `Pending` on chain
 with the provider's stake reserved, and the cancel is the **settlement admin's** instruction, so
 this platform cannot withdraw it itself.
@@ -166,11 +153,10 @@ the case says off chain. The settlement admin must sign the cancel before that m
   `{ transaction, admin, requestId, provider }` — an unsigned cancel for the settlement admin's
   key. It writes nothing and is refused unless `chain_status` is `CANCEL_REQUESTED`. The case's
   `chain_status` moves to `CANCELLED` when `SlashLifecycleJob`'s admin-cancel sweep sees the record
-  leave `Pending`; the case `status` (`CANCELLED` for a suspension, `OVERTURNED` for an overturn)
-  does not change.
+  leave `Pending`; the case `status` does not change.
 - **If the request was lost, it is repaired.** Every tick, `SlashLifecycleJob` looks for cases that
   are `CANCELLED` or `OVERTURNED` while `chain_status` is still `PENDING` — a failed request, or a
-  suspension that landed while the proposal was in flight — and requests the cancel for them. It
+  closure that landed while the proposal was in flight — and requests the cancel for them. It
   logs a warning when it does. Cases the chain itself voided (`resolution_kind =
   AUTO_CHAIN_VOIDED`) are not touched by this.
 - **If nobody signs it and nobody executes it,** the reservation is still released: seven days
@@ -180,7 +166,7 @@ the case says off chain. The settlement admin must sign the cancel before that m
 - **If somebody executes it first,** the sweep records that as what it is: `chain_status =
   EXECUTED`, `executed_at` and `applied_amount` are written, the case `status` keeps the human
   decision, the timeline gets an `EXECUTED_AFTER_CLOSURE` entry and the log an error line naming the
-  case. For an **overturned** case the compensation in step 4 then applies. For a **suspended**
+  case. For an **overturned** case the compensation in step 4 then applies. For a **cancelled**
   case, `compensation-intent` builds the deposit but `compensated` is refused today
   (`SLASH_INVALID_TRANSITION`: there is no `CANCELLED → REVERSED` transition) — escalate it.
 

@@ -335,12 +335,6 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.PER_EVENT,
       nonSuppressible: false,
     },
-    [NotificationEvent.PROVIDER_PAYOUT_SENT]: {
-      severity: NotificationSeverity.INFO,
-      channels: IN_APP_EMAIL,
-      aggregation: NotificationAggregation.PER_EVENT,
-      nonSuppressible: false,
-    },
 
     // ── Provider tools (T4) ───────────────────────────────────────────────────
 

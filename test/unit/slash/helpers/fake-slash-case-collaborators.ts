@@ -61,8 +61,6 @@ export function buildProposal(
       proposedAt: new Date('2026-08-10T09:14:00Z'),
       notifiedAt: new Date('2026-08-10T09:14:00Z'),
       acknowledgedAt: null,
-      respondByAt: new Date('2026-08-12T09:14:00Z'),
-      platformDecisionDueAt: null,
       earliestExecutionAt: new Date('2026-08-13T09:14:00Z'),
       disputedAt: null,
       disputeId: null,

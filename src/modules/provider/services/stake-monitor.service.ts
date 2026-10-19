@@ -751,12 +751,9 @@ export class StakeMonitorService {
    * One row per sweep: what the whole fleet has bonded, and how many stake
    * accounts that covers (for the proof-of-reserves page).
    *
-   * `bonded` is a **pure chain reading**, never `PROVIDER_STAKE_SOURCE`. The
-   * composite source runs in `chain_with_config_fallback` and mixes chain reads
-   * with values from a JSON file for providers not yet proved on chain;
-   * publishing that under "stake locked in the settlement program" would put an
-   * unverifiable number on the one page whose entire purpose is verifiability —
-   * the same reason an unverifiable "3-of-5" multisig claim was dropped.
+   * `bonded` is a **pure chain reading**, never `PROVIDER_STAKE_SOURCE`, whose
+   * readings are cached for routing; the proof-of-reserves page publishes
+   * only what the chain says now.
    *
    * Skipped entirely on a failed read (the caller passes `null`), never written
    * as a zero: a zero is a claim that the fleet has no stake. A fleet whose

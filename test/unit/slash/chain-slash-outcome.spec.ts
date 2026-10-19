@@ -11,7 +11,7 @@
  * The number still has to be turned into a name somewhere, because that is all
  * the chain hands back (`{"InstructionError":[i,{"Custom":6011}]}`). This suite
  * is what keeps that one lookup honest: it reads `errors` out of the same
- * `idl/x402_payment.json` the client is generated from and compares it with the
+ * `idl/assay_payment.json` the client is generated from and compares it with the
  * table `chain-slash-outcome.ts` declares, entry by entry and however many
  * there are. A variant inserted, deleted or renamed in the program turns this
  * suite red rather than silently re-pointing a verdict at its neighbour.
@@ -51,7 +51,7 @@ const IDL_PATH = join(
   'packages',
   'settlement-client',
   'idl',
-  'x402_payment.json',
+  'assay_payment.json',
 );
 
 interface Idl {
@@ -269,7 +269,7 @@ describe('settlementErrorName', () => {
 
 describe('chainErrorName', () => {
   it('reads the name off the structured error, not out of the message', () => {
-    // `explainStatusError` renders `getX402PaymentErrorMessage(code)` — the
+    // `explainStatusError` renders `getAssayPaymentErrorMessage(code)` — the
     // human sentence, not the variant name — and in production it renders a
     // fixed placeholder for every code. A classifier that parsed the message
     // would see "reinstated" for that code, or nothing at all, and every VOID

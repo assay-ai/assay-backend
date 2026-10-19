@@ -33,7 +33,7 @@ function build(input: {
     tenantOf: jest.fn(async () => 'org-1'),
     findOneScoped: jest.fn(async () => proposal),
   };
-  const queue = { brief: jest.fn(async () => ({ chainStatus: proposal.chainStatus })) };
+  const briefs = { brief: jest.fn(async () => ({ chainStatus: proposal.chainStatus })) };
   const approvals = { register: jest.fn() };
   const parts = { findForEpoch: jest.fn(async () => input.parts ?? []) };
   const enrolments = {
@@ -76,8 +76,7 @@ function build(input: {
     : null;
   const service = new OperatorCaseService(
     proposals as never,
-    queue as never,
-    {} as never,
+    briefs as never,
     {} as never,
     approvals as never,
     parts as never,

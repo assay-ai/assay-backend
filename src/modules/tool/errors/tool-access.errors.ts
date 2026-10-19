@@ -12,7 +12,7 @@ import { createErrorFactory } from '@shared/errors/app-errors';
  *
  * `message` is plain English because people read it in chat. It never names
  * a provider or a tool another organization owns; the structured detail is
- * `context.details`, which the MCP server puts on `_meta["x402/error"]`.
+ * `context.details`, which the MCP server puts on `_meta["assay/error"]`.
  * None of them is charged.
  */
 export enum ToolAccessErrorCode {

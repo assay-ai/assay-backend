@@ -44,7 +44,7 @@ const REFUSAL_LAYER: Readonly<Record<string, RefusalLayer>> = Object.freeze({
 export const REPEAT_ALERT_THRESHOLD = 5;
 export const REPEAT_WINDOW_SECONDS = 60 * 60;
 
-/** What the MCP server adds to a refusal's `_meta["x402/error"]`. */
+/** What the MCP server adds to a refusal's `_meta["assay/error"]`. */
 export interface RefusalNotice {
   /** `null` when the agent is past its per-minute cap: the refusal is counted, not stored. */
   readonly callId: string | null;
@@ -161,7 +161,7 @@ export class McpCallRecorder {
       return `${web}/agents?agent=${encodeURIComponent(session.agentId)}#access`;
     }
     if (code === ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES) {
-      return `${web}/calls?call=${encodeURIComponent(callId)}`;
+      return `${web}/spend/calls?call=${encodeURIComponent(callId)}`;
     }
     return null;
   }

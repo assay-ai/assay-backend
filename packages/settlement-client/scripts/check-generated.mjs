@@ -1,5 +1,5 @@
 /**
- * CI gate: `src/generated/` is what `idl/x402_payment.json` renders to.
+ * CI gate: `src/generated/` is what `idl/assay_payment.json` renders to.
  *
  *     yarn client:check              # from the backend root
  *
@@ -101,7 +101,7 @@ for (const path of committed.keys()) {
 const where = relative(process.cwd(), PACKAGE_ROOT) || '.';
 
 if (problems.length === 0) {
-  console.log(`OK: ${where}/src/generated matches ${where}/idl/x402_payment.json`);
+  console.log(`OK: ${where}/src/generated matches ${where}/idl/assay_payment.json`);
   console.log(`    program ${programAddress}, ${instructionCount} instructions, ${fresh.size} files`);
   process.exit(0);
 }

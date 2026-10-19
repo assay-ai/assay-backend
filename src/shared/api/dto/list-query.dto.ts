@@ -23,8 +23,7 @@ export const MAX_PAGE_SIZE = 100;
  *
  * ## Why cursors and not `page` / `limit`
  *
- * The repository shipped an offset `PaginationDto`, and this replaces it for
- * product endpoints. Offsets are wrong for what this API actually serves:
+ * Offsets are wrong for what this API actually serves:
  *
  * - **Every collection here is an append-heavy time series** — tool calls,
  *   ledger entries, verdicts, notifications, audit records. Rows arrive at the
@@ -45,13 +44,6 @@ export const MAX_PAGE_SIZE = 100;
  * a screen genuinely needs totals it reads them from the summary endpoints
  * (`/receipts/summary` and friends), which aggregate server-side and can say
  * exactly what window they counted.
- *
- * ## Why not `PaginationDto`
- *
- * List endpoints do not extend the offset `PaginationDto`, for the reasons
- * above. `PaginationDto` survives only under `src/modules/_examples/`, which is
- * reference material behind `EXAMPLES_ENABLED` and not part of the product
- * surface.
  */
 export class ListQueryDto {
   @ApiPropertyOptional({

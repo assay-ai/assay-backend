@@ -53,7 +53,7 @@ describe('provider stake-authority constraints', () => {
     return JSON.stringify({
       challengeId: randomUUID(),
       signature: 'test-signature',
-      messageVersion: 'x402-stake-authority/v1',
+      messageVersion: 'assay-stake-authority/v1',
       provedAt: new Date().toISOString(),
     });
   }

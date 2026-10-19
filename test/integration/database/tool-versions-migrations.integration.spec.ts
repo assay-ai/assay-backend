@@ -80,6 +80,7 @@ describe('tool version migrations: up, down, up', () => {
     'OAuthCodeReuseDetected1762400000013',
     'OAuthExpiryIndexes1762400000012',
     'OAuth1762400000010',
+    'DropOffChainSlashObjection1762400000001',
     'DropLegacyPaymentSchema1762400000000',
     'EscrowWithdrawalEvents1762300000000',
     'ModerationCutoffPublicReason1762200000000',

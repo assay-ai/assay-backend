@@ -6,12 +6,9 @@ export const DELIVERY_OBSERVER = 'DELIVERY_OBSERVER';
  *
  * ## Why a port and not a direct call
  *
- * The one consumer today is the slash case: `respond_by_at` — the clock a
- * provider has to object within — is set by `SlashProposalService.markDelivered`,
- * and until this port existed **nothing in `src/` called it**. A proposal could
- * therefore never reach `UPHELD`, because `findUndisputedPast` requires
- * `respond_by_at IS NOT NULL`, and the sweeper had been running every minute
- * against a predicate no row could satisfy.
+ * The one consumer today is the slash case: `notified_at` is set by
+ * `SlashProposalService.markDelivered`, and the propose sweep reserves no stake
+ * on chain for a case whose provider was never told about it.
  *
  * `notification` must not import `slash`: the dependency already runs the other
  * way (`SlashOpenerModule` imports `NotificationModule` to raise
@@ -22,10 +19,9 @@ export const DELIVERY_OBSERVER = 'DELIVERY_OBSERVER';
  *
  * ## Why delivery and not dispatch
  *
- * A countdown that starts when a message is *queued* is a countdown on a
- * message nobody received. This is called from the deliver processor, after a
- * sender reports success, so the clock starts on the same event the provider
- * could have seen. `IN_APP` is a real sender (`InAppChannelSender`); the other
+ * A message that is only *queued* is a message nobody received. This is
+ * called from the deliver processor, after a sender reports success, so the
+ * delivery is recorded on the same event the provider could have seen. `IN_APP` is a real sender (`InAppChannelSender`); the other
  * channels are still `LoggingChannelSender`, and a log line does not report a
  * delivery it did not make — it reports the one it did, into a log the operator
  * reads, which is the honest meaning available today.
@@ -37,9 +33,7 @@ export const DELIVERY_OBSERVER = 'DELIVERY_OBSERVER';
  * into a job failure would retry a delivery that already happened.
  *
  * Implementations **must be idempotent**. Two channels delivering the same
- * notification call this twice, and the deadline must not move twice — later
- * being the direction it would move, which looks generous and is really the
- * platform choosing when its own timelock expires.
+ * notification call this twice, and the delivery is recorded once.
  */
 export interface DeliveryObserverPort {
   /**

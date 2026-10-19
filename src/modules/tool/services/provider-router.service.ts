@@ -444,7 +444,7 @@ export class ProviderRouterService {
    *
    * ## Why the statistics are traffic-weighted
    *
-   * `x402/p95LatencyMs` and `x402/qualityRate` are published as the platform's
+   * `assay/p95LatencyMs` and `assay/qualityRate` are published as the platform's
    * measured figures *for the tool*, over every provider behind it. A plain
    * mean would describe a provider that takes 2% of the traffic exactly as
    * loudly as one that takes 60%. The weights used here are the ones routing

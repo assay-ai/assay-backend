@@ -10,9 +10,6 @@ import { SlashLifecycleJob } from '@modules/slash/jobs/slash-lifecycle.job';
  * rest — neither of which a mock of a repository could show.
  */
 class FakeSlashProposals {
-  platformMisses: { organizationId: string; id: string }[] = [];
-  throws: Error | null = null;
-
   constructor(
     private readonly record: (name: string) => void = () => {},
     private readonly throwOn: string | null = null,
@@ -23,19 +20,9 @@ class FakeSlashProposals {
     if (this.throwOn === 'sweepUndisputed') throw new Error('sweepUndisputed failed');
     return 0;
   }
-
-  async sweepPlatformMisses(): Promise<{ organizationId: string; id: string }[]> {
-    this.record('sweepPlatformMisses');
-    if (this.throws) throw this.throws;
-    if (this.throwOn === 'sweepPlatformMisses') throw new Error('sweepPlatformMisses failed');
-    return this.platformMisses;
-  }
 }
 
 class FakeSlashExecution {
-  readonly adminCancelRequests: { organizationId: string; proposalId: string; reason: string }[] =
-    [];
-  cancelThrowsOn: string | null = null;
   /** Counts the admin-cancel sweep, which is a step of the tick in its own right. */
   adminCancelSweeps = 0;
 
@@ -43,11 +30,6 @@ class FakeSlashExecution {
     private readonly record: (name: string) => void = () => {},
     private readonly throwOn: string | null = null,
   ) {}
-
-  async requestAdminCancel(organizationId: string, proposalId: string, reason: string) {
-    if (this.cancelThrowsOn === proposalId) throw new Error('rpc timeout');
-    this.adminCancelRequests.push({ organizationId, proposalId, reason });
-  }
 
   /** What the closed-case repair answers; a tick is quiet when it is 0. */
   closedCasesRepaired = 0;
@@ -90,18 +72,16 @@ function buildJob(
   options: {
     record?: (name: string) => void;
     throwOn?: string;
-    platformMisses?: { organizationId: string; id: string }[];
   } = {},
 ) {
   const proposals = new FakeSlashProposals(options.record, options.throwOn ?? null);
   const execution = new FakeSlashExecution(options.record, options.throwOn ?? null);
-  if (options.platformMisses) proposals.platformMisses = options.platformMisses;
-  const job = new SlashLifecycleJob(proposals as never, execution as never, {} as never);
+  const job = new SlashLifecycleJob(proposals as never, execution as never);
   return { proposals, execution, job };
 }
 
-describe('SlashLifecycleJob — the seven-step tick', () => {
-  it('runs the seven steps in the order the clocks require', async () => {
+describe('SlashLifecycleJob — the tick', () => {
+  it('runs the steps in the order the clocks require', async () => {
     // Propose before execute, because a case that becomes upheld on this very
     // tick has to reach the chain before anything looks for it there. The
     // admin-cancel sweep after execute, because it READS on-chain records and
@@ -116,7 +96,6 @@ describe('SlashLifecycleJob — the seven-step tick', () => {
 
     expect(calls).toEqual([
       'sweepUndisputed',
-      'sweepPlatformMisses',
       'proposeDue',
       'executeDue',
       'requestCancelsForClosedCases',
@@ -144,7 +123,7 @@ describe('SlashLifecycleJob — the seven-step tick', () => {
 
   it('keeps running the remaining steps when one throws', async () => {
     // The header's rule: an RPC outage that stops execution must not stop the
-    // sweeper that costs the platform money.
+    // other steps.
     const calls: string[] = [];
     const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     const { job } = buildJob({
@@ -170,7 +149,6 @@ describe('SlashLifecycleJob — the seven-step tick', () => {
 
     await expect(job.handleTick()).resolves.toBeUndefined();
 
-    expect(calls).toContain('sweepPlatformMisses');
     expect(calls).toContain('proposeDue');
     expect(calls).toContain('executeDue');
     expect(calls).toContain('reconcileExecuting');
@@ -212,7 +190,6 @@ describe('SlashLifecycleJob — the seven-step tick', () => {
 
     expect(calls).toEqual([
       'sweepUndisputed',
-      'sweepPlatformMisses',
       'proposeDue',
       'executeDue',
       'requestCancelsForClosedCases',
@@ -221,62 +198,6 @@ describe('SlashLifecycleJob — the seven-step tick', () => {
     ]);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
-  });
-});
-
-describe('SlashLifecycleJob — the platform-miss sweep', () => {
-  /**
-   * The chain does not know we missed a deadline. Until it is told the
-   * reservation stands and `execute_slash` stays open to anybody once
-   * `executable_at` passes — which, on a case the platform failed to work, is
-   * the worst possible moment for a stranger to be able to take a provider's
-   * stake.
-   */
-  it('requests an admin cancel for every case it auto-overturned', async () => {
-    const { proposals, execution, job } = buildJob();
-    proposals.platformMisses = [
-      { organizationId: 'org_1', id: 'p1' },
-      { organizationId: 'org_2', id: 'p2' },
-    ];
-
-    await job.handleTick();
-
-    expect(execution.adminCancelRequests).toEqual([
-      { organizationId: 'org_1', proposalId: 'p1', reason: 'AUTO_PLATFORM_MISS' },
-      { organizationId: 'org_2', proposalId: 'p2', reason: 'AUTO_PLATFORM_MISS' },
-    ]);
-  });
-
-  it('keeps asking for the rest when one request fails', async () => {
-    const { proposals, execution, job } = buildJob();
-    proposals.platformMisses = [
-      { organizationId: 'org_1', id: 'p1' },
-      { organizationId: 'org_2', id: 'p2' },
-    ];
-    execution.cancelThrowsOn = 'p1';
-
-    await expect(job.handleTick()).resolves.toBeUndefined();
-
-    expect(execution.adminCancelRequests.map((call) => call.proposalId)).toEqual(['p2']);
-  });
-
-  it('does nothing to the chain on a tick that overturned nothing', async () => {
-    const { execution, job } = buildJob();
-
-    await job.handleTick();
-
-    expect(execution.adminCancelRequests).toEqual([]);
-  });
-
-  it('does not take the tick down when the sweep itself throws', async () => {
-    const { proposals, job } = buildJob();
-    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
-    proposals.throws = new Error('the database is unreachable');
-
-    await expect(job.handleTick()).resolves.toBeUndefined();
-
-    expect(error).toHaveBeenCalled();
-    error.mockRestore();
   });
 });
 
@@ -318,7 +239,7 @@ describe('SlashLifecycleJob — the closed-case repair', () => {
   });
 });
 
-describe('SlashLifecycleJob — open EVM cases from the in-app objection era (review N-3, R2-5)', () => {
+describe('SlashLifecycleJob — open DISPUTED cases re-read after start-up (review N-3, R2-5)', () => {
   const row = (id: string) => ({ organizationId: 'org', id });
 
   function buildWithRulings(rulings: Record<string, unknown>, steps: string[] = []) {
@@ -327,7 +248,6 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
     const job = new SlashLifecycleJob(
       proposals as never,
       execution as never,
-      {} as never,
       { followOpenCasesPastDoor: async () => 0, ...rulings } as never,
     );
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
@@ -424,7 +344,6 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
       const job = new SlashLifecycleJob(
         proposals as never,
         execution as never,
-        {} as never,
         {
           followOpenCasesPastDoor: async () => 0,
           reconcileCases: async () => ({ moved: 0, failed: [] }),
@@ -478,12 +397,7 @@ describe('SlashLifecycleJob — open EVM cases past their door (review R2-2)', (
         return 1;
       },
     };
-    const job = new SlashLifecycleJob(
-      proposals as never,
-      execution as never,
-      {} as never,
-      rulings as never,
-    );
+    const job = new SlashLifecycleJob(proposals as never, execution as never, rulings as never);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 
     await job.handleTick();

@@ -1,7 +1,7 @@
 import type { Connection } from '@solana/web3.js';
 import { assertMintAuthority } from '../../../scripts/devnet/lib/assert-mint-authority';
 
-const PATH = '~/.x402-keys/devnet-operator.json';
+const PATH = '~/.assay-keys/devnet-operator.json';
 // Real base58 addresses, not placeholders: the function builds a PublicKey
 // from `mint`, so a fixture that cannot be one would force the production
 // code to tolerate garbage it should reject.

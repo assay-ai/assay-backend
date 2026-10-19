@@ -107,7 +107,7 @@ describe('OverrideLogService', () => {
     const { service, dataSource, entries } = build();
 
     const result = await service.perform(
-      { code: 'S-3', actor: ADJUDICATOR, ...BASE },
+      { code: 'S-14', actor: ADJUDICATOR, ...BASE },
       async () => ({
         value: 'done',
         before: { status: 'DISPUTED' },
@@ -121,9 +121,9 @@ describe('OverrideLogService', () => {
     expect(dataSource.runner.released).toBe(true);
     expect(entries.appended).toHaveLength(1);
     expect(entries.appended[0]).toMatchObject({
-      code: 'S-3',
+      code: 'S-14',
       family: 'S',
-      action: 'dispute.decided',
+      action: 'call_dispute.decided',
       actorOperatorId: 'op_1',
       before: { status: 'DISPUTED' },
       after: { status: 'UPHELD' },
@@ -135,7 +135,7 @@ describe('OverrideLogService', () => {
     const { service, dataSource, entries } = build();
 
     await expect(
-      service.perform({ code: 'S-3', actor: ADJUDICATOR, ...BASE }, async () => {
+      service.perform({ code: 'S-14', actor: ADJUDICATOR, ...BASE }, async () => {
         throw new Error('constraint violation');
       }),
     ).rejects.toThrow('constraint violation');
@@ -155,7 +155,7 @@ describe('OverrideLogService', () => {
     entries.throwOnAppend = true;
 
     await expect(
-      service.perform({ code: 'S-3', actor: ADJUDICATOR, ...BASE }, async () => ({
+      service.perform({ code: 'S-14', actor: ADJUDICATOR, ...BASE }, async () => ({
         value: 'done',
         before: {},
         after: {},
@@ -201,8 +201,8 @@ describe('OverrideLogService', () => {
     const { service } = build();
 
     await expect(
-      // `S-11` is ADJL only; this actor is ADJ.
-      service.perform({ code: 'S-11', actor: ADJUDICATOR, ...BASE }, async () => ({
+      // `S-17` is ADJL or TRE only; this actor is ADJ.
+      service.perform({ code: 'S-17', actor: ADJUDICATOR, ...BASE }, async () => ({
         value: null,
         before: {},
         after: {},
@@ -215,7 +215,7 @@ describe('OverrideLogService', () => {
       const { service } = build();
 
       await expect(
-        service.perform({ code: 'S-11', actor: LEAD, ...BASE }, async () => ({
+        service.perform({ code: 'S-17', actor: LEAD, ...BASE }, async () => ({
           value: null,
           before: {},
           after: {},
@@ -230,7 +230,7 @@ describe('OverrideLogService', () => {
       const { service } = build();
 
       await expect(
-        service.perform({ code: 'S-11', actor: LEAD, approver: LEAD, ...BASE }, async () => ({
+        service.perform({ code: 'S-17', actor: LEAD, approver: LEAD, ...BASE }, async () => ({
           value: null,
           before: {},
           after: {},
@@ -243,7 +243,7 @@ describe('OverrideLogService', () => {
 
       await service.perform(
         {
-          code: 'S-11',
+          code: 'S-17',
           actor: LEAD,
           approver: { ...ADJUDICATOR, roles: [OperatorRole.ADJL] },
           ...BASE,
@@ -259,14 +259,14 @@ describe('OverrideLogService', () => {
     });
 
     /**
-     * A fleet sweep applies one conclusion to providers who never complained,
-     * so its checker has to be somebody who can read a case: an adjudicator or
-     * an adjudication lead. Authenticating as *an* operator is not enough.
+     * A re-proposal takes a provider's stake again, so its checker has to be
+     * somebody who can read a case: an adjudicator or an adjudication lead.
+     * Authenticating as *an* operator is not enough.
      */
-    describe('the fleet sweep approver (S-11)', () => {
+    describe('an approver drawn from the adjudicators (S-17)', () => {
       const perform = (service: OverrideLogService, roles: OperatorRole[]) =>
         service.perform(
-          { code: 'S-11', actor: LEAD, approver: { ...ADJUDICATOR, roles }, ...BASE },
+          { code: 'S-17', actor: LEAD, approver: { ...ADJUDICATOR, roles }, ...BASE },
           async () => ({ value: null, before: {}, after: {} }),
         );
 
@@ -297,7 +297,7 @@ describe('OverrideLogService', () => {
         await perform(service, roles);
 
         expect(entries.appended[0]).toMatchObject({
-          code: 'S-11',
+          code: 'S-17',
           approvalMode: ApprovalMode.TWO_PERSON,
           approverOperatorId: 'op_1',
         });
@@ -307,7 +307,7 @@ describe('OverrideLogService', () => {
         const { service } = build();
 
         await expect(
-          service.perform({ code: 'S-11', actor: LEAD, ...BASE }, async () => ({
+          service.perform({ code: 'S-17', actor: LEAD, ...BASE }, async () => ({
             value: null,
             before: {},
             after: {},
@@ -318,7 +318,7 @@ describe('OverrideLogService', () => {
         await expect(
           service.perform(
             {
-              code: 'S-11',
+              code: 'S-17',
               actor: { ...LEAD, roles: [OperatorRole.ADJL] },
               approver: LEAD,
               ...BASE,
@@ -411,17 +411,17 @@ describe('OverrideLogService', () => {
     });
 
     /**
-     * `S-1` is single-person on the register and raised per occurrence: a
-     * suspension of a case a second person has confirmed, or is confirming,
-     * needs an adjudicator as its checker.
+     * `S-14` is single-person on the register and may be raised per
+     * occurrence (`escalateToTwoPerson`); its checker must then be an
+     * adjudicator.
      */
-    describe('a suspension raised to two-person (S-1)', () => {
+    describe('a single-person row raised to two-person (S-14)', () => {
       const perform = (
         service: OverrideLogService,
         context: { approver?: typeof ADJUDICATOR | null; escalateToTwoPerson?: boolean },
       ) =>
         service.perform(
-          { code: 'S-1', actor: LEAD, amountMinor: '5000000', ...context, ...BASE },
+          { code: 'S-14', actor: LEAD, amountMinor: '5000000', ...context, ...BASE },
           async () => ({ value: null, before: {}, after: {} }),
         );
 
@@ -485,7 +485,7 @@ describe('OverrideLogService', () => {
         await perform(service, { escalateToTwoPerson: true, approver: ADJUDICATOR });
 
         expect(entries.appended[0]).toMatchObject({
-          code: 'S-1',
+          code: 'S-14',
           approvalMode: ApprovalMode.TWO_PERSON,
           approverOperatorId: 'op_1',
         });
@@ -497,12 +497,15 @@ describe('OverrideLogService', () => {
      * row that is two-person, or can be raised to it, names its approver roles.
      */
     it('names approver roles on every implemented row that can need an approver', () => {
-      expect(OVERRIDE_REGISTER['S-11'].approverRoles).toEqual([
+      expect(OVERRIDE_REGISTER['S-17'].approverRoles).toEqual([
         OperatorRole.ADJ,
         OperatorRole.ADJL,
       ]);
       expect(OVERRIDE_REGISTER['S-5'].approverRoles).toEqual([OperatorRole.ADJL, OperatorRole.TRE]);
-      expect(OVERRIDE_REGISTER['S-1'].approverRoles).toEqual([OperatorRole.ADJ, OperatorRole.ADJL]);
+      expect(OVERRIDE_REGISTER['S-14'].approverRoles).toEqual([
+        OperatorRole.ADJ,
+        OperatorRole.ADJL,
+      ]);
       expect(
         Object.values(OVERRIDE_REGISTER)
           .filter((row) => row.implemented && row.approval === ApprovalMode.TWO_PERSON)
@@ -524,7 +527,7 @@ describe('OverrideLogService', () => {
 
       await expect(
         service.perform(
-          { code: 'S-3', actor: bounded, amountMinor: '5000000', ...BASE },
+          { code: 'S-14', actor: bounded, amountMinor: '5000000', ...BASE },
           async () => ({ value: null, before: {}, after: {} }),
         ),
       ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_AUTHORITY_EXCEEDED });
@@ -534,7 +537,7 @@ describe('OverrideLogService', () => {
       const { service, entries } = build();
       const bounded = { ...ADJUDICATOR, authorityLimitMinor: '0' };
 
-      await service.perform({ code: 'S-3', actor: bounded, ...BASE }, async () => ({
+      await service.perform({ code: 'S-14', actor: bounded, ...BASE }, async () => ({
         value: null,
         before: {},
         after: {},
@@ -553,7 +556,7 @@ describe('OverrideLogService', () => {
     const { service, entries } = build();
 
     await service.perform(
-      { code: 'S-1', actor: ADJUDICATOR, breakGlass: true, ...BASE },
+      { code: 'S-14', actor: ADJUDICATOR, breakGlass: true, ...BASE },
       async () => ({ value: null, before: {}, after: {} }),
     );
 

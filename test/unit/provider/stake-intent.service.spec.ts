@@ -17,7 +17,7 @@ import {
   getConfigEncoder,
   getDepositStakeInstructionDataDecoder,
   getProviderStakeEncoder,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { UnsignedChainTransactionDto } from '@modules/chains/dto/unsigned-chain-transaction.dto';

@@ -18,19 +18,11 @@ import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard, RequireRoles } 
 
 import { OperatorRole } from '../domain/override-register';
 import {
-  AdjudicationQueueRowDto,
   CancelIntentDto,
   CompensatedBodyDto,
   CompensationIntentDto,
-  DecideCaseBodyDto,
-  ExtendDeadlineBodyDto,
-  FleetSweepDto,
-  ListQueueQueryDto,
   ManualCaseActionBodyDto,
-  OpenFleetSweepBodyDto,
   OperatorDto,
-  SecondSignatureBodyDto,
-  SuspendProposalBodyDto,
 } from '../dto/operator-console.dto';
 import { ListOperatorCasesQueryDto, OperatorCaseListRowDto } from '../dto/operator-case-list.dto';
 import { Override, OverrideExempt } from '../decorators/override.decorator';
@@ -43,7 +35,9 @@ import { OperatorCaseService } from '../services/operator-case.service';
 import { OperatorService } from '../services/operator.service';
 
 /**
- * The adjudication surface: the queue, the case decision and the second signature.
+ * The operator's case surface: the Penalties list, the case brief, and the
+ * on-chain follow-ups (cancel, compensation, the stuck-case actions). An EVM
+ * case is decided by the arbiter on chain; nothing here decides one.
  *
  * ## Three guards, and each answers a different question
  *
@@ -92,29 +86,12 @@ export class OperatorCasesController {
   }
 
   /**
-   * The queue.
-   *
-   * Ordered by time-to-deadline, then penalty size — deliberately, and not a
-   * default: FIFO against a hard deadline guarantees the oldest case expires
-   * first, and an expired case is overturned against us.
-   */
-  @Get('queue')
-  @ApiOperation({ summary: 'Open cases, ordered by time-to-deadline then penalty size' })
-  @ApiCursorPage(AdjudicationQueueRowDto)
-  async queue(
-    @CurrentOperator() operator: OperatorSession,
-    @Query() query: ListQueueQueryDto,
-  ): Promise<CursorPageDto<AdjudicationQueueRowDto>> {
-    return this.cases.listQueue(operator, query);
-  }
-
-  /**
    * Every penalty, by where it stands now — the console's Penalties list.
    *
-   * Read-only and open to every operator role, like the queue: Support and
-   * on-call need to find a penalty as much as an adjudicator does. One fixed
-   * order (next deadline, then amount, then newest), for the queue's reason:
-   * the list must not be re-sortable into one that lets the urgent ones lapse.
+   * Read-only and open to every operator role: Support and on-call need to
+   * find a penalty as much as an adjudicator does. One fixed order (next
+   * deadline, then amount, then newest): the list must not be re-sortable into
+   * one that lets the urgent ones lapse.
    * A static segment, so it never reaches `cases/:proposalId`'s UUID pipe.
    */
   @Get('cases')
@@ -132,145 +109,6 @@ export class OperatorCasesController {
   @ApiOperation({ summary: 'The full case brief for one proposal' })
   async getCase(@Param('proposalId', ParseUUIDPipe) proposalId: string) {
     return this.cases.brief(proposalId);
-  }
-
-  /**
-   * Take ownership.
-   *
-   * The one mutating route with no register row, exempt by a named decorator
-   * rather than by omission — so it appears in the coverage test as a decision
-   * somebody made, not as one nobody made.
-   */
-  @Post('cases/:proposalId/claim')
-  @OverrideExempt('Assignment moves no money and changes nobody’s state but the queue’s')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL)
-  @ApiOperation({ summary: 'Assign this case to yourself' })
-  async claim(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-  ) {
-    return this.cases.claim(operator, proposalId);
-  }
-
-  /**
-   * `S-3` — decide.
-   *
-   * The reason code and the 120-character explanation are validated on the DTO
-   * and again by `chk_override_log_entries_decision_reason_length`. There is no
-   * path that records a decision without both, and that includes a lead and an
-   * admin: the exclusion is explicit.
-   */
-  @Post('cases/:proposalId/decide')
-  @Override('S-3')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL)
-  @ApiOperation({ summary: 'Decide a case — one of six outcomes, with a reason' })
-  @ApiResponse({ status: 422, description: 'Reason code invalid for the chosen outcome' })
-  async decide(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-    @Body() body: DecideCaseBodyDto,
-  ) {
-    return this.cases.decide(operator, proposalId, body, requestIdOf());
-  }
-
-  /** `S-12` — countersign, or object. An objection returns the case undecided. */
-  @Post('cases/:proposalId/second')
-  @Override('S-12')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL)
-  @ApiOperation({ summary: 'Countersign or object to another adjudicator’s decision' })
-  async second(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-    @Body() body: SecondSignatureBodyDto,
-  ) {
-    return this.cases.second(operator, proposalId, body, requestIdOf());
-  }
-
-  /**
-   * `S-1` — suspend a proposal.
-   *
-   * Closes the case and asks for the cancel of any record standing on chain
-   * (`chain_status` → `CANCEL_REQUESTED`). The cancel itself is the settlement
-   * admin's to sign — see {@link cancelIntent}.
-   *
-   * Single-person from `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`. From
-   * `AWAITING_SECOND` and `UPHELD` it is two-person: the call is queued and
-   * answers 202 `{approvalId}`; a second operator holding `ADJ` or `ADJL`, with
-   * an authority limit that covers the penalty, approves it in
-   * `POST /operator/approvals/:id/approve`.
-   */
-  @Post('cases/:proposalId/suspend')
-  @Override('S-1')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE)
-  @ApiOperation({ summary: 'Suspend a pending proposal' })
-  @ApiResponse({
-    status: 202,
-    type: ApprovalQueuedDto,
-    description: 'Queued for a second operator',
-  })
-  async suspend(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-    @Body() body: SuspendProposalBodyDto,
-    @Res({ passthrough: true }) response: Response,
-  ) {
-    return answerOrQueued(
-      response,
-      await this.cases.suspend(operator, proposalId, body, requestIdOf()),
-    );
-  }
-
-  /**
-   * `S-8` — give the provider more time.
-   *
-   * The register requires that this *also* extends body retention for that
-   * window, and it does not yet: `evidence_bodies` are scrubbed at 72 hours on
-   * their own schedule, with no per-window hold. An extended deadline that
-   * outlives the evidence leaves the adjudicator deciding on hashes, which is
-   * exactly the evidence-freshness risk to avoid. Left as a known gap rather than
-   * silently half-implemented.
-   */
-  @Post('cases/:proposalId/extend-deadline')
-  @Override('S-8')
-  @RequireRoles(OperatorRole.ADJL)
-  @ApiOperation({ summary: 'Extend the provider’s deadline to object' })
-  async extendDeadline(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-    @Body() body: ExtendDeadlineBodyDto,
-  ) {
-    return this.cases.extendDeadline(operator, proposalId, body, requestIdOf());
-  }
-
-  /**
-   * `S-11` — carry this conclusion to every binding the same defect touched.
-   *
-   * Two-person: the call is queued and answers 202 `{approvalId}`, and a
-   * second operator holding `ADJ` or `ADJL` (the register row's
-   * `approverRoles`) approves it with their own session.
-   * `chk_override_log_entries_no_self_approval` refuses self-approval at the
-   * database in any case.
-   */
-  @Post('cases/:proposalId/sweep')
-  @Override('S-11')
-  @RequireRoles(OperatorRole.ADJL)
-  @ApiOperation({ summary: 'Open a fleet sweep from this decided case' })
-  @ApiResponse({
-    status: 202,
-    type: ApprovalQueuedDto,
-    description: 'Queued for a second operator',
-  })
-  @ApiResponse({ status: 422, description: 'This outcome does not generalise' })
-  async sweep(
-    @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId', ParseUUIDPipe) proposalId: string,
-    @Body() body: OpenFleetSweepBodyDto,
-    @Res({ passthrough: true }) response: Response,
-  ): Promise<FleetSweepDto | ApprovalQueuedDto> {
-    return answerOrQueued(
-      response,
-      await this.cases.openSweep(operator, proposalId, body, requestIdOf()),
-    );
   }
 
   /**

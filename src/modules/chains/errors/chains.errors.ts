@@ -24,7 +24,6 @@ export enum ChainErrorCode {
   CHAIN_SETTLED_NETWORK_MISMATCH = 'CHAIN_SETTLED_NETWORK_MISMATCH',
   CHAIN_SETTLED_AMOUNT_BELOW_INTENT = 'CHAIN_SETTLED_AMOUNT_BELOW_INTENT',
   CHAIN_FACILITATOR_UNAVAILABLE = 'CHAIN_FACILITATOR_UNAVAILABLE',
-  CHAIN_VAULT_NOT_CONFIGURED = 'CHAIN_VAULT_NOT_CONFIGURED',
   CHAIN_VAULT_CONTROL_UNVERIFIED = 'CHAIN_VAULT_CONTROL_UNVERIFIED',
   CHAIN_DEVNET_OVERRIDE_FORBIDDEN = 'CHAIN_DEVNET_OVERRIDE_FORBIDDEN',
   CHAIN_ENABLED_CHAINS_INVALID = 'CHAIN_ENABLED_CHAINS_INVALID',
@@ -162,17 +161,10 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `Facilitator could not be reached for ${context?.chainId}` +
       `${context?.reason ? `: ${context.reason}` : ''}`,
   },
-  /** No `create_key` is configured — there is no multisig to derive a vault from. */
-  vaultNotConfigured: {
-    code: ChainErrorCode.CHAIN_VAULT_NOT_CONFIGURED,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Treasury vault is not configured${context?.reason ? `: ${context.reason}` : ''}`,
-  },
   /**
-   * The on-chain arrangement the vault depends on could not be proven: the
-   * vault ATA's authority is not the derived vault PDA, or the derived
-   * multisig PDA is not owned by the Squads program. A vault whose control
+   * The on-chain arrangement the vault depends on could not be proven (on EVM,
+   * the escrow's implementation, owner, admin or asset is not the recorded
+   * deployment). A vault whose control
    * cannot be proven must fail loudly at the point of use rather than be
    * assumed correct.
    */
@@ -208,8 +200,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
   /**
    * An on-chain program this deployment needs an address for has none.
    *
-   * Raised at the call, not at boot — same reasoning as `vaultNotConfigured`
-   * next door. A deployment that never reaches the settlement program (most
+   * Raised at the call, not at boot. A deployment that never reaches the settlement program (most
    * integration tests, and every process that only serves HTTP) has no business
    * failing to start because a program id it will not use is unset.
    */
@@ -297,7 +288,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * the refusal against the vendored IDL and decide what it means: a revoked
    * verifier key voids a judgement outright, an unelapsed timelock means wait,
    * an expired blockhash means retry. The rendered message cannot carry that —
-   * `getX402PaymentErrorMessage` returns the human sentence, and a fixed
+   * `getAssayPaymentErrorMessage` returns the human sentence, and a fixed
    * placeholder in production — so a caller that parsed the string would
    * collapse every one of those outcomes into "try again".
    *
@@ -359,7 +350,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * more than a declaration.
    *
    * **4xx, not 500.** The rail is the caller's choice: an agent sends
-   * `x402/rail` or a voucher, or it calls a paid tool on a chain whose list is
+   * `assay/rail` or a voucher, or it calls a paid tool on a chain whose list is
    * empty (Solana today: free calls only). Every site that asserts this runs
    * before an intent exists, so nothing is left to clean up and the caller
    * can act on the answer — pay on a chain in `offered`, or call free tools.

@@ -17,7 +17,7 @@ import {
   findConfigPda,
   findEscrowPda,
   getOpenEscrowInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { EscrowOpenerPort } from '@modules/payment/ports/escrow-opener.port';
 

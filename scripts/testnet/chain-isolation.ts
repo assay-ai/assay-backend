@@ -108,7 +108,7 @@ async function callTool(
     const meta = (result._meta ?? {}) as Record<string, Record<string, unknown> | undefined>;
     const requirement = meta['x402/paymentRequired'];
     return {
-      code: (meta['x402/error']?.code as string | undefined) ?? null,
+      code: (meta['assay/error']?.code as string | undefined) ?? null,
       network: (requirement?.network as string | undefined) ?? null,
       providerId: (requirement?.providerId as string | undefined) ?? null,
     };

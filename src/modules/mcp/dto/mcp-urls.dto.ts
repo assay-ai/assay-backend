@@ -61,7 +61,7 @@ export class PreviewToolDto {
 
   @ApiProperty({
     nullable: true,
-    description: 'The `x402/price` display, e.g. "up to $0.01"; `null` when unpriced',
+    description: 'The `assay/price` display, e.g. "up to $0.01"; `null` when unpriced',
   })
   price: string | null;
 

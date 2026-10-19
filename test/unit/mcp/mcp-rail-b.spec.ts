@@ -6,11 +6,11 @@ import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
-  X402_ERROR,
+  ASSAY_ERROR,
   X402_PAYMENT_REQUIRED,
-  X402_RAIL,
-  X402_RECEIPT,
-  X402_VOUCHER,
+  ASSAY_RAIL,
+  ASSAY_RECEIPT,
+  ASSAY_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
 import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -46,7 +46,7 @@ import { CHAIN_ID, SESSION, buildMcpHarness, fakeVoucherSignature } from './help
  *
  * ```text
  *  tools/call                       → isError, x402/paymentRequired {provider, payTo, seq, requestHash…}
- *  tools/call + _meta[x402/voucher] → the call, paid by that voucher
+ *  tools/call + _meta[assay/voucher] → the call, paid by that voucher
  * ```
  *
  * `VoucherService` is the REAL class here (see the harness), so every binding
@@ -534,7 +534,7 @@ describe('rail B over MCP', () => {
           (await client.callTool({
             name: TOOL_NAME,
             arguments: ARGS,
-            _meta: { [X402_RAIL]: 'B' },
+            _meta: { [ASSAY_RAIL]: 'B' },
           })) as CallToolResult
         )._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
       const pay = async (requirement: VoucherRequirement) =>
@@ -542,7 +542,7 @@ describe('rail B over MCP', () => {
           name: TOOL_NAME,
           arguments: ARGS,
           _meta: {
-            [X402_VOUCHER]: {
+            [ASSAY_VOUCHER]: {
               voucher: voucherFor(requirement),
               signature: fakeVoucherSignature(requirement.payer),
               providerId: requirement.providerId,
@@ -556,7 +556,7 @@ describe('rail B over MCP', () => {
 
       const stale = await pay(first);
       expect(stale.isError).toBe(true);
-      expect(stale._meta?.[X402_ERROR]).toMatchObject({
+      expect(stale._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
         retryable: true,
       });
@@ -569,7 +569,7 @@ describe('rail B over MCP', () => {
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_RAIL]: 'B' },
+        _meta: { [ASSAY_RAIL]: 'B' },
       })) as CallToolResult;
       const requirement = refused._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
       intents.pausedFor = 7;
@@ -578,7 +578,7 @@ describe('rail B over MCP', () => {
         name: TOOL_NAME,
         arguments: ARGS,
         _meta: {
-          [X402_VOUCHER]: {
+          [ASSAY_VOUCHER]: {
             voucher: voucherFor(requirement),
             signature: fakeVoucherSignature(requirement.payer),
             providerId: requirement.providerId,
@@ -587,7 +587,7 @@ describe('rail B over MCP', () => {
       })) as CallToolResult;
 
       expect(paused.isError).toBe(true);
-      expect(paused._meta?.[X402_ERROR]).toMatchObject({
+      expect(paused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
         retryable: true,
         retryAfter: 7,
@@ -606,11 +606,11 @@ describe('rail B over MCP', () => {
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_RAIL]: 'B' },
+        _meta: { [ASSAY_RAIL]: 'B' },
       })) as CallToolResult;
 
       expect(refused.isError).toBe(true);
-      expect(refused._meta?.[X402_ERROR]).toMatchObject({
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: McpFailureCode.PAYMENT_REQUIRED,
         retryable: true,
       });
@@ -622,7 +622,7 @@ describe('rail B over MCP', () => {
         name: TOOL_NAME,
         arguments: ARGS,
         _meta: {
-          [X402_VOUCHER]: {
+          [ASSAY_VOUCHER]: {
             voucher,
             signature: fakeVoucherSignature(voucher.payer),
             providerId: requirement.providerId,
@@ -631,21 +631,21 @@ describe('rail B over MCP', () => {
       })) as CallToolResult;
 
       expect(paid.isError).toBeFalsy();
-      expect(paid._meta?.[X402_RECEIPT]).toMatchObject({ status: PaymentIntentStatus.VERIFYING });
+      expect(paid._meta?.[ASSAY_RECEIPT]).toMatchObject({ status: PaymentIntentStatus.VERIFYING });
       expect(intents.only.rail).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
-    it('refuses a malformed _meta[x402/voucher] as PAYMENT_VOUCHER_MALFORMED', async () => {
+    it('refuses a malformed _meta[assay/voucher] as PAYMENT_VOUCHER_MALFORMED', async () => {
       const { client, invoker } = await connect();
 
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_VOUCHER]: { voucher: 'not-an-object' } },
+        _meta: { [ASSAY_VOUCHER]: { voucher: 'not-an-object' } },
       })) as CallToolResult;
 
       expect(refused.isError).toBe(true);
-      expect(refused._meta?.[X402_ERROR]).toMatchObject({
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_MALFORMED,
       });
       expect(invoker.invocations).toHaveLength(0);

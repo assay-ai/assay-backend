@@ -8,7 +8,6 @@ import { EvmDeployment, MULTICALL3_ADDRESS } from '@modules/chains/evm/evm.const
 import { buildNamespaceVaultPort } from '@modules/chains/multiplex/namespace-vault.port';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
-import { VaultPort } from '@modules/chains/ports/vault.port';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import {
   ReconciliationFindingCode,
@@ -20,7 +19,6 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import {
   SettlementTestContext,
   USDC_ASSET,
-  USDC_DECIMALS,
   createSettlementTestContext,
 } from '../helpers/settlement-test-context';
 
@@ -47,10 +45,6 @@ const DEPLOYMENT: EvmDeployment = {
 };
 
 const BUYER = toAccountId(EVM_CHAIN, '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4');
-const SOLANA_VAULT: AccountId = toAccountId(
-  CHAIN_IDS.SOLANA_MAINNET,
-  'Vau1t1111111111111111111111111111111111111',
-);
 const BLOCK = 116_313_808n;
 
 const SELECTOR = {
@@ -115,22 +109,6 @@ function evmClient(): EvmVaultClient {
 }
 
 /**
- * The Solana half, faked at the port.
- *
- * Only test 3 reads it, and all it has to be is *a chain that is fine* — the
- * assertion is that a breach on 46630 leaves it alone, which a real Squads
- * derivation would add nothing to.
- */
-const solanaVault: VaultPort = {
-  getVaultOwner: () => Promise.resolve(SOLANA_VAULT),
-  getVaultAccount: () => Promise.resolve(SOLANA_VAULT),
-  getVaultBalance: () => Promise.resolve(MoneyUtil.of(0n, USDC_ASSET, USDC_DECIMALS)),
-  getVaultBalanceAt: () =>
-    Promise.resolve({ balance: MoneyUtil.of(0n, USDC_ASSET, USDC_DECIMALS), slot: 1n }),
-  assertVaultControl: () => Promise.resolve(),
-};
-
-/**
  * `ReconciliationService` on `eip155:46630`.
  *
  * **Integration, not unit, and the reason is measured:** three maker/checker
@@ -166,7 +144,6 @@ describe('ReconciliationService on eip155:46630', () => {
       database: `${process.env.DATABASE_NAME || 'app'}_settlement_evm_test`,
       vault: buildNamespaceVaultPort({
         enabled: [CHAIN_IDS.SOLANA_MAINNET as ChainId, EVM_CHAIN],
-        solana: solanaVault,
         evm: new EvmVaultService(
           new Map<ChainId, EvmVaultClient>([[EVM_CHAIN, evmClient()]]),
           new Map([[EVM_CHAIN, DEPLOYMENT]]),
@@ -263,17 +240,15 @@ describe('ReconciliationService on eip155:46630', () => {
     );
   });
 
-  it('freezes withdrawals on 46630 and LEAVES SOLANA ALONE', async () => {
+  it('freezes withdrawals on 46630 and nothing else', async () => {
     await fundUsdg(BUYER, 20_000_000n);
     evmRpc.escrowBalance = 0n;
 
     await context.reconciliation.reconcile(USDG);
-    await context.reconciliation.reconcile(USDC_ASSET);
 
     expect(await context.reconciliation.isFrozen(USDG)).toBe(true);
-    // Solana's own pass ran against its own vault and its own (empty) journal.
-    // A freeze keyed on "the latest run of any asset" would fail here, and it
-    // is the shape a per-asset freeze exists to refuse.
+    // A freeze keyed on "the latest run of any asset" would freeze Solana too;
+    // Solana has no vault to reconcile, and a per-asset freeze leaves it alone.
     expect(await context.reconciliation.isFrozen(USDC_ASSET)).toBe(false);
   });
 

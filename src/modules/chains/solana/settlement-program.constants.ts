@@ -1,7 +1,7 @@
 /**
  * What the backend needs to know about the Anchor settlement program that is
  * *not* in the program itself: **which deployment of it this process is
- * talking to.** The PDA seeds come from `@x402/settlement-client`
+ * talking to.** The PDA seeds come from `@assay/settlement-client`
  * (`findVerifierKeyPda`, `findConfigPda`), generated from the IDL.
  */
 

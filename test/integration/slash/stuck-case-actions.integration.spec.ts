@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 
 import { DataSource } from 'typeorm';
 
-import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
@@ -132,13 +131,11 @@ describe('stuck-case actions (B18), against a real database', () => {
     execution = new SlashExecutionService(
       proposals,
       enrolments,
-      new FleetSweepRepository(dataSource),
       lifecycle,
       overrides,
       notifications,
       TEST_SLASH_CONFIG,
       executor as never,
-      null,
       { distribute: async () => 0 } as never,
       null,
       parts,
@@ -162,7 +159,6 @@ describe('stuck-case actions (B18), against a real database', () => {
     );
     cases = new OperatorCaseService(
       proposals,
-      null as never,
       null as never,
       execution,
       approvals,

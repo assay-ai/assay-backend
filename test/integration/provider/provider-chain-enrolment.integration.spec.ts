@@ -57,7 +57,7 @@ describe('provider_chain_enrolments', () => {
     JSON.stringify({
       challengeId: randomUUID(),
       signature: 'test-signature',
-      messageVersion: 'x402-payout-proof/v1',
+      messageVersion: 'assay-payout-proof/v1',
       provedAt: new Date().toISOString(),
     });
 

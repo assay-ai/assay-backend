@@ -9,7 +9,6 @@ import {
   IsBoolean,
   IsEnum,
   IsIn,
-  IsInt,
   IsISO8601,
   IsNotEmpty,
   IsOptional,
@@ -18,17 +17,12 @@ import {
   IsUUID,
   Length,
   Matches,
-  Max,
   MaxLength,
-  Min,
-  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { ListQueryDto } from '@shared/api/dto/list-query.dto';
-import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
-import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 
 import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 
@@ -106,19 +100,6 @@ export class PlatformHealthDto {
 
   @ApiProperty()
   providersWithStake: number;
-
-  @ApiProperty({
-    description:
-      'Cases still in the retired in-app objection statuses (DISPUTED, UNDER_REVIEW, ' +
-      'AWAITING_SECOND). None of them is on chain or waiting for the arbiter.',
-  })
-  oldProcessCases: number;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description: 'Age of the oldest old-process case, in seconds. Null when there are none.',
-  })
-  oldestOldProcessCaseAgeSeconds: number | null;
 
   @ApiPropertyOptional({
     nullable: true,
@@ -210,76 +191,6 @@ export class ChainStateHealthDto {
   reconciledAt: string | null;
 }
 
-/**
- * One row of the adjudication queue.
- *
- * The ordering is fixed: **time-to-deadline, then penalty size — not
- * FIFO.** FIFO against a hard deadline guarantees the oldest case expires
- * first, which under the platform-miss rule means we lose it.
- */
-export class AdjudicationQueueRowDto {
-  @ApiProperty()
-  proposalId: string;
-
-  @ApiProperty({ description: 'e.g. `w_4471 · bnd_7QK`' })
-  caseLabel: string;
-
-  @ApiPropertyOptional({ nullable: true })
-  disputeId: string | null;
-
-  @ApiProperty()
-  providerId: string;
-
-  @ApiProperty()
-  providerName: string;
-
-  @ApiProperty({ type: MoneyDto })
-  penaltyAmount: MoneyDto;
-
-  @ApiPropertyOptional({ enum: DisputeClaimType, nullable: true })
-  claimType: DisputeClaimType | null;
-
-  @ApiProperty({ enum: SlashProposalStatus })
-  status: SlashProposalStatus;
-
-  @ApiPropertyOptional({ nullable: true, description: 'Our deadline' })
-  dueAt: Date | null;
-
-  @ApiPropertyOptional({ nullable: true })
-  secondsToDeadline: number | null;
-
-  @ApiProperty({
-    description: 'True once our deadline has passed. The sweeper overturns these against us.',
-  })
-  overdue: boolean;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description:
-      'The named owner. NULL is rendered in red on purpose: a case with no owner and a running ' +
-      'clock is the failure the queue exists to prevent.',
-  })
-  ownerSubject: string | null;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description: 'Set when this case shares a suspected root cause with others — decide once.',
-  })
-  rootCauseKey: string | null;
-
-  @ApiProperty({
-    description: 'How many open cases share this root cause, including this one. 1 when ungrouped.',
-  })
-  rootCauseGroupSize: number;
-
-  @ApiProperty({
-    description:
-      'Co-failure count: other bindings on the same tool whose failure rate moved in the same ' +
-      'period. This is the item that settles most platform-defect cases in seconds.',
-  })
-  coFailureCount: number;
-}
-
 /** One row of the override log — its five columns, plus what a filter needs. */
 export class OverrideLogEntryDto {
   @ApiProperty()
@@ -291,7 +202,7 @@ export class OverrideLogEntryDto {
   @ApiProperty({ enum: OverrideFamily })
   family: OverrideFamily;
 
-  @ApiProperty({ description: 'The register row, e.g. `S-3`' })
+  @ApiProperty({ description: 'The register row, e.g. `S-5`' })
   code: string;
 
   @ApiProperty({ description: 'The register row’s label, rendered as-is' })
@@ -379,11 +290,6 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
 }
 
 /**
- * A query-string boolean. `@Type(() => Boolean)` is `Boolean(value)`, which reads
- * `'false'` as `true`; anything other than `'true'`/`'false'` is left for
- * `@IsBoolean` to refuse.
- */
-/**
  * Trim before validating, so what is checked is what is recorded.
  *
  * Every operator action writes its reason code and note to the override
@@ -392,14 +298,6 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
  */
 export const Trimmed = () =>
   Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value));
-
-/** As {@link Trimmed}, for each member of a string array. */
-const TrimmedEach = () =>
-  Transform(({ value }: { value: unknown }) =>
-    Array.isArray(value)
-      ? value.map((item: unknown) => (typeof item === 'string' ? item.trim() : item))
-      : value,
-  );
 
 /**
  * As {@link Trimmed}, for an optional reference: blank becomes absent, so an
@@ -412,18 +310,14 @@ export const TrimmedOrAbsent = () =>
     return trimmed === '' ? undefined : trimmed;
   });
 
-/**
- * A penalty in minor units: a positive whole number, digits only.
- *
- * No sign, no decimal point, no exponent, no leading zero and no surrounding
- * space — the value is handed to `BigInt()` and written as the penalty, and
- * `BigInt('')` is `0n` while `BigInt('284.7')` throws.
- */
-const MINOR_UNITS_PATTERN = /^[1-9]\d{0,39}$/;
-
 /** The single reason code of an operator action: required, and not blank. */
 export const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
 
+/**
+ * A query-string boolean. `@Type(() => Boolean)` is `Boolean(value)`, which reads
+ * `'false'` as `true`; anything other than `'true'`/`'false'` is left for
+ * `@IsBoolean` to refuse.
+ */
 export const QueryBoolean = () =>
   Transform(({ value }: { value: unknown }) => {
     if (value === 'true') return true;
@@ -431,213 +325,11 @@ export const QueryBoolean = () =>
     return value;
   });
 
-export class ListQueueQueryDto extends ListQueryDto {
-  @ApiPropertyOptional({ description: 'Only cases assigned to the calling operator' })
-  @IsOptional()
-  @IsBoolean()
-  @QueryBoolean()
-  mine?: boolean;
-
-  @ApiPropertyOptional({ description: 'Only cases with no owner' })
-  @IsOptional()
-  @IsBoolean()
-  @QueryBoolean()
-  unassigned?: boolean;
-
-  @ApiPropertyOptional({ description: 'Only cases past our own deadline' })
-  @IsOptional()
-  @IsBoolean()
-  @QueryBoolean()
-  overdue?: boolean;
-
-  @ApiPropertyOptional({ description: 'Group by a suspected root cause — decide once' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(128)
-  rootCauseKey?: string;
-}
-
-/**
- * The decision body.
- *
- * A reason code from a closed list **and** a hand-written explanation
- * of at least 120 characters, with no path around it for a lead or an admin.
- * Both are validated here and again at the database — `class-validator` refuses
- * the request, `chk_override_log_entries_decision_reason_length` refuses the
- * row, and neither is redundant: the first gives a usable error and the second
- * survives a second write path.
- */
-export class DecideCaseBodyDto {
-  @ApiProperty({ enum: ArbitrationOutcome })
-  @IsEnum(ArbitrationOutcome)
-  outcome: ArbitrationOutcome;
-
-  @ApiProperty({
-    isArray: true,
-    type: String,
-    description: 'Reason codes, all of which must be valid for the chosen outcome',
-  })
-  @TrimmedEach()
-  @IsArray()
-  @ArrayNotEmpty()
-  @ArrayMaxSize(6)
-  @IsString({ each: true })
-  @IsNotEmpty({ each: true })
-  @MaxLength(64, { each: true })
-  reasonCodes: string[];
-
-  @ApiProperty({ minLength: 120, description: 'The reasoning, in the adjudicator’s own words' })
-  @Trimmed()
-  @IsString()
-  @Length(120, 4096)
-  note: string;
-
-  @ApiPropertyOptional({
-    description:
-      'Names a suspected shared root cause, so sibling cases are decided once rather than N times',
-  })
-  @TrimmedOrAbsent()
-  @IsOptional()
-  @IsString()
-  @MaxLength(128)
-  rootCauseKey?: string;
-
-  @ApiPropertyOptional({ description: 'The ticket this was worked under' })
-  @TrimmedOrAbsent()
-  @IsOptional()
-  @IsString()
-  @MaxLength(128)
-  ticketRef?: string;
-
-  /**
-   * Required with `UPHELD_RECALCULATED`, and validated whenever it is sent.
-   *
-   * Refused here rather than in the service because the service's first use of
-   * it is `BigInt()`. The comparison against the original penalty needs the
-   * case and stays in `ArbitrationService.resolvePenalty`.
-   */
-  @ApiPropertyOptional({
-    pattern: MINOR_UNITS_PATTERN.source,
-    description:
-      'Required for UPHELD_RECALCULATED: the corrected penalty, in minor units — a positive ' +
-      'whole number, digits only. Must be ≤ the original: an adjudication may reduce a penalty ' +
-      'and may never raise one.',
-  })
-  @ValidateIf(
-    (body: DecideCaseBodyDto) =>
-      body.outcome === ArbitrationOutcome.UPHELD_RECALCULATED ||
-      body.recalculatedAmount !== undefined,
-  )
-  @Matches(MINOR_UNITS_PATTERN, {
-    message:
-      'recalculatedAmount is required for UPHELD_RECALCULATED and must be a positive whole ' +
-      'number of minor units: digits only, no sign, decimal point or leading zero',
-  })
-  recalculatedAmount?: string;
-}
-
-/** The second reader signs, or objects — and an objection needs a reason too. */
-export class SecondSignatureBodyDto {
-  @ApiProperty({ enum: ['SIGNED', 'OBJECTED'] })
-  @IsIn(['SIGNED', 'OBJECTED'])
-  kind: 'SIGNED' | 'OBJECTED';
-
-  @ApiProperty({ minLength: 20 })
-  @Trimmed()
-  @IsString()
-  @Length(20, 2048)
-  note: string;
-}
-
-/** `S-11`. Only the two outcomes that are findings about us may open one. */
-export class OpenFleetSweepBodyDto {
-  @ApiProperty({
-    description: 'What the affected cases have in common — a binding, mapping or policy version',
-  })
-  @Trimmed()
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(128)
-  defectKey: string;
-
-  @ApiProperty({ description: 'How far back to sweep, in hours' })
-  @IsInt()
-  @Min(1)
-  @Max(24 * 90)
-  lookbackHours: number;
-
-  @ApiProperty({ minLength: 120 })
-  @Trimmed()
-  @IsString()
-  @Length(120, 4096)
-  note: string;
-
-  @ApiProperty({ description: 'The reason code, from the source case’s outcome' })
-  @ReasonCode()
-  reasonCode: string;
-}
-
-export class FleetSweepDto {
-  @ApiProperty()
-  id: string;
-
-  @ApiProperty({ enum: ArbitrationOutcome })
-  outcome: ArbitrationOutcome;
-
-  @ApiProperty()
-  defectKey: string;
-
-  @ApiProperty()
-  windowFrom: Date;
-
-  @ApiProperty()
-  windowTo: Date;
-
-  @ApiProperty({ enum: ['OPEN', 'COMPLETED', 'FAILED'] })
-  status: 'OPEN' | 'COMPLETED' | 'FAILED';
-
-  @ApiProperty({ description: 'Cases the defect key matched' })
-  matchedCount: number;
-
-  @ApiProperty({
-    description:
-      'Cases the sweep actually changed. Lower than `matchedCount` when a match was already ' +
-      'decided the same way — reporting one number would make an idempotent re-run look inert.',
-  })
-  appliedCount: number;
-
-  @ApiProperty()
-  openedBySubject: string;
-
-  @ApiPropertyOptional({ nullable: true })
-  completedAt: Date | null;
-}
-
-/** `S-1` and `S-2`: stop a proposal before anything is signed. */
-export class SuspendProposalBodyDto {
-  @ApiProperty({ minLength: 20 })
-  @Trimmed()
-  @IsString()
-  @Length(20, 2048)
-  note: string;
-
-  @ApiProperty()
-  @ReasonCode()
-  reasonCode: string;
-
-  @ApiPropertyOptional()
-  @TrimmedOrAbsent()
-  @IsOptional()
-  @IsString()
-  @MaxLength(128)
-  ticketRef?: string;
-}
-
 /**
  * B18 (`S-15`, `S-16`, `S-17`): the operator's reason for a manual action on a
- * case stuck behind a requested cancel. The same fields as a suspension; what
- * the action does is fixed by its route, and the case's state is read, never
- * taken from the body.
+ * case stuck behind a requested cancel: a reason code, a note and an optional
+ * ticket reference. What the action does is fixed by its route, and the case's
+ * state is read, never taken from the body.
  */
 export class ManualCaseActionBodyDto {
   @ApiProperty({ minLength: 20 })
@@ -738,25 +430,6 @@ export class CancelIntentDto {
 
   @ApiProperty({ description: "The provider's stake authority, base58" })
   provider: string;
-}
-
-/** `S-8`. Extending a deadline also extends body retention for that window. */
-export class ExtendDeadlineBodyDto {
-  @ApiProperty({ description: 'Additional hours on the provider’s clock' })
-  @IsInt()
-  @Min(1)
-  @Max(24 * 14)
-  additionalHours: number;
-
-  @ApiProperty({ minLength: 20 })
-  @Trimmed()
-  @IsString()
-  @Length(20, 2048)
-  note: string;
-
-  @ApiProperty()
-  @ReasonCode()
-  reasonCode: string;
 }
 
 /** `V-7`: set or clear a provider’s verified label. */

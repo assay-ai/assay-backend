@@ -3,7 +3,6 @@ import { SlashProposalEventEntity } from '@database/postgres/entities/slash-prop
 import {
   ChainClaimGuards,
   ChainSweepRow,
-  OverdueProposalRow,
   UndisputedProposalRow,
 } from '@database/postgres/repositories/slash-proposal.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -22,13 +21,7 @@ import { CHAIN_DISPUTE_SETTLE_MS, SlashConfig } from '@modules/slash/constants/s
  * `slash-proposal.repository.ts`, name for name and order for order, so a
  * reader can check the two side by side.
  */
-const CHAIN_PROPOSABLE_STATUSES = [
-  'PROPOSED',
-  'DISPUTED',
-  'UNDER_REVIEW',
-  'AWAITING_SECOND',
-  'UPHELD',
-] as const;
+const CHAIN_PROPOSABLE_STATUSES = ['PROPOSED', 'DISPUTED', 'UPHELD'] as const;
 
 /** Mirrors `REVERSIBLE_STATUSES` in `slash-proposal.repository.ts`. */
 const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
@@ -90,8 +83,6 @@ export class FakeSlashProposals {
         proposedAt: new Date('2026-08-10T09:14:00Z'),
         notifiedAt: new Date('2026-08-10T09:14:00Z'),
         acknowledgedAt: null,
-        respondByAt: new Date('2026-08-12T09:14:00Z'),
-        platformDecisionDueAt: null,
         earliestExecutionAt: new Date('2026-08-13T09:14:00Z'),
         disputedAt: null,
         disputeId: null,
@@ -238,56 +229,29 @@ export class FakeSlashProposals {
     organizationId: string,
     id: string,
     notifiedAt: Date,
-    respondByAt: Date | null,
   ): Promise<number> {
     const row = this.rows.get(id);
     if (!row || row.organizationId !== organizationId || row.notifiedAt !== null) return 0;
-    Object.assign(row, { notifiedAt, respondByAt });
+    Object.assign(row, { notifiedAt });
     return 1;
   }
 
   async findUndisputedPast(now: Date, limit: number): Promise<UndisputedProposalRow[]> {
     return [...this.rows.values()]
-      .map((row) => ({
-        row,
-        deadline: row.assetId.startsWith('eip155:')
-          ? row.chainStatus === 'PENDING'
-            ? row.chainExecutableAt
-            : null
-          : row.respondByAt,
-      }))
-      .filter(
-        ({ row, deadline }) =>
-          row.status === 'PROPOSED' &&
-          deadline &&
-          // As the real query: an EVM door counts once the settle margin passed.
-          deadline.getTime() + (row.assetId.startsWith('eip155:') ? CHAIN_DISPUTE_SETTLE_MS : 0) <=
-            now.getTime(),
-      )
-      .slice(0, limit)
-      .map(({ row, deadline }) => ({
-        organizationId: row.organizationId,
-        id: row.id,
-        respondByAt: deadline as Date,
-        arbiterUpheld: this.arbiterUpheld.has(row.id),
-      }));
-  }
-
-  async findOverduePast(now: Date, limit: number): Promise<OverdueProposalRow[]> {
-    return [...this.rows.values()]
       .filter(
         (row) =>
-          ['DISPUTED', 'UNDER_REVIEW'].includes(row.status) &&
-          !row.assetId.startsWith('eip155:') &&
-          row.platformDecisionDueAt &&
-          row.platformDecisionDueAt <= now,
+          row.status === 'PROPOSED' &&
+          row.chainStatus === 'PENDING' &&
+          row.chainExecutableAt &&
+          // As the real query: the door counts once the settle margin passed.
+          row.chainExecutableAt.getTime() + CHAIN_DISPUTE_SETTLE_MS <= now.getTime(),
       )
       .slice(0, limit)
       .map((row) => ({
         organizationId: row.organizationId,
         id: row.id,
-        disputeId: row.disputeId,
-        platformDecisionDueAt: row.platformDecisionDueAt as Date,
+        executableAt: row.chainExecutableAt as Date,
+        arbiterUpheld: this.arbiterUpheld.has(row.id),
       }));
   }
 
@@ -403,45 +367,6 @@ export class FakeSlashProposals {
   }
 
   /**
-   * Mirrors `SlashProposalRepository.findSweepCandidates` — see that method's
-   * query builder. Terminal cases are excluded except `EXECUTED`, which is
-   * precisely the one a sweep must reach.
-   */
-  async findSweepCandidates(
-    defectKey: string,
-    from: Date,
-    to: Date,
-    limit: number,
-  ): Promise<
-    Array<{
-      organizationId: string;
-      id: string;
-      status: string;
-      penaltyAmount: string;
-      disputeId: string | null;
-    }>
-  > {
-    return [...this.rows.values()]
-      .filter(
-        (row) =>
-          !['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'].includes(row.status) &&
-          !String(row.assetId).startsWith('eip155:') &&
-          row.rootCauseKey === defectKey &&
-          row.proposedAt >= from &&
-          row.proposedAt <= to,
-      )
-      .sort((a, b) => a.proposedAt.getTime() - b.proposedAt.getTime())
-      .slice(0, limit)
-      .map((row) => ({
-        organizationId: row.organizationId,
-        id: row.id,
-        status: row.status,
-        penaltyAmount: row.penaltyAmount,
-        disputeId: row.disputeId,
-      }));
-  }
-
-  /**
    * The chain-mirror CAS, faked with the same semantics as the real one: zero
    * affected rows when any of its predicates refuses.
    *
@@ -530,14 +455,7 @@ export class FakeNotifications {
 
 export const TEST_SLASH_CONFIG: SlashConfig = {
   timelockMs: 72 * 60 * 60 * 1000,
-  responseWindowMs: 48 * 60 * 60 * 1000,
-  // 23 + the 1h guard band, matching the shipped defaults: the fixture has to
-  // satisfy the same boot invariant `loadSlashConfig` asserts, or the tests run
-  // against a combination the application refuses to start on.
-  platformDecisionWindowMs: 23 * 60 * 60 * 1000,
-  executionGuardMs: 1 * 60 * 60 * 1000,
   deMinimisMinor: '0',
-  secondSignatureThresholdMinor: '2500000',
   sweepBatchSize: 100,
   assetDecimals: 6,
 };

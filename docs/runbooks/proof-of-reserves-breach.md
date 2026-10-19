@@ -10,19 +10,19 @@ deployment, not one per API replica.
 This document assumes you got here from an alert. If you got here without one, first check whether
 alerting actually reached you — see **§0** below before anything else.
 
-## §-1. Which chain? Establish this FIRST — the remedies do not overlap
+## §-1. Which chain? Establish this FIRST
 
 The alert carries `asset`, and an asset belongs to exactly one chain
-(`src/modules/chains/ports/asset-registry.ts`). Read the chain off the asset before anything else,
-because the two chains are short in different places, are refilled by different people, and behave
-differently while they are short:
+(`src/modules/chains/ports/asset-registry.ts`). Only `eip155:*` assets are reconciled: there the
+vault is `X402Escrow` itself. Solana has no vault (its pooled Squads treasury is gone), so a Solana
+asset never reaches this check.
 
-| | `solana:*` | `eip155:*` |
-|---|---|---|
-| what holds the money | a Squads multisig vault + its ATA | `X402Escrow` itself — the contract IS the vault |
-| how a shortfall is fixed | fund the Squads vault (a multisig proposal + approvals) | send USDG to the escrow proxy — an ordinary ERC-20 transfer, no multisig |
-| what "control unverified" means | the vault ATA's authority is not the derived PDA, or the PDA is not owned by the Squads program | the ERC-1967 implementation slot, `CONFIG.owner()` (the upgrade authority), `CONFIG.admin()` (the operational key) or `ASSET()` disagrees with `EVM_DEPLOYMENTS` |
-| can buyers still take money out? | no — withdrawals go through this platform, and `isFrozen` refuses them | **yes.** `withdraw()` is `msg.sender`-only, pays `msg.sender`, and is NOT pause-gated |
+| | `eip155:*` |
+|---|---|
+| what holds the money | `X402Escrow` itself — the contract IS the vault |
+| how a shortfall is fixed | send USDG to the escrow proxy — an ordinary ERC-20 transfer, no multisig |
+| what "control unverified" means | the ERC-1967 implementation slot, `CONFIG.owner()` (the upgrade authority), `CONFIG.admin()` (the operational key) or `ASSET()` disagrees with `EVM_DEPLOYMENTS` |
+| can buyers still take money out? | **yes.** `withdraw()` is `msg.sender`-only, pays `msg.sender`, and is NOT pause-gated |
 
 That last row is the one to act on. **On EVM the freeze does not stop buyers exiting.** Every buyer
 can keep calling `withdraw()` directly against the escrow contract for as long as the platform is
@@ -32,7 +32,7 @@ EVM shortfall gets worse on its own, and the useful clock is how long refunding 
 how long investigating takes. Fund first, investigate second.
 
 **`isFrozen` is per asset, and therefore per chain.** A CRITICAL run on `eip155:46630` freezes
-withdrawals of USDG and leaves Solana untouched, and vice versa. Do not "freeze everything" by hand:
+withdrawals of USDG and of nothing else. Do not "freeze everything" by hand:
 there is no such switch, and a freeze that crosses chains is deliberately not representable.
 
 **A control failure is not a shortfall.** If the findings say `RECONCILIATION_FAILED` rather than
@@ -69,7 +69,7 @@ step. Confirm it did:
 ```sql
 SELECT asset_id, severity, difference, started_at
 FROM reconciliation_runs
-WHERE asset_id = '<caip-19 asset, e.g. solana:.../token:EPjF...>'
+WHERE asset_id = '<caip-19 asset, e.g. eip155:46630/erc20:0x...>'
 ORDER BY started_at DESC
 LIMIT 1;
 ```

@@ -14,7 +14,7 @@ const ANY_KEY_PREDICATE = `"idempotency_key" IS NOT NULL`;
  *
  * The index was unique over every row that carried a key, whatever its status.
  * Nothing wrote a key until the MCP `tools/call` path started passing
- * `_meta["x402/idempotency-key"]`, and that caller needs one thing the old
+ * `_meta["assay/idempotency-key"]`, and that caller needs one thing the old
  * index forbids: a call that **failed without a charge** must leave its key
  * free, so the agent's retry runs as a fresh attempt instead of being answered
  * with a dead intent forever.

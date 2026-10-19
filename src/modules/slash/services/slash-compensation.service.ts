@@ -32,10 +32,8 @@ export interface CompensationRequest {
  *
  * ## Where the money is by the time this runs
  *
- * In the vault. `slash` paid the agent share to the signed `beneficiary`, which
- * `SlashBeneficiaryService` resolved to the platform's settlement vault, so the
- * on-chain balance the reconciler measures has already gone up by
- * `agentAmountMinor`. This class makes the ledger agree, by crediting each
+ * In the signed `beneficiary`. When that account is one the reconciler
+ * measures, its on-chain balance has already gone up by `agentAmountMinor`. This class makes the ledger agree, by crediting each
  * harmed agent their pro-rata share.
  *
  * That ordering is what keeps proof of reserves true at every instant *in the

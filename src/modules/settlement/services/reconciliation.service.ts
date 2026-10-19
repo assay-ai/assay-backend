@@ -9,7 +9,7 @@ import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-esc
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
-import { AccountId, AssetId, namespaceOf } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { VAULT_PORT, VaultPort } from '@modules/chains/ports/vault.port';
 import {
   ESCROW_BALANCE_READER,
@@ -36,7 +36,8 @@ import {
 } from '../ports/reconciliation.types';
 
 /**
- * The 5-minute reconciler.
+ * The 5-minute reconciler, over each enabled chain's vault — the EVM escrow
+ * contract (`settlementAssetsOn`; Solana has no vault to reconcile).
  *
  * The reason for it fits in one line: *without it, every later bug is a
  * silent money bug.* Everything about the design below
@@ -179,16 +180,14 @@ export class ReconciliationService {
     const difference = vaultAtomic - liabilities.total;
 
     const escrows = await this.walkEscrows(asset, decimals);
-    // On eip155 the vault IS the escrow contract, so what it holds beyond the
-    // buyer escrows the walk read is value in no `buyer_escrows` row. Only
-    // known when every escrow was read; Solana escrows sit outside the vault.
-    // The escrow's held payments (G3.B1): in the contract, in no buyer balance.
+    // The vault IS the escrow contract, so what it holds beyond the buyer
+    // escrows the walk read is value in no `buyer_escrows` row. Only known
+    // when every escrow was read. The escrow's held payments (G3.B1): in the
+    // contract, in no buyer balance.
     const totalHeld = await this.readTotalHeld(asset);
     const mirroredHeld = this.intents ? await this.intents.sumHeldOnChain(asset) : 0n;
     const outsideEscrows =
-      namespaceOf(asset) === 'eip155' && escrows.unreadable === 0
-        ? vaultAtomic - escrows.total - (totalHeld ?? 0n)
-        : null;
+      escrows.unreadable === 0 ? vaultAtomic - escrows.total - (totalHeld ?? 0n) : null;
 
     const findings = [
       ...this.checkReserves(
