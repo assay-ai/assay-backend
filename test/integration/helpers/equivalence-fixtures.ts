@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { Server } from 'node:http';
 
 import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
@@ -54,6 +55,7 @@ import {
   BindingInvocation,
   BindingInvokerPort,
 } from '@modules/tool/ports/binding-invoker.port';
+import { UpstreamRequest, mapRequest } from '@modules/tool/domain/mapping';
 import { TOOL_CATALOGUE } from '@modules/tool/ports/tool-catalogue.port';
 import {
   TOOL_CONTRACT_CHANGES,
@@ -168,6 +170,25 @@ const SEEDED = [...Object.values(TOOLS), { ...MAKER_TOOL, name: 'equivalence_mak
 /** Free calls per agent and day on the freemium binding. */
 export const FREEMIUM_QUOTA = 2;
 
+/** The seeded binding of a tool (one per tool, all at {@link PROVIDER_ID}). */
+export const bindingIdOf = (toolId: string): string => `${toolId.slice(0, -2)}b${toolId.slice(-1)}`;
+
+/**
+ * Ids that are the SAME in every world, by placeholder. The normaliser keeps
+ * them distinct (`<tool:paid>`, not a bare `<uuid>`), so a row or a call that
+ * names the wrong tool, binding, provider or shared toolset on one side fails.
+ * `publishMarket` adds the shared toolsets.
+ */
+export const KNOWN_IDS = new Map<string, string>([
+  ...Object.entries(TOOLS).flatMap(([kind, tool]): [string, string][] => [
+    [tool.id, `<tool:${kind}>`],
+    [bindingIdOf(tool.id), `<binding:${kind}>`],
+  ]),
+  [MAKER_TOOL.id, '<tool:maker>'],
+  [bindingIdOf(MAKER_TOOL.id), '<binding:maker>'],
+  [PROVIDER_ID, '<provider>'],
+]);
+
 const catalogueSeed = () => ({
   tools: SEEDED.map((tool) => ({
     id: tool.id,
@@ -181,7 +202,7 @@ const catalogueSeed = () => ({
     tier: 'VERIFIED',
   })),
   bindings: SEEDED.map((tool) => ({
-    id: `${tool.id.slice(0, -2)}b${tool.id.slice(-1)}`,
+    id: bindingIdOf(tool.id),
     toolId: tool.id,
     providerId: PROVIDER_ID,
     endpoint: 'https://provider.example.test/api',
@@ -200,12 +221,31 @@ const catalogueSeed = () => ({
   })),
 });
 
-/** What the provider answers, and how often it was asked. */
+/** What one call to the provider carried: the request the binding's mapping renders. */
+export interface ProviderCall {
+  readonly toolId: string;
+  readonly bindingId: string;
+  readonly request: UpstreamRequest;
+  readonly timeoutMs: number;
+  readonly omit: BindingInvocation['omit'] | null;
+}
+
+/** What the provider answers, and every request it was sent. */
 export class ProviderStub implements BindingInvokerPort {
-  readonly invocations: BindingInvocation[] = [];
+  readonly calls: ProviderCall[] = [];
 
   async invoke(invocation: BindingInvocation): Promise<ProviderResponse> {
-    this.invocations.push(invocation);
+    // Rendered as `EgressBindingInvoker` renders it before dialling: method,
+    // path, query, headers and body from the binding's request mapping.
+    this.calls.push({
+      toolId: invocation.tool.id,
+      bindingId: invocation.binding.id,
+      request: mapRequest(invocation.binding.requestMapping, invocation.input, {
+        inputSchema: invocation.tool.inputSchema,
+      }),
+      timeoutMs: invocation.timeoutMs,
+      omit: invocation.omit ?? null,
+    });
     return {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -536,6 +576,15 @@ export function randomWallet(): AccountId {
   return `${CHAIN}:${privateKeyToAccount(`0x${randomBytes(32).toString('hex')}`).address}` as AccountId;
 }
 
+/**
+ * Closes an ioredis client without leaving a timer behind: `disconnect()` on
+ * a socket arms a 2 s force-close timer that keeps Jest alive (review M7).
+ */
+async function quit(client: Redis): Promise<void> {
+  if (client.status === 'end') return;
+  await client.quit().catch(() => client.disconnect());
+}
+
 export async function bootEquivalenceApps(options: BootOptions): Promise<EquivalenceApps> {
   const saved = { ...process.env };
   const dataSource = await freshMigratedDatabase(options.database);
@@ -857,8 +906,10 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
         .get<ToolContractChanges>(TOOL_CONTRACT_CHANGES, { strict: false })
         .contractsChanged();
     }
-    await toolsetFor(maker, 'kit', 'PUBLIC', 2);
+    const kit = await toolsetFor(maker, 'kit', 'PUBLIC', 2);
     const link = await toolsetFor(maker, 'link-kit', 'UNLISTED');
+    KNOWN_IDS.set(kit.id, '<toolset:kit>');
+    KNOWN_IDS.set(link.id, '<toolset:link-kit>');
     return { maker, handle: MAKER_HANDLE, unlistedToken: link.unlistedToken! };
   }
 
@@ -877,11 +928,14 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
           if (wrapper.instance instanceof Redis) clients.add(wrapper.instance);
         }
       }
+      // Each app listens (see boot): its idle keep-alive sockets would hold
+      // the process open after `close()` (review M7).
+      (app.getHttpServer() as Server).closeAllConnections();
       await app.close().catch(() => undefined);
       await appData?.destroy().catch(() => undefined);
-      for (const client of clients) client.disconnect();
+      for (const client of clients) await quit(client);
     }
-    redis.disconnect();
+    await quit(redis);
     await dataSource.destroy();
     process.env = saved;
   }
