@@ -435,19 +435,15 @@ async function main(): Promise<void> {
   if (!proposal) {
     throw new Error(
       `A strike was written (${strike.id}) but no proposal opened. ` +
-        'SLASH_PROPOSAL_OPENER is not bound in this context.',
+        'SLASH_PROPOSAL_OPENER is not bound in this context, or the binding is not on an EVM ' +
+        'chain (Solana opens no slash case).',
     );
   }
 
-  // The provider's clock starts on DELIVERY, and **`markDelivered` has a
-  // real caller** — `SlashDeliveryObserver`, reached from the notification
-  // deliver processor when a channel confirms. This script used to call it by
-  // hand because nothing in `src/` did; standing in for a caller that now
-  // exists would hide whether that path works, so the call is gone.
-  //
-  // It means `respondByAt` is null for a moment after this script finishes and
-  // is filled in by the worker, asynchronously — if it stays null, the delivery
-  // path is broken and that is worth seeing rather than papering over.
+  // Delivery is recorded by `SlashDeliveryObserver`, reached from the
+  // notification deliver processor when a channel confirms, so `notifiedAt`
+  // may be null for a moment after this script finishes. A case opens only on
+  // an EVM binding: Solana has no slash path.
 
   const final = await proposals.findOne({ where: { organizationId, id: proposal.id } });
 
@@ -464,7 +460,7 @@ async function main(): Promise<void> {
   log(`  penalty  ${strike.penaltyAmount} ${strike.assetId}`);
   log(`proposal   ${proposal.id}`);
   log(`  status   ${final?.status}`);
-  log(`  respond  ${final?.respondByAt?.toISOString() ?? '(null)'}`);
+  log(`  notified ${final?.notifiedAt?.toISOString() ?? '(null)'}`);
   log(`  executes ${final?.earliestExecutionAt.toISOString()}`);
   log('');
   log(`curl -s http://localhost:3010/api/v1/providers/me/slash-proposals/${proposal.id} \\`);
