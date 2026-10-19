@@ -4,7 +4,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
-import { X402_ERROR, X402_PRICE, X402_RECEIPT } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_ERROR, ASSAY_PRICE, ASSAY_RECEIPT } from '@modules/mcp/constants/mcp.constants';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { ASSAY_NO_PROVIDER_FITS } from '@modules/mcp/services/mcp-catalogue.service';
@@ -392,7 +392,7 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
     const [tool] = (await client.listTools()).tools;
     expect(tool.description).toContain('No provider fits your limits.');
     expect(tool._meta?.[ASSAY_NO_PROVIDER_FITS]).toBe(true);
-    expect(tool._meta?.[X402_PRICE]).toBeUndefined();
+    expect(tool._meta?.[ASSAY_PRICE]).toBeUndefined();
   });
 
   it('a refusal reaches the model as plain text, with code, message, fixUrl and details', async () => {
@@ -411,14 +411,14 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toEqual([{ type: 'text', text: "This agent isn't allowed to use it." }]);
-    expect(result._meta?.[X402_ERROR]).toMatchObject({
+    expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'TOOL_NOT_ALLOWED',
       message: "This agent isn't allowed to use it.",
       fixUrl: `https://app.example.com/agents?agent=${SESSION.agentId}#access`,
       details: { name: TOOL_NAME, toolId: TOOL_ID },
       retryable: false,
     });
-    expect(result._meta?.[X402_RECEIPT]).toBeUndefined();
+    expect(result._meta?.[ASSAY_RECEIPT]).toBeUndefined();
     expect(writes).toEqual([
       expect.objectContaining({
         refusalCode: 'TOOL_NOT_ALLOWED',
@@ -454,7 +454,7 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
     );
 
     const result = (await client.callTool({ name: TOOL_NAME, arguments: ARGS })) as CallToolResult;
-    const error = result._meta?.[X402_ERROR] as Record<string, unknown>;
+    const error = result._meta?.[ASSAY_ERROR] as Record<string, unknown>;
 
     expect(error.code).toBe('NO_PROVIDER_MATCHES_RULES');
     expect(error.fixUrl).toBe(
@@ -513,7 +513,7 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
       await client.callTool({ name: 'nope_tool', arguments: {} });
     }
     const result = (await client.callTool({ name: 'nope_tool', arguments: {} })) as CallToolResult;
-    expect(result._meta?.[X402_ERROR]).toMatchObject({
+    expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'RATE_LIMITED',
       retryable: true,
       retryAfterMs: expect.any(Number),

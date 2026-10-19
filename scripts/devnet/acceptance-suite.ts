@@ -107,7 +107,7 @@
  *   catalogue driven by `curl` can therefore show a price no real agent would
  *   ever receive, which is the one thing `tools/list` exists to publish.
  * - **The price is published TWICE and only one copy survives an SDK client.**
- *   The server puts `x402/price` in `annotations`, but the
+ *   The server puts `assay/price` in `annotations`, but the
  *   specification types `annotations` as a closed set of behavioural hints and
  *   the SDK's zod schema strips every key it does not know. `_meta` is specified
  *   as an open record and survives, so it is the copy `listTools()` actually
@@ -180,7 +180,7 @@ import type {
   GetBalancesResponseDto,
   MoneyDto,
 } from '@modules/ledger/dto/get-balances.dto';
-import { X402_PRICE, X402_RECEIPT, X402_TOOL_ID } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_PRICE, ASSAY_RECEIPT, ASSAY_TOOL_ID } from '@modules/mcp/constants/mcp.constants';
 // The credential file's own loader, rather than a second `JSON.parse` of the
 // same path: it is what the running API parses the file with, so this script
 // cannot come to disagree with the server about what the file means.
@@ -2665,7 +2665,7 @@ async function connectMcp(token: string): Promise<Client> {
   return client;
 }
 
-/** The shape `x402/price` carries: atomic units, the asset, and a display form. */
+/** The shape `assay/price` carries: atomic units, the asset, and a display form. */
 interface McpPriceValue {
   readonly amount?: unknown;
   readonly asset?: unknown;
@@ -2777,13 +2777,13 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
     const catalogue = await client.listTools();
     listedCount = catalogue.tools.length;
 
-    // Joined on the platform's own uuid rather than on a name. `x402/toolId`
+    // Joined on the platform's own uuid rather than on a name. `assay/toolId`
     // exists for exactly this — an MCP tool is addressed by `name` while every
     // receipt, intent and journal entry references the uuid — and matching on
     // the id is what makes this immune to a catalogue rename between steps.
     const descriptors = catalogue.tools.filter(
       (tool) =>
-        (tool._meta as Record<string, unknown> | undefined)?.[X402_TOOL_ID] === ACCEPTANCE_TOOL_ID,
+        (tool._meta as Record<string, unknown> | undefined)?.[ASSAY_TOOL_ID] === ACCEPTANCE_TOOL_ID,
     );
     if (descriptors.length === 0) {
       throw new Error(
@@ -2804,16 +2804,16 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
     const [descriptor] = descriptors;
     toolName = descriptor.name;
 
-    const fromMeta = (descriptor._meta as Record<string, unknown> | undefined)?.[X402_PRICE] as
+    const fromMeta = (descriptor._meta as Record<string, unknown> | undefined)?.[ASSAY_PRICE] as
       | McpPriceValue
       | undefined;
     const fromAnnotations = (descriptor.annotations as Record<string, unknown> | undefined)?.[
-      X402_PRICE
+      ASSAY_PRICE
     ] as McpPriceValue | undefined;
 
     if (!fromMeta) {
       throw new Error(
-        `${toolName} is listed without ${X402_PRICE} in _meta` +
+        `${toolName} is listed without ${ASSAY_PRICE} in _meta` +
           `${fromAnnotations ? ' (it IS in annotations)' : ' and not in annotations either'}. ` +
           `_meta is the copy an SDK client receives: the MCP specification types annotations as ` +
           `a closed set and the reference SDK STRIPS every key it does not know, which is why ` +
@@ -2828,7 +2828,7 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
 
     if (typeof fromMeta.amount !== 'string' || typeof fromMeta.asset !== 'string') {
       throw new Error(
-        `${X402_PRICE} on ${toolName} is ${JSON.stringify(fromMeta)} — amount and asset must ` +
+        `${ASSAY_PRICE} on ${toolName} is ${JSON.stringify(fromMeta)} — amount and asset must ` +
           `both be strings; money is never a number on this wire`,
       );
     }
@@ -2878,7 +2878,7 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
     `${credential.expiresAt ? new Date(credential.expiresAt).toISOString() : 'never'}) minted over ` +
     `HTTP; the agent now holds ${listed.items.length} credential(s), the first being the ` +
     `identity mint's; MCP at ${mcpUrl()} listed ${listedCount} tool(s) and ` +
-    `${toolName} (${ACCEPTANCE_TOOL_ID}) carries ${X402_PRICE}=${MoneyUtil.format(quoted)} ` +
+    `${toolName} (${ACCEPTANCE_TOOL_ID}) carries ${ASSAY_PRICE}=${MoneyUtil.format(quoted)} ` +
     `(displayed as "${priceDisplay}") via ${priceChannel}; ` +
     `this run's own binding ${ctx.binding.id} is published at ${MoneyUtil.format(ourPrice)}` +
     `${MoneyUtil.equals(quoted, ourPrice) ? ' — the same figure, so this run IS the dearest eligible binding' : ' — a DIFFERENT, dearer binding is setting the quote; the tool is shared supply'}`
@@ -3161,7 +3161,7 @@ function describeStages(stages: readonly ReceiptStageDto[]): string {
  * through the MCP protocol, charged against real ledger money.
  *
  * ```text
- *   tools/call            -> DATA_RESULT + _meta[x402/receipt], intent VERIFYING
+ *   tools/call            -> DATA_RESULT + _meta[assay/receipt], intent VERIFYING
  *   GET /balances         -> available DOWN by the quote, held UP by it, total UNCHANGED
  *   worker judges         -> intent SETTLED, hold committed
  *   GET /receipts/:id     -> all four verification stages, chargedPrice == the quote
@@ -3211,7 +3211,7 @@ function describeStages(stages: readonly ReceiptStageDto[]): string {
  *
  * ## "The receipt shows all verification layers"
  *
- * The MCP receipt (`_meta[x402/receipt]`) is the agent's payment document — what
+ * The MCP receipt (`_meta[assay/receipt]`) is the agent's payment document — what
  * it paid, to whom, how far the call got — and deliberately carries no
  * verification detail, because at the moment it is written there is none: the
  * call ends at `VERIFYING`. The four-layer receipt is the platform's, at
@@ -3311,7 +3311,7 @@ async function runStep7(ctx: SuiteContext): Promise<string> {
   if (result.isError) {
     throw new Error(
       `tools/call on ${toolName} came back as an error result: ` +
-        `${JSON.stringify(meta[X402_RECEIPT] ?? meta)} — ` +
+        `${JSON.stringify(meta[ASSAY_RECEIPT] ?? meta)} — ` +
         `${JSON.stringify(result.content)}. Every tool-call failure is reported INSIDE the ` +
         `result rather than as a JSON-RPC error, so this is the server's own verdict on the ` +
         `call, not a transport problem`,
@@ -3319,7 +3319,7 @@ async function runStep7(ctx: SuiteContext): Promise<string> {
   }
 
   // ── The receipt the agent is handed ───────────────────────────────────────
-  const receipt = meta[X402_RECEIPT] as
+  const receipt = meta[ASSAY_RECEIPT] as
     | {
         intentId?: unknown;
         charged?: { amount?: unknown; asset?: unknown; display?: unknown };
@@ -3332,7 +3332,7 @@ async function runStep7(ctx: SuiteContext): Promise<string> {
     | undefined;
   if (!receipt) {
     throw new Error(
-      `tools/call on ${toolName} succeeded with no ${X402_RECEIPT} in _meta. The receipt is the ` +
+      `tools/call on ${toolName} succeeded with no ${ASSAY_RECEIPT} in _meta. The receipt is the ` +
         `one document that tells an agent what it just paid, and _meta is the only channel that ` +
         `survives the SDK. _meta held [${Object.keys(meta).join(', ')}]`,
     );

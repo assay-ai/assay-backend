@@ -8,7 +8,7 @@
  *  (optional) POST /deposits + approve + signed depositFor + settle   the agent funds its escrow
  *  tools/call                         → PAYMENT_REQUIRED, _meta[x402/paymentRequired]
  *  sign the EIP-712 voucher from that requirement, and nothing else
- *  tools/call + _meta[x402/voucher]   → the result, receipt status VERIFYING
+ *  tools/call + _meta[assay/voucher]   → the result, receipt status VERIFYING
  * ```
  *
  * Redemption is NOT done here: the platform's own `VoucherRedemptionJob` redeems the voucher on
@@ -234,15 +234,15 @@ async function run(): Promise<void> {
   const paid = (await client.callTool({
     name: TOOL,
     arguments: ARGS,
-    _meta: { 'x402/voucher': await signVoucher(requirement) },
+    _meta: { 'assay/voucher': await signVoucher(requirement) },
   })) as CallToolResult;
   await client.close();
 
   console.log(
     `E2_MCP_RESULT ${JSON.stringify({
       isError: paid.isError ?? false,
-      receipt: paid._meta?.['x402/receipt'] ?? null,
-      error: paid._meta?.['x402/error'] ?? null,
+      receipt: paid._meta?.['assay/receipt'] ?? null,
+      error: paid._meta?.['assay/error'] ?? null,
       result: paid.structuredContent ?? null,
     })}`,
   );

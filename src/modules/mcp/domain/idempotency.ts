@@ -6,7 +6,7 @@ import { canonicalJson } from '@shared/crypto/canonical-json';
 import { McpErrors } from '../errors/mcp.errors';
 
 /**
- * The idempotency key of an MCP `tools/call` (`_meta["x402/idempotency-key"]`,
+ * The idempotency key of an MCP `tools/call` (`_meta["assay/idempotency-key"]`,
  * G2.1) — the pure half: what a valid key is, and what one logical call's
  * identity is made of. `McpIdempotencyStore` owns the Redis record.
  */

@@ -17,7 +17,7 @@ export enum McpErrorCode {
    */
   MCP_URL_NOT_FOUND = 'MCP_URL_NOT_FOUND',
   /**
-   * `_meta["x402/idempotency-key"]` is not a printable ASCII string of 1 to
+   * `_meta["assay/idempotency-key"]` is not a printable ASCII string of 1 to
    * 128 characters. Refused before anything runs, so nothing is charged; not
    * retryable unchanged.
    */
@@ -95,7 +95,7 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     code: McpErrorCode.MCP_IDEMPOTENCY_KEY_INVALID,
     statusCode: 400,
     message: (context?: Record<string, any>) =>
-      `Invalid _meta["x402/idempotency-key"]` +
+      `Invalid _meta["assay/idempotency-key"]` +
       `${context?.reason ? `: ${context.reason}` : ''}. Nothing was charged.`,
   },
   quotaExceeded: {

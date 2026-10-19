@@ -459,8 +459,8 @@ export class CatalogueToolDto {
    *
    * ## The same fact the MCP surface publishes, from the same derivation
    *
-   * `tools/list` publishes this as `x402/settlementChains`
-   * (`X402_SETTLEMENT_CHAINS`), and both come from the identical expression:
+   * `tools/list` publishes this as `assay/settlementChains`
+   * (`ASSAY_SETTLEMENT_CHAINS`), and both come from the identical expression:
    * `ProviderRouterService.quote(...).settlementChains`, the union of
    * `settleableChains(candidate, context)` over the ELIGIBLE set. Same name,
    * same CAIP-2 values, one derivation. A second derivation off

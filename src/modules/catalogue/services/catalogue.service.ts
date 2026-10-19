@@ -749,7 +749,7 @@ export class CatalogueService {
         paidBindings: quote.paidBindings ?? 0,
         unroutableReason: quote.unroutableReason,
         // The settles-elsewhere caveat, off the router's own union — the same value and the
-        // same spelling `tools/list` publishes as `x402/settlementChains`. NOT
+        // same spelling `tools/list` publishes as `assay/settlementChains`. NOT
         // re-derived from `tool_bindings.settlement_chains`: a binding's
         // declared list is narrowed by the provider's ACTIVE enrolments and by
         // `ENABLED_CHAINS` before it is a chain a call can settle on, and a

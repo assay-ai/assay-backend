@@ -1,15 +1,15 @@
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
 import {
-  X402_FREE_QUOTA,
-  X402_PAID_ALTERNATIVE,
-  X402_PAID_ON_THIS_CHAIN,
-  X402_PRICE,
-  X402_PRICING_MODE,
-  X402_QUALITY_RATE,
-  X402_SETTLEMENT_CHAINS,
-  X402_TIER,
-  X402_TOOL_ID,
+  ASSAY_FREE_QUOTA,
+  ASSAY_PAID_ALTERNATIVE,
+  ASSAY_PAID_ON_THIS_CHAIN,
+  ASSAY_PRICE,
+  ASSAY_PRICING_MODE,
+  ASSAY_QUALITY_RATE,
+  ASSAY_SETTLEMENT_CHAINS,
+  ASSAY_TIER,
+  ASSAY_TOOL_ID,
 } from '@modules/mcp/constants/mcp.constants';
 import {
   McpCatalogueService,
@@ -56,7 +56,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     expect(price.amount).toBe(usdc('0.05').amount);
     expect(price.asset).toBe(usdc('0.05').asset);
@@ -74,7 +74,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     // The amount is the most a call can cost — what it is held for. The
     // charge is the price of whichever binding serves, so the display says so.
@@ -100,7 +100,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     const [descriptor] = await catalogue.listTools();
 
     expect(descriptor._meta).toEqual(descriptor.annotations);
-    expect(descriptor._meta[X402_PRICE]).toBeDefined();
+    expect(descriptor._meta[ASSAY_PRICE]).toBeDefined();
   });
 
   it('quotes the dearest eligible binding, so the call never costs more than the quote', async () => {
@@ -115,7 +115,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect((descriptor.annotations[X402_PRICE] as McpPriceAnnotation).amount).toBe(
+    expect((descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation).amount).toBe(
       usdc('0.09').amount,
     );
   });
@@ -137,7 +137,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect((descriptor.annotations[X402_PRICE] as McpPriceAnnotation).amount).toBe(
+    expect((descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation).amount).toBe(
       usdc('0.05').amount,
     );
   });
@@ -161,7 +161,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations[X402_TIER]).toBe('guaranteed');
+    expect(descriptor.annotations[ASSAY_TIER]).toBe('guaranteed');
   });
 
   it('renders a free binding as "free" rather than as a zero', async () => {
@@ -172,7 +172,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     expect(price.amount).toBe('0');
     expect(price.display).toBe('free');
@@ -191,7 +191,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect(descriptor.annotations).not.toHaveProperty(X402_QUALITY_RATE);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_QUALITY_RATE);
   });
 
   it('weights a statistic by the traffic each provider would actually take', async () => {
@@ -205,7 +205,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    const rate = descriptor.annotations[X402_QUALITY_RATE] as number;
+    const rate = descriptor.annotations[ASSAY_QUALITY_RATE] as number;
 
     // Two providers, so the published figure lies strictly between theirs — it
     // is neither a max nor a min, and neither provider's number alone.
@@ -223,7 +223,7 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations[X402_TOOL_ID]).toBe(tool.id);
+    expect(descriptor.annotations[ASSAY_TOOL_ID]).toBe(tool.id);
   });
 
   it('refuses a name the catalogue does not hold', async () => {
@@ -244,7 +244,7 @@ describe('McpCatalogueService — free-tier annotations', () => {
   const invoker = new ScriptedInvoker({});
   const VIEWER = { organizationId: 'org-viewer', agentId: 'agent-viewer' };
 
-  it('publishes x402/pricingMode on a FREE tool', async () => {
+  it('publishes assay/pricingMode on a FREE tool', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' })],
       providers: [buildProvider('provider-a')],
@@ -252,10 +252,10 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations[X402_PRICING_MODE]).toBe(PricingMode.FREE);
+    expect(descriptor.annotations[ASSAY_PRICING_MODE]).toBe(PricingMode.FREE);
   });
 
-  it('publishes x402/pricingMode on a FREEMIUM tool', async () => {
+  it('publishes assay/pricingMode on a FREEMIUM tool', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM })],
       providers: [buildProvider('provider-a')],
@@ -263,10 +263,10 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations[X402_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
+    expect(descriptor.annotations[ASSAY_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
   });
 
-  it('omits x402/pricingMode on a PAID tool', async () => {
+  it('omits assay/pricingMode on a PAID tool', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.PAID })],
       providers: [buildProvider('provider-a')],
@@ -274,10 +274,10 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations).not.toHaveProperty(X402_PRICING_MODE);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_PRICING_MODE);
   });
 
-  it('omits x402/freeQuota when no viewer is supplied — no number is nobody’s', async () => {
+  it('omits assay/freeQuota when no viewer is supplied — no number is nobody’s', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' })],
       providers: [buildProvider('provider-a')],
@@ -285,10 +285,10 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations).not.toHaveProperty(X402_FREE_QUOTA);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_FREE_QUOTA);
   });
 
-  it('publishes this agent’s own x402/freeQuota when a viewer is supplied', async () => {
+  it('publishes this agent’s own assay/freeQuota when a viewer is supplied', async () => {
     const tool = buildTool();
 
     const harness = buildMcpHarness({
@@ -305,14 +305,14 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await harness.catalogue.listTools(VIEWER);
-    expect(descriptor.annotations[X402_FREE_QUOTA]).toEqual({
+    expect(descriptor.annotations[ASSAY_FREE_QUOTA]).toEqual({
       remaining: 87,
       limit: 100,
       resetsAt: '2026-08-11T00:00:00.000Z',
     });
   });
 
-  it('a FREEMIUM tool’s x402/paidAlternative is its own name — the honest answer this catalogue can give', async () => {
+  it('a FREEMIUM tool’s assay/paidAlternative is its own name — the honest answer this catalogue can give', async () => {
     const tool = buildTool({ name: 'search_web' });
     const { catalogue } = buildMcpHarness({
       tool,
@@ -322,7 +322,7 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations[X402_PAID_ALTERNATIVE]).toBe('search_web');
+    expect(descriptor.annotations[ASSAY_PAID_ALTERNATIVE]).toBe('search_web');
   });
 
   it('quotes FREE beside PAID as FREEMIUM: "N free per day, then" the paid price', async () => {
@@ -344,15 +344,15 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await harness.catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
-    expect(descriptor.annotations[X402_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
+    expect(descriptor.annotations[ASSAY_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
     // The amount is still the hold — the paid supply's price, never the FREE zero.
     expect(price.amount).toBe(usdc('0.02').amount);
     // One paid binding: one price, no range — the FREE one is not part of
     // what a paid call can cost (review 2026-10-15, L2).
     expect(price.display).toBe('100 free per day, then $0.02');
-    expect(descriptor.annotations[X402_PAID_ALTERNATIVE]).toBe(tool.name);
+    expect(descriptor.annotations[ASSAY_PAID_ALTERNATIVE]).toBe(tool.name);
   });
 
   it('words a lone FREEMIUM binding "N free per day, then $X"', async () => {
@@ -367,7 +367,7 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await harness.catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     expect(price.display).toBe('25 free per day, then $0.05');
   });
@@ -385,13 +385,13 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await harness.catalogue.listTools();
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     // 600 + 700, capped at the platform's 1,000 a day; two paid bindings → a range.
     expect(price.display).toBe('1000 free per day, then up to $0.05');
   });
 
-  it('a FREE-only tool publishes no x402/paidAlternative — no cross-tool pairing exists to name', async () => {
+  it('a FREE-only tool publishes no assay/paidAlternative — no cross-tool pairing exists to name', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' })],
       providers: [buildProvider('provider-a')],
@@ -399,12 +399,12 @@ describe('McpCatalogueService — free-tier annotations', () => {
     });
 
     const [descriptor] = await catalogue.listTools();
-    expect(descriptor.annotations).not.toHaveProperty(X402_PAID_ALTERNATIVE);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_PAID_ALTERNATIVE);
   });
 });
 
 /**
- * `x402/settlementChains` — the caveat that makes a price honest.
+ * `assay/settlementChains` — the caveat that makes a price honest.
  *
  * The catalogue is deliberately **not** filtered to the buyer's own chains:
  * hiding a tool makes the platform look like it lacks the tool. So a tool that
@@ -471,7 +471,7 @@ describe('McpCatalogueService — where a tool settles', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect(descriptor.annotations[X402_SETTLEMENT_CHAINS]).toEqual([
+    expect(descriptor.annotations[ASSAY_SETTLEMENT_CHAINS]).toEqual([
       'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
     ]);
   });
@@ -497,10 +497,10 @@ describe('McpCatalogueService — where a tool settles', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect(descriptor.annotations[X402_SETTLEMENT_CHAINS]).toEqual([
+    expect(descriptor.annotations[ASSAY_SETTLEMENT_CHAINS]).toEqual([
       'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
     ]);
-    expect(descriptor.annotations[X402_SETTLEMENT_CHAINS]).not.toContain(
+    expect(descriptor.annotations[ASSAY_SETTLEMENT_CHAINS]).not.toContain(
       'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
     );
   });
@@ -513,14 +513,14 @@ describe('McpCatalogueService — where a tool settles', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect(descriptor._meta[X402_SETTLEMENT_CHAINS]).toEqual([
+    expect(descriptor._meta[ASSAY_SETTLEMENT_CHAINS]).toEqual([
       'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
       'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
     ]);
   });
 
   it('publishes an empty list rather than omitting the key', async () => {
-    // The opposite of `x402/p95LatencyMs`, which is OMITTED when unmeasured
+    // The opposite of `assay/p95LatencyMs`, which is OMITTED when unmeasured
     // because a null in a numeric field is read as zero by more clients than
     // not. An EMPTY list is a fact ("nowhere"), not an absence, and a missing
     // key reads as "settles everywhere" — the one reading that makes the
@@ -529,7 +529,7 @@ describe('McpCatalogueService — where a tool settles', () => {
 
     const [descriptor] = await catalogue.listTools();
 
-    expect(descriptor.annotations).toHaveProperty(X402_SETTLEMENT_CHAINS, []);
+    expect(descriptor.annotations).toHaveProperty(ASSAY_SETTLEMENT_CHAINS, []);
   });
 
   it('hands out a copy, not the quote’s own array', async () => {
@@ -538,7 +538,7 @@ describe('McpCatalogueService — where a tool settles', () => {
     const { catalogue, quote } = scriptedCatalogue([CHAIN_IDS.SOLANA_DEVNET]);
 
     const [descriptor] = await catalogue.listTools();
-    (descriptor.annotations[X402_SETTLEMENT_CHAINS] as string[]).push('eip155:1');
+    (descriptor.annotations[ASSAY_SETTLEMENT_CHAINS] as string[]).push('eip155:1');
 
     expect(quote.settlementChains).toEqual(['solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1']);
   });
@@ -548,7 +548,7 @@ describe('McpCatalogueService — where a tool settles', () => {
  * One tool sold on two chains, in two assets (BUG-J-BUY-05).
  *
  * Each viewer is shown the price of the bindings on ITS chain, and the tool
- * carries both chains in `x402/settlementChains`. Before, the two assets met
+ * carries both chains in `assay/settlementChains`. Before, the two assets met
  * in one quote, it threw, and the throw took down `tools/list` for every
  * agent on the platform.
  */
@@ -599,8 +599,8 @@ describe('McpCatalogueService — a tool sold on two chains', () => {
   it('shows an EVM buyer the USDG price', async () => {
     const [descriptor] = await twoChainCatalogue().listTools(viewerOn(EVM));
 
-    expect(descriptor.annotations[X402_PRICE]).toMatchObject({ amount: '100000', asset: USDG });
-    expect([...(descriptor.annotations[X402_SETTLEMENT_CHAINS] as string[])].sort()).toEqual(
+    expect(descriptor.annotations[ASSAY_PRICE]).toMatchObject({ amount: '100000', asset: USDG });
+    expect([...(descriptor.annotations[ASSAY_SETTLEMENT_CHAINS] as string[])].sort()).toEqual(
       [SOLANA, EVM].sort(),
     );
   });
@@ -613,7 +613,7 @@ describe('McpCatalogueService — a tool sold on two chains', () => {
   it('shows a Solana buyer the USDC price', async () => {
     const [descriptor] = await twoChainCatalogue().listTools(viewerOn(SOLANA));
 
-    expect(descriptor.annotations[X402_PRICE]).toMatchObject({
+    expect(descriptor.annotations[ASSAY_PRICE]).toMatchObject({
       amount: '250000',
       asset: ASSET_IDS.USDC_SOLANA_DEVNET,
     });
@@ -671,11 +671,11 @@ describe('McpCatalogueService — a viewer whose chain offers no paid rail (revi
     });
 
     const [descriptor] = await catalogue.listTools(SOLANA_VIEWER);
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     expect(price.display).toContain('paid calls are off on this chain');
-    expect(descriptor.annotations[X402_PAID_ON_THIS_CHAIN]).toBe(false);
-    expect(descriptor._meta[X402_PAID_ON_THIS_CHAIN]).toBe(false);
+    expect(descriptor.annotations[ASSAY_PAID_ON_THIS_CHAIN]).toBe(false);
+    expect(descriptor._meta[ASSAY_PAID_ON_THIS_CHAIN]).toBe(false);
   });
 
   it('a FREEMIUM tool advertises its free allowance only, with no paid alternative', async () => {
@@ -686,11 +686,11 @@ describe('McpCatalogueService — a viewer whose chain offers no paid rail (revi
     });
 
     const [descriptor] = await catalogue.listTools(SOLANA_VIEWER);
-    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+    const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation;
 
     expect(price.display).not.toContain('then');
-    expect(descriptor.annotations).not.toHaveProperty(X402_PAID_ALTERNATIVE);
-    expect(descriptor.annotations[X402_PAID_ON_THIS_CHAIN]).toBe(false);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_PAID_ALTERNATIVE);
+    expect(descriptor.annotations[ASSAY_PAID_ON_THIS_CHAIN]).toBe(false);
   });
 
   it('a viewer with no chain carries no flag', async () => {
@@ -704,6 +704,6 @@ describe('McpCatalogueService — a viewer whose chain offers no paid rail (revi
       organizationId: 'org-viewer',
       agentId: 'agent-viewer',
     });
-    expect(descriptor.annotations).not.toHaveProperty(X402_PAID_ON_THIS_CHAIN);
+    expect(descriptor.annotations).not.toHaveProperty(ASSAY_PAID_ON_THIS_CHAIN);
   });
 });

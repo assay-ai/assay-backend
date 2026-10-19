@@ -31,7 +31,7 @@ import {
   WITHDRAWAL_FLAG_CACHE_MS,
 } from '@modules/catalogue/services/catalogue.service';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
-import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
   ChainEnrolment,
@@ -832,7 +832,7 @@ describe('GET /catalogue/tools', () => {
 
   it('spells the field the way `tools/list` spells it, with CAIP-2 values', async () => {
     // One fact, one name, one derivation. `McpCatalogueService` publishes
-    // `x402/settlementChains` from `quote.settlementChains`; this publishes
+    // `assay/settlementChains` from `quote.settlementChains`; this publishes
     // `settlementChains` from the same expression. Asserting the KEY is what
     // stops the two surfaces from being renamed apart.
     const { service } = build({
@@ -843,7 +843,7 @@ describe('GET /catalogue/tools', () => {
     const { tools } = await service.listTools();
 
     expect(Object.keys(tools[0])).toContain('settlementChains');
-    expect(X402_SETTLEMENT_CHAINS).toBe('x402/settlementChains');
+    expect(ASSAY_SETTLEMENT_CHAINS).toBe('assay/settlementChains');
     for (const chainId of tools[0].settlementChains ?? []) {
       expect(chainId).toMatch(CHAIN_ID_RE);
     }
