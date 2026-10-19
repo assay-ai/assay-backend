@@ -9,7 +9,7 @@ const NAME = ['agent', 'cli'].join('-');
 const ENV_NAME = ['AGENT', 'CLI'].join('_');
 
 /**
- * `agent-cli` was retired: the local `assay-mcp` proxy holds the payment key and signs vouchers.
+ * The old e2e agent CLI was retired: the local `assay-mcp` proxy holds the payment key and signs vouchers.
  * No tracked file outside `docs/history` may name it again.
  */
 describe('the retired agent CLI is not referenced', () => {
