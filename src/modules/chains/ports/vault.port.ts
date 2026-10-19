@@ -2,29 +2,23 @@ import { AccountId, AssetId } from './caip.types';
 import { Money } from './money.types';
 
 /**
- * The platform treasury vault — the one Squads-controlled account that
- * custodies every agent's **legacy** deposited balance on a chain, until the
- * cutover moves it onto per-buyer escrows. Deposits no longer land here —
- * `DepositService` points every new one at the buyer's own escrow — so what is
- * left is proof of reserves over what has not yet been migrated, and
- * `sweep_fees`, which is a settlement-program door and not a Squads one at
- * all.
+ * The account that holds buyers' money on a chain, for proof of reserves: on
+ * EVM the `X402Escrow` contract, whose token balance must cover every buyer
+ * escrow and held payment the ledger records. Solana has none (its pooled
+ * Squads treasury is gone); `NamespaceVaultPort` answers a Solana asset with
+ * `CHAIN_UNSUPPORTED`.
  *
  * Deliberately separate from `ChainAdapter.getVaultAccount(owner, asset)`:
  * that method derives the receiving token account for *any* owner an intent
- * names, generic enough to also be used for provider stake or a future
- * per-agent channel PDA. `VaultPort` is about exactly one account — this
- * platform's own treasury — and it is the only thing in the domain allowed to
- * assert control over it or propose moving money out of it.
- *
- * Each chain has its own implementation behind this port (on EVM a contract,
- * not a Squads multisig) rather than a second method on this one.
+ * names. `VaultPort` is about exactly one account per chain — this platform's
+ * own — and it is the only thing in the domain allowed to assert control over
+ * it.
  */
 export interface VaultPort {
-  /** The multisig vault PDA that owns the treasury's token account for `asset`. */
+  /** The account that owns the vault's holding of `asset` (on EVM, the escrow contract). */
   getVaultOwner(asset: AssetId): Promise<AccountId>;
 
-  /** The token account (an ATA on SVM) that actually holds `asset`. */
+  /** The account that actually holds `asset`. */
   getVaultAccount(asset: AssetId): Promise<AccountId>;
 
   /** The vault's on-chain balance of `asset` — the left side of proof of reserves. */
@@ -46,9 +40,8 @@ export interface VaultPort {
   getVaultBalanceAt(asset: AssetId): Promise<{ balance: Money; slot: bigint }>;
 
   /**
-   * Proves, on chain, that the vault is what it claims to be: the vault ATA's
-   * authority is the derived vault PDA, and the account at the derived
-   * multisig PDA is owned by the Squads program. Throws
+   * Proves, on chain, that the vault is what it claims to be (on EVM, the
+   * deployed escrow contract and its configured roles). Throws
    * `CHAIN_VAULT_CONTROL_UNVERIFIED` on any mismatch — a vault whose control
    * cannot be proven must fail loudly at the point of use, never be assumed.
    */

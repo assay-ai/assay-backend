@@ -776,23 +776,6 @@ describe('ReconciliationService — every buyer’s own escrow', () => {
 
     expect(escrowRepository.bumpNextSeqTo).not.toHaveBeenCalled();
   });
-
-  it('still checks the pooled vault, because legacy balances are still in it', async () => {
-    // Until the cutover completes, some buyers' money is in the Squads vault and
-    // some is in escrows. Dropping check 1 now would stop watching the half that
-    // has not moved yet.
-    const { service } = build({
-      vaultBalance: 1n,
-      journal: { [LedgerEntryType.DEPOSIT]: 5_000_000n },
-      snapshot: { available: 5_000_000n },
-    });
-
-    const report = await service.reconcile(USDC);
-
-    expect(report.findings.map((finding) => finding.code)).toContain(
-      ReconciliationFindingCode.RESERVES_BREACH,
-    );
-  });
 });
 
 describe('ReconciliationService — the freeze flag', () => {

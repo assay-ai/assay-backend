@@ -23,8 +23,8 @@ import { SETTLEMENT_PROGRAM_ID, SETTLEMENT_PROGRAM_ID_ENV } from './settlement-p
 
 /**
  * The two RPC calls this service makes, declared structurally so a test can
- * supply exactly them — the same trade `SquadsVaultRpcClient` and
- * `VerifierRegistryRpcClient` make next door.
+ * supply exactly them — the same trade `VerifierRegistryRpcClient` makes next
+ * door.
  */
 export interface SettlementStakeRpcClient {
   getAccountInfo(

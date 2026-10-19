@@ -62,8 +62,8 @@ export const DEFAULT_ESCROW_BALANCE_READER_CONFIG: Omit<EscrowBalanceReaderConfi
 
 /**
  * The one RPC call this service makes, declared structurally so a test can
- * supply exactly it — the same trade `SettlementStakeRpcClient` and
- * `SquadsVaultRpcClient` make next door. **No `sendTransaction`** — this file
+ * supply exactly it — the same trade `SettlementStakeRpcClient` makes next
+ * door. **No `sendTransaction`** — this file
  * only ever reads. Both the escrow account and its ATA are fetched together
  * — one round trip, not two — so there is no `getAccountInfo` here at all.
  */

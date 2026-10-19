@@ -445,8 +445,7 @@ export class SolanaStakeIntentBuilder implements StakeIntentBuilderPort {
    * account.
    *
    * `getAccountInfo` + the generated decoder rather than
-   * `getTokenAccountBalance`, which is what `SquadsVaultService` uses next door:
-   * that method *throws* on a missing account, and the missing account is a
+   * `getTokenAccountBalance`: that method *throws* on a missing account, and the missing account is a
    * first-class answer here. A provider who has never held the stake mint has
    * no ATA, and telling them "0 USDC" instead of "no token account" sends them
    * to a faucet when what they need is an account.

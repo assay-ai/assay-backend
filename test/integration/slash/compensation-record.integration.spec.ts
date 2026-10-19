@@ -77,7 +77,6 @@ describe('recording a compensation, against a real database', () => {
       // Only the treasury lookup is reached; nothing is signed or sent.
       { settlementTreasury: async () => TREASURY } as never,
       null,
-      null,
       { confirmedDeposit } as never,
     );
 

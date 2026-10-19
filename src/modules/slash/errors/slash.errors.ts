@@ -13,7 +13,6 @@ export enum SlashErrorCode {
   SLASH_ALREADY_REVERSED = 'SLASH_ALREADY_REVERSED',
   SLASH_NOT_EXECUTED = 'SLASH_NOT_EXECUTED',
   SLASH_NO_BENEFICIARY = 'SLASH_NO_BENEFICIARY',
-  SLASH_BENEFICIARY_IS_TREASURY = 'SLASH_BENEFICIARY_IS_TREASURY',
   /** A route needed the settlement program and this deployment has none. */
   SLASH_CHAIN_UNAVAILABLE = 'SLASH_CHAIN_UNAVAILABLE',
   /** The signature offered as a compensation does not show the deposit it claims. */
@@ -179,28 +178,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       'This proposal has no single beneficiary, so it cannot execute. A window-level penalty ' +
       'is owed to every agent who spent in the window, and how that is distributed on chain ' +
       'has not been decided.',
-  },
-  /**
-   * The resolved collection account is the settlement treasury.
-   *
-   * `slash` cannot execute such a judgement: `beneficiary_token_account` and
-   * `treasury_token_account` would derive to one address and Anchor rejects a
-   * duplicate mutable account (`ConstraintDuplicateMutableAccount`, 2040)
-   * before the handler runs — so the on-chain failure has no name and no
-   * explanation. The program's own comment asks the off-chain issuer to refuse
-   * instead, which is what this is.
-   *
-   * 500 rather than 409: nothing a caller did causes it. It means the vault and
-   * the treasury have been configured to the same key, which is an operator
-   * error that must be fixed before any slash can pay out.
-   */
-  beneficiaryIsTreasury: {
-    code: SlashErrorCode.SLASH_BENEFICIARY_IS_TREASURY,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      'The settlement vault and the economics treasury are the same account ' +
-      `${context?.address ? `(${context.address}) ` : ''}` +
-      'so no penalty can be paid: the slash instruction would be given one account twice.',
   },
   /**
    * Nothing to propose: no agent in the window had a DATA_FAIL call with a

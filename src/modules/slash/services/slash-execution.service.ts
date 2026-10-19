@@ -36,7 +36,6 @@ import {
 import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { SlashBeneficiaryService } from './slash-beneficiary.service';
 import { SlashCompensationService } from './slash-compensation.service';
 import { SlashPartsService } from './slash-parts.service';
 import { DISPUTE_TIMEOUT_MS, SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
@@ -265,10 +264,6 @@ export class SlashExecutionService {
     // `VerifierSigningModule` — so the throw happens at the first call, in
     // whichever process had no business signing, rather than at injection.
     @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null,
-    // Optional for the same structural reason: it reads the chain through
-    // `SLASH_EXECUTOR` and `VaultPort`, so a composition lacking those has
-    // nothing for it to read.
-    @Optional() private readonly beneficiaries: SlashBeneficiaryService | null = null,
     // Optional for the same reason: it is only reachable on the path that
     // actually executes.
     @Optional() private readonly compensation: SlashCompensationService | null = null,
@@ -809,18 +804,11 @@ export class SlashExecutionService {
         reason: 'EVM cases are paid pro rata per window; no call-level beneficiary rule exists',
       });
     }
-    // Resolved and persisted BEFORE anything is signed, because `beneficiary` is
-    // a field of the signed attestation: a row that learned it afterwards could
-    // not say who the judgement it authorised actually named.
-    const beneficiaryAccount =
-      proposal.beneficiaryAccount ?? (await this.resolveBeneficiary(proposal));
-    if (!beneficiaryAccount) {
-      // Deliberately a throw and not a void. A composition with no resolver
-      // cannot name who the compensating share is owed to, which is a fact
-      // about this process rather than about the judgement — the case stays
-      // live and a scheduler that has the resolver picks it up.
-      throw SlashErrors.noBeneficiary();
-    }
+    // Only a beneficiary already on the row. The single-record rule named the
+    // pooled Solana treasury vault, which is gone, so nothing resolves one any
+    // more; a row without one is refused rather than given a guess.
+    const beneficiaryAccount = proposal.beneficiaryAccount;
+    if (!beneficiaryAccount) throw SlashErrors.noBeneficiary();
 
     return this.executor.propose({
       chainId: chainIdOf(proposal.assetId as AssetId),
@@ -2858,27 +2846,6 @@ export class SlashExecutionService {
     }
 
     return enrolment.stakeAuthorityAccountId as AccountId;
-  }
-
-  /**
-   * The account this penalty's compensating share is paid into, persisted so
-   * the row records what was signed.
-   *
-   * Returns `null` rather than throwing when no resolver is wired, so the
-   * caller's existing `SLASH_NO_BENEFICIARY` refusal stays the single place
-   * that decides what a missing beneficiary means.
-   */
-  private async resolveBeneficiary(proposal: SlashProposalEntity): Promise<string | null> {
-    if (!this.beneficiaries) return null;
-
-    const account = await this.beneficiaries.resolve(proposal.assetId as AssetId);
-
-    await this.proposals.update(
-      { organizationId: proposal.organizationId, id: proposal.id },
-      { beneficiaryAccount: account },
-    );
-
-    return account;
   }
 
   /**
