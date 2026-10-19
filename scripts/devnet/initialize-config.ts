@@ -42,7 +42,7 @@ import {
   getInitializeConfigInstructionAsync,
   SLASH_DELAY_SECONDS,
   WITHDRAW_DELAY_SECONDS,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 const DAY = 24 * 60 * 60;
 

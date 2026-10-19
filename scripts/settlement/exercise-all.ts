@@ -82,7 +82,7 @@ import {
   reversalAttestationMessage,
   settlementAttestationMessage,
   slashAttestationMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { solanaBin } from '../devnet/lib/solana-cli';
 import { createSender, loadKeypairSigner } from './lib/sender';
@@ -226,7 +226,7 @@ function web3ToKit(instruction: TransactionInstruction): Instruction {
 
 // ── the signed messages ─────────────────────────────────────────────────────
 //
-// From `@x402/settlement-client`, not from here. They are the one part of the
+// From `@assay/settlement-client`, not from here. They are the one part of the
 // program's interface that is not in the IDL, so they are hand-written — but in
 // exactly one file, which is reviewed and tested, rather than re-derived by each
 // caller. See `packages/settlement-client/src/attestation-message.ts`.

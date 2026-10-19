@@ -11,7 +11,7 @@ import {
   getVerifierKeyDecoder,
   VERIFIER_KEY_DISCRIMINATOR,
   VerifierStatus,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   RegisteredVerifierStatus,
@@ -38,7 +38,7 @@ export interface VerifierRegistryRpcClient {
  * ## Decoded by the generated client, not by hand
  *
  * The seeds, the eight-byte discriminator, the field order and every field's
- * width come from `@x402/settlement-client`, which is Codama output rendered
+ * width come from `@assay/settlement-client`, which is Codama output rendered
  * from the program's own IDL. An earlier version of this file did it by hand —
  * ninety lines of `DataView` offsets with the layout written out in a comment —
  * and that was a copy of the program's interface that nothing checked. The

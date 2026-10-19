@@ -34,7 +34,7 @@ import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-t
  *
  * ## Why it is a port and not a call into the client
  *
- * ESLint's chain-SDK ban: `@x402/settlement-client` and `@solana/*` are
+ * ESLint's chain-SDK ban: `@assay/settlement-client` and `@solana/*` are
  * importable only under `src/modules/chains/`, and `yarn lint` is a gate. So
  * the consuming domain declares the interface and `chains/solana/` supplies the
  * implementation — the arrangement `OnChainStakeReaderPort` already has, for

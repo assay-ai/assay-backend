@@ -88,7 +88,7 @@ import {
   findStakeVaultPda,
   getDepositStakeInstructionAsync,
   getOpenStakeInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -625,7 +625,7 @@ async function fetchProviderEarnings(
   provider: Address,
   programAddress: Address,
 ): Promise<bigint> {
-  const { findEarningsPda } = await import('@x402/settlement-client');
+  const { findEarningsPda } = await import('@assay/settlement-client');
   const [pda] = await findEarningsPda({ provider }, { programAddress });
   const acc = await fetchMaybeProviderEarnings(rpc, pda);
   return acc.exists ? acc.data.balance : 0n;

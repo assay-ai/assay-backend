@@ -37,7 +37,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const REVOKE_VERIFIER_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   241, 50, 210, 153, 161, 110, 90, 123,
@@ -48,7 +48,7 @@ export function getRevokeVerifierDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type RevokeVerifierInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountAdmin extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TAccountVerifierKey extends string | AccountMeta<string> = string,
@@ -107,7 +107,7 @@ export async function getRevokeVerifierInstructionAsync<
   TAccountAdmin extends string,
   TAccountConfig extends string,
   TAccountVerifierKey extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RevokeVerifierAsyncInput<TAccountAdmin, TAccountConfig, TAccountVerifierKey>,
   config?: { programAddress?: TProgramAddress },
@@ -115,7 +115,7 @@ export async function getRevokeVerifierInstructionAsync<
   RevokeVerifierInstruction<TProgramAddress, TAccountAdmin, TAccountConfig, TAccountVerifierKey>
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -164,13 +164,13 @@ export function getRevokeVerifierInstruction<
   TAccountAdmin extends string,
   TAccountConfig extends string,
   TAccountVerifierKey extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RevokeVerifierInput<TAccountAdmin, TAccountConfig, TAccountVerifierKey>,
   config?: { programAddress?: TProgramAddress },
 ): RevokeVerifierInstruction<TProgramAddress, TAccountAdmin, TAccountConfig, TAccountVerifierKey> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -201,7 +201,7 @@ export function getRevokeVerifierInstruction<
 }
 
 export type ParsedRevokeVerifierInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

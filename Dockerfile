@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY yarn.lock ./
 # `packages/*` is a yarn workspace, so its manifest has to exist before
-# `yarn install` — without it yarn resolves `@x402/settlement-client` against the
+# `yarn install` — without it yarn resolves `@assay/settlement-client` against the
 # registry, where it does not exist, and the install fails.
 COPY packages/settlement-client/package.json ./packages/settlement-client/
 

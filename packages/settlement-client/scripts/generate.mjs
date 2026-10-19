@@ -1,5 +1,5 @@
 /**
- * Regenerate `src/generated/` from `idl/x402_payment.json`.
+ * Regenerate `src/generated/` from `idl/assay_payment.json`.
  *
  *     yarn client:generate            # from the backend root
  *

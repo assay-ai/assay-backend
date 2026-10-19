@@ -37,7 +37,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const CANCEL_SLASH_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   222, 163, 161, 54, 103, 113, 42, 67,
@@ -48,7 +48,7 @@ export function getCancelSlashDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type CancelSlashInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountAdmin extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TAccountSlashRecord extends string | AccountMeta<string> = string,
@@ -112,7 +112,7 @@ export async function getCancelSlashInstructionAsync<
   TAccountConfig extends string,
   TAccountSlashRecord extends string,
   TAccountStake extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: CancelSlashAsyncInput<TAccountAdmin, TAccountConfig, TAccountSlashRecord, TAccountStake>,
   config?: { programAddress?: TProgramAddress },
@@ -126,7 +126,7 @@ export async function getCancelSlashInstructionAsync<
   >
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -181,7 +181,7 @@ export function getCancelSlashInstruction<
   TAccountConfig extends string,
   TAccountSlashRecord extends string,
   TAccountStake extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: CancelSlashInput<TAccountAdmin, TAccountConfig, TAccountSlashRecord, TAccountStake>,
   config?: { programAddress?: TProgramAddress },
@@ -193,7 +193,7 @@ export function getCancelSlashInstruction<
   TAccountStake
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -227,7 +227,7 @@ export function getCancelSlashInstruction<
 }
 
 export type ParsedCancelSlashInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

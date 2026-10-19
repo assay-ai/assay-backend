@@ -16,7 +16,7 @@ import {
   REQUEST_WITHDRAW_DISCRIMINATOR,
   SET_ESCROW_LIMITS_DISCRIMINATOR,
   WITHDRAW_DISCRIMINATOR,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-transaction';

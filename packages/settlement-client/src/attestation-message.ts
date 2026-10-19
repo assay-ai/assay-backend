@@ -1,7 +1,7 @@
 import { getAddressEncoder } from '@solana/kit';
 import type { Address, ReadonlyUint8Array } from '@solana/kit';
 
-import { X402_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
 
 /**
  * The exact bytes a verifier signs — the one part of the program's interface
@@ -92,7 +92,7 @@ export interface SlashAttestationFields {
 export function slashAttestationMessage(fields: SlashAttestationFields): Uint8Array {
   const out = new Uint8Array(SLASH_MESSAGE_LENGTH);
   out.set(SLASH_DOMAIN, 0);
-  out.set(addressBytes(fields.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS), 26);
+  out.set(addressBytes(fields.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS), 26);
   out.set(fixed(fields.requestId, 32), 58);
   out.set(addressBytes(fields.provider), 90);
   out.set(addressBytes(fields.beneficiary), 122);

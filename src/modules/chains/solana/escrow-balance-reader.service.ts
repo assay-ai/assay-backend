@@ -9,7 +9,7 @@ import {
   BUYER_ESCROW_DISCRIMINATOR,
   findEscrowPda,
   getBuyerEscrowDecoder,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   EscrowBalanceReaderPort,

@@ -78,7 +78,7 @@ const ROBINHOOD_TESTNET = 'eip155:46630' as ChainId;
  */
 const SOLANA_TESTNET = 'solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z' as ChainId;
 
-/** Deployed, deliberately not `X402_PAYMENT_PROGRAM_ADDRESS`. See the adapter spec. */
+/** Deployed, deliberately not `ASSAY_PAYMENT_PROGRAM_ADDRESS`. See the adapter spec. */
 const DEPLOYED_PROGRAM_ID = 'PR5bEscrowRedep1oyment11111111111111111111z';
 
 /** A transaction the stub RPC can find, and one it cannot. */

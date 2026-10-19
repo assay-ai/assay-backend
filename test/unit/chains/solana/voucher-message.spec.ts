@@ -16,7 +16,7 @@ import {
   VOUCHER_DOMAIN,
   VOUCHER_MESSAGE_LENGTH,
   voucherMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 const PROGRAM = address('DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR');
 const PAYER = address('9xGuGHFYb4KysmNbZpvHEUJYwxC8zwFhP1GT2apAyCjj');

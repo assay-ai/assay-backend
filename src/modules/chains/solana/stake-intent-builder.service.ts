@@ -30,7 +30,7 @@ import {
   getOpenStakeInstruction,
   getRequestUnstakeInstruction,
   getWithdrawStakeInstruction,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   GAS_NOT_SPONSORED_REASON,
@@ -183,7 +183,7 @@ export const STAKE_INTENT_GAS_LAMPORTS = 10_000_000n;
  *
  * `getOpenStakeInstruction`, `getDepositStakeInstruction`,
  * `getRequestUnstakeInstruction`, `getWithdrawStakeInstruction` from
- * `@x402/settlement-client`, which is Codama output rendered from the program's
+ * `@assay/settlement-client`, which is Codama output rendered from the program's
  * IDL. Two locks enforce it — an ESLint `no-restricted-syntax` rule and
  * `test/unit/chains/solana/settlement-client-only.spec.ts` — and the reason is
  * the usual one, sharpened by what these instructions do: a `u64` written at

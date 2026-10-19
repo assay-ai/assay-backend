@@ -14,7 +14,7 @@ import {
   ReadonlyUint8Array,
 } from '@solana/kit';
 
-import { voucherMessage } from '@x402/settlement-client';
+import { voucherMessage } from '@assay/settlement-client';
 
 import { computeResourceHash, hashHexToBytes } from '@modules/payment/domain/resource-hash';
 
@@ -374,7 +374,7 @@ export class SolanaChainAdapter implements ChainAdapter {
 
   /**
    * The 240 bytes of voucher v2, produced by the one encoder in this repository
-   * (`@x402/settlement-client`'s `voucherMessage`) so that the bytes a buyer
+   * (`@assay/settlement-client`'s `voucherMessage`) so that the bytes a buyer
    * signs and the bytes `redeem_voucher` recomputes cannot drift apart.
    *
    * v1 was a newline-joined UTF-8 text message under the tag `x402-voucher/v1`.
@@ -384,7 +384,7 @@ export class SolanaChainAdapter implements ChainAdapter {
    * signature can verify as v2 — an old voucher is refused, never misread.
    *
    * `programAddress` is the **deployed** id from `SOLANA_SETTLEMENT_PROGRAM_ID`,
-   * never the client's compiled-in `X402_PAYMENT_PROGRAM_ADDRESS`. See
+   * never the client's compiled-in `ASSAY_PAYMENT_PROGRAM_ADDRESS`. See
    * `voucher-message.ts` for the failure that default would produce: every
    * buyer signs bytes naming a program that is not the one about to check them,
    * the call is served, the money is held, and every redemption dies with

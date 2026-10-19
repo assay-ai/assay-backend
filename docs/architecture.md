@@ -371,13 +371,13 @@ the symptom is a `dist/` containing `src/` and `packages/` instead of `main.js`.
 ## The Settlement Client (`packages/settlement-client`)
 
 The Anchor settlement program's interface is **generated, never hand-written**.
-`@x402/settlement-client` is a yarn workspace package holding Codama output
+`@assay/settlement-client` is a yarn workspace package holding Codama output
 rendered from the program's IDL, which `anchor idl build` renders from the
 program source in the `assay-solana` repository. The IDL is vendored at
-`packages/settlement-client/idl/x402_payment.json`.
+`packages/settlement-client/idl/assay_payment.json`.
 
 ```bash
-yarn client:generate     # re-render src/generated/ from idl/x402_payment.json
+yarn client:generate     # re-render src/generated/ from idl/assay_payment.json
 yarn client:check        # CI gate: fails if the two disagree
 yarn client:build        # tsc -> packages/settlement-client/dist
 ```
@@ -390,7 +390,7 @@ Rules:
 
 - **Never build an instruction for that program by hand.** Use
   `get<Name>Instruction[Async]`, `fetch<Name>` / `get<Name>Decoder()`,
-  `find<Name>Pda`, `getX402PaymentErrorMessage`. Two locks enforce this: an
+  `find<Name>Pda`, `getAssayPaymentErrorMessage`. Two locks enforce this: an
   ESLint `no-restricted-syntax` rule under `src/`, and
   `test/unit/chains/solana/settlement-client-only.spec.ts`, which also covers
   `scripts/` (ESLint ignores that directory).
