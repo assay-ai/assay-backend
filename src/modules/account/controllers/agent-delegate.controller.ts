@@ -6,6 +6,7 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import {
   AgentDelegateBindingDto,
+  AgentDelegateStatusDto,
   BindDelegateBodyDto,
   CreateDelegateChallengeBodyDto,
   DelegateChallengeResponseDto,
@@ -26,9 +27,11 @@ export class AgentDelegateController {
   constructor(private readonly delegates: AgentDelegateService) {}
 
   @Get()
-  @ApiOperation({ summary: "This credential's bound delegate key, if any" })
-  @ApiResponse({ status: 200, type: AgentDelegateBindingDto })
-  current(@CurrentSession() session: McpSession): Promise<AgentDelegateBindingDto> {
+  @ApiOperation({
+    summary: "This credential's bound delegate key, if any, and its on-chain paid-call status",
+  })
+  @ApiResponse({ status: 200, type: AgentDelegateStatusDto })
+  current(@CurrentSession() session: McpSession): Promise<AgentDelegateStatusDto> {
     return this.delegates.current(session);
   }
 
