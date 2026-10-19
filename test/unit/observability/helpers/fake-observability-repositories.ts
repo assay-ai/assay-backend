@@ -44,7 +44,6 @@ export interface FakeObservabilityOverrides {
   openHoldAge?: { count: number; oldestAgeSeconds: number | null };
   attestationsSigned?: number;
   slashesExecuted?: number;
-  disputeOverturnCounts?: { raised: number; overturned: number };
 }
 
 /** Every method defaults to the "empty database" answer — no calls, no rows, nothing null-crashing. */
@@ -62,9 +61,6 @@ export function fakeObservabilityMetricsRepository(
       .mockResolvedValue(overrides.openHoldAge ?? { count: 0, oldestAgeSeconds: null }),
     attestationsSigned: jest.fn().mockResolvedValue(overrides.attestationsSigned ?? 0),
     slashesExecuted: jest.fn().mockResolvedValue(overrides.slashesExecuted ?? 0),
-    disputeOverturnCounts: jest
-      .fn()
-      .mockResolvedValue(overrides.disputeOverturnCounts ?? { raised: 0, overturned: 0 }),
   } as unknown as ObservabilityMetricsRepository;
 }
 

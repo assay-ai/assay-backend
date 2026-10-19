@@ -27,7 +27,7 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { Tool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { ArbitrationOutcome, OUTCOME_CONSEQUENCE, ResolutionKind } from '../domain/arbitration';
+import { ResolutionKind } from '../domain/arbitration';
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
@@ -176,18 +176,10 @@ export class SlashCaseService {
   /** The dispute case restoration record. */
   async restoration(organizationId: string, proposalId: string): Promise<RestorationRowDto[]> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const windowLabel = proposal.windowId
-      ? await this.windowLabelFor(organizationId, proposal.windowId)
-      : null;
-    return buildRestorationRows(proposal, windowLabel);
+    return buildRestorationRows(proposal);
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
-
-  private async windowLabelFor(organizationId: string, windowId: string): Promise<string | null> {
-    const window = await this.windows.findOneBy({ organizationId, id: windowId });
-    return window ? renderWindowLabel(window.sequence) : null;
-  }
 
   /** This window and the previous five for the same binding, `CLOSED` only. */
   private async loadPriorWindows(
@@ -477,7 +469,6 @@ function buildProposalDto(
     clocks,
     disputeId: proposal.disputeId,
     resolutionKind: proposal.resolutionKind as ResolutionKind | null,
-    outcome: proposal.outcome as ArbitrationOutcome | null,
     resolvedAt: proposal.resolvedAt,
     executedAt: proposal.executedAt,
     executionSignature: proposal.executionSignature,
@@ -627,89 +618,27 @@ function toAttributionRows(groups: readonly SlaWindowFailureGroup[]): SlashAttri
   return rows;
 }
 
-interface RestorationBasis {
-  readonly penaltyStands: boolean;
-  readonly strikesStand: boolean;
-  readonly routingWeightStands: boolean;
-}
-
 /**
- * What an eventual (or already-reached) resolution promises to restore.
- * `null` while the case is still open — nothing has been decided yet, so
- * every row reads `ON_DECISION`.
+ * Whether the case is still waiting on a decision. `S-1` closes a case
+ * without a resolution (no kind, no `resolvedAt`); it is settled, not pending.
  */
-function restorationBasisFor(proposal: SlashProposalEntity): RestorationBasis | null {
-  // `S-1` closes a case without a resolution (no kind, no `resolvedAt`); it is
-  // settled, not pending.
-  if (!proposal.resolvedAt && proposal.status !== 'CANCELLED') return null;
-
-  if (proposal.outcome) {
-    const consequence = OUTCOME_CONSEQUENCE[proposal.outcome as ArbitrationOutcome];
-    return {
-      penaltyStands: consequence.penaltyStands,
-      strikesStand: consequence.strikesStand,
-      routingWeightStands: consequence.routingWeightStands,
-    };
-  }
-
-  // Automatic resolutions carry no `ArbitrationOutcome` —
-  // `chk_slash_proposals_outcome_needs_adjudicator` refuses one. Only
-  // `AUTO_PLATFORM_MISS` is a genuine overturn among the three: it is our own
-  // control failing, not a judgement about the provider, so it is read here
-  // as a full reversal. This mapping names no
-  // `ArbitrationOutcome` and is therefore not in `OUTCOME_CONSEQUENCE` — it is
-  // a judgement of this service, not a documented rule.
-  if (proposal.resolutionKind === ResolutionKind.AUTO_PLATFORM_MISS) {
-    return { penaltyStands: false, strikesStand: false, routingWeightStands: false };
-  }
-
-  // `AUTO_UNDISPUTED` (penalty stands), `AUTO_DE_MINIMIS` (nothing was ever
-  // levied) and a pre-attestation `CANCELLED` (`S-1`, never adjudicated) all
-  // land here: none of them promises to undo anything, so every row below
-  // reads `NOT_APPLICABLE`.
-  return { penaltyStands: true, strikesStand: true, routingWeightStands: true };
-}
-
-function restorationStatus(
-  pending: boolean,
-  restores: boolean,
-): 'ON_DECISION' | 'RESTORED' | 'NOT_APPLICABLE' {
-  if (pending) return 'ON_DECISION';
-  return restores ? 'RESTORED' : 'NOT_APPLICABLE';
+function restorationPending(proposal: SlashProposalEntity): boolean {
+  return !proposal.resolvedAt && proposal.status !== 'CANCELLED';
 }
 
 /**
- * The dispute case restoration record — six rows. Two of them
- * (`strikesStand`/`routingWeightStands`) are read off `OUTCOME_CONSEQUENCE`
- * or the automatic-resolution mapping above; two (`penalty cancelled`,
+ * The dispute case restoration record — four rows. Two (`penalty cancelled`,
  * `false-positive metric`) are read off real columns on the proposal itself;
- * and two ("tier progress", "policy recalibration ticket") have no backing
- * data anywhere in this codebase and say so rather than guessing.
+ * two ("tier progress", "policy recalibration ticket") have no backing data
+ * anywhere in this codebase and say so rather than guessing.
+ *
+ * No resolution the system writes promises to undo anything, so a closed case
+ * reads `NOT_APPLICABLE` throughout.
  */
-function buildRestorationRows(
-  proposal: SlashProposalEntity,
-  windowLabel: string | null,
-): RestorationRowDto[] {
-  const basis = restorationBasisFor(proposal);
-  const pending = basis === null;
-
-  const strikeRestores = basis !== null && !basis.strikesStand;
-  const routingRestores = basis !== null && !basis.routingWeightStands;
-  const penaltyStands = basis !== null && basis.penaltyStands;
+function buildRestorationRows(proposal: SlashProposalEntity): RestorationRowDto[] {
+  const pending = restorationPending(proposal);
 
   const rows: RestorationRowDto[] = [];
-
-  rows.push({
-    label: windowLabel ? `Strikes removed from ${windowLabel}` : 'Strikes removed',
-    value: proposal.strikeId ? '1 strike' : 'no SLA strike on this proposal',
-    status: proposal.strikeId ? restorationStatus(pending, strikeRestores) : 'NOT_APPLICABLE',
-  });
-
-  rows.push({
-    label: 'Routing weight restored',
-    value: pending ? 'pending decision' : routingRestores ? 'restored' : 'stands',
-    status: restorationStatus(pending, routingRestores),
-  });
 
   rows.push({
     label: 'Tier progress restored',
@@ -720,20 +649,10 @@ function buildRestorationRows(
     status: 'NOT_APPLICABLE',
   });
 
-  const penaltyStatus = pending
-    ? 'ON_DECISION'
-    : penaltyStands
-      ? 'NOT_APPLICABLE'
-      : // Overturned. Money that already moved needs an on-chain reversal
-        // before it is actually undone; overturned before execution, there
-        // was never anything to undo and the promise is fulfilled at once.
-        proposal.status === 'EXECUTED'
-        ? 'ON_DECISION'
-        : 'RESTORED';
   rows.push({
     label: 'Penalty cancelled',
     value: formatMoney(proposal.penaltyAmount, proposal.assetId, proposal.decimals),
-    status: penaltyStatus,
+    status: pending ? 'ON_DECISION' : 'NOT_APPLICABLE',
   });
 
   rows.push({

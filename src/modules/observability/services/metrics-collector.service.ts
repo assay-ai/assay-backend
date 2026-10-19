@@ -111,7 +111,6 @@ export class MetricsCollectorService {
       slashes,
       queue,
       intentRates,
-      disputeOverturn,
       oauth,
     ] = await Promise.all([
       this.reconciliationRuns.findLatestPerAsset(),
@@ -124,7 +123,6 @@ export class MetricsCollectorService {
       this.observability.slashesExecuted(new Date(now - SLASH_WINDOW_MS)),
       this.platformMetrics.verificationBacklog(nowDate),
       this.platformMetrics.intentRateCounts(nowDate),
-      this.observability.disputeOverturnCounts(new Date(now - OVERTURN_WINDOW_MS)),
       // Never rejects: a failed OAuth source reads as absent (see the reader).
       this.oauthSignals.read(now),
     ]).catch((error: unknown) => {
@@ -141,8 +139,6 @@ export class MetricsCollectorService {
       toolCalls.total > 0 ? toolCalls.nonSystemError / toolCalls.total : null;
     const falsePositiveRate =
       falsePositive.resolved > 0 ? falsePositive.falsePositives / falsePositive.resolved : null;
-    const disputeOverturnRate =
-      disputeOverturn.raised > 0 ? disputeOverturn.overturned / disputeOverturn.raised : null;
 
     const signals: SignalReadingDto[] = [
       this.reading(
@@ -153,15 +149,6 @@ export class MetricsCollectorService {
         null,
       ),
       this.reading(ObservabilitySignal.FALSE_NEGATIVE_RATE, 'other', null, 'ratio', null),
-      this.reading(
-        ObservabilitySignal.DISPUTE_OVERTURN_RATE,
-        'money',
-        disputeOverturnRate,
-        'ratio',
-        disputeOverturnRate === null
-          ? null
-          : toGate(evaluateGoldenSignal(GoldenSignal.DISPUTE_OVERTURN_RATE, disputeOverturnRate)),
-      ),
       this.reading(ObservabilitySignal.GAS_RUNWAY_DAYS, 'money', null, 'days', null),
       this.reading(
         ObservabilitySignal.TOOL_CALL_SUCCESS_RATE,

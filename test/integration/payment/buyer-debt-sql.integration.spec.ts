@@ -527,6 +527,7 @@ describe('buyer debt migrations, down and up again', () => {
       'OAuthCodeReuseDetected1762400000013',
       'OAuthExpiryIndexes1762400000012',
       'OAuth1762400000010',
+      'DropUnwrittenSlashColumns1762400000003',
       'DropDeadDisputeSchema1762400000002',
       'DropOffChainSlashObjection1762400000001',
       'DropLegacyPaymentSchema1762400000000',

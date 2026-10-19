@@ -119,9 +119,9 @@ export class OperatorService {
   /**
    * Looks an operator up by id and refuses unless they may still act.
    *
-   * The caller for this is every place an id is about to become a
-   * `decided_by_operator_id`, `approver_operator_id`, `assigned_operator_id`
-   * or `opened_by_operator_id` — an id that resolved to an active operator
+   * The caller for this is every place an id is about to become an
+   * `approver_operator_id`, `assigned_operator_id` or `opened_by_operator_id`
+   * — an id that resolved to an active operator
    * five minutes ago is not proof it still does, and the revocation story
    * is worthless if only the sign-in path checks `status`. Uncached.
    */
