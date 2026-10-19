@@ -201,7 +201,12 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     worlds: World | Record<Via, World>,
     run: (context: RunContext) => Promise<T>,
     options: TwinOptions<T> = {},
-  ) => expectEquivalent(worlds, run, { provider: apps.market.provider, ...options });
+  ) =>
+    expectEquivalent(worlds, run, {
+      provider: apps.market.provider,
+      knownIds: apps.knownIds,
+      ...options,
+    });
 
   /** The key's normalised result (equal to the grant's once `equivalent` passed). */
   const resultOf = <T>(twins: TwinResult): T => (twins.key as { result: T }).result;
@@ -780,7 +785,9 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       )) as { resource_id: string; after: Record<string, unknown> }[];
       const of = (via: Via) => {
         const row = rows.find((entry) => entry.resource_id === credentialOf(world, via).id)!;
-        return normaliser(world, via)(row) as { after: Record<string, unknown> };
+        return normaliser(world, via, {}, { known: apps.knownIds })(row) as {
+          after: Record<string, unknown>;
+        };
       };
       const [key, grant] = [of('key'), of('grant')];
       expect(key.after).toMatchObject({ issuedVia: 'API_KEY', clientId: null });
@@ -860,6 +867,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         },
         {
           provider: apps.market.provider,
+          knownIds: apps.knownIds,
           // The replacement is the run's credential; the grant it replaced
           // stays apart, so a read-back of the old one would fail (review M3).
           placeholders: ({ via }) =>
@@ -1061,7 +1069,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         delete after.issuedVia;
         delete after.clientId;
         delete after.expiresAt;
-        return normaliser(world, via)({ ...row, after });
+        return normaliser(world, via, {}, { known: apps.knownIds })({ ...row, after });
       };
       expect(issuance('grant', grant)).toStrictEqual(issuance('key', key));
     });
