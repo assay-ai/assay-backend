@@ -41,8 +41,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Signed build provenance (Sigstore), checked by the deploy before pull.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -67,6 +72,15 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ github.ref_name }}
           cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
+
+      # Proves this digest came from this workflow on this branch. The deploy
+      # refuses an image without it, so a digest pushed to the package any
+      # other way (another workflow, a person with write access) never runs.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Ask the deploy repository to roll it out
         env:
