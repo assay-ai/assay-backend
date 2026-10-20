@@ -43,14 +43,6 @@ export interface ProviderContact {
   readonly phone?: string | null;
 }
 
-/** Which of the two contacts a notice is addressed to. */
-export enum ProviderContactKind {
-  /** Webhooks, incidents, binding changes, policy notices. */
-  TECHNICAL = 'TECHNICAL',
-  /** Escalation. Never the same inbox as technical. */
-  OWNER = 'OWNER',
-}
-
 /**
  * What was accepted, and which text of it.
  *
@@ -121,8 +113,8 @@ export interface PayoutProof {
   /**
    * Version tag that led the signed message, so an old proof stays checkable —
    * and what distinguishes a payout proof
-   * (`x402-payout-proof/v1`) from a stake-authority proof
-   * (`x402-stake-authority/v1`).
+   * (`assay-payout-proof/v1`) from a stake-authority proof
+   * (`assay-stake-authority/v1`).
    */
   readonly messageVersion: string;
   /** ISO-8601, UTC. */
@@ -176,8 +168,6 @@ export interface ConnectivityCheckResult {
   /** `EGRESS_*` code, when there was one. */
   readonly failureCode: string | null;
   readonly detail: string | null;
-  /** The addresses we told them to allowlist, as of this check. */
-  readonly egressIps: readonly string[];
   /** ISO-8601, UTC. */
   readonly checkedAt: string;
 }
@@ -243,34 +233,6 @@ export interface ProviderPayoutAccount {
   readonly accountId: AccountId;
   readonly proof: PayoutProof;
   readonly provedAt: string;
-}
-
-/**
- * The registration record as the domain sees it.
- *
- * `payoutAccounts` carries one entry per chain and is empty until the first is
- * proved. There is no "declared but unproved" address anywhere in this type or
- * in the tables underneath it: an unproved address is not stored, so no code
- * path can ever read one and pay to it. That is the whole of the payout-address
- * proof expressed as a data-model property rather than as a check somebody has
- * to remember to run — and since multichain support it is a **list**, because
- * one provider has one answer per chain and a scalar could hold only one of
- * them.
- */
-export interface ProviderRegistration {
-  readonly providerId: string;
-  readonly organizationId: string;
-  readonly legalName: string;
-  readonly technicalContact: ProviderContact;
-  readonly ownerContact: ProviderContact;
-  /** IANA zone. Every deadline we quote is counted in business days here. */
-  readonly timezone: string;
-  readonly acceptedTerms: AcceptedTerms;
-  readonly payoutAccounts: readonly ProviderPayoutAccount[];
-  /** The registration-time endpoint the connectivity check probes. A binding has its own. */
-  readonly endpoint: string | null;
-  readonly verification: ProviderVerificationProfile;
-  readonly registeredAt: string;
 }
 
 /** Where a provider is in the four-step onboarding setup. */

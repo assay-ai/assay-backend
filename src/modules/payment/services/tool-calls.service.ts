@@ -1,3 +1,7 @@
+import {
+  DISPUTE_FILING_GUARD_SECONDS,
+  disputeWindowEndOf,
+} from '../constants/collection-hold.constants';
 import { Injectable } from '@nestjs/common';
 import { In } from 'typeorm';
 
@@ -23,10 +27,29 @@ import {
   collectionStateOf,
   debtStateOf,
   isChargedWhenSettled,
+  isRefundedByReport,
 } from '../domain/collection';
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
 import { PaymentErrors } from '../errors/payment.errors';
-import { PaymentIntentStatus } from '../ports/payment.types';
+import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
+import { containsLikePattern } from '@shared/utils/like-pattern.util';
+
+/**
+ * For a page of calls: whether a report filed now on each would be refunded
+ * in full, until when, and whether one is already open on it.
+ * `RefundEligibilityService.ofCalls` (dispute module), passed in by the
+ * controller so this module does not import the dispute module that imports
+ * it.
+ */
+export type RefundableCheck = (
+  calls: readonly { intent: PaymentIntentEntity; settledAt: Date | null }[],
+  now: Date,
+) => Promise<
+  ReadonlyMap<
+    string,
+    { readonly refundable: boolean; readonly until: Date | null; readonly reported: boolean }
+  >
+>;
 
 /**
  * Declared next to the query this drives, per `backend/docs/api-list-contract.md`.
@@ -86,7 +109,13 @@ export class ToolCallsService {
   async list(
     organizationId: string,
     query: ListToolCallsQueryDto,
+    refundableCheck?: RefundableCheck,
   ): Promise<CursorPageDto<ToolCallDto>> {
+    if (query.refundable && !refundableCheck) {
+      // Never answer "nothing refundable" for want of the check.
+      throw new Error('refundable=true needs the refund eligibility check');
+    }
+    const now = new Date();
     const qb = this.paymentIntents
       .createQueryBuilder('intent')
       .where('intent.organizationId = :organizationId', { organizationId })
@@ -115,19 +144,70 @@ export class ToolCallsService {
       // which is a separate, cross-resource feature this endpoint does not
       // implement.
       qb.andWhere('(intent.id::text ILIKE :search OR intent.requestHash ILIKE :search)', {
-        search: `%${query.search}%`,
+        search: containsLikePattern(query.search),
       });
+    }
+
+    if (query.refundable) {
+      // Narrows the scan to rows `refundGuaranteedIfReported` could accept; the
+      // per-row check below is what decides, so this can only drop rows the
+      // predicate would refuse anyway.
+      qb.andWhere('intent.status = :settled', { settled: PaymentIntentStatus.SETTLED })
+        .andWhere('intent.holdId IS NOT NULL')
+        .andWhere('intent.holdReleasedAt IS NULL')
+        .andWhere('intent.disputeOutcome IS NULL')
+        .andWhere(
+          '((intent.heldStatus = :held AND intent.collectableAt > :guardedNow) OR ' +
+            '(intent.heldStatus IS NULL AND intent.rail = :railB ' +
+            'AND intent.redemptionLapsedAt IS NULL AND intent.redemptionLastError IS NULL))',
+          {
+            held: 'HELD',
+            guardedNow: new Date(now.getTime() + DISPUTE_FILING_GUARD_SECONDS * 1000),
+            railB: PaymentRail.RAIL_B_VOUCHER,
+          },
+        );
     }
 
     applyTimeWindow(qb, query, TOOL_CALLS_LIST);
 
     const page = await paginate(qb, query, TOOL_CALLS_LIST);
-    const verdicts = await this.verdictsByIntentId(
+    const records = await this.recordsByIntentId(
       organizationId,
       page.items.map((intent) => intent.id),
     );
+    const verdictOf = (intentId: string): VerdictStatus | null => {
+      const status = records.get(intentId)?.verdictStatus;
+      return status ? (status as VerdictStatus) : null;
+    };
 
-    return page.map((intent) => this.toDto(intent, verdicts.get(intent.id) ?? null));
+    if (!query.refundable || !refundableCheck) {
+      return page.map((intent) => this.toDto(intent, verdictOf(intent.id)));
+    }
+
+    // The same answer the receipt gives, for the page at once. A row that no
+    // longer qualifies, or already carries an open report (it cannot be
+    // reported again), is dropped from the page; the cursor is unaffected.
+    const checked = await refundableCheck(
+      page.items.map((intent) => ({
+        intent,
+        settledAt: records.get(intent.id)?.settledAt ?? null,
+      })),
+      now,
+    );
+    const answers = new Map<string, Date | null>();
+    for (const intent of page.items) {
+      const answer = checked.get(intent.id);
+      if (answer?.refundable && !answer.reported) answers.set(intent.id, answer.until);
+    }
+    return new CursorPageDto(
+      page.items
+        .filter((intent) => answers.has(intent.id))
+        .map((intent) => ({
+          ...this.toDto(intent, verdictOf(intent.id)),
+          refundableIfReportedUntil: answers.get(intent.id) ?? null,
+        })),
+      page.pageInfo.nextCursor,
+    );
   }
 
   async getOne(organizationId: string, intentId: string): Promise<ToolCallDto> {
@@ -144,22 +224,17 @@ export class ToolCallsService {
   }
 
   /** One batched lookup rather than one query per row — see the class comment. */
-  private async verdictsByIntentId(
+  private async recordsByIntentId(
     organizationId: string,
     intentIds: readonly string[],
-  ): Promise<Map<string, VerdictStatus | null>> {
-    const map = new Map<string, VerdictStatus | null>();
+  ): Promise<Map<string, VerificationRecordEntity>> {
+    const map = new Map<string, VerificationRecordEntity>();
     if (intentIds.length === 0) return map;
 
     const records = await this.verificationRecords.find({
       where: { organizationId, intentId: In(intentIds) },
     });
-    for (const record of records) {
-      map.set(
-        record.intentId,
-        record.verdictStatus ? (record.verdictStatus as VerdictStatus) : null,
-      );
-    }
+    for (const record of records) map.set(record.intentId, record);
     return map;
   }
 
@@ -186,6 +261,9 @@ export class ToolCallsService {
       charged: toMoneyDto(chargedPrice),
       forfeited: settled && collectionStateOf(intent) === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
+      refundedByReport: settled && isRefundedByReport(intent),
+      collectableAt: intent.collectableAt ?? null,
+      disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
       verdict,
       createdAt: intent.createdAt,
     };

@@ -9,7 +9,7 @@ import {
   BUYER_ESCROW_DISCRIMINATOR,
   findEscrowPda,
   getBuyerEscrowDecoder,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   EscrowBalanceReaderPort,
@@ -62,8 +62,8 @@ export const DEFAULT_ESCROW_BALANCE_READER_CONFIG: Omit<EscrowBalanceReaderConfi
 
 /**
  * The one RPC call this service makes, declared structurally so a test can
- * supply exactly it — the same trade `SettlementStakeRpcClient` and
- * `SquadsVaultRpcClient` make next door. **No `sendTransaction`** — this file
+ * supply exactly it — the same trade `SettlementStakeRpcClient` makes next
+ * door. **No `sendTransaction`** — this file
  * only ever reads. Both the escrow account and its ATA are fetched together
  * — one round trip, not two — so there is no `getAccountInfo` here at all.
  */
@@ -194,15 +194,16 @@ export class SolanaEscrowBalanceReader implements EscrowBalanceReaderPort {
    * re-read them one at a time.
    *
    * A batch that fails is skipped rather than thrown, and its accounts are
-   * simply absent from the returned map — the port's contract, and what lets
+   * simply absent from the returned map (an escrow that does not exist maps to
+   * `null`) — the port's contract, and what lets
    * the reconciler report "I could not check these buyers" instead of dying on
    * one of them.
    */
   async readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
-    const found = new Map<AccountId, EscrowChainBalance>();
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     if (accounts.length === 0) {
       return found;
     }
@@ -251,9 +252,9 @@ export class SolanaEscrowBalanceReader implements EscrowBalanceReaderPort {
             reading,
             observedAt: this.config.now(),
           });
-          if (reading) {
-            found.set(account, reading);
-          }
+          // `null` = no escrow account: read, and a zero. Only a failure is
+          // left out of the map.
+          found.set(account, reading);
         } catch (error) {
           // One buyer's unreadable account must not blind the rest — the same
           // per-buyer isolation the cache gives `read`.

@@ -39,7 +39,7 @@ without its `A-9` register entry is an intervention nobody can audit.
 | --- | --- | --- |
 | Agent machine credential (`assay_sk_live_…`) | everything | `AUTH_ORGANIZATION_SUSPENDED` (org) / `ACCOUNT_BLOCKED` (wallet) |
 | Dashboard session (Privy, or a config-file token) | every non-`GET` route; `GET`s stay open | same |
-| `POST /mcp` (tools/list, tools/call), public demo | everything | same |
+| the MCP host (tools/list, tools/call on every path), public demo | everything | same |
 | New payment intent (every rail) | payer org, payer account, provider org, payout account, voucher delegate | `ACCOUNT_BLOCKED` |
 | Voucher accepted on a call | payer, `payTo`, provider account (checked after the signature and the session binding, so it is not an oracle) | `ACCOUNT_BLOCKED` |
 | Voucher seq (`GET /escrow/next-seq`, rail B `PAYMENT_REQUIRED`) | payer org or account | `ACCOUNT_BLOCKED` |

@@ -52,9 +52,9 @@ describe('rail-A payment intents must name a payee', () => {
   async function unroutedIntent(label: string): Promise<PaymentIntent> {
     return context.createIntent(label, {
       rail: PaymentRail.RAIL_A_PER_CALL,
-      // Rail A's replay guard is on-chain; a nonce here would be refused by
-      // `chk_payment_intents_voucher_nonce_rail`.
-      voucherNonce: null,
+      // Rail A's replay guard is on-chain; a seq here would be refused by
+      // `chk_payment_intents_rail_a_has_no_seq`.
+      voucherSeq: null,
       providerId: null,
       providerAccount: null,
       callId: randomUUID(),
@@ -182,11 +182,21 @@ describe('rail-A payment intents must name a payee', () => {
       { providerId: providerOrg, providerAccount: payee },
     );
 
-    const settled = await context.intents.resolve(
+    const held = await context.intents.resolve(
       context.organizationId,
       intent.id,
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
+    );
+    // Held for the dispute window (G3.B1): the provider is credited when it is
+    // collected, not at settlement.
+    expect(held.heldStatus).toBe('HELD');
+    expect(held.holdReleasedAt).toBeNull();
+    expect(await context.held(intent.agentAccount)).toBe(1_000_000n);
+    const settled = await context.intents.bookHeldCollected(
+      context.organizationId,
+      intent.id,
+      null,
     );
 
     expect(settled.status).toBe(PaymentIntentStatus.SETTLED);

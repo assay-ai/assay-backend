@@ -41,6 +41,7 @@ import { DEFAULT_EVM_PARAMS_TTL_MS, EvmStakeReader } from './evm-stake-reader.se
 import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
+import { EvmHeldPayments, parseHoldLiveChains } from './evm-held-payments.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
@@ -262,6 +263,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         clients: ReadonlyMap<ChainId, never>,
         deployments: ReadonlyMap<ChainId, EvmDeployment>,
         enabled: readonly ChainId[],
+        config: ConfigService,
       ) =>
         // The INTERSECTION of what is configured with what is enabled, so a
         // Solana-only deployment produces an adapter declaring no chains and
@@ -270,8 +272,9 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           clients,
           deployments,
           enabled.filter((chainId) => deployments.has(chainId)),
+          depositConfirmationsFrom(config.get<string>('EVM_DEPOSIT_CONFIRMATIONS')),
         ),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ENABLED_CHAINS],
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ENABLED_CHAINS, ConfigService],
     },
 
     {
@@ -332,6 +335,19 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       useFactory: (clients: never, deployments: never) =>
         new EvmTightenDelayProbe(clients, deployments, { now: () => Date.now() }),
       inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+    },
+    {
+      // "Redeem into hold" (G3.B1): collect and refund the escrow's held
+      // payments with the REDEEMER key.
+      provide: EvmHeldPayments,
+      useFactory: (clients: never, deployments: never, redeemer: never, config: ConfigService) =>
+        new EvmHeldPayments(
+          clients,
+          deployments,
+          redeemer,
+          parseHoldLiveChains(config.get<string>('EVM_HOLD_LIVE_CHAINS')),
+        ),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ConfigService],
     },
     {
       provide: EvmVoucherRedeemer,
@@ -503,6 +519,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmEscrowIntentBuilder,
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
+    EvmHeldPayments,
     EvmTightenDelayProbe,
     EvmSlashExecutor,
     EvmVerifierRegistryService,
@@ -640,8 +657,8 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
           'admin and owner. config/stake/escrow are the PROXY addresses, which are what an ' +
           'EIP-712 verifyingContract names and what does not move across an upgrade; ' +
           'escrowImplementation is the address behind the escrow proxy and DOES move on every ' +
-          'upgrade; admin is X402Config.admin, the operational key; owner is ' +
-          'X402Config.owner(), the upgrade authority of all three contracts',
+          'upgrade; admin is AssayConfig.admin, the operational key; owner is ' +
+          'AssayConfig.owner(), the upgrade authority of all three contracts',
       });
     }
   }
@@ -709,4 +726,21 @@ function readOptionalWei(raw: string | undefined): bigint | undefined {
     });
   }
   return BigInt(raw);
+}
+
+/**
+ * `EVM_DEPOSIT_CONFIRMATIONS`: blocks on top of a deposit before it is credited
+ * (unset: 0, the sequencer's soft confirmation), or `finalized` for the chain's
+ * finalized head. Anything else refuses to boot rather than guess.
+ */
+export function depositConfirmationsFrom(raw: string | undefined): number | null {
+  const value = raw?.trim() ?? '';
+  if (value === '') return 0;
+  if (value === 'finalized') return null;
+  if (!/^\d{1,6}$/.test(value)) {
+    throw new Error(
+      `EVM_DEPOSIT_CONFIRMATIONS must be a block count or "finalized", got "${value}"`,
+    );
+  }
+  return Number(value);
 }

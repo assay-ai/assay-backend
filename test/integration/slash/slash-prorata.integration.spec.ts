@@ -14,7 +14,6 @@ import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { CHAIN_DISPUTE_SETTLE_MS } from '@modules/slash/constants/slash.constants';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
-import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
@@ -32,7 +31,6 @@ import {
   buildProRataSlashServices,
   freshMigratedDatabase,
   ProRataSlashServices,
-  TEST_SLASH_CONFIG,
 } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
@@ -44,11 +42,11 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * parts in one batch — paying each agent 60% of its part and the treasury
  * 30%, with nothing booked to the ledger.
  *
- * The chain is `FakeStakeChain`, an emulator of the `X402Stake` rules the
+ * The chain is `FakeStakeChain`, an emulator of the `AssayStake` rules the
  * executor depends on (signature recovery, replay lock, caps, 72h door,
  * 60/30 split). Everything else is production code.
  */
-const DATABASE = 'x402_slash_prorata_test';
+const DATABASE = 'assay_slash_prorata_test';
 const USDG = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const VERIFIER_SECRET = new Uint8Array(32).fill(5);
 const VERIFIER = privateKeyToAccount(toHex(VERIFIER_SECRET)).address;
@@ -320,7 +318,7 @@ describe('pro-rata EVM slash, against a real database', () => {
         chainId: CHAIN,
         to: `${CHAIN}:${DEPLOYMENT.stake}` as never,
         data: (await import('viem')).encodeFunctionData({
-          abi: (await import('@modules/chains/evm/abi/x402.abi')).X402_STAKE_SLASH_ABI,
+          abi: (await import('@modules/chains/evm/abi/assay.abi')).ASSAY_STAKE_SLASH_ABI,
           functionName: 'executeSlash',
           args: [`0x${part.chainRequestId}`],
         }),
@@ -706,21 +704,16 @@ describe('pro-rata EVM slash, against a real database', () => {
       });
     });
 
-    it('closes the open in-app dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
+    it('closes the open dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
       const seeded = await seedWindow(250_001n);
       await services.execution.proposeDue(nowOf());
       const arbitration = new ArbitrationService(
         services.proposals,
         new DisputeRepository(dataSource),
-        new SlaStrikeRepository(dataSource),
         services.lifecycle,
-        {} as never,
-        { notify: async () => undefined } as never,
-        TEST_SLASH_CONFIG,
-        services.execution,
       );
       // On EVM the only dispute is the provider's `disputeSlash`; the watcher
-      // opens the case's dispute row from it (no in-app objection, 3a2b376).
+      // opens the case's dispute row from it.
       const [disputedPart] = await services.partsRepository.findForEpoch(
         seeded.organizationId,
         seeded.proposalId,
@@ -769,11 +762,9 @@ describe('pro-rata EVM slash, against a real database', () => {
       await services.execution.proposeDue(nowOf());
       chain.now += BigInt(73 * 3600);
       const proposal = await load(seeded);
-      await dataSource.query(
-        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
-           resolved_at = now() WHERE id = $1`,
-        [proposal.id],
-      );
+      await dataSource.query(`UPDATE slash_proposals SET status = 'CANCELLED' WHERE id = $1`, [
+        proposal.id,
+      ]);
       const parts = await services.partsRepository.findForEpoch(
         proposal.organizationId,
         proposal.id,
@@ -783,7 +774,7 @@ describe('pro-rata EVM slash, against a real database', () => {
         await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
       }
       const after = await load(seeded);
-      expect(after).toMatchObject({ status: 'OVERTURNED', chainStatus: 'EXECUTED' });
+      expect(after).toMatchObject({ status: 'CANCELLED', chainStatus: 'EXECUTED' });
       expect(after.executedAt).not.toBeNull();
       expect(await kinds(proposal.id)).toContain('EXECUTED_AFTER_CLOSURE');
     });

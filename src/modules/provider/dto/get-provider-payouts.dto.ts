@@ -3,34 +3,54 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ListQueryDto } from '@shared/api';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
-/** No resource-specific filters — `from`/`to`/`cursor`/`limit`/`sort` from `ListQueryDto` are enough. */
+/**
+ * No resource-specific filters — `from`/`to`/`cursor`/`limit`/`sort` from
+ * `ListQueryDto` are enough. `[from, to)` windows a redemption on its first
+ * credit.
+ */
 export class ListProviderPayoutsQueryDto extends ListQueryDto {}
 
+/** How a payment reached the provider's wallet. */
+export enum ProviderPaymentKind {
+  /** A rail-B redemption: the buyer's escrow paid on chain, one transaction. */
+  REDEMPTION = 'REDEMPTION',
+}
+
 /**
- * One `PAYOUT` ledger entry — a line in a payout batch.
+ * One payment sent to the provider's wallet (D18).
  *
- * `docs/api-list-contract.md`'s row-level cursor requires a stable, `NOT NULL`,
- * indexed sort column; `ledger_entries` has no "batch" row, only entries, so
- * this list paginates entries (one row per `PAYOUT` entry) rather than a
- * server-side `GROUP BY batch_id`. In practice a payout run writes at most one
- * `PAYOUT` entry per asset per provider, so this is one row per batch for any
- * provider dealing in a single asset; a provider paid out in two assets in the
- * same run sees two rows sharing one `batchId`, which is the honest ledger
- * shape rather than a synthetic merge.
+ * A **REDEMPTION** row is one redemption transaction: the `PROVIDER_CREDIT`
+ * entries carrying its `chainTxRef`, summed. A credit whose ref is synthetic
+ * (`unobserved:` / `held_collected:`, no signature seen) is a payment of its
+ * own with `chainTxRef: null`. A legacy platform absorb is not a payment
+ * (nobody paid it) and is never listed.
  */
 export class ProviderPayoutDto {
-  @ApiProperty({ description: 'The ledger entry id' })
+  @ApiProperty({
+    description: 'The lowest ledger entry id in the transaction',
+  })
   id: string;
 
-  @ApiProperty({ description: 'The payout run this entry belongs to' })
-  batchId: string;
+  @ApiProperty({ enum: ProviderPaymentKind })
+  kind: ProviderPaymentKind;
 
   @ApiProperty({ type: MoneyDto })
   amount: MoneyDto;
 
-  @ApiPropertyOptional({ nullable: true, description: 'On-chain transaction reference, once sent' })
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'On-chain transaction reference, once sent. `null` for a redemption whose transaction ' +
+      'signature was not observed (its ledger ref is synthetic, not a transaction)',
+  })
   chainTxRef: string | null;
 
-  @ApiProperty()
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Calls this payment paid for: the redeemed calls',
+  })
+  calls: number | null;
+
+  @ApiProperty({ description: 'When the money was sent (a redemption: its last credit)' })
   createdAt: Date;
 }

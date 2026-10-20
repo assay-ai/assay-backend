@@ -1,7 +1,7 @@
 import { hashTypedData, TypedDataDomain } from 'viem';
 
 /**
- * The two voucher-DELEGATION messages of `X402Escrow` (assay-evm
+ * The two voucher-DELEGATION messages of `AssayEscrow` (assay-evm
  * `src/Types.sol`, `AuthorizeDelegate` and `RevokeDelegate`).
  *
  * A payer whose own key cannot leave its wallet (a Privy embedded wallet) signs

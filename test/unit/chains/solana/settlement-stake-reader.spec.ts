@@ -4,7 +4,7 @@ import {
   findStakePda,
   getConfigEncoder,
   getProviderStakeEncoder,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, parseAssetId, toAccountId } from '@modules/chains/ports/caip.types';

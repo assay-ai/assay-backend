@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { NotificationModule } from '@modules/notification/notification.module';
 
+import { BindingStatsRefreshJob } from './jobs/binding-stats-refresh.job';
 import { StakeMonitorJob } from './jobs/stake-monitor.job';
 import {
   STAKE_GRACE_PERIOD_MS,
@@ -17,18 +18,11 @@ import {
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
   loadMinimumStakeParameters,
 } from './services/provider-stake.service';
+import { BindingStatsService } from './services/binding-stats.service';
 import { StakeMonitorService } from './services/stake-monitor.service';
 
 /**
  * Scheduler-only half of the stake lifecycle — the stake monitor.
- *
- * The first of the two scheduler modules this file now holds. It used to be
- * the second: `ProviderPayoutSchedulerModule` ran an hourly job that read every
- * provider's earnings and built one Squads batch, and it has been deleted
- * outright. The simplified contract went further: `redeem_voucher` pays the provider's own
- * wallet in the same instruction, so there is no scheduled job moving anybody
- * else's money at all. `provider_payouts` keeps the rows that job wrote;
- * nothing writes new ones.
  *
  * Registered here and nowhere else, for the reason `docs/architecture.md`
  * §Scaling Design gives: the scheduler is a single instance, so the 5-minute
@@ -98,3 +92,18 @@ export class ProviderStakeMonitorSchedulerModule {}
   providers: [SlaWindowSweepJob],
 })
 export class ProviderSlaWindowSweepSchedulerModule {}
+
+/**
+ * Scheduler-only half of the observed stats — the five-minute refresh of
+ * `binding_stats` from `binding_attempts` and the verdicts.
+ *
+ * Here and nowhere else for the reason the two modules above give: one pass
+ * per deployment. `ProviderModule` supplies `BINDING_STATS_CONFIG`, the same
+ * value `DbProviderRegistry` reads its minimum sample from; the repositories
+ * arrive with the `@Global()` `PostgresModule`.
+ */
+@Module({
+  imports: [ProviderModule],
+  providers: [BindingStatsService, BindingStatsRefreshJob],
+})
+export class ProviderBindingStatsSchedulerModule {}

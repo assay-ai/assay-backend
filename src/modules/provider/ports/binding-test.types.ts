@@ -1,5 +1,5 @@
 import { Classification } from '@modules/tool/domain/classification/classification.types';
-import { JsonObject, JsonValue, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
+import { JsonValue, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { StageResult } from '@modules/verification/domain/stage';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
 
@@ -161,10 +161,18 @@ export interface BindingTestReport {
   /** The second panel: the document the response mapping produced. */
   readonly mapped: JsonValue | null;
   readonly verification: BindingTestVerificationView | null;
+  /** Always present; empty when there is nothing to warn about. Never changes `outcome`. */
+  readonly warnings: readonly BindingTestWarning[];
 }
 
-/** What the console posts to run a test. */
-export interface BindingTestRequestInput {
-  /** The tool arguments to call with, validated against the tool's `inputSchema` first. */
-  readonly input: JsonObject;
+/** A finding that never changes the outcome of a run (spec 7.3). */
+export enum BindingTestWarningCode {
+  ACCEPTS_UNSIGNED = 'ACCEPTS_UNSIGNED',
+  ACCEPTS_WITHOUT_CREDENTIALS = 'ACCEPTS_WITHOUT_CREDENTIALS',
+  NO_AUTHENTICATION = 'NO_AUTHENTICATION',
+}
+
+export interface BindingTestWarning {
+  readonly code: BindingTestWarningCode;
+  readonly message: string;
 }

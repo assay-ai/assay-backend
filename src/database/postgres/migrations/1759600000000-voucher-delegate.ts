@@ -4,7 +4,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `payment_intents.voucher_delegate` — agent payment delegation.
  *
  * A rail-B voucher on eip155 may be signed by a DELEGATE key the payer
- * authorised on chain (`X402Escrow.authorizeDelegate[BySig]`) instead of by the
+ * authorised on chain (`AssayEscrow.authorizeDelegate[BySig]`) instead of by the
  * payer's own key. The column records that delegate (CAIP-10, 256 wide like
  * every account column), and is NULL when the payer — or the payer's EIP-1271
  * wallet — signed.

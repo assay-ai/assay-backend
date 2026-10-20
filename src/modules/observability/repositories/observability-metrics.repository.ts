@@ -4,7 +4,6 @@ import { DataSource } from 'typeorm';
 
 import { LedgerHoldEntity } from '@database/postgres/entities/ledger-hold.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
-import { ProviderPayoutEntity } from '@database/postgres/entities/provider-payout.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { VerificationRecordEntity } from '@database/postgres/entities/verification-record.entity';
 import { VerifierSigningLogEntryEntity } from '@database/postgres/entities/verifier-signing-log-entry.entity';
@@ -184,51 +183,6 @@ export class ObservabilityMetricsRepository {
       .select('COUNT(*)::int', 'count')
       .where("proposal.status = 'EXECUTED'")
       .andWhere('proposal.updated_at >= :since', { since })
-      .getRawOne<{ count: number }>();
-
-    return row?.count ?? 0;
-  }
-
-  /**
-   * `overturned / raised`, over slash-proposal disputes decided in the
-   * trailing window.
-   *
-   * Deliberately reads `slash_proposals.outcome` (`ArbitrationOutcome`'s six
-   * values), **not** `disputes.state`/`disputes.outcome` — `UPHELD` means the
-   * opposite thing on the two tables (see `dispute-arbitration-g26` memory,
-   * proved against the database): on a slash proposal, `UPHELD` means the
-   * *proposed slash* stood; on a `disputes` row it would read as the
-   * complaint succeeding. Grading "overturn rate" off the wrong table's
-   * `UPHELD` would silently invert the signal. `raised` counts every proposal
-   * that was disputed at all (`disputed_at IS NOT NULL`) in the window,
-   * whether or not it has been decided yet — a rate computed only over
-   * *decided* cases would read as artificially high while a backlog of
-   * still-open disputes sits ungraded.
-   */
-  async disputeOverturnCounts(since: Date): Promise<{ raised: number; overturned: number }> {
-    const row = await this.dataSource
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .select('COUNT(*)::int', 'raised')
-      .addSelect("COUNT(*) FILTER (WHERE proposal.outcome LIKE 'OVERTURNED_%')::int", 'overturned')
-      .where('proposal.disputed_at IS NOT NULL')
-      .andWhere('proposal.disputed_at >= :since', { since })
-      .getRawOne<{ raised: number; overturned: number }>();
-
-    return { raised: row?.raised ?? 0, overturned: row?.overturned ?? 0 };
-  }
-
-  /**
-   * How many provider payouts are still short of a confirmed ledger entry —
-   * `PENDING` (reserved, nothing sent) or `SUBMITTED` (built, not yet
-   * confirmed — see `ProviderPayoutEntity`'s own docstring on why
-   * `SUBMITTED` is not `CONFIRMED`). The Money dashboard's "payout queue"
-   * content, distinct from `PAYOUT_LAG_P95` (absent — see the catalog).
-   */
-  async payoutQueueDepth(): Promise<number> {
-    const row = await this.dataSource
-      .createQueryBuilder(ProviderPayoutEntity, 'payout')
-      .select('COUNT(*)::int', 'count')
-      .where("payout.status IN ('PENDING', 'SUBMITTED')")
       .getRawOne<{ count: number }>();
 
     return row?.count ?? 0;

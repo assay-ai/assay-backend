@@ -28,6 +28,17 @@ export class PublishRequirementDto {
     description: 'The specifics — how much stake is missing, which layer the tester failed at.',
   })
   detail: string | null;
+
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    example: 2,
+    description:
+      'TESTER_RUN and TESTER_PASSED: the contract major this row is for — one row per major ' +
+      'in the binding’s `toolVersionRange`, each with its own result. `null` on the other ' +
+      'requirements.',
+  })
+  major: number | null;
 }
 
 export class PublishCheckDto {
@@ -37,7 +48,12 @@ export class PublishCheckDto {
   @ApiProperty({ description: 'The revision that would go live.' })
   mappingVersion: number;
 
-  @ApiProperty({ type: [PublishRequirementDto], description: 'One entry per requirement, always.' })
+  @ApiProperty({
+    type: [PublishRequirementDto],
+    description:
+      'One entry per requirement; the tester requirements one per contract major in the ' +
+      'range, the payout and stake ones one per failing chain (one entry when all pass).',
+  })
   requirements: PublishRequirementDto[];
 }
 

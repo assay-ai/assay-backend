@@ -1,9 +1,13 @@
 import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 
+import { OAUTH_SESSION_CONFIG, loadOAuthSessionConfig } from '@modules/oauth/config/oauth.config';
+
 import { PRIVY_AUTH_CONFIG, PrivyAuthConfig } from './domain/privy-auth.config';
 import { AgentProvisioningService } from './services/agent-provisioning.service';
+import { CredentialSessionResolver } from './services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from './services/db-credential-mcp-session.source';
+import { OAuthAccessTokenMcpSessionSource } from './services/oauth-access-token-mcp-session.source';
 import { PrivyJwksCache } from './services/privy-jwks.cache';
 import { PrivyMcpSessionSource } from './services/privy-mcp-session.source';
 import { PrivyTokenVerifier } from './services/privy-token.verifier';
@@ -13,14 +17,16 @@ import { PrivyUserDirectory } from './services/privy-user.directory';
  * Real authentication — a Privy access token, verified locally, and an
  * `agent_credentials` bearer token, looked up directly.
  *
- * Exports `PrivyMcpSessionSource` and `DbCredentialMcpSessionSource`, both
- * implementations of **`McpModule`'s** `McpSessionPort`. The dependency runs
+ * Exports `PrivyMcpSessionSource`, `DbCredentialMcpSessionSource` and
+ * `OAuthAccessTokenMcpSessionSource`, implementations of **`McpModule`'s**
+ * `McpSessionPort`. The dependency runs
  * one way only: this module imports a port (a bare TypeScript interface file)
  * and never `McpModule` itself, which is what lets `McpModule` import *this*
  * one to choose between the sources without a cycle.
  *
- * `AgentRepository`, `AgentCredentialRepository` and `OrganizationRepository`
- * arrive from the `@Global` `PostgresModule`; `EgressHttpClient` from the
+ * `AgentRepository`, `AgentCredentialRepository`, `OrganizationRepository`,
+ * `OAuthAccessTokenRepository` and `OAuthClientRepository` arrive from the
+ * `@Global` `PostgresModule`; `EgressHttpClient` from the
  * `@Global` `NetworkModule` — the one place in `src/` allowed to open a
  * socket, and therefore the only way the JWKS is fetched.
  */
@@ -64,11 +70,21 @@ import { PrivyUserDirectory } from './services/privy-user.directory';
     PrivyUserDirectory,
     AgentProvisioningService,
     PrivyMcpSessionSource,
+    CredentialSessionResolver,
     DbCredentialMcpSessionSource,
+    // Only the audience and the payment clients, never `OAUTH_CONFIG`: this
+    // module loads wherever `McpModule` does, the scheduler included, and
+    // `OAUTH_CONFIG` demands the OAuth secrets.
+    { provide: OAUTH_SESSION_CONFIG, useFactory: () => loadOAuthSessionConfig() },
+    OAuthAccessTokenMcpSessionSource,
   ],
   exports: [
     PrivyMcpSessionSource,
+    // The OAuth access-token source resolves through the same resolver, so an
+    // OAuth grant and an API key for one agent yield the same session.
+    CredentialSessionResolver,
     DbCredentialMcpSessionSource,
+    OAuthAccessTokenMcpSessionSource,
     PrivyTokenVerifier,
     // `AuthApiModule`'s `WalletLinkService` re-runs the login path's wallet
     // lookup on demand, so it needs the same provisioning service the session

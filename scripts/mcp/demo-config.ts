@@ -36,4 +36,4 @@ export const UNFUNDED = DEMO_CREDENTIALS.find(
   (credential) => !credential.fundable,
 ) as DemoCredential;
 
-export const MCP_URL = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/mcp';
+export const MCP_URL = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/';

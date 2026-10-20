@@ -171,6 +171,44 @@ describe('evaluatePublishGate', () => {
     expect(check.requirements).toHaveLength(4);
   });
 
+  describe('API_KEY_CREDENTIALS', () => {
+    const base = {
+      mappingVersion: 4,
+      latestRun: GREEN_RUN,
+      payoutByChain: on(PAYOUT_OK),
+      stakeByChain: on(STAKE_OK),
+    };
+    const origin = 'https://api.example.com';
+
+    it('is unmet, naming the origin, when a key is required and none is stored', () => {
+      const check = evaluatePublishGate({
+        ...base,
+        credentials: { required: true, origin, present: false },
+      });
+      const row = requirement(check, PublishRequirement.API_KEY_CREDENTIALS);
+      expect(row.met).toBe(false);
+      expect(row.code).toBe('credentials_missing_for_origin');
+      expect(row.detail).toContain(origin);
+      expect(check.publishable).toBe(false);
+    });
+    it('is met when a set is stored, or no key is required', () => {
+      for (const credentials of [
+        { required: true, origin, present: true },
+        { required: false, origin, present: false },
+      ]) {
+        const check = evaluatePublishGate({ ...base, credentials });
+        expect(requirement(check, PublishRequirement.API_KEY_CREDENTIALS).met).toBe(true);
+        expect(check.publishable).toBe(true);
+      }
+    });
+    it('is not asked without credential facts', () => {
+      const check = evaluatePublishGate(base);
+      expect(check.requirements.map((r) => r.requirement)).not.toContain(
+        PublishRequirement.API_KEY_CREDENTIALS,
+      );
+    });
+  });
+
   it('reports every requirement even when the first one fails', () => {
     const check = evaluatePublishGate({
       mappingVersion: 1,

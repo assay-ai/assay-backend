@@ -1,4 +1,6 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { HELD_PAYMENTS, HeldPaymentsPort } from '@modules/payment/ports/held-payments.port';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowEntity } from '@database/postgres/entities/buyer-escrow.entity';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -7,7 +9,7 @@ import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-esc
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
-import { AccountId, AssetId, namespaceOf } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { VAULT_PORT, VaultPort } from '@modules/chains/ports/vault.port';
 import {
   ESCROW_BALANCE_READER,
@@ -34,7 +36,8 @@ import {
 } from '../ports/reconciliation.types';
 
 /**
- * The 5-minute reconciler.
+ * The 5-minute reconciler, over each enabled chain's vault — the EVM escrow
+ * contract (`settlementAssetsOn`; Solana has no vault to reconcile).
  *
  * The reason for it fits in one line: *without it, every later bug is a
  * silent money bug.* Everything about the design below
@@ -76,15 +79,13 @@ import {
  * An unredeemable rail-B voucher no longer credits anybody: the provider
  * forfeits it, or it becomes buyer debt (the buyer's hold stays open) and is
  * paid from the buyer's escrow once re-signed, or written off. So no ledger
- * entry is ever written that the vault must fund for a provider, and the
- * legacy `platform_absorbed:` credits written before that are not counted as a
- * liability (`LedgerEntryRepository.sumPaidAtRedemption`). A breach here is a
+ * entry is ever written that the vault must fund for a provider. A breach here
+ * is a
  * real discrepancy to investigate.
  *
  * ## Why it does not throw on a breach
  *
- * `TreasuryVaultService.checkReserves` throws, and should: its callers are
- * about to move money. This one records and alerts, because a throw would
+ * It records and alerts, because a throw would
  * abort the pass *before* the `reconciliation_runs` row is written, and that
  * row is the artefact an incident is reconstructed from. A breach here is a
  * `CRITICAL` finding, a persisted row, an alert, and a frozen withdrawal path
@@ -102,6 +103,10 @@ export class ReconciliationService {
     private readonly runs: ReconciliationRunRepository,
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly escrows: BuyerEscrowRepository,
+    // "Redeem into hold" (G3.B1): held payments are in the escrow contract but
+    // in no buyer's balance. Optional: without them nothing is held.
+    @Optional() private readonly intents: PaymentIntentRepository | null = null,
+    @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
   ) {}
 
   /**
@@ -151,7 +156,7 @@ export class ReconciliationService {
     decimals: number,
     startedAt: Date,
   ): Promise<ReconciliationReport> {
-    // Control first, exactly as `checkReserves` does. A vault balance read
+    // Control first. A vault balance read
     // from an address whose control has not been proven is not evidence of
     // anything, and it would look authoritative in the stored row forever.
     await this.vault.assertVaultControl(asset);
@@ -175,13 +180,14 @@ export class ReconciliationService {
     const difference = vaultAtomic - liabilities.total;
 
     const escrows = await this.walkEscrows(asset, decimals);
-    // On eip155 the vault IS the escrow contract, so what it holds beyond the
-    // buyer escrows the walk read is value in no `buyer_escrows` row. Only
-    // known when every escrow was read; Solana escrows sit outside the vault.
+    // The vault IS the escrow contract, so what it holds beyond the buyer
+    // escrows the walk read is value in no `buyer_escrows` row. Only known
+    // when every escrow was read. The escrow's held payments (G3.B1): in the
+    // contract, in no buyer balance.
+    const totalHeld = await this.readTotalHeld(asset);
+    const mirroredHeld = this.intents ? await this.intents.sumHeldOnChain(asset) : 0n;
     const outsideEscrows =
-      namespaceOf(asset) === 'eip155' && escrows.unreadable === 0
-        ? vaultAtomic - escrows.total
-        : null;
+      escrows.unreadable === 0 ? vaultAtomic - escrows.total - (totalHeld ?? 0n) : null;
 
     const findings = [
       ...this.checkReserves(
@@ -196,6 +202,7 @@ export class ReconciliationService {
       ...this.checkSnapshot(decimals, asset, books.total, snapshotTotal),
       ...this.checkBooks(decimals, asset, books),
       ...escrows.findings,
+      ...this.checkHeld(asset, decimals, totalHeld, mirroredHeld),
     ];
 
     const finishedAt = new Date();
@@ -225,6 +232,44 @@ export class ReconciliationService {
     });
   }
 
+  /** `totalHeld()`, or `null` when the escrow has no hold or it could not be read. */
+  private async readTotalHeld(asset: AssetId): Promise<bigint | null> {
+    if (!this.held) return null;
+    try {
+      return await this.held.totalHeld(asset);
+    } catch (error) {
+      this.logger.warn(`totalHeld() on ${asset} could not be read: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Check 6 (G3.B1): the escrow's `totalHeld()` against the calls mirrored as held. */
+  private checkHeld(
+    asset: AssetId,
+    decimals: number,
+    totalHeld: bigint | null,
+    mirroredHeld: bigint,
+  ): ReconciliationFinding[] {
+    if (totalHeld === null || totalHeld === mirroredHeld) return [];
+    return [
+      {
+        code: ReconciliationFindingCode.HELD_MIRROR_DRIFT,
+        severity: ReconciliationSeverity.WARN,
+        summary:
+          `Held payments on ${asset}: the escrow holds ${format(totalHeld, decimals)}, the ` +
+          `platform mirrors ${format(mirroredHeld, decimals)} as held — drift ` +
+          `${format(totalHeld - mirroredHeld, decimals)}. Transient while a redemption, collect ` +
+          `or refund is booked; persistent means a missed PaymentHeld, HeldCollected or ` +
+          `HeldRefunded.`,
+        details: {
+          asset,
+          totalHeld: totalHeld.toString(),
+          mirroredHeld: mirroredHeld.toString(),
+        },
+      },
+    ];
+  }
+
   // ── Check 4 and 5: every buyer's own escrow ──────────────────────────────
 
   /**
@@ -238,6 +283,9 @@ export class ReconciliationService {
    * the chain read underneath `readMany`. The second is the mitigation
    * that keeps failing closed affordable as buyers grow — without it this pass
    * is one RPC round trip per buyer, every five minutes, forever.
+   *
+   * **An escrow with no account on chain is a zero** (`readMany` maps it to
+   * `null`) and is compared like any other.
    *
    * **An escrow that could not be read is neither a shortfall nor silence.** It
    * is absent from the reading map, counted, and reported as a finding of its
@@ -267,20 +315,29 @@ export class ReconciliationService {
       const accounts = page.map((row) => row.accountId as AccountId);
       const readings = await this.escrowReader.readMany(accounts, asset);
       const mirror = await this.balances.sumByAccounts(asset, accounts);
+      // Held payments (G3.B1) are out of the escrow balance but still in the
+      // buyer's ledger hold: take them off both sides before comparing.
+      const heldOnChain = this.intents
+        ? await this.intents.sumHeldOnChainByAccounts(asset, accounts)
+        : new Map<string, bigint>();
 
       for (const row of page) {
         const account = row.accountId as AccountId;
-        const reading = readings.get(account);
-        if (!reading) {
+        if (!readings.has(account)) {
           unreadable += 1;
           continue;
         }
+        // `null` is a read that found no escrow on chain — a mirror row for a
+        // buyer who never funded (an unfunded rail-B offer, an abandoned first
+        // deposit). That is a zero balance, checked like any other, not unknown.
+        const reading = readings.get(account) ?? null;
 
         read += 1;
-        const chain = MoneyUtil.toAtomic(reading.balance);
+        const chain = reading ? MoneyUtil.toAtomic(reading.balance) : 0n;
         total += chain;
 
-        const held = mirror.get(account)?.held ?? 0n;
+        const inHold = heldOnChain.get(account) ?? 0n;
+        const held = (mirror.get(account)?.held ?? 0n) - inHold;
         // `pending` too: a deposit settled and awaiting finality is already in
         // the escrow on chain. Leaving it out paged drift for every deposit on
         // a chain whose finality lags (~20 minutes on eip155:46630).
@@ -294,7 +351,9 @@ export class ReconciliationService {
           findings.push(this.escrowDrift(asset, decimals, account, chain, mirrored));
         }
 
-        this.realignSeq(row, reading);
+        if (reading) {
+          this.realignSeq(row, reading);
+        }
       }
 
       if (page.length < RECONCILIATION_ESCROW_PAGE) {
@@ -308,8 +367,7 @@ export class ReconciliationService {
         severity: ReconciliationSeverity.WARN,
         summary:
           `${unreadable} buyer escrow${unreadable === 1 ? '' : 's'} on ${asset} could not be ` +
-          `read this pass — either no escrow account exists at those seeds or the chain read ` +
-          `failed. Their balances are unknown, not healthy.`,
+          `read this pass — the chain read failed. Their balances are unknown, not healthy.`,
         details: { asset, unreadableEscrows: unreadable, escrowsRead: read },
       });
     }

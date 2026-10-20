@@ -1,7 +1,7 @@
 /**
  * Agent payment delegation, end to end against a REAL EVM — an anvil fork of
- * Robinhood Chain testnet (eip155:46630) whose X402Escrow proxy has been
- * upgraded with `assay-evm/script/UpgradeEscrow.s.sol`.
+ * Robinhood Chain testnet (eip155:46630) that carries the Assay* deployment
+ * (`AssayConfig`, `AssayStake`, `AssayEscrow`) named in `EVM_DEPLOYMENTS`.
  *
  * It drives the backend's own production classes against that chain, with no
  * Nest and no database, so what it proves is the chain/backend contract:
@@ -10,7 +10,7 @@
  *      payer signs; `EvmRelayedEscrowIntentSubmitter` relays it
  *      (`authorizeDelegateBySig`) — the payer pays no gas;
  *   2. `list` reads the delegation back from the chain;
- *   3. a voucher built by the agent CLI and signed by the DELEGATE key is
+ *   3. a voucher built by the assay-mcp signer and signed by the DELEGATE key is
  *      accepted by `EvmChainAdapter.authorizeVoucherSigner` (the off-chain
  *      mirror) and redeemed on chain by `EvmVoucherRedeemer`; the provider is
  *      paid and the delegate's own window counts it;
@@ -24,12 +24,10 @@
  * payer. Nothing here sends a transaction to a real network.
  *
  *   anvil --fork-url https://rpc.testnet.chain.robinhood.com --port 8547
- *   (assay-evm) forge script script/UpgradeEscrow.s.sol --rpc-url http://127.0.0.1:8547 \
- *       --sender <admin> --unlocked --broadcast
  *   (assay-backend) E2_RPC_URL=http://127.0.0.1:8547 \
  *       npx ts-node -r tsconfig-paths/register scripts/testnet/e2-delegation-anvil.ts
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -69,24 +67,38 @@ const RPC = process.env.E2_RPC_URL ?? 'http://127.0.0.1:8547';
 const EVIDENCE =
   process.env.E2_EVIDENCE ??
   resolve(__dirname, '../../../e2e/apps/evidence/delegation-anvil-proof.json');
-const CLI_LIB =
-  process.env.E2_AGENT_CLI_LIB ?? resolve(__dirname, '../../../e2e/apps/agent-cli/lib.mjs');
+// assay-mcp's own signer, bundled from its source with esbuild:
+//   (assay-mcp/node) npx esbuild src/signer/voucher.ts --bundle --platform=node --format=esm \
+//       --outfile=dist/signer/voucher.mjs
+const MCP_SIGNER =
+  process.env.E2_ASSAY_MCP_SIGNER ??
+  resolve(__dirname, '../../../assay-mcp/node/dist/signer/voucher.mjs');
 
 const CHAIN: ChainId = 'eip155:46630' as ChainId;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
+/** The escrow and asset come from assay-mcp's deployments.json (anvil entry), never a literal here. */
+const MCP_DEPLOYMENTS =
+  process.env.E2_ASSAY_MCP_DEPLOYMENTS ?? resolve(__dirname, '../../../assay-mcp/deployments.json');
+const ANVIL_NET = (
+  JSON.parse(readFileSync(MCP_DEPLOYMENTS, 'utf8')) as {
+    anvil: { networks: Record<string, { escrow: string; asset: string }> };
+  }
+).anvil.networks[CHAIN];
+if (!ANVIL_NET) throw new Error(`no anvil entry for ${CHAIN} in ${MCP_DEPLOYMENTS}`);
+const caipAddress = (caip: string): string => caip.slice(caip.lastIndexOf(':') + 1);
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
-  config: '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43',
-  stake: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
-  escrow: '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41',
-  asset: '0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3',
-  escrowImplementation: '0x0000000000000000000000000000000000000000',
+  config: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5',
+  stake: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
+  escrow: caipAddress(ANVIL_NET.escrow),
+  asset: caipAddress(ANVIL_NET.asset),
+  escrowImplementation: '0x2d3568a0a37A86A961B7970446e78620Bc93cFc0',
   admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
-  owner: '0x0000000000000000000000000000000000000000',
+  owner: '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
   multicall3: MULTICALL3,
 } as EvmDeployment;
-/** The real testnet provider, already bonded above the stake floor. */
+/** The testnet provider. It must bond above the stake floor on the current stake contract first. */
 const PROVIDER = getAddress('0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
 const USDG = `${CHAIN}/erc20:${DEPLOYMENT.asset}`;
 /**
@@ -108,7 +120,7 @@ const chain = defineChain({
 const CONFIG_ABI = parseAbi([
   'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'function params() view returns (ParamSet)',
-  'function updateConfig(ParamSet p, address newAdmin)',
+  'function updateConfig(ParamSet p)',
 ]);
 const ERC20_ABI = parseAbi([
   'function mint(address to, uint256 amount)',
@@ -188,7 +200,7 @@ async function main(): Promise<void> {
       address: DEPLOYMENT.config as `0x${string}`,
       abi: CONFIG_ABI,
       functionName: 'updateConfig',
-      args: [{ ...params, redeemer: relayer.address }, DEPLOYMENT.admin as `0x${string}`],
+      args: [{ ...params, redeemer: relayer.address }],
       chain,
     } as never),
   });
@@ -336,13 +348,13 @@ async function main(): Promise<void> {
   );
   step('2. GET /escrow/delegates equivalent (from chain)', listed);
 
-  // 3. The agent CLI builds and signs the voucher with the DELEGATE key.
-  const cli = (await new Function('p', 'return import(p)')(CLI_LIB)) as {
+  // 3. The assay-mcp signer builds and signs the voucher with the DELEGATE key.
+  const signer = (await new Function('p', 'return import(p)')(MCP_SIGNER)) as {
     buildVoucher: (
       r: unknown,
       now: number,
-    ) => { voucher: Voucher; typedData: Record<string, unknown> };
-    assertDelegateMaySign: (r: unknown, a: string) => void;
+      env: 'production' | 'staging' | 'e2e' | 'anvil',
+    ) => { wire: Voucher; typedData: Record<string, unknown> };
   };
   const requirementFor = (seq: string, amount: bigint) => ({
     rail: 'B',
@@ -360,11 +372,10 @@ async function main(): Promise<void> {
     signers: ['payer', 'delegate'],
     delegate: delegateAccount,
   });
-  const voucherFor = async (signer: typeof delegate, seq: string, amount: bigint) => {
+  const voucherFor = async (who: typeof delegate, seq: string, amount: bigint) => {
     const requirement = requirementFor(seq, amount);
-    if (signer === delegate) cli.assertDelegateMaySign(requirement, delegate.address);
-    const { voucher, typedData } = cli.buildVoucher(requirement, await chainNow());
-    const signature = await signer.signTypedData(typedData as never);
+    const { wire: voucher, typedData } = signer.buildVoucher(requirement, await chainNow(), 'anvil');
+    const signature = await who.signTypedData(typedData as never);
     return {
       voucher: {
         ...voucher,

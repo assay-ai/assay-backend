@@ -1,7 +1,7 @@
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { encodeFunctionData, getAddress, keccak256, serializeTransaction } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
 import { AccountId, CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 
@@ -129,7 +129,7 @@ export function depositTransaction(
       data:
         overrides.data ??
         encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'depositFor',
           args: [
             (overrides.buyer ?? '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4') as `0x${string}`,

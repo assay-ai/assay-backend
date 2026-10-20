@@ -2,6 +2,14 @@ import { Column, Entity, Index } from 'typeorm';
 
 import { OrganizationScopedEntity } from './organization-scoped.entity';
 
+/** How a credential was obtained. Everything else about the row is the same. */
+export enum CredentialIssuedVia {
+  /** Created on the credentials screen; the row holds its token's hash and prefix. */
+  API_KEY = 'API_KEY',
+  /** An OAuth grant; its tokens live in `oauth_access_tokens` / `oauth_refresh_tokens`. */
+  OAUTH = 'OAUTH',
+}
+
 /**
  * The machine tokens the credentials screens list and rotate.
  *
@@ -31,10 +39,23 @@ import { OrganizationScopedEntity } from './organization-scoped.entity';
  * show a lineage and an operator can see that the token their deploy still
  * uses was superseded a week ago. Credentials issued through Privy later fill
  * in this same shape rather than replacing it.
+ *
+ * ## An OAuth grant is a row of this table too
+ *
+ * OAuth only changes how a credential is obtained (`issued_via`). A grant has
+ * no token of its own, so its `prefix` and `token_hash` are `NULL` and its
+ * `oauth_client_id` names the client; `ck_agent_credentials_issued_via` keeps
+ * the two shapes apart. Limits, narrowing, revocation and audit are the same.
  */
 @Entity('agent_credentials')
 @Index('idx_agent_credentials_agent', ['organizationId', 'agentId'])
 @Index('idx_agent_credentials_prefix', ['organizationId', 'prefix'])
+@Index('idx_agent_credentials_oauth_live', ['agentId'], {
+  where: `"issued_via" = 'OAUTH' AND "revoked_at" IS NULL`,
+})
+@Index('idx_agent_credentials_oauth_client', ['oauthClientId'], {
+  where: `"oauth_client_id" IS NOT NULL`,
+})
 export class AgentCredentialEntity extends OrganizationScopedEntity {
   @Column({ name: 'agent_id', type: 'uuid' })
   agentId: string;
@@ -43,13 +64,20 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
   @Column({ name: 'name', type: 'varchar', length: 128 })
   name: string;
 
-  /** Clear-text leading characters, for disambiguation only. */
-  @Column({ name: 'prefix', type: 'varchar', length: 24 })
-  prefix: string;
+  @Column({ name: 'issued_via', type: 'varchar', length: 16, default: CredentialIssuedVia.API_KEY })
+  issuedVia: CredentialIssuedVia;
 
-  /** SHA-256 hex of the full token. The only copy we keep. */
-  @Column({ name: 'token_hash', type: 'varchar', length: 128 })
-  tokenHash: string;
+  /** The OAuth client a grant was issued to; `NULL` for an API key. */
+  @Column({ name: 'oauth_client_id', type: 'uuid', nullable: true })
+  oauthClientId: string | null;
+
+  /** Clear-text leading characters, for disambiguation only. `NULL` for an OAuth grant. */
+  @Column({ name: 'prefix', type: 'varchar', length: 24, nullable: true })
+  prefix: string | null;
+
+  /** SHA-256 hex of the full token. The only copy we keep. `NULL` for an OAuth grant. */
+  @Column({ name: 'token_hash', type: 'varchar', length: 128, nullable: true })
+  tokenHash: string | null;
 
   /**
    * What this credential may do, as an array rather than a bitmask or a CSV.
@@ -94,4 +122,18 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
 
   @Column({ name: 'delegate_bound_at', type: 'timestamptz', nullable: true })
   delegateBoundAt: Date | null;
+
+  /**
+   * Per-key narrowing of the agent's access (API only, design spec §7.7).
+   * `NULL` narrows nothing; otherwise a second grant intersected with the
+   * agent's, so a key can only ever narrow.
+   */
+  @Column({ name: 'access_mode', type: 'varchar', length: 16, nullable: true })
+  accessMode: string | null;
+
+  @Column({ name: 'allowed_toolsets', type: 'jsonb', nullable: true })
+  allowedToolsets: unknown[] | null;
+
+  @Column({ name: 'allowed_tool_ids', type: 'uuid', array: true, nullable: true })
+  allowedToolIds: string[] | null;
 }

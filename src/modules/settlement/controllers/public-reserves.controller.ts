@@ -1,8 +1,9 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, UseInterceptors } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { CacheHeader } from '@shared/decorators/cache-header.decorator';
 import { HttpCacheTTL } from '@shared/decorators/http-cache.decorator';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { GetPublicReservesResponseDto } from '../dto/get-public-reserves.dto';
 import { PublicReservesService } from '../services/public-reserves.service';
@@ -50,6 +51,7 @@ import { PublicReservesService } from '../services/public-reserves.service';
  * `must-revalidate`. A stale proof of reserves is worse than a slow one.
  */
 @ApiTags('Public')
+@UseInterceptors(PublicReadRateLimitInterceptor)
 @Controller('public/reserves')
 export class PublicReservesController {
   constructor(private readonly reserves: PublicReservesService) {}

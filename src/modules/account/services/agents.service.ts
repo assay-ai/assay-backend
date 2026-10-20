@@ -1,20 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { CursorPageDto } from '@shared/api';
+import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import { AgentDto, ListAgentsQueryDto } from '../dto/list-agents.dto';
+import { AccountErrors } from '../errors/account.errors';
 
 /**
- * `GET /api/v1/agents` — the agents in this organization.
+ * `GET /api/v1/agents` — the agents in this organization, and
+ * `PATCH /api/v1/agents/:agentId` — rename one.
  *
- * Reads the `agents` table (`AgentEntity`) — the real
- * table Privy login provisions into. Earlier this read a config-file snapshot
- * of demo MCP credentials, because the table did not exist yet; that snapshot
- * is gone, along with `ACCOUNT_AGENT_SNAPSHOT`.
+ * Reads the `agents` table (`AgentEntity`) — the table Privy login provisions
+ * into.
  */
 @Injectable()
 export class AgentsService {
@@ -22,6 +25,8 @@ export class AgentsService {
     private readonly agents: AgentRepository,
     private readonly credentials: AgentCredentialRepository,
     private readonly config: ConfigService,
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly audit: AuditLogWriter,
   ) {}
 
   async list(organizationId: string, query: ListAgentsQueryDto): Promise<CursorPageDto<AgentDto>> {
@@ -39,6 +44,58 @@ export class AgentsService {
     const defaultChainId = this.config.get<string>('auth.privy.defaultChainId', '');
 
     return page.map((agent) => this.toDto(agent, counts.get(agent.id) ?? 0, defaultChainId));
+  }
+
+  /**
+   * Sets the label and nothing else, with an `agent.renamed` audit row in the
+   * same transaction. The label is display text only (`McpSession.label`):
+   * no authorisation reads it.
+   *
+   * An agent in another organization is the same 404 as a missing one. The
+   * update is scoped by organization as well, so a row that moved between the
+   * read and the write is not touched. Renaming to the current label writes
+   * nothing.
+   */
+  async rename(
+    organizationId: string,
+    agentId: string,
+    label: string,
+    actor: AuditActor,
+  ): Promise<AgentDto> {
+    const agent = await this.agents.findById(agentId);
+    if (!agent || agent.organizationId !== organizationId) {
+      throw AccountErrors.agentNotFound({ agentId });
+    }
+
+    const defaultChainId = this.config.get<string>('auth.privy.defaultChainId', '');
+    const counts = await this.credentialCounts(organizationId, [agentId]);
+    const credentialCount = counts.get(agentId) ?? 0;
+
+    if (agent.label === label) {
+      return this.toDto(agent, credentialCount, defaultChainId);
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      // The row may have gone between the read and the write: then nothing
+      // was renamed, and no audit row may say it was.
+      const { affected } = await manager.update(
+        AgentEntity,
+        { id: agentId, organizationId },
+        { label },
+      );
+      if (affected !== 1) throw AccountErrors.agentNotFound({ agentId });
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'agent.renamed',
+        resourceType: 'agent',
+        resourceId: agentId,
+        before: { label: agent.label },
+        after: { label },
+      });
+    });
+
+    return this.toDto({ ...agent, label } as AgentEntity, credentialCount, defaultChainId);
   }
 
   private toDto(agent: AgentEntity, credentialCount: number, defaultChainId: string): AgentDto {

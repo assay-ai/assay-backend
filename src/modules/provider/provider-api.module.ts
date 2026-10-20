@@ -7,19 +7,19 @@ import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { AuditLogModule } from '@shared/audit';
 
+import { CredentialVaultModule } from './credentials/credential-vault.module';
+import { ProviderBindingCredentialsController } from './controllers/provider-binding-credentials.controller';
 import { ProviderConnectivityController } from './controllers/provider-connectivity.controller';
 import { ProviderPayoutAddressController } from './controllers/provider-payout-address.controller';
 import { ProviderPayoutsController } from './controllers/provider-payouts.controller';
 import { ProviderPolicyChangesController } from './controllers/provider-policy-changes.controller';
 import { ProviderReconciliationController } from './controllers/provider-reconciliation.controller';
 import { ProviderRegistrationController } from './controllers/provider-registration.controller';
-import {
-  ProviderBindingSlaController,
-  ProviderSlaWindowsController,
-} from './controllers/provider-sla-windows.controller';
+import { ProviderSlaWindowsController } from './controllers/provider-sla-windows.controller';
 import { ProviderStakeAuthorityController } from './controllers/provider-stake-authority.controller';
 import { ProviderStakeIntentController } from './controllers/provider-stake-intent.controller';
 import { ProviderToolBindingsController } from './controllers/provider-tool-bindings.controller';
@@ -27,7 +27,6 @@ import { ProviderVerdictsController } from './controllers/provider-verdicts.cont
 import { ProviderController } from './controllers/provider.controller';
 import { ProviderModule } from './provider.module';
 import { SlaWindowModule } from './sla-window.module';
-import { PROVIDER_EGRESS_IPS, loadEgressIps } from './services/egress-ips';
 import { ProviderCallsExportService } from './services/provider-calls-export.service';
 import { ProviderConnectivityService } from './services/provider-connectivity.service';
 import { ProviderEarningsService } from './services/provider-earnings.service';
@@ -42,7 +41,6 @@ import { ProviderStakeAuthorityService } from './services/provider-stake-authori
 import { ProviderStakeIntentService } from './services/provider-stake-intent.service';
 import { ProviderVerificationService } from './services/provider-verification.service';
 import { PROVIDER_TERMS, loadProviderTerms } from './services/provider-terms';
-import { ProviderQualityService } from './services/provider-quality.service';
 import {
   PROVIDER_MINIMUM_STAKE_BY_CHAIN,
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
@@ -56,7 +54,6 @@ import { BindingMappingTesterService } from './services/binding-mapping-tester.s
 import { BindingPauseService } from './services/binding-pause.service';
 import { BindingPublishService } from './services/binding-publish.service';
 import { ProviderToolBindingsService } from './services/provider-tool-bindings.service';
-import { ProviderTrafficService } from './services/provider-traffic.service';
 import { ProviderVerdictService } from './services/provider-verdict.service';
 
 /**
@@ -113,6 +110,10 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderModule,
     BlocklistModule,
     ToolModule,
+    // `BINDING_INVOKER` for the mapping tester, which dials through the same
+    // invoker production uses rather than a sandbox copy of it.
+    ToolEgressModule,
+    CredentialVaultModule,
     McpModule,
     ChainsModule,
     VerificationModule,
@@ -125,17 +126,16 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderController,
     ProviderPayoutsController,
     ProviderToolBindingsController,
+    ProviderBindingCredentialsController,
     ProviderVerdictsController,
     ProviderReconciliationController,
     ProviderPolicyChangesController,
     ProviderSlaWindowsController,
-    ProviderBindingSlaController,
     ProviderStakeAuthorityController,
     ProviderStakeIntentController,
   ],
   providers: [
     { provide: PROVIDER_TERMS, useFactory: loadProviderTerms, inject: [ConfigService] },
-    { provide: PROVIDER_EGRESS_IPS, useFactory: loadEgressIps, inject: [ConfigService] },
     ProviderRegistrationService,
     ProviderPayoutAddressService,
     ProviderStakeAuthorityService,
@@ -144,8 +144,6 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderEgressLimiter,
     ProviderVerificationService,
     ProviderProfileService,
-    ProviderTrafficService,
-    ProviderQualityService,
     ProviderEarningsService,
     ProviderCallsExportService,
     ProviderPayoutsService,
@@ -175,6 +173,8 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     },
     ProviderStakeService,
   ],
-  exports: [ProviderModule],
+  // `BindingPublishService`: a provider tool's publish gate is its binding's (T4).
+  // `ProviderEgressLimiter`: "Try your endpoint" shares the tester's budget.
+  exports: [ProviderModule, BindingPublishService, ProviderEgressLimiter],
 })
 export class ProviderApiModule {}

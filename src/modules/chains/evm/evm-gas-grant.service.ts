@@ -13,7 +13,7 @@ import { chainMetadata } from '../chain-metadata';
 import { EvmEscrowBalanceReader } from './evm-escrow-balance-reader.service';
 import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, AssetId, ChainId, parseAccountId } from '../ports/caip.types';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_RELAYER_FLOAT_LOW_WEI } from './evm-relayer-float.constants';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
@@ -39,7 +39,7 @@ export interface EvmGasGrantClient {
    * The chain's own clock, and the fourth read.
    *
    * Declared here for the same reason `EvmEscrowIntentClient` declares it:
-   * `X402Escrow.withdraw()` decides maturity on `block.timestamp`, so the only
+   * `AssayEscrow.withdraw()` decides maturity on `block.timestamp`, so the only
    * clock that can be right about whether this buyer's exit is ready is the
    * chain's. See control 2 in {@link EvmGasGrantService.grantNow}.
    */
@@ -100,7 +100,7 @@ export const EVM_RELAYER_FLOAT_LOW_WATER_ENV = EVM_RELAYER_FLOAT_LOW_WEI;
 
 /** `withdraw()` — the selector is `0x3ccfd60b`, derived here rather than typed. */
 const WITHDRAW_CALLDATA = encodeFunctionData({
-  abi: X402_ESCROW_ABI,
+  abi: ASSAY_ESCROW_ABI,
   functionName: 'withdraw',
 }) as `0x${string}`;
 
@@ -185,7 +185,7 @@ function positiveWei(value: string | undefined, variable: string): bigint {
  *
  * ## The problem this exists for
  *
- * `X402Escrow.withdraw()` is `msg.sender`-only, pays `msg.sender`, and there is
+ * `AssayEscrow.withdraw()` is `msg.sender`-only, pays `msg.sender`, and there is
  * no `withdrawBySig` **by design**: the owner is the only party who can take
  * money out, which is exactly what makes a hardware wallet a sufficient upgrade
  * later and what makes a full leak of every env-held key cost the ETH float and
@@ -346,7 +346,7 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
     /*
       2. A matured exit, not a possible one — on the CHAIN's clock.
 
-      `X402Escrow.withdraw()` reads `if (block.timestamp < e.withdrawAvailableAt)
+      `AssayEscrow.withdraw()` reads `if (block.timestamp < e.withdrawAvailableAt)
       revert WithdrawNotYetAvailable()`. The chain is therefore the authority on
       whether this buyer's exit is ready, and `Date.now()` — which this control
       used until now — is a proxy for it that can be arbitrarily wrong: on the

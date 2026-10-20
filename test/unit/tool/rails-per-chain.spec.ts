@@ -75,7 +75,7 @@ describe('each chain is held to its own rails', () => {
   });
 
   it('answers a rail the caller picked with a 4xx, not a server fault', () => {
-    // Review 2026-10-15 L1: the agent supplies the rail (`x402/rail`, or a
+    // Review 2026-10-15 L1: the agent supplies the rail (`assay/rail`, or a
     // voucher), so a refusal is a client error, not one to page someone for.
     let thrown: AppError | null = null;
     try {

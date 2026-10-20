@@ -149,6 +149,7 @@ describe('sessionAccounts', () => {
       chainId: DEVNET,
       label: 'buyer',
       callerKind: McpCallerKind.CONFIG,
+      paymentsAllowed: true,
     };
 
     expect(sessionAccounts(session)).toEqual([{ chainId: DEVNET, accountId: DEVNET_ACCOUNT }]);

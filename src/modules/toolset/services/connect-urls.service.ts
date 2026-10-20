@@ -1,0 +1,351 @@
+import { Inject, Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+
+import { AgentConnectUrlRepository } from '@database/postgres/repositories/agent-connect-url.repository';
+import { ToolsetRepository } from '@database/postgres/repositories/toolset.repository';
+import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+
+import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
+
+import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
+import { newestServed, servesPublicPath, servesUnlistedPath } from '../domain/sharing';
+import { HandlesService } from './handles.service';
+import { sharingStateOf } from './sharing-row';
+import {
+  EndpointKind,
+  McpPathKind,
+  ParsedMcpUrl,
+  canonicalUrl,
+  endpointKindOf,
+  parseMcpAbsoluteUrl,
+  viewFilterFromRecord,
+} from '../domain/mcp-url';
+
+/** "Called recently" — the window the Servers in use list reads (design spec §7.10). */
+export const SERVERS_IN_USE_WINDOW_DAYS = 30;
+
+/** One canonical URL an agent has been handed or has called through. */
+export interface ServerInUseRow {
+  readonly canonicalUrl: string;
+  readonly parsed: ParsedMcpUrl;
+  readonly endpointKind: EndpointKind;
+  readonly toolsetId: string | null;
+  /** The version the URL serves when pinned, or the one its calls were served; `null`: a Draft or latest. */
+  readonly toolsetVersion: number | null;
+  readonly serverName: string | null;
+  readonly client: string | null;
+  /** When the Connect sheet handed it out; `null` when it was only ever called. */
+  readonly handedOutAt: Date | null;
+  readonly firstCallAt: Date | null;
+  readonly lastCallAt: Date | null;
+}
+
+interface AttributionGroup {
+  endpoint_kind: string;
+  endpoint_handle: string | null;
+  toolset_id: string | null;
+  toolset_version: number | null;
+  view_filter: Record<string, unknown> | null;
+  last_call_at: Date;
+}
+
+/**
+ * `agent_connect_urls` and the URLs an agent actually called through.
+ *
+ * There is no connection object (design spec §10 L): a URL handed out by the
+ * Connect sheet is remembered only for the "Waiting for first call" row, and
+ * every other row of Servers in use is derived from the calls' attribution.
+ */
+@Injectable()
+export class ConnectUrlsService {
+  /** URLs whose first call this process already stamped; bounded, and re-checked hourly. */
+  private readonly firstCallsSeen = new BoundedTtlCache<true>(50_000, 60 * 60 * 1_000);
+
+  constructor(
+    private readonly connectUrls: AgentConnectUrlRepository,
+    private readonly toolsets: ToolsetRepository,
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    private readonly handles: HandlesService,
+  ) {}
+
+  /** `url` → its parsed and canonical form, or `URL_NOT_RECOGNISED`. Never fetched. */
+  canonicalise(url: string): { parsed: ParsedMcpUrl; canonicalUrl: string } {
+    const parsed = parseMcpAbsoluteUrl(url, this.host.mcpPublicUrl);
+    if (!parsed) {
+      throw ToolAccessErrors.urlNotRecognised({
+        reason: `expected an MCP URL on ${this.host.mcpPublicUrl}`,
+      });
+    }
+    return { parsed, canonicalUrl: canonicalUrl(this.host.mcpPublicUrl, parsed) };
+  }
+
+  async record(
+    organizationId: string,
+    agentId: string,
+    input: { url: string; serverName: string | null; client: string | null },
+  ): Promise<string> {
+    const { canonicalUrl: canonical } = this.canonicalise(input.url);
+    await this.connectUrls.record({
+      organizationId,
+      agentId,
+      canonicalUrl: canonical,
+      serverName: input.serverName,
+      client: input.client,
+    });
+    return canonical;
+  }
+
+  /**
+   * Stamp the first call through a URL the sheet handed out. Best effort, and
+   * at most one write per URL per process: the live first-call check reads it.
+   */
+  async markFirstCall(organizationId: string, agentId: string, canonical: string): Promise<void> {
+    const key = `${agentId}:${canonical}`;
+    if (this.firstCallsSeen.has(key)) return;
+    try {
+      await this.connectUrls.markFirstCall(organizationId, agentId, canonical);
+      this.firstCallsSeen.set(key, true);
+    } catch {
+      // Bookkeeping; a missed stamp leaves the row "waiting" until the next call.
+    }
+  }
+
+  /** Every URL handed out to the agent or called through in the last 30 days, newest first. */
+  async serversInUse(organizationId: string, agentId: string): Promise<ServerInUseRow[]> {
+    const since = new Date(Date.now() - SERVERS_IN_USE_WINDOW_DAYS * 24 * 60 * 60 * 1_000);
+
+    const [handedOut, intentGroups, recordGroups] = await Promise.all([
+      this.connectUrls.find({ where: { organizationId, agentId } }),
+      this.attributionGroups('payment_intents', organizationId, agentId, since),
+      this.attributionGroups('tool_call_records', organizationId, agentId, since),
+    ]);
+
+    const toolsetIds = [
+      ...new Set(
+        [...intentGroups, ...recordGroups]
+          .map((group) => group.toolset_id)
+          .filter((id): id is string => id !== null),
+      ),
+    ];
+    const slugs = new Map(
+      (await this.toolsets.findAnyByIds(toolsetIds)).map((toolset) => [
+        toolset.id,
+        { slug: toolset.slug, own: toolset.ownerOrgId === organizationId },
+      ]),
+    );
+
+    const rows = new Map<string, ServerInUseRow>();
+    for (const group of [...intentGroups, ...recordGroups]) {
+      const parsed = parsedFromAttribution(group, slugs);
+      if (!parsed) continue;
+      const canonical = canonicalUrl(this.host.mcpPublicUrl, parsed);
+      const existing = rows.get(canonical);
+      const lastCallAt = new Date(group.last_call_at);
+      if (!existing || (existing.lastCallAt && existing.lastCallAt < lastCallAt)) {
+        rows.set(canonical, {
+          canonicalUrl: canonical,
+          parsed,
+          endpointKind: group.endpoint_kind as EndpointKind,
+          toolsetId: group.toolset_id,
+          toolsetVersion: group.toolset_version ?? null,
+          serverName: null,
+          client: null,
+          handedOutAt: null,
+          firstCallAt: null,
+          lastCallAt,
+        });
+      }
+    }
+
+    // A handed-out `/my/{slug}` names its toolset by slug; resolve it once.
+    const handedOutSlugs = handedOut.flatMap((row) => {
+      const parsed = parseMcpAbsoluteUrl(row.canonicalUrl, this.host.mcpPublicUrl);
+      return parsed?.path.kind === McpPathKind.MY_TOOLSET ? [parsed.path.slug] : [];
+    });
+    const idsBySlug = new Map(
+      (await this.toolsets.findOwnedBySlugs(organizationId, handedOutSlugs)).map((toolset) => [
+        toolset.slug,
+        toolset.id,
+      ]),
+    );
+
+    for (const row of handedOut) {
+      const parsed = parseMcpAbsoluteUrl(row.canonicalUrl, this.host.mcpPublicUrl);
+      if (!parsed) continue;
+      const called = rows.get(row.canonicalUrl);
+      const toolsetId =
+        called?.toolsetId ??
+        (parsed.path.kind === McpPathKind.MY_TOOLSET
+          ? (idsBySlug.get(parsed.path.slug) ?? null)
+          : await this.sharedToolsetIdOf(parsed));
+      const pathVersion =
+        'version' in parsed.path ? (parsed.path as { version: number | null }).version : null;
+      rows.set(row.canonicalUrl, {
+        canonicalUrl: row.canonicalUrl,
+        parsed,
+        endpointKind: called?.endpointKind ?? endpointKindOf(parsed.path),
+        toolsetId,
+        toolsetVersion: pathVersion ?? called?.toolsetVersion ?? null,
+        serverName: row.serverName,
+        client: row.client,
+        handedOutAt: row.createdAt,
+        firstCallAt: row.firstCallAt,
+        lastCallAt: called?.lastCallAt ?? null,
+      });
+    }
+
+    return [...rows.values()].sort(
+      (a, b) => recency(b) - recency(a) || a.canonicalUrl.localeCompare(b.canonicalUrl),
+    );
+  }
+
+  /**
+   * "Update available" for a URL pinned to `@n` (design spec §7.10): the
+   * newest version **on that URL's own path** — `/@…` offers only versions
+   * published PUBLIC, a link only what that link serves, `/my/` the owner's
+   * newest — with the same URL at it. `null` when the URL follows its latest,
+   * does not serve now, or is already at the newest. Never a version the path
+   * does not serve, so it tells nobody more than the URL itself would.
+   */
+  async updateFor(
+    organizationId: string,
+    parsed: ParsedMcpUrl,
+  ): Promise<{ latestVersion: number; latestUrl: string } | null> {
+    const { path } = parsed;
+    const now = new Date();
+    let newest: number | null = null;
+    let handle: string | null = null;
+    if (path.kind === McpPathKind.MY_TOOLSET && path.version !== null) {
+      const [toolset] = await this.toolsets.findOwnedBySlugs(organizationId, [path.slug]);
+      if (toolset && !toolset.deletedAt) newest = toolset.latestVersion;
+    } else if (path.kind === McpPathKind.UNLISTED_TOOLSET && path.version !== null) {
+      const toolset = await this.toolsets.findByUnlistedToken(path.token);
+      if (
+        toolset &&
+        toolset.unlistedToken === path.token &&
+        servesUnlistedPath(sharingStateOf(toolset), now) &&
+        (await this.handles.ownerHandleActive(toolset.ownerOrgId))
+      ) {
+        newest = newestServed(toolset, 'UNLISTED');
+      }
+    } else if (path.kind === McpPathKind.PUBLIC_TOOLSET && path.version !== null) {
+      const owner = await this.handles.resolve(path.handle);
+      const toolset = owner
+        ? await this.toolsets.findHolderOfSlug(
+            owner.kind === 'OFFICIAL' ? null : owner.organizationId,
+            path.slug,
+          )
+        : null;
+      if (owner && toolset && servesPublicPath(sharingStateOf(toolset), now)) {
+        newest = newestServed(toolset, 'PUBLIC');
+        handle = owner.kind === 'ORG' ? (owner.renamedTo ?? path.handle) : path.handle;
+      }
+    }
+    const pinned = 'version' in path ? (path as { version: number | null }).version : null;
+    if (newest === null || pinned === null || newest <= pinned) return null;
+    const next = {
+      ...parsed,
+      path: { ...path, version: newest, ...(handle ? { handle } : {}) } as typeof path,
+    };
+    return { latestVersion: newest, latestUrl: canonicalUrl(this.host.mcpPublicUrl, next) };
+  }
+
+  /**
+   * The toolset behind a handed-out `/@…` or `/u/…` URL, or `null` — only
+   * while that URL serves it. A URL anyone may hand to the Connect sheet must
+   * not turn into an oracle: a PRIVATE, UNLISTED-by-slug, deleted or removed
+   * toolset answers exactly like one that does not exist.
+   */
+  private async sharedToolsetIdOf(parsed: ParsedMcpUrl): Promise<string | null> {
+    const { path } = parsed;
+    const now = new Date();
+    if (path.kind === McpPathKind.UNLISTED_TOOLSET) {
+      const toolset = await this.toolsets.findByUnlistedToken(path.token);
+      return toolset &&
+        toolset.unlistedToken === path.token &&
+        servesUnlistedPath(sharingStateOf(toolset), now) &&
+        (await this.handles.ownerHandleActive(toolset.ownerOrgId))
+        ? toolset.id
+        : null;
+    }
+    if (path.kind !== McpPathKind.PUBLIC_TOOLSET) return null;
+    const owner = await this.handles.resolve(path.handle);
+    if (!owner) return null;
+    const toolset = await this.toolsets.findHolderOfSlug(
+      owner.kind === 'OFFICIAL' ? null : owner.organizationId,
+      path.slug,
+    );
+    return toolset && servesPublicPath(sharingStateOf(toolset), now) ? toolset.id : null;
+  }
+
+  private attributionGroups(
+    table: 'payment_intents' | 'tool_call_records',
+    organizationId: string,
+    agentId: string,
+    since: Date,
+  ): Promise<AttributionGroup[]> {
+    // A refused call is not a server in use: an agent calling a URL it may not
+    // use must not be able to steer "only what's connected" onto it.
+    const servedOnly = table === 'tool_call_records' ? 'AND "refusal_code" IS NULL' : '';
+    return this.dataSource.query(
+      `SELECT "endpoint_kind", "endpoint_handle", "toolset_id", "toolset_version", "view_filter",
+              max("created_at") AS "last_call_at"
+         FROM "${table}"
+        WHERE "organization_id" = $1
+          AND "agent_id" = $2
+          AND "created_at" >= $3
+          AND "endpoint_kind" IS NOT NULL
+          ${servedOnly}
+        GROUP BY "endpoint_kind", "endpoint_handle", "toolset_id", "toolset_version", "view_filter"`,
+      [organizationId, agentId, since],
+    );
+  }
+}
+
+/**
+ * A call's attribution → the URL it came through: `/`, the organization's own
+ * `/my/{slug}[@n]`, or another organization's `/@{handle}/{slug}@n`. A
+ * link-only call is not rebuilt — its token is not in the attribution, and
+ * the Connect sheet's own row for it names the link.
+ */
+function parsedFromAttribution(
+  group: AttributionGroup,
+  slugs: ReadonlyMap<string, { slug: string; own: boolean }>,
+): ParsedMcpUrl | null {
+  const filter = viewFilterFromRecord(group.view_filter);
+  if (group.endpoint_kind === EndpointKind.ROOT) {
+    return { path: { kind: McpPathKind.ROOT }, filter };
+  }
+  if (group.endpoint_kind === EndpointKind.TOOLSET && group.toolset_id) {
+    const toolset = slugs.get(group.toolset_id);
+    if (!toolset) return null;
+    if (toolset.own && !group.endpoint_handle) {
+      return {
+        path: {
+          kind: McpPathKind.MY_TOOLSET,
+          slug: toolset.slug,
+          version: group.toolset_version ?? null,
+        },
+        filter,
+      };
+    }
+    if (group.endpoint_handle) {
+      return {
+        path: {
+          kind: McpPathKind.PUBLIC_TOOLSET,
+          handle: group.endpoint_handle,
+          slug: toolset.slug,
+          version: group.toolset_version ?? null,
+        },
+        filter,
+      };
+    }
+  }
+  return null;
+}
+
+function recency(row: ServerInUseRow): number {
+  return Math.max(row.lastCallAt?.getTime() ?? 0, row.handedOutAt?.getTime() ?? 0);
+}

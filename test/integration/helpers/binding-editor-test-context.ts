@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto';
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
+import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -21,6 +24,12 @@ import { LedgerHoldEntity } from '@database/postgres/entities/ledger-hold.entity
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provider-chain-enrolment.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
+import { AuditLogEntryEntity } from '@database/postgres/entities/audit-log-entry.entity';
+import { AuditLogWriter } from '@shared/audit';
+import { VaultKekCheckEntity } from '@database/postgres/entities/vault-kek-check.entity';
+import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
+import { CreateVaultKekChecks1762000000003 } from '@database/postgres/migrations/1762000000003-create-vault-kek-checks';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
@@ -33,8 +42,10 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { CreateLedger1755100000000 } from '@database/postgres/migrations/1755100000000-create-ledger';
 import { CreatePaymentIntents1755200000000 } from '@database/postgres/migrations/1755200000000-create-payment-intents';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { ProviderStakeAuthority1757000000000 } from '@database/postgres/migrations/1757000000000-provider-stake-authority';
 import { CreateProviderChainEnrolments1759300000001 } from '@database/postgres/migrations/1759300000001-create-provider-chain-enrolments';
 import { DropProviderPayoutColumns1759300000002 } from '@database/postgres/migrations/1759300000002-drop-provider-payout-columns';
@@ -56,7 +67,6 @@ import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.se
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import {
   ProviderChainStakeKey,
   ProviderStake,
@@ -70,10 +80,14 @@ import { BindingPauseService } from '@modules/provider/services/binding-pause.se
 import { BindingPublishService } from '@modules/provider/services/binding-publish.service';
 import { DbChainEnrolmentSource } from '@modules/provider/services/db-chain-enrolment.source';
 import { DbProviderRegistry } from '@modules/provider/services/db-provider-registry';
+import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
+import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { ProviderToolBindingsService } from '@modules/provider/services/provider-tool-bindings.service';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import { staticToolContracts } from '@modules/tool/ports/tool-contracts.port';
 import { Tool, ToolTier } from '@modules/tool/ports/tool.types';
 import { DatabaseToolCatalogue } from '@modules/tool/services/database-tool-catalogue';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
@@ -84,6 +98,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -106,10 +121,8 @@ export const STAKE_CHAIN: ChainId = chainIdOf(USDC_ASSET as AssetId);
  * account. A test that compared two empty tables would pass against a tester
  * that charged every call.
  *
- * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: `ConfigProviderStakeSource`
- * reads a seed file and the on-chain source replaces it, so what the gate
- * needs from this context is a number it can move — not a fixture of whichever
- * implementation happens to be bound this month. `PROVIDER_REGISTRY` is the
+ * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: what the gate needs from
+ * this context is a number it can move, not a chain. `PROVIDER_REGISTRY` is the
  * **real** `DbProviderRegistry`, because the publish check is what bound it
  * and "a registered provider is now visible to routing" is a claim worth
  * testing rather than stubbing.
@@ -166,6 +179,8 @@ export interface BindingEditorTestContext {
   readonly editor: BindingEditorService;
   readonly tester: BindingMappingTesterService;
   readonly publisher: BindingPublishService;
+  /** A vault over the test database, wired into the publisher for credential pruning. */
+  readonly vault: CredentialVaultService;
   /** The pause button — the provider's own, never the health breaker's. */
   readonly pauser: BindingPauseService;
   readonly bindingsList: ProviderToolBindingsService;
@@ -207,6 +222,10 @@ const NO_ALERTS = { emit: async (): Promise<void> => undefined };
 
 export async function createBindingEditorTestContext(
   invoker: BindingInvokerPort,
+  /** The contract the bindings implement; {@link TOOL} (one implicit version) by default. */
+  tool: Tool = TOOL,
+  /** The signer the invoker uses, so the tester names the headers it adds. Keyless by default. */
+  signer: RequestSignerService = new RequestSignerService([]),
 ): Promise<BindingEditorTestContext> {
   const database = await ensureTestDatabase(
     process.env.BINDING_TEST_DATABASE || `${process.env.DATABASE_NAME || 'app'}_binding_test`,
@@ -222,6 +241,9 @@ export async function createBindingEditorTestContext(
       AccountBalanceEntity,
       ProviderEntity,
       ToolBindingEntity,
+      BindingCredentialEntity,
+      VaultKekCheckEntity,
+      AuditLogEntryEntity,
       BindingVersionEntity,
       BindingTestRunEntity,
       // The payout address the publish gate reads is on the
@@ -236,9 +258,8 @@ export async function createBindingEditorTestContext(
     migrations: [
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
-      // `ProviderEntity` gained `payout_threshold_override` here, and TypeORM
-      // inserts every mapped column — so the row this context writes needs the
-      // schema that has it, even though payouts are no part of this suite.
+      DropConnectivityEgressIps1762000000000,
+      // The ledger's credit-type unique index; its payout table is unused here.
       ProviderEarningsAndPayouts1756700000000,
       CreateToolBindingTables1756900000000,
       // The stake-authority migration put `stake_authority`, `stake_proof` and
@@ -295,6 +316,14 @@ export async function createBindingEditorTestContext(
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // T3: the binding's contract range and declared fields, on the binding,
+      // its snapshots and its tester runs.
+      BindingContractTerms1761500000001,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
+      CreateBindingCredentials1762000000001,
+      ToolBindingAuthMode1762000000002,
+      CreateVaultKekChecks1762000000003,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',
@@ -302,7 +331,30 @@ export async function createBindingEditorTestContext(
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
+  // The audit table of `1756000000000` without the rest of that migration's
+  // tables: the publish service writes prune entries into it.
+  await dataSource.query(`
+    CREATE TABLE IF NOT EXISTS "audit_log_entries" (
+      "id" uuid NOT NULL DEFAULT gen_random_uuid(),
+      "created_at" timestamptz NOT NULL DEFAULT now(),
+      "updated_at" timestamptz NOT NULL DEFAULT now(),
+      "version" integer NOT NULL DEFAULT 1,
+      "organization_id" uuid NOT NULL,
+      "actor_type" varchar(16) NOT NULL,
+      "actor_id" varchar(128) NOT NULL,
+      "action" varchar(64) NOT NULL,
+      "resource_type" varchar(32) NOT NULL,
+      "resource_id" varchar(128) NULL,
+      "before" jsonb NULL,
+      "after" jsonb NULL,
+      "ip_address" varchar(64) NULL,
+      "user_agent" varchar(512) NULL,
+      "request_id" varchar(128) NULL,
+      CONSTRAINT "pk_audit_log_entries" PRIMARY KEY ("id")
+    )
+  `);
 
   const bindings = new ToolBindingRepository(dataSource);
   const versions = new BindingVersionRepository(dataSource);
@@ -315,15 +367,13 @@ export async function createBindingEditorTestContext(
     new AccountBalanceRepository(dataSource),
     dataSource,
   );
-  const writer = new LedgerWriterService(journal, dataSource);
   const ledger = new LedgerService(
     journal,
-    writer,
     new LedgerBalanceService(new AccountBalanceRepository(dataSource), journal),
     new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource),
   );
 
-  const catalogue = new DatabaseToolCatalogue({ tools: [TOOL], bindings: [] }, bindings, versions);
+  const catalogue = new DatabaseToolCatalogue(staticToolContracts([tool]), bindings, versions);
   const stakes = new MutableStakeSource();
 
   // No policy is registered for any tool yet, which is also what production
@@ -336,6 +386,11 @@ export async function createBindingEditorTestContext(
   // this context already writes, and the same mutable stake source the publish
   // gate is given — so a binding saved here is refused for exactly the reasons
   // production would refuse it, rather than passing a stubbed gate.
+  const vaultKek = { keyId: 'ctx-kek', key: randomBytes(32) };
+  const vault = new CredentialVaultService(new BindingCredentialRepository(dataSource), {
+    active: vaultKek,
+    byId: new Map([[vaultKek.keyId, vaultKek]]),
+  });
   const editor = new BindingEditorService(
     bindings,
     catalogue,
@@ -344,6 +399,8 @@ export async function createBindingEditorTestContext(
     stakes,
     [STAKE_CHAIN],
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
+    null,
+    vault,
   );
   const tester = new BindingMappingTesterService(
     editor,
@@ -352,6 +409,7 @@ export async function createBindingEditorTestContext(
     invoker,
     policies,
     new ProviderEgressLimiter(),
+    signer,
   );
   const publisher = new BindingPublishService(
     editor,
@@ -364,6 +422,9 @@ export async function createBindingEditorTestContext(
     ),
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     dataSource,
+    catalogue,
+    vault,
+    new AuditLogWriter(dataSource),
   );
 
   const context: BindingEditorTestContext = {
@@ -371,6 +432,7 @@ export async function createBindingEditorTestContext(
     editor,
     tester,
     publisher,
+    vault,
     pauser: new BindingPauseService(editor, bindings),
     // Three constructor arguments since the catalogue endpoint landed;
     // this call site had only ever passed one, which is why every suite on this
@@ -378,7 +440,15 @@ export async function createBindingEditorTestContext(
     // holds, and `ConfigService` falls back to `PLATFORM_STAKE_ASSET_ID`'s
     // default when the variable is unset — neither is exercised by the binding
     // list, which is all this context uses the service for.
-    bindingsList: new ProviderToolBindingsService(bindings, catalogue, new ConfigService()),
+    bindingsList: new ProviderToolBindingsService(
+      bindings,
+      catalogue,
+      new ConfigService(),
+      versions,
+      dataSource,
+      vault,
+      new AuditLogWriter(dataSource),
+    ),
     catalogue,
     stakes,
     ledger,
@@ -388,14 +458,6 @@ export async function createBindingEditorTestContext(
     organizationId: randomUUID(),
 
     async reset(): Promise<void> {
-      for (let attempt = 0; attempt < 5 && writer.pending > 0; attempt += 1) {
-        try {
-          await writer.flush();
-        } catch {
-          // A batch a previous test abandoned is that test's business.
-        }
-      }
-      writer.drainQuarantine();
       context.organizationId = randomUUID();
     },
 
@@ -472,7 +534,7 @@ export async function createBindingEditorTestContext(
             JSON.stringify({
               challengeId: randomUUID(),
               signature: 'test-signature',
-              messageVersion: 'x402-payout-proof/v1',
+              messageVersion: 'assay-payout-proof/v1',
               provedAt: new Date().toISOString(),
             }),
           ],

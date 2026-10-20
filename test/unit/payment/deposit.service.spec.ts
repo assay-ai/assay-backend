@@ -60,6 +60,7 @@ function buildHarness(overrides?: {
   ledger?: ReturnType<typeof fakeLedger>;
   /** Seeds the escrow mirror with an already-open row for `AGENT_ACCOUNT` when true (default). */
   escrowExists?: boolean;
+  chainState?: { assertActive: jest.Mock } | null;
 }) {
   const repo = new FakeDepositIntentRepository();
   const depositIntents = new DepositIntentService(repo.asRepository());
@@ -95,6 +96,7 @@ function buildHarness(overrides?: {
     escrowReader,
     escrows.asRepository(),
     ledger,
+    (overrides?.chainState ?? null) as never,
   );
 
   return {
@@ -180,6 +182,21 @@ describe('DepositService.createDeposit', () => {
     expect(intent.chainId).toBe(CHAIN_IDS.ROBINHOOD_TESTNET);
     expect(intent.requestedAmount.asset).toBe(ASSET_IDS.USDG_ROBINHOOD_TESTNET);
     expect(repo.rows.size).toBe(1);
+  });
+
+  it('checks the deposit door before writing anything: a paused or blocked buyer leaves no row', async () => {
+    const refusal = new Error('CHAIN_ADDRESS_BLOCKED');
+    const chainState = { assertActive: jest.fn().mockRejectedValue(refusal) };
+    const { service, repo, escrows, opener } = buildHarness({ chainState, escrowExists: false });
+
+    await expect(service.createDeposit(input())).rejects.toBe(refusal);
+
+    expect(chainState.assertActive).toHaveBeenCalledWith('DEPOSIT', [
+      { role: 'BUYER', account: AGENT_ACCOUNT },
+    ]);
+    expect(repo.rows.size).toBe(0);
+    expect(escrows.rows).toHaveLength(0);
+    expect(opener.open).not.toHaveBeenCalled();
   });
 
   it('leaves no deposit intent behind when the facilitator cannot be reached', async () => {
@@ -401,9 +418,9 @@ describe('DepositService.settleDeposit — happy path', () => {
     expect(reread.status).toBe(DepositIntentStatus.SETTLED);
   });
 
-  it('writes DEPOSIT_PENDING durably before answering SETTLED — never through the buffered writer', async () => {
+  it('writes DEPOSIT_PENDING durably before answering SETTLED', async () => {
     // The console refetches `GET /balances` the moment the settle response
-    // lands. A buffered append was still unflushed then, so the buyer read an
+    // lands. A credit written after SETTLED would leave the buyer reading an
     // empty ledger ("No credited balance") next to a deposit row already
     // reading SETTLED.
     const order: string[] = [];
@@ -438,7 +455,6 @@ describe('DepositService.settleDeposit — happy path', () => {
     });
     await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
 
-    expect(ledger.append).not.toHaveBeenCalled();
     expect(ledger.appendNow).toHaveBeenCalledWith(
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING, intentId: intent.id }),
     );

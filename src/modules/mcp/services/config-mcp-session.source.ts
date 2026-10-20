@@ -152,6 +152,7 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       label: record.label ?? null,
       // A person only when the record says so — see `McpCredentialRecord.kind`.
       callerKind: record.kind === 'human' ? McpCallerKind.CONFIG : McpCallerKind.AGENT,
+      paymentsAllowed: true,
     });
   }
 

@@ -147,7 +147,7 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
 
     const error = await client
       .readContract({
-        address: '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43',
+        address: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5',
         abi: parseAbi(['function slashDelaySeconds() view returns (uint64)']),
         functionName: 'slashDelaySeconds',
       })

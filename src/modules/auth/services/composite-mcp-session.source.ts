@@ -1,5 +1,9 @@
 import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import {
+  McpUnauthorizedReason,
+  unauthorizedReasonOf,
+} from '@modules/mcp/ports/mcp-unauthorized.port';
 import { BaseError } from '@shared/errors/base.error';
 
 import { SessionSourceMode } from '../domain/session-source-mode';
@@ -41,6 +45,9 @@ export class CompositeMcpSessionSource implements McpSessionPort {
   constructor(private readonly sources: readonly McpSessionPort[]) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
+    // The private 401 reason a source gave (only the OAuth source gives one),
+    // kept for the metric; the refusal itself is the same either way.
+    let reason: McpUnauthorizedReason | null = null;
     for (const source of this.sources) {
       try {
         return await source.resolve(bearerToken);
@@ -48,10 +55,13 @@ export class CompositeMcpSessionSource implements McpSessionPort {
         if (!isUnrecognisedCredential(error)) {
           throw error;
         }
+        reason = unauthorizedReasonOf(error) ?? reason;
       }
     }
 
-    throw McpErrors.credentialInvalid();
+    throw reason
+      ? McpErrors.credentialInvalid({ unauthorizedReason: reason })
+      : McpErrors.credentialInvalid();
   }
 }
 
@@ -77,6 +87,8 @@ export function createSessionSource(
   sources: {
     readonly config: McpSessionPort;
     readonly db: McpSessionPort;
+    /** OAuth access tokens: `both` only, because consent needs the Privy source. */
+    readonly oauth: McpSessionPort;
     readonly privy: McpSessionPort;
   },
 ): McpSessionPort {
@@ -86,7 +98,14 @@ export function createSessionSource(
     case SessionSourceMode.DB:
       return sources.db;
     case SessionSourceMode.BOTH:
-      return new CompositeMcpSessionSource([sources.config, sources.db, sources.privy]);
+      // The API-key and OAuth sources refuse a token of another shape before
+      // any read, so each token reaches its own source and a Privy JWT the last.
+      return new CompositeMcpSessionSource([
+        sources.config,
+        sources.db,
+        sources.oauth,
+        sources.privy,
+      ]);
     case SessionSourceMode.CONFIG:
     default:
       return sources.config;

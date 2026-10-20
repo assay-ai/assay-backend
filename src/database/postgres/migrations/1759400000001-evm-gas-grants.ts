@@ -3,7 +3,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 /**
  * The ledger behind the zero-ETH withdraw grant.
  *
- * `X402Escrow.withdraw()` is `msg.sender`-only and pays `msg.sender`, and there
+ * `AssayEscrow.withdraw()` is `msg.sender`-only and pays `msg.sender`, and there
  * is no `withdrawBySig` by design — which is exactly what makes a hardware
  * wallet a sufficient upgrade later, and exactly what leaves a buyer who
  * deposited USDG and holds no ETH with no exit at all. The answer: the relayer

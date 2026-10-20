@@ -1,7 +1,7 @@
 import { getBytesEncoder, getProgramDerivedAddress } from '@solana/kit';
 import type { Address, ProgramDerivedAddress, ReadonlyUint8Array } from '@solana/kit';
 
-import { X402_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
 
 /**
  * The one PDA finder Codama does not render, and why it is hand-written.
@@ -45,7 +45,7 @@ export async function findSlashRecordPda(
   seeds: SlashRecordSeeds,
   config: { programAddress?: Address | undefined } = {},
 ): Promise<ProgramDerivedAddress> {
-  const { programAddress = X402_PAYMENT_PROGRAM_ADDRESS } = config;
+  const { programAddress = ASSAY_PAYMENT_PROGRAM_ADDRESS } = config;
   return getProgramDerivedAddress({
     programAddress,
     seeds: [getBytesEncoder().encode(SLASH_RECORD_SEED), getBytesEncoder().encode(seeds.requestId)],

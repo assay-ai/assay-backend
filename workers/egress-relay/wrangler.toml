@@ -1,0 +1,12 @@
+name = "assay-egress-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-18"
+
+# Custom domain route (set after the zone is chosen):
+# routes = [{ pattern = "egress.example.com", custom_domain = true }]
+
+[vars]
+ALLOW_HTTP = "0"
+
+# Secrets (never in this file): wrangler secret put RELAY_TOKEN
+# Optional during rotation:     wrangler secret put RELAY_TOKEN_NEXT

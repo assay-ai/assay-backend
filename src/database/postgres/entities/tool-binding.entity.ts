@@ -44,13 +44,10 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Index('idx_tool_bindings_tool_id_status', ['toolId', 'status'])
 export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /**
-   * The tool this implements, from the catalogue seed.
-   *
-   * `varchar`, not `uuid`: seeded tool ids are operator-defined strings
-   * (the seed format, and `GetToolBindingParamsDto` already says so).
-   * There is no `tools` table to reference — see the migration for why.
+   * The tool this implements: `tools.id` (`fk_tool_bindings_tool`). The seeded
+   * tools are mirrored into `tools` at boot by `ToolRegistrySeeder`.
    */
-  @Column({ name: 'tool_id', type: 'varchar', length: 128 })
+  @Column({ name: 'tool_id', type: 'uuid' })
   toolId: string;
 
   /** The provider's own URL, unchanged. `requestMapping.path` is appended to it. */
@@ -73,6 +70,10 @@ export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete
 
   @Column({ name: 'pricing_mode', type: 'varchar', length: 16 })
   pricingMode: string;
+
+  /** `BindingAuthMode`. Not a versioned field: changing it never bumps `mappingVersion`. */
+  @Column({ name: 'auth_mode', type: 'varchar', length: 16, default: 'NONE' })
+  authMode: string;
 
   /** Minor units, as a string — `numeric(78,0)`, like every other money column. */
   @Column({ name: 'price_amount', type: 'numeric', precision: 78, scale: 0 })
@@ -183,6 +184,33 @@ export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete
    */
   @Column({ name: 'pause_reason', type: 'varchar', length: 24, nullable: true })
   pauseReason: string | null;
+
+  /**
+   * The contract majors this binding serves: `^1`, or `^1 || ^2` (design spec
+   * §7.2, §7.5). Each major in it needs a green tester run at the revision
+   * being published, and its mapping is checked against that major's
+   * contract at save.
+   */
+  @Column({ name: 'tool_version_range', type: 'varchar', length: 32, default: '^1' })
+  toolVersionRange: string;
+
+  /** The contract's optional output fields this binding promises to return. */
+  @Column({
+    name: 'provides_output_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  providesOutputFields: string[];
+
+  /** The contract's optional input fields this binding passes on to its endpoint. */
+  @Column({
+    name: 'supports_input_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  supportsInputFields: string[];
 
   /**
    * When the pause began, written alongside {@link pauseReason}.

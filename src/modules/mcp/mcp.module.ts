@@ -13,8 +13,10 @@ import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-se
 import { parseSessionSourceMode } from '@modules/auth/domain/session-source-mode';
 import { createSessionSource } from '@modules/auth/services/composite-mcp-session.source';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolsetModule } from '@modules/toolset/toolset.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 
 import { MCP_SESSION_SOURCE } from './ports/mcp-session.port';
@@ -29,8 +31,17 @@ import {
   MCP_PRICING,
   McpPricingConfig,
 } from './services/mcp-pricing.config';
+import {
+  MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyStore,
+  mcpIdempotencyConfigFactory,
+} from './services/mcp-idempotency.store';
+import { McpDiscoveryService } from './services/mcp-discovery.service';
 import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
+import { CallAttributionWriter } from './services/call-attribution.writer';
+import { McpCallRecorder } from './services/mcp-call-recorder.service';
+import { McpRateLimiter } from './services/mcp-rate-limiter.service';
 
 /**
  * MCP domain — the interface agents actually call.
@@ -82,6 +93,9 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
     // `LedgerModule`, which both need it for their own producers.
     SpendPolicyModule,
     FreeTierModule,
+    // What each MCP URL serves and what each caller may use: the view, the
+    // access policy and the agent rules a call is checked and routed under.
+    ToolsetModule,
   ],
   providers: [
     // Empty until an operator points `MCP_CREDENTIALS_FILE` at a file. An empty
@@ -102,6 +116,7 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
         config: ConfigService,
         configSource: ConfigMcpSessionSource,
         dbSource: DbCredentialMcpSessionSource,
+        oauthSource: OAuthAccessTokenMcpSessionSource,
         privySource: PrivyMcpSessionSource,
         blocklist: AccountBlocklistService,
       ) =>
@@ -111,6 +126,7 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
           createSessionSource(parseSessionSourceMode(config.get<string>('auth.sessionSource')), {
             config: configSource,
             db: dbSource,
+            oauth: oauthSource,
             privy: privySource,
           }),
           blocklist,
@@ -119,6 +135,7 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
         ConfigService,
         ConfigMcpSessionSource,
         DbCredentialMcpSessionSource,
+        OAuthAccessTokenMcpSessionSource,
         PrivyMcpSessionSource,
         AccountBlocklistService,
       ],
@@ -134,10 +151,34 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
       inject: [ConfigService],
     },
 
+    {
+      // `_meta["assay/idempotency-key"]`: how long a keyed call's result stays
+      // replayable — the retry window, default 900 s, at most 3600 s — and the
+      // largest output kept, default 256 KB. A bad value fails the boot.
+      provide: MCP_IDEMPOTENCY_CONFIG,
+      useFactory: (config: ConfigService) =>
+        mcpIdempotencyConfigFactory(
+          config.get<string>('MCP_IDEMPOTENCY_TTL_SECONDS'),
+          config.get<string>('MCP_IDEMPOTENCY_MAX_RESULT_BYTES'),
+        ),
+      inject: [ConfigService],
+    },
+    McpIdempotencyStore,
     McpCatalogueService,
     McpToolCallService,
+    McpDiscoveryService,
     McpServerFactory,
+    CallAttributionWriter,
+    McpCallRecorder,
+    McpRateLimiter,
   ],
-  exports: [McpCatalogueService, McpToolCallService, McpServerFactory, MCP_SESSION_SOURCE],
+  exports: [
+    McpCatalogueService,
+    McpDiscoveryService,
+    McpToolCallService,
+    McpServerFactory,
+    MCP_SESSION_SOURCE,
+    ToolsetModule,
+  ],
 })
 export class McpModule {}

@@ -16,13 +16,6 @@ export const SOLANA_PAYMENT_SCHEME = 'exact';
 /**
  * Version tag on the canonical payout-proof message.
  *
- * **A withdrawal-authorization message used to lead this file** —
- * `WITHDRAWAL_MESSAGE_VERSION`, `'x402-withdrawal/v1'` — before per-buyer escrows moved
- * the buyer's exit onto a chain transaction the buyer signs directly
- * (`EscrowIntentBuilderPort`; see `ChainAdapter`'s class comment on
- * `buildPayoutProofMessage`). There is no off-chain withdrawal authorization
- * left to distinguish this tag from.
- *
  * Distinct from the voucher's own domain tag, for the confusion that already
  * refuses to allow: "sign this to prove you own this wallet" must never
  * verify as "sign this to pay", in either direction. A payout-proof signature
@@ -31,7 +24,7 @@ export const SOLANA_PAYMENT_SCHEME = 'exact';
  * signature obtained for one purpose satisfy a security check it was never
  * meant to.
  */
-export const PAYOUT_PROOF_MESSAGE_VERSION = 'x402-payout-proof/v1';
+export const PAYOUT_PROOF_MESSAGE_VERSION = 'assay-payout-proof/v1';
 
 /**
  * Version tag on the stake-authority proof.
@@ -55,14 +48,14 @@ export const PAYOUT_PROOF_MESSAGE_VERSION = 'x402-payout-proof/v1';
  *   the message and is newline-delimited, so two messages are equal exactly
  *   when their two tags are: the two directions are logically equivalent, and
  *   neither is sensitive to a prefix. Verified by mutation — setting this to
- *   `'x402-payout-proof/v1X'` leaves both cross directions green, and the
+ *   `'assay-payout-proof/v1X'` leaves both cross directions green, and the
  *   whole unit suite fails in exactly one place: the
  *   `expect(text).not.toContain(PAYOUT_PROOF_MESSAGE_VERSION)` assertion in
  *   that spec's `leads the message with the version tag`. Nothing else covers
  *   a prefix collision, so that assertion is not the redundant one it looks
  *   like.
  */
-export const STAKE_AUTHORITY_MESSAGE_VERSION = 'x402-stake-authority/v1';
+export const STAKE_AUTHORITY_MESSAGE_VERSION = 'assay-stake-authority/v1';
 
 /** DI token for the Solana JSON-RPC client. */
 /**

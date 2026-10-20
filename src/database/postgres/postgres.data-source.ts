@@ -3,6 +3,8 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 import { config } from 'dotenv';
 
+import { ParameterlessQueryLogger } from './parameterless-query.logger';
+
 // Load environment variables
 config();
 
@@ -52,5 +54,7 @@ export const PostgresDataSource = new DataSource({
 
   synchronize: false,
   logging: isLogging,
+  // As the app does: queries, never their bound parameters (R-OA-27).
+  ...(isLogging && { logger: new ParameterlessQueryLogger() }),
   migrationsTransactionMode: 'each',
 });

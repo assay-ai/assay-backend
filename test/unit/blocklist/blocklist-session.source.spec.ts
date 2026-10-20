@@ -36,6 +36,7 @@ function session(callerKind: McpCallerKind, overrides: Partial<McpSession> = {})
     chainId: CHAIN,
     label: null,
     callerKind,
+    paymentsAllowed: true,
     delegateAccount: null,
     ...overrides,
   };
@@ -262,8 +263,6 @@ describe('the revoke routes a blocked person still needs (audit E-5)', () => {
     [EscrowDelegatesController, 'revokeIntent', 'POST'],
     [EscrowDelegatesController, 'revoke', 'POST'],
     [AgentCredentialsController, 'revoke', 'DELETE'],
-    // Review S-8: an objection only takes authority away from the platform.
-    [ProviderSlashProposalsController, 'dispute', 'POST'],
     [ProviderSlashProposalsController, 'acknowledge', 'POST'],
   ] as const)('lets a blocked person through %p.%s', async (controller, handler, method) => {
     for (const [role, kind] of [
@@ -314,10 +313,16 @@ describe('the MCP endpoint, for a blocked person', () => {
         }),
       ),
       { create } as never,
+      { resolve: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
     );
 
     await expect(
-      controller.handle({ headers: { authorization: 'Bearer t' } } as never, {} as never),
+      controller.handle(
+        { method: 'POST', originalUrl: '/', headers: { authorization: 'Bearer t' } } as never,
+        {} as never,
+      ),
     ).rejects.toMatchObject({ errorCode: AccountErrorCode.ACCOUNT_BLOCKED });
     expect(create).not.toHaveBeenCalled();
   });

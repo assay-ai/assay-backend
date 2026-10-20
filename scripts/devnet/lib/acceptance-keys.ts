@@ -63,21 +63,3 @@ export async function bootSender(): Promise<{ sender: Sender; operator: KeyPairS
   const sender = createSender(config.rpcUrl, 'confirmed');
   return { sender, operator };
 }
-
-/**
- * The same cluster connection, **without** loading the operator keypair.
- *
- * For the `--resume` path, which reads the provider's stake account and the
- * slash record off the chain and signs nothing of its own: the one signature
- * step 9 needs is the verifier's, and that is made inside the Nest context by
- * `VerifierSigningService`, never here.
- *
- * Separate from {@link bootSender} rather than a flag on it, because loading a
- * funding key you will not spend is a prerequisite you do not have: a machine
- * that can resume a case it did not seed should not be refused for want of a
- * keypair file it never reads. Same `solana config get` RPC url as the seeding
- * run used, so a stake reading taken here is comparable with one taken there.
- */
-export function bootReadOnlySender(): Sender {
-  return createSender(solanaConfig().rpcUrl, 'confirmed');
-}

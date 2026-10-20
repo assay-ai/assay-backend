@@ -4,7 +4,7 @@ import {
   findStakePda,
   getConfigEncoder,
   getProviderStakeEncoder,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';

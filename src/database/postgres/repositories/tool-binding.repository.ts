@@ -75,20 +75,4 @@ export class ToolBindingRepository extends OrganizationScopedRepository<ToolBind
       .addOrderBy('binding.id', 'ASC')
       .getMany();
   }
-
-  /**
-   * Every tool id that has at least one binding, from every provider.
-   *
-   * Cross-organization for the same reason as {@link findByTool}: it answers
-   * "which tools can be served at all", which is a question about the whole
-   * catalogue and not about one tenant.
-   */
-  async findServedToolIds(): Promise<string[]> {
-    const rows = await this.createQueryBuilder('binding')
-      .select('DISTINCT binding.tool_id', 'toolId')
-      .where('binding.organizationId IS NOT NULL')
-      .getRawMany<{ toolId: string }>();
-
-    return rows.map((row) => row.toolId);
-  }
 }

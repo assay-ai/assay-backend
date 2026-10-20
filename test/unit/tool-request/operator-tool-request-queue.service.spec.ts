@@ -1,4 +1,9 @@
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+
+import { ToolRequestRepository } from '@database/postgres/repositories/tool-request.repository';
 import { SortDirection } from '@shared/api';
+import { ListToolRequestQueueQueryDto } from '@modules/tool-request/dto/tool-request.dto';
 import { ToolRequestStatus } from '@modules/tool-request/domain/tool-request-state';
 import { ToolRequestErrorCode } from '@modules/tool-request/errors/tool-request.errors';
 import { ToolRequestQueueService } from '@modules/tool-request/services/operator-tool-request-queue.service';
@@ -25,6 +30,47 @@ describe('ToolRequestQueueService.listQueue', () => {
     await service.listQueue(baseQuery());
 
     expect(requests.queueQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(requests.queueQueryBuilder).toHaveBeenCalledWith(undefined);
+  });
+
+  it('passes ?status= through, so acknowledged requests can be listed and accepted later', async () => {
+    const fake = fakeQueryBuilder([]);
+    const requests = { queueQueryBuilder: jest.fn().mockReturnValue(fake.qb) };
+    const service = new ToolRequestQueueService(requests as never);
+
+    await service.listQueue(baseQuery({ status: [ToolRequestStatus.ACKNOWLEDGED] }));
+
+    expect(requests.queueQueryBuilder).toHaveBeenCalledWith([ToolRequestStatus.ACKNOWLEDGED]);
+  });
+
+  it('the repository filters by status when asked, else on the unanswered ones', () => {
+    const fake = fakeQueryBuilder([]);
+    const repository = Object.create(ToolRequestRepository.prototype) as ToolRequestRepository;
+    Object.defineProperty(repository, 'manager', {
+      value: { createQueryBuilder: () => fake.qb },
+    });
+
+    repository.queueQueryBuilder([ToolRequestStatus.ACKNOWLEDGED, ToolRequestStatus.OPEN]);
+    repository.queueQueryBuilder();
+
+    expect(fake.wheres).toEqual([
+      {
+        sql: 'request.status IN (:...statuses)',
+        params: { statuses: ['ACKNOWLEDGED', 'OPEN'] },
+      },
+      { sql: 'request.first_responded_at IS NULL', params: {} },
+    ]);
+  });
+
+  it('?status= reads one value, a repeated one, or a comma list, and rejects an unknown state', async () => {
+    const parse = async (status: unknown) => {
+      const dto = plainToInstance(ListToolRequestQueueQueryDto, { status });
+      return { dto, errors: await validate(dto) };
+    };
+    expect((await parse('ACKNOWLEDGED')).dto.status).toEqual(['ACKNOWLEDGED']);
+    expect((await parse(['OPEN', 'ACKNOWLEDGED'])).dto.status).toEqual(['OPEN', 'ACKNOWLEDGED']);
+    expect((await parse('OPEN,ACKNOWLEDGED')).dto.status).toEqual(['OPEN', 'ACKNOWLEDGED']);
+    expect((await parse('NOPE')).errors.map((error) => error.property)).toEqual(['status']);
   });
 
   it('maps rows to the thinner queue-row DTO', async () => {

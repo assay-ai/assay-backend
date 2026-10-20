@@ -627,15 +627,15 @@ describe('ProviderStakeService — a chain reading the stake source cannot see',
   /**
    * The lockout this describe block exists for, in one sentence: the screen
    * answers "how much have you staked" out of `PROVIDER_STAKE_SOURCE`, and
-   * `chainReadable` out of `ONCHAIN_STAKE_READER`, so under
-   * `PROVIDER_STAKE_SOURCE_MODE=config` a provider with real collateral is
-   * told `hasKnownStake: false` beside a `chainReadable: true` that says the
-   * chain answered — which it did, with the balance, into the same response.
+   * `chainReadable` out of `ONCHAIN_STAKE_READER`, so a stale or failed source
+   * read tells a provider with real collateral `hasKnownStake: false` beside a
+   * `chainReadable: true` that says the chain answered — which it did, with the
+   * balance, into the same response.
    *
    * The DTO is not the thing to change: `staked` has to be the number
    * `evaluateStakeGate` will actually compare, or the screen tells a provider
    * they are covered while the router refuses them. What must not stay is the
-   * SILENCE. These tests pin the log line that names the variable.
+   * SILENCE. These tests pin the log line.
    */
   function chainStake(bonded: string): ReadonlyMap<AccountId, OnChainStake> {
     return new Map<AccountId, OnChainStake>([
@@ -663,7 +663,7 @@ describe('ProviderStakeService — a chain reading the stake source cannot see',
     warn.mockRestore();
   });
 
-  it('warns, naming the variable, when the chain holds stake the source has no reading for', async () => {
+  it('warns when the chain holds stake the source has no reading for', async () => {
     const res = await build({
       stakeAuthority: AUTHORITY,
       onChain: chainStake('60000000'),
@@ -677,7 +677,7 @@ describe('ProviderStakeService — a chain reading the stake source cannot see',
 
     expect(warn).toHaveBeenCalledTimes(1);
     const message = String(warn.mock.calls[0][0]);
-    expect(message).toContain('PROVIDER_STAKE_SOURCE_MODE');
+    expect(message).toContain('stake source');
     // The three facts an operator needs to act without opening a debugger.
     expect(message).toContain(PROVIDER);
     expect(message).toContain(AUTHORITY);
@@ -959,9 +959,7 @@ describe('GET /providers/me/stake reports stake PER CHAIN', () => {
   it('carries the FLOOR’s chain even when the provider is enrolled only elsewhere', async () => {
     // Every figure denominated in the floor's asset — `requirementTotal`,
     // `headroom`, `shortfall` — is about this chain, so a response that omitted
-    // it could not be read. It also keeps the seed-file reading of a provider
-    // with no enrolment row, which is the ordinary state under
-    // PROVIDER_STAKE_SOURCE_MODE=config.
+    // it could not be read.
     const res = await build({
       enrolledOn: [{ chainId: SECOND_CHAIN, stakeAuthority: SECOND_AUTHORITY }],
       stake: { staked: usdc('60000000'), observedAt: OBSERVED },

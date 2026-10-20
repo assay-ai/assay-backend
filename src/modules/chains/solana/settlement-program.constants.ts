@@ -1,17 +1,8 @@
 /**
  * What the backend needs to know about the Anchor settlement program that is
- * *not* in the program itself.
- *
- * ## The seeds used to live here, and no longer do
- *
- * This file used to carry `VERIFIER_SEED` and `SETTLEMENT_CONFIG_SEED`, copied
- * byte-for-byte out of the program's `constants.rs` because the PDA has to be
- * derived on both sides. They are now `findVerifierKeyPda` and `findConfigPda`
- * in `@x402/settlement-client`, generated from the IDL, so there is no second
- * copy to keep in step and no unit test needed to pin one against the other.
- *
- * What remains here is the one thing the program cannot tell us: **which
- * deployment of it this process is talking to.**
+ * *not* in the program itself: **which deployment of it this process is
+ * talking to.** The PDA seeds come from `@assay/settlement-client`
+ * (`findVerifierKeyPda`, `findConfigPda`), generated from the IDL.
  */
 
 /**

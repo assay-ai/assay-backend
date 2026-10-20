@@ -5,6 +5,8 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { EscrowDelegationStatus } from '@modules/settlement/ports/escrow-delegation.port';
+import { EscrowDelegationWithUnsettled } from '@modules/settlement/services/escrow-delegation.service';
 
 import { deployment } from '../chains/evm/evm-fixtures';
 
@@ -66,6 +68,32 @@ class FakeCredentials {
   }
 }
 
+/** The payer's standing delegations, as `EscrowDelegationService.list` reads them from the chain. */
+class FakeDelegations {
+  standing: EscrowDelegationWithUnsettled[] = [];
+  readonly reads: AccountId[] = [];
+  failure: Error | null = null;
+  async list(payer: AccountId) {
+    this.reads.push(payer);
+    if (this.failure) throw this.failure;
+    return this.standing;
+  }
+}
+
+const standing = (
+  delegate: string,
+  status: EscrowDelegationStatus = EscrowDelegationStatus.ACTIVE,
+): EscrowDelegationWithUnsettled =>
+  ({
+    delegate: delegate as AccountId,
+    maxVoucherAmount: 500_000n,
+    maxPerWindow: 5_000_000n,
+    spentInWindow: 1_250n,
+    validUntil: 1_900_000_000n,
+    status,
+    unsettled: {},
+  }) as unknown as EscrowDelegationWithUnsettled;
+
 const session = (overrides: Partial<McpSession> = {}): McpSession => ({
   credentialId: 'cred-1',
   organizationId: 'org-1',
@@ -74,6 +102,7 @@ const session = (overrides: Partial<McpSession> = {}): McpSession => ({
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.AGENT,
+  paymentsAllowed: true,
   storedCredential: true,
   ...overrides,
 });
@@ -86,15 +115,18 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
   let redis: FakeRedis;
   let credentials: FakeCredentials;
   let service: AgentDelegateService;
+  let delegations: FakeDelegations;
 
   beforeEach(() => {
     redis = new FakeRedis();
     credentials = new FakeCredentials();
+    delegations = new FakeDelegations();
     const adapter = new EvmChainAdapter(new Map(), new Map([[CHAIN, deployment(CHAIN)]]), [CHAIN]);
     service = new AgentDelegateService(
       credentials as never,
       new ChainAdapterRegistry([adapter], [CHAIN]),
       redis as never,
+      delegations as never,
     );
   });
 
@@ -147,6 +179,102 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     expect(credentials.updates).toHaveLength(1);
     expect(credentials.updates[0].criteria).toEqual({ organizationId: 'org-1', id: 'cred-1' });
     expect((await service.current(session())).delegate).toBe(`${CHAIN}:${delegateKey.address}`);
+  });
+
+  describe('GET /agents/me/delegate — the agent label and paidCalls (§7.10 item 1, R-PAY-3)', () => {
+    const DELEGATE = `${CHAIN}:${delegateKey.address}`;
+    const bound = () =>
+      credentials.rows.set('cred-1', {
+        delegateAccount: DELEGATE,
+        delegateBoundAt: new Date('2026-10-01T00:00:00.000Z'),
+      });
+
+    it('no delegate bound → paidCalls null, the label beside the credential id, no chain read', async () => {
+      expect(await service.current(session({ label: 'research bot' }))).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: 'research bot',
+        delegate: null,
+        boundAt: null,
+        paidCalls: null,
+        paidCallsUnknown: false,
+      });
+      expect(delegations.reads).toEqual([]);
+    });
+
+    it("an authorised key → ACTIVE with the caps, read from the payer's delegations", async () => {
+      bound();
+      delegations.standing = [standing(`${CHAIN}:${otherKey.address}`), standing(DELEGATE)];
+      expect(await service.current(session())).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: null,
+        delegate: DELEGATE,
+        boundAt: '2026-10-01T00:00:00.000Z',
+        paidCalls: {
+          status: 'ACTIVE',
+          maxVoucherAmount: '500000',
+          maxPerWindow: '5000000',
+          spentInWindow: '1250',
+          validUntil: new Date(1_900_000_000 * 1000).toISOString(),
+        },
+        paidCallsUnknown: false,
+      });
+      expect(delegations.reads).toEqual([session().agentAccount]);
+    });
+
+    it('chain read fails → the stored binding still answers, paidCalls null and marked unknown', async () => {
+      bound();
+      delegations.failure = new Error('RPC timeout');
+      expect(await service.current(session({ label: 'research bot' }))).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: 'research bot',
+        delegate: DELEGATE,
+        boundAt: '2026-10-01T00:00:00.000Z',
+        paidCalls: null,
+        paidCallsUnknown: true,
+      });
+    });
+
+    it('matches the bound key in any spelling of its address', async () => {
+      bound();
+      delegations.standing = [standing(`${CHAIN}:${delegateKey.address.toLowerCase()}`)];
+      expect((await service.current(session())).paidCalls?.status).toBe('ACTIVE');
+    });
+
+    it('past validUntil → EXPIRED with its caps', async () => {
+      bound();
+      delegations.standing = [standing(DELEGATE, EscrowDelegationStatus.EXPIRED)];
+      expect((await service.current(session())).paidCalls).toMatchObject({
+        status: 'EXPIRED',
+        maxPerWindow: '5000000',
+      });
+    });
+
+    it("bound but not authorised (or revoked) → NONE; another key's grant is never shown", async () => {
+      bound();
+      delegations.standing = [standing(`${CHAIN}:${otherKey.address}`)];
+      expect((await service.current(session())).paidCalls).toEqual({
+        status: 'NONE',
+        maxVoucherAmount: null,
+        maxPerWindow: null,
+        spentInWindow: null,
+        validUntil: null,
+      });
+    });
+
+    it('returns the stored label exactly: the server does not escape it (the proxy sanitises on print)', async () => {
+      const label = 'bot <b>"x"</b> \u00e9';
+      expect((await service.current(session({ label }))).agentLabel).toBe(label);
+    });
+
+    it('bind answers with the agent label too', async () => {
+      const { challenge, signature } = await signChallenge();
+      const answer = await service.bind(
+        session({ label: 'research bot' }),
+        challenge.challengeId,
+        signature,
+      );
+      expect(answer).toMatchObject({ credentialId: 'cred-1', agentLabel: 'research bot' });
+    });
   });
 
   it('refuses a signature by any other key, and binds nothing', async () => {
@@ -335,12 +463,80 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
   });
 
+  /**
+   * R-OA-22 (defence in depth): only API keys and `assay-mcp` grants may bind a
+   * payment key. Payments need `paymentsAllowed === true`, so a session that
+   * lacks the field is refused like one that says false (fail closed).
+   */
+  describe('a session without paymentsAllowed === true', () => {
+    function spies() {
+      return [
+        jest.spyOn(redis, 'set'),
+        jest.spyOn(redis, 'getdel'),
+        jest.spyOn(credentials, 'findOneBy'),
+        jest.spyOn(credentials, 'update'),
+        jest.spyOn(credentials, 'findOtherDelegateHolders'),
+        jest.spyOn(credentials, 'releaseDelegateFromExpired'),
+      ];
+    }
+
+    const refused: Array<[string, Partial<McpSession>]> = [
+      ['false (a third-party OAuth grant)', { paymentsAllowed: false }],
+      ['missing', { paymentsAllowed: undefined }],
+    ];
+
+    it.each(refused)(
+      'paymentsAllowed %s → challenge, bind and current refused before any Redis or DB access',
+      async (_label, overrides) => {
+        const watched = spies();
+        const s = session(overrides);
+
+        await expect(service.challenge(s, delegateKey.address)).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+          statusCode: 403,
+        });
+        await expect(service.bind(s, 'challenge-1', '0xsig')).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+        });
+        await expect(service.current(s)).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+        });
+
+        for (const spy of watched) expect(spy).not.toHaveBeenCalled();
+        expect(redis.store.size).toBe(0);
+      },
+    );
+
+    it('paymentsAllowed true → challenge and bind proceed', async () => {
+      const { challenge, signature } = await signChallenge(
+        delegateKey,
+        session({ paymentsAllowed: true }),
+      );
+      const bound = await service.bind(
+        session({ paymentsAllowed: true }),
+        challenge.challengeId,
+        signature,
+      );
+      expect(bound.delegate).toBe(`${CHAIN}:${delegateKey.address}`);
+    });
+
+    it('a config-file token is still refused as agent-only first', async () => {
+      await expect(
+        service.challenge(
+          session({ storedCredential: undefined, paymentsAllowed: false }),
+          delegateKey.address,
+        ),
+      ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
+    });
+  });
+
   it('refuses a chain without voucher delegation', async () => {
     const solana = { resolve: () => ({ toAccountId: jest.fn() }) };
     const onSolana = new AgentDelegateService(
       credentials as never,
       solana as never,
       redis as never,
+      delegations as never,
     );
     await expect(onSolana.challenge(session(), delegateKey.address)).rejects.toMatchObject({
       errorCode: 'ACCOUNT_DELEGATE_BINDING_UNSUPPORTED',

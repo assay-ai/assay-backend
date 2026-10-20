@@ -12,7 +12,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
-import { X402_CONFIG_ABI, X402_ESCROW_ABI, X402_STAKE_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
 import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
@@ -236,7 +236,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       chainId,
       to: this.escrowAccount(chainId),
       data: encodeFunctionData({
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'redeemVoucher',
         args,
       }),
@@ -319,7 +319,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       chainId,
       to: this.escrowAccount(chainId),
       data: encodeFunctionData({
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'redeemVoucherBatch',
         args: [admissible.map((i) => vouchers[i]), admissible.map((i) => signatures[i])],
       }),
@@ -404,7 +404,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         if (getAddress(log.address) !== escrow) continue;
         let decoded: { eventName: string; args: unknown };
         try {
-          decoded = decodeEventLog({ abi: X402_ESCROW_ABI, data: log.data, topics: log.topics });
+          decoded = decodeEventLog({ abi: ASSAY_ESCROW_ABI, data: log.data, topics: log.topics });
         } catch {
           continue;
         }
@@ -444,7 +444,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     try {
       await this.client(chainId).readContract({
         address: getAddress(this.deployment(chainId).escrow),
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName,
         args,
         account: sender,
@@ -497,24 +497,24 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       this.redeemer.address(chainId),
       client.multicall({
         contracts: [
-          { address: config, abi: X402_CONFIG_ABI, functionName: 'params', args: [] },
-          { address: config, abi: X402_CONFIG_ABI, functionName: 'paused', args: [] },
+          { address: config, abi: ASSAY_CONFIG_ABI, functionName: 'params', args: [] },
+          { address: config, abi: ASSAY_CONFIG_ABI, functionName: 'paused', args: [] },
           ...payers.map((payer) => ({
             address: getAddress(deployment.escrow),
-            abi: X402_ESCROW_ABI,
+            abi: ASSAY_ESCROW_ABI,
             functionName: 'escrowOf',
             args: [payer] as readonly unknown[],
           })),
           ...providers.map((provider) => ({
             address: getAddress(deployment.stake),
-            abi: X402_STAKE_ABI,
+            abi: ASSAY_STAKE_ABI,
             functionName: 'bondedOf',
             args: [provider] as readonly unknown[],
           })),
           ...(effective
             ? payers.map((payer, index) => ({
                 address: getAddress(deployment.escrow),
-                abi: X402_ESCROW_ABI,
+                abi: ASSAY_ESCROW_ABI,
                 functionName: 'effectiveCapsOf',
                 args: [payer, signers[index]] as readonly unknown[],
               }))
@@ -561,7 +561,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       const reads = await client.multicall({
         contracts: delegated.map(({ request }) => ({
           address: getAddress(deployment.escrow),
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'delegationOf',
           args: [
             this.addressOf(request.payer, chainId),

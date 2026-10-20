@@ -82,7 +82,7 @@ import {
   reversalAttestationMessage,
   settlementAttestationMessage,
   slashAttestationMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { solanaBin } from '../devnet/lib/solana-cli';
 import { createSender, loadKeypairSigner } from './lib/sender';
@@ -226,7 +226,7 @@ function web3ToKit(instruction: TransactionInstruction): Instruction {
 
 // ── the signed messages ─────────────────────────────────────────────────────
 //
-// From `@x402/settlement-client`, not from here. They are the one part of the
+// From `@assay/settlement-client`, not from here. They are the one part of the
 // program's interface that is not in the IDL, so they are hand-written — but in
 // exactly one file, which is reviewed and tested, rather than re-derived by each
 // caller. See `packages/settlement-client/src/attestation-message.ts`.
@@ -301,7 +301,7 @@ async function main(): Promise<void> {
   // signature — the program has no admin path to any of them, which is half of
   // the separation of powers that keeps the platform from moving a provider's
   // stake, and would be invisible if one key did everything here.
-  const providerPath = join(mkdtempSync(join(tmpdir(), 'x402-exercise-')), 'provider.json');
+  const providerPath = join(mkdtempSync(join(tmpdir(), 'assay-exercise-')), 'provider.json');
   execFileSync(solanaBin('solana-keygen'), [
     'new',
     '--no-bip39-passphrase',
@@ -793,7 +793,7 @@ async function main(): Promise<void> {
   }
 
   async function freshKeypair(): Promise<Address> {
-    const path = join(mkdtempSync(join(tmpdir(), 'x402-agent-')), 'agent.json');
+    const path = join(mkdtempSync(join(tmpdir(), 'assay-agent-')), 'agent.json');
     execFileSync(solanaBin('solana-keygen'), ['new', '--no-bip39-passphrase', '-s', '-o', path]);
     const signer = await loadKeypairSigner(path);
     return signer.address;
@@ -827,7 +827,7 @@ async function main(): Promise<void> {
   }
 
   function setupMint(rpcUrl: string, feePayer: string): string {
-    const existing = process.env.X402_EXERCISE_MINT;
+    const existing = process.env.ASSAY_EXERCISE_MINT;
     if (existing) {
       return existing;
     }

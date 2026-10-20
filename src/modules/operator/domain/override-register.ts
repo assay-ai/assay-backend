@@ -104,22 +104,6 @@ const define = (d: OverrideDefinition): OverrideDefinition => Object.freeze(d);
 
 export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = Object.freeze({
   // ── S · Slashing and disputes ────────────────────────────────────────────
-  'S-1': define({
-    code: 'S-1',
-    family: OverrideFamily.SLASHING,
-    action: 'slash_proposal.suspended',
-    label: 'Suspend a pending slash proposal (pre-attestation)',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
-    // The floor. `ArbitrationService.suspend` raises an occurrence to
-    // TWO_PERSON when the case is `AWAITING_SECOND` or `UPHELD`: cancelling a
-    // penalty a second person has confirmed, or is confirming, is not one
-    // person's act. `approverRoles` applies to those occurrences — the checker
-    // must be able to read a case, which `SRE` cannot.
-    approval: ApprovalMode.SINGLE,
-    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    reversible: true,
-    implemented: true,
-  }),
   'S-2': define({
     code: 'S-2',
     family: OverrideFamily.SLASHING,
@@ -128,20 +112,6 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
     approverRoles: [OperatorRole.ADJL],
-    reversible: true,
-    implemented: true,
-  }),
-  'S-3': define({
-    code: 'S-3',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.decided',
-    label: 'Decide a dispute',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    // The mode on the *row* is the floor. `requiresSecondSignature` raises an
-    // individual case to TWO_PERSON on blast radius or materiality; below the
-    // threshold it is single review with a sampled audit, because a blanket
-    // two-person rule cannot be staffed.
-    approval: ApprovalMode.SINGLE,
     reversible: true,
     implemented: true,
   }),
@@ -161,46 +131,6 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
-  'S-12': define({
-    code: 'S-12',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.countersigned',
-    label: 'Countersign or object to another adjudicator’s decision',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    approval: ApprovalMode.SINGLE,
-    reversible: false,
-    // Not in the original register, and added rather than folded into `S-3`.
-    // The second signature is a distinct act by a distinct person, and
-    // filing it under `S-3` would make the log read as though one case had been
-    // decided twice. It also carries a different evidentiary burden: `S-3`
-    // requires 120 characters because it is the decision, and a countersignature
-    // that agreed with a decision already argued at length does not.
-    implemented: true,
-  }),
-  'S-8': define({
-    code: 'S-8',
-    family: OverrideFamily.SLASHING,
-    action: 'dispute.deadline_extended',
-    label: 'Extend a dispute deadline',
-    roles: [OperatorRole.ADJL],
-    approval: ApprovalMode.SINGLE,
-    reversible: false,
-    implemented: true,
-  }),
-  'S-11': define({
-    code: 'S-11',
-    family: OverrideFamily.SLASHING,
-    action: 'fleet_sweep.opened',
-    label: 'Open a fleet sweep from a decided case',
-    roles: [OperatorRole.ADJL],
-    approval: ApprovalMode.TWO_PERSON,
-    // A sweep carries one conclusion to providers who never complained, so the
-    // checker has to be somebody who can read a case — not any operator who
-    // can authenticate.
-    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
-    reversible: false,
-    implemented: true,
-  }),
   /**
    * Prepare the ARBITER's on-chain ruling (assay-evm D-19): an unsigned
    * `upholdSlashBatch` (against the provider) or `cancelSlashBatch` (for them)
@@ -216,6 +146,82 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Prepare the arbiter’s on-chain uphold or cancel of disputed slash records',
     roles: [OperatorRole.ADJL, OperatorRole.TRE],
     approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * Decide a buyer's dispute over one paid call (G3.B1): uphold (refund, and
+   * the call counts against the binding's quality) or reject, with a note.
+   * Single review below `CALL_DISPUTE_TWO_PERSON_THRESHOLD_MINOR`; an upheld
+   * decision owing at least that much is raised to two-person for that
+   * occurrence (`escalateToTwoPerson`).
+   */
+  'S-14': define({
+    code: 'S-14',
+    family: OverrideFamily.SLASHING,
+    action: 'call_dispute.decided',
+    label: 'Decide a buyer’s dispute over a paid call',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * B18, owner-approved 2026-10-18: three operator actions for a case stuck
+   * behind a requested cancel the admin-cancel sweep cannot settle (a window
+   * case opened before the parts model; `slash/domain/stuck-case.ts`). Each
+   * runs only on a fresh chain read taken immediately before it, and each is
+   * a compare-and-set on the case.
+   *
+   * `S-15` closes the cancel when the record reads `Cancelled` on chain. It
+   * moves no money and writes nothing on chain (only the mirror the sweep
+   * would have written), so it is one person's act, like the cancel intent it
+   * stands in for, by the same pair (`ADJL`/`TRE`).
+   */
+  'S-15': define({
+    code: 'S-15',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.chain_cancel_closed',
+    label: 'Close a requested cancel when nothing stands on chain',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * `S-16` records an execution the chain made while the cancel waited,
+   * through the existing `recordAnExecutionNobodyAskedFor` path. It records
+   * money that moved, so it is two-person with the roles and the limit of
+   * `S-5` (the compensation that usually follows it); the limit is checked
+   * against what the chain took.
+   */
+  'S-16': define({
+    code: 'S-16',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.execution_recorded',
+    label: 'Record an on-chain execution that happened while the cancel waited',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL, OperatorRole.TRE],
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * `S-17` puts an upheld penalty back on chain under a fresh epoch once its
+   * old record reads `Cancelled`. It reserves the provider's stake, so it is
+   * two-person, and the checker must be able to read a case (`ADJ`/`ADJL`, as
+   * for suspending an upheld case). The proposal itself is the scheduler's
+   * existing path, with its stake, cap, idempotency and promise guards.
+   */
+  'S-17': define({
+    code: 'S-17',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.reproposed',
+    label: 'Propose again an upheld penalty whose cancelled record is gone',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
     reversible: false,
     implemented: true,
   }),
@@ -381,6 +387,46 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     implemented: false,
   }),
 
+  /**
+   * Standard tool contracts (design spec §7.5, FR-15). Drafting changes
+   * nothing served and is not an override; what reaches traffic is. A
+   * published version and a moved current version change what every buyer
+   * and binding is held to, so both are two-person. A deprecation only
+   * starts a sunset at least 90 days out, and is one operator's act.
+   */
+  'P-10': define({
+    code: 'P-10',
+    family: OverrideFamily.POLICY,
+    action: 'tool_version.published',
+    label: 'Publish a standard tool contract version',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: false,
+    implemented: true,
+  }),
+  'P-11': define({
+    code: 'P-11',
+    family: OverrideFamily.POLICY,
+    action: 'tool.current_version_moved',
+    label: 'Move the contract version unpinned URLs serve',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: true,
+    implemented: true,
+  }),
+  'P-12': define({
+    code: 'P-12',
+    family: OverrideFamily.POLICY,
+    action: 'tool_version.deprecated',
+    label: 'Deprecate a contract major (sunset at least 90 days out)',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+
   // ── A · Access and routing ───────────────────────────────────────────────
   'A-2': define({
     code: 'A-2',
@@ -511,6 +557,137 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     // Raised to TWO_PERSON when the operator removed holds `OPS_ADMIN`.
     approval: ApprovalMode.SINGLE,
     approverRoles: [OperatorRole.OPS_ADMIN],
+    reversible: true,
+    implemented: true,
+  }),
+  /**
+   * Toolset and handle moderation (design spec FR-15, FR-18). A delist or a
+   * takedown is one operator's act and takes effect at once — abuse that
+   * needs stopping cannot wait for a second person — and a different
+   * operator confirms it within 72 hours (`A-18`) or it is reverted
+   * automatically. Renaming a locked handle and reassigning a taken-down one
+   * move a public name between organizations, so they are two-person.
+   */
+  'A-15': define({
+    code: 'A-15',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.delisted',
+    label: 'Delist a public tool set (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-16': define({
+    code: 'A-16',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.taken_down',
+    label: 'Take down a tool set for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-17': define({
+    code: 'A-17',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.taken_down',
+    label: 'Take down a public name for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-18': define({
+    code: 'A-18',
+    family: OverrideFamily.ACCESS,
+    action: 'moderation_cutoff.confirmed',
+    label: 'Confirm another operator’s delist or takedown',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    // The second person is this route's caller, checked to differ from the
+    // operator who acted; the register cannot express "not that person".
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  'A-19': define({
+    code: 'A-19',
+    family: OverrideFamily.ACCESS,
+    action: 'moderation_cutoff.reverted',
+    label: 'Reject a pending delist or takedown, or lift a confirmed one',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    // Raised to TWO_PERSON when lifting a cutoff two people already agreed on.
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJL],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-20': define({
+    code: 'A-20',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.relisted',
+    label: 'Relist a delisted tool set the owner fixed',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-21': define({
+    code: 'A-21',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.renamed',
+    label: 'Rename a locked public name (old name kept as an alias for 90 days)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SUP],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
+  'A-22': define({
+    code: 'A-22',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.reassigned',
+    label: 'Reassign a taken-down public name to another verified organization',
+    roles: [OperatorRole.ADJL, OperatorRole.CMP],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL, OperatorRole.CMP],
+    reversible: false,
+    implemented: true,
+  }),
+  'A-23': define({
+    code: 'A-23',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset_report.resolved',
+    label: 'Resolve a report about a tool set, a tool or a public name',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SUP],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * Provider tools (design spec §7.6, FR-15, FR-18). A review decision moves
+   * a provider tool into the LISTED catalogue (or a new version of a LISTED
+   * one onto the wire), for the content hash the operator read; one
+   * operator decides, as any review. A takedown is FR-18's cutoff: at once,
+   * confirmed by a second operator within 72 hours (`A-18`) or reverted.
+   */
+  'A-24': define({
+    code: 'A-24',
+    family: OverrideFamily.ACCESS,
+    action: 'provider_tool.review_decided',
+    label: 'Approve or reject a provider tool for the catalogue',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.POL],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  'A-25': define({
+    code: 'A-25',
+    family: OverrideFamily.ACCESS,
+    action: 'provider_tool.taken_down',
+    label: 'Take down a provider tool for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
     reversible: true,
     implemented: true,
   }),

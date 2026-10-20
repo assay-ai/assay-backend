@@ -31,13 +31,6 @@ export class CacheService {
     await this.redis.del(key);
   }
 
-  async delPattern(pattern: string): Promise<void> {
-    const keys = await this.redis.keys(pattern);
-    if (keys.length > 0) {
-      await this.redis.del(...keys);
-    }
-  }
-
   async reset(): Promise<void> {
     await this.redis.flushdb();
   }
@@ -55,33 +48,6 @@ export class CacheService {
     await this.redis.expire(key, seconds);
   }
 
-  // Low-level methods for advanced use cases (e.g., SWR cache)
-  /**
-   * Get raw string value without JSON parsing
-   */
-  async getRaw(key: string): Promise<string | null> {
-    return await this.redis.get(key);
-  }
-
-  /**
-   * Set raw string value without JSON stringification
-   */
-  async setRaw(key: string, value: string): Promise<void> {
-    await this.redis.set(key, value);
-  }
-
-  /**
-   * Set raw string value with TTL (in seconds)
-   * Used by SWR cache provider to apply hard expiration on keys.
-   */
-  async setRawWithTtl(key: string, value: string, ttlSeconds: number): Promise<void> {
-    if (ttlSeconds > 0) {
-      await this.redis.setex(key, ttlSeconds, value);
-    } else {
-      await this.redis.set(key, value);
-    }
-  }
-
   /**
    * Set with advanced options (for distributed locking, etc.)
    * @param key - Cache key
@@ -95,14 +61,6 @@ export class CacheService {
     ...options: (string | number)[]
   ): Promise<string | null> {
     return (await this.redis.set(key, value, ...(options as any))) as string | null;
-  }
-
-  /**
-   * Delete multiple keys at once
-   */
-  async delMultiple(...keys: string[]): Promise<void> {
-    if (keys.length === 0) return;
-    await this.redis.del(...keys);
   }
 
   /**

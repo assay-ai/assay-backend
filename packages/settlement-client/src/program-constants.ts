@@ -5,7 +5,7 @@
  * Codama renders instructions, accounts, PDAs, types and errors from the IDL; it
  * does **not** render the IDL's `constants` array. So these two are the one part
  * of the interface that has to be retyped, and the retyping is checked against
- * `idl/x402_payment.json` by
+ * `idl/assay_payment.json` by
  * `backend/test/unit/chains/solana/program-constants.spec.ts` — which is why
  * they belong here, next to the IDL, and not in whichever module happened to
  * need one first.

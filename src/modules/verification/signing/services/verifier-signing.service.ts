@@ -5,7 +5,6 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { VerifierSigningLogEntryRepository } from '@database/postgres';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
-import { AppError } from '@shared/errors/app-errors';
 
 import { VerificationErrors } from '../../errors/verification.errors';
 import { SigningOutcome, SigningRequest } from '../domain/signing-journal';
@@ -290,7 +289,3 @@ export class VerifierSigningService {
 function truncate(message: string): string {
   return message.length <= 240 ? message : `${message.slice(0, 237)}...`;
 }
-
-/** Re-exported so callers do not import the error catalog to catch one case. */
-export const isSigningRateLimited = (error: unknown): boolean =>
-  error instanceof AppError && error.errorCode === 'VERIFICATION_SIGNING_RATE_LIMITED';

@@ -1,7 +1,7 @@
 import { domainSeparator } from 'viem';
 
 import { ChainId } from '../../ports/caip.types';
-import { X402_ESCROW_ABI, X402_STAKE_ABI } from '../abi/x402.abi';
+import { ASSAY_ESCROW_ABI, ASSAY_STAKE_ABI } from '../abi/assay.abi';
 import { EvmDeployment } from '../evm.constants';
 import { evmDomain } from './domain';
 
@@ -16,7 +16,7 @@ export interface EvmDomainReadClient {
 
 /** One proxy whose live `DOMAIN_SEPARATOR()` is not the one this backend signs under. */
 export interface EvmDomainMismatch {
-  readonly contract: 'X402Escrow' | 'X402Stake';
+  readonly contract: 'AssayEscrow' | 'AssayStake';
   readonly address: `0x${string}`;
   readonly expected: `0x${string}`;
   readonly live: `0x${string}`;
@@ -43,8 +43,8 @@ export async function readDomainMismatches(
   deployment: Pick<EvmDeployment, 'escrow' | 'stake'>,
 ): Promise<EvmDomainMismatch[]> {
   const proxies = [
-    { contract: 'X402Escrow' as const, address: deployment.escrow, abi: X402_ESCROW_ABI },
-    { contract: 'X402Stake' as const, address: deployment.stake, abi: X402_STAKE_ABI },
+    { contract: 'AssayEscrow' as const, address: deployment.escrow, abi: ASSAY_ESCROW_ABI },
+    { contract: 'AssayStake' as const, address: deployment.stake, abi: ASSAY_STAKE_ABI },
   ];
   const mismatches: EvmDomainMismatch[] = [];
   for (const proxy of proxies) {

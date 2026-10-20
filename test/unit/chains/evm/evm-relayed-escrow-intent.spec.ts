@@ -1,6 +1,6 @@
 import { decodeFunctionData, encodeFunctionData, toFunctionSelector } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   EVM_RELAYED_INTENT_MAX_GAS,
   EvmRelayedEscrowIntentSubmitter,
@@ -150,7 +150,7 @@ describe('the calldata, built from fields', () => {
     // file computed the same way: a wrong ARGUMENT ORDER is the defect worth
     // catching, and a byte-for-byte comparison against `encodeFunctionData`
     // would agree with any order both sides used.
-    const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+    const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data });
     expect(decoded.functionName).toBe('setLimitsBySig');
     expect(decoded.args).toEqual([
       BUYER,
@@ -174,7 +174,7 @@ describe('the calldata, built from fields', () => {
     await submitter.submit(requestWithdraw());
 
     const decoded = decodeFunctionData({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       data: sendCall.mock.calls[0][0].data,
     });
     expect(decoded.functionName).toBe('requestWithdrawBySig');
@@ -203,7 +203,7 @@ describe('the calldata, built from fields', () => {
     await submitter.submit(setLimits({ account: toAccountId(TESTNET, someoneElse) }));
 
     const decoded = decodeFunctionData({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       data: sendCall.mock.calls[0][0].data,
     });
     expect(decoded.args?.[0]).toBe(someoneElse);
@@ -223,7 +223,7 @@ describe('the calldata, built from fields', () => {
     // The two calldata forms `withdraw` and a redemption would take, neither of
     // which any input to this class can produce.
     expect(selectors).not.toContain(
-      encodeFunctionData({ abi: X402_ESCROW_ABI, functionName: 'withdraw' }),
+      encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'withdraw' }),
     );
   });
 

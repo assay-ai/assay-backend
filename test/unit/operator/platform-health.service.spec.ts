@@ -113,8 +113,6 @@ describe('PlatformHealthService', () => {
     expect(health.policiesTotal).toBe(0);
     expect(health.stakeLocked.amount).toBe('0');
     expect(health.providersWithStake).toBe(0);
-    expect(health.openDisputes).toBe(0);
-    expect(health.oldestOpenDisputeAgeSeconds).toBeNull();
   });
 
   it('reports a false-positive rate of 0, not NaN, when nothing has resolved yet', async () => {
@@ -141,6 +139,16 @@ describe('PlatformHealthService', () => {
 
     expect(health.intentsPerMinute).toBe(15);
     expect(health.intentsPerMinuteDeltaVsHour).toBeCloseTo(0.5);
+  });
+
+  it('carries the "Needs you" counts: pending tool reviews and open call disputes', async () => {
+    const service = build({
+      metrics: { operatorWorkCounts: { pendingToolReviews: 3, openCallDisputes: 7 } },
+    });
+
+    const health = await service.getHealth();
+
+    expect(health).toMatchObject({ pendingToolReviews: 3, openCallDisputes: 7 });
   });
 
   it('reports the delta as null on a cold start — an hour-ago figure of zero', async () => {
@@ -193,11 +201,10 @@ describe('PlatformHealthService', () => {
     expect(health.providersWithStake).toBe(0);
   });
 
-  it('passes the backlog p95 and dispute age straight through, including nulls', async () => {
+  it('passes the backlog p95 straight through', async () => {
     const service = build({
       metrics: {
         verificationBacklog: { count: 4, p95AgeSeconds: 12.5 },
-        openSlashProposalCounts: { count: 2, oldestAgeSeconds: 3600 },
       },
     });
 
@@ -205,8 +212,7 @@ describe('PlatformHealthService', () => {
 
     expect(health.verificationBacklog).toBe(4);
     expect(health.verificationBacklogP95AgeSeconds).toBe(12.5);
-    expect(health.openDisputes).toBe(2);
-    expect(health.oldestOpenDisputeAgeSeconds).toBe(3600);
+    expect(health).not.toHaveProperty('openDisputes');
   });
 });
 

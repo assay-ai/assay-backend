@@ -6,6 +6,8 @@ import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
+import { SHARED_WINDOW_RETRY_MS } from '@shared/interceptors/address-rate-limit.interceptor';
 import {
   HTTP_CACHE_TTL_KEY,
   HTTP_CACHE_KEY_KEY,
@@ -20,6 +22,8 @@ type HandlerFunction = (...args: any[]) => any;
 export class HttpCacheInterceptor implements NestInterceptor {
   private readonly logger = new Logger(HttpCacheInterceptor.name);
   private readonly defaultTTLSeconds = 10;
+  /** After a Redis failure, cached routes go straight to their handler until then. */
+  private skipRedisUntil = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly cacheService: CacheService,
@@ -135,8 +139,13 @@ export class HttpCacheInterceptor implements NestInterceptor {
   // ==================== Cache Operations ====================
 
   private async tryGetFromCache(cacheKey: string): Promise<any | null> {
+    // A Redis that failed a moment ago is not asked again yet, so an outage
+    // costs each cached route one deadline per window rather than per request.
+    if (Date.now() < this.skipRedisUntil) return null;
     try {
-      const cached = await this.cacheService.get(cacheKey);
+      // A Redis that stops answering must cost a public read the deadline, not
+      // the request: on a timeout this is a miss and the handler runs.
+      const cached = await withRedisTimeout(() => this.cacheService.get(cacheKey));
 
       if (cached) {
         this.logger.debug(`HTTP Cache HIT: ${cacheKey}`);
@@ -146,6 +155,7 @@ export class HttpCacheInterceptor implements NestInterceptor {
       this.logger.debug(`HTTP Cache MISS: ${cacheKey}`);
       return null;
     } catch (error) {
+      this.skipRedisUntil = Date.now() + SHARED_WINDOW_RETRY_MS;
       this.logger.error(`HTTP Cache GET error: ${cacheKey}`, error);
       return null;
     }
@@ -167,10 +177,12 @@ export class HttpCacheInterceptor implements NestInterceptor {
   }
 
   private async setCache(cacheKey: string, data: any, ttl: number): Promise<void> {
+    if (Date.now() < this.skipRedisUntil) return;
     try {
-      await this.cacheService.set(cacheKey, data, ttl);
+      await withRedisTimeout(() => this.cacheService.set(cacheKey, data, ttl));
       this.logger.debug(`HTTP Cache SET: ${cacheKey} (TTL: ${ttl}s)`);
     } catch (error) {
+      this.skipRedisUntil = Date.now() + SHARED_WINDOW_RETRY_MS;
       this.logger.error(`HTTP Cache SET error: ${cacheKey}`, error);
     }
   }

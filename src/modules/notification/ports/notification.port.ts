@@ -115,10 +115,51 @@ export enum NotificationEvent {
   SPEND_THRESHOLD_CROSSED = 'spend.threshold_crossed',
   VELOCITY_ANOMALY = 'velocity.anomaly',
   AGENT_PAUSED = 'agent.paused',
+  /**
+   * The same refusal — same agent, tool and code — five times within an hour
+   * (design spec §7.10): an agent stuck on a limit or a rule it cannot fix.
+   * `McpCallRecorder` is the producer.
+   */
+  CALL_REFUSED_REPEATEDLY = 'call.refused_repeatedly',
+
+  /**
+   * A newer version of a shared toolset an agent of this organization used in
+   * the last 30 days (design spec FR-17), with the diff. At most one per
+   * toolset per 7 days; `ToolsetNoticesService` is the producer.
+   */
+  TOOLSET_UPDATE_AVAILABLE = 'toolset.update_available',
+  /**
+   * A contract major this organization calls through, or serves a binding
+   * on, was deprecated: it runs until `sunsetAt` (at least 90 days), then
+   * retires (design spec §7.5). Names the replacement.
+   * `ContractLifecycleService` is the producer.
+   */
+  TOOL_VERSION_DEPRECATED = 'tool_version.deprecated',
+  /** That major reached its sunset and no longer serves calls. */
+  TOOL_VERSION_RETIRED = 'tool_version.retired',
 
   // ── Credentials and signing ─────────────────────────────────────────────
   SESSION_EXPIRING = 'session.expiring',
   SESSION_EXPIRED = 'session.expired',
+  /**
+   * An app's OAuth grant was revoked because a rotated refresh token came back
+   * after one of its descendants was used: the sign-in was copied (spec
+   * §6.3.11). `OAuthTokenService.refresh` is the producer.
+   */
+  OAUTH_GRANT_STOPPED_REUSE = 'oauth.grant_stopped_reuse',
+  /**
+   * A payment key (an agent credential's bound delegate) signed its first
+   * voucher that held money: the earliest sign that a key on someone's
+   * computer is spending (spec §7.9, threats T2/T12). Once per key;
+   * `PaymentKeyFirstSpendService`, from `VoucherService.redeem`, is the producer.
+   */
+  PAYMENT_KEY_FIRST_SPEND = 'payment_key.first_spend',
+  /**
+   * Yesterday's (UTC) paid calls and amount per payment key, for an
+   * organization whose keys spent anything. Once per organization per UTC day;
+   * `PaymentKeyDailySummaryService`, in the scheduler, is the producer.
+   */
+  PAYMENT_KEY_DAILY_SUMMARY = 'payment_key.daily_summary',
 
   // ── Free tier ───────────────────────────────────────────────────────────
   FREE_QUOTA_EXHAUSTED = 'free_quota.exhausted',
@@ -167,8 +208,54 @@ export enum NotificationEvent {
    * override that gives money back.
    */
   PROVIDER_SLASH_REVERSED = 'provider.slash_reversed',
-  /** No producer: the payout batch is defaulted off. */
-  PROVIDER_PAYOUT_SENT = 'provider.payout_sent',
+
+  // ── Buyer call disputes (G3.B1) ─────────────────────────────────────────
+  /** A buyer disputed a call this provider served. `CallDisputeService.file`. */
+  CALL_DISPUTE_OPENED = 'call_dispute.opened',
+  /** The provider replied to the buyer's dispute. Sent to the buyer. */
+  CALL_DISPUTE_RESPONDED = 'call_dispute.responded',
+  /** An operator upheld or rejected the dispute. Sent to the buyer and the provider. */
+  CALL_DISPUTE_DECIDED = 'call_dispute.decided',
+  /**
+   * The disputed call was refunded before any decision: its provider was
+   * blocked and its held payment went back to the buyer. Sent to the buyer.
+   * `HeldCollectionService`.
+   */
+  CALL_DISPUTE_REFUNDED = 'call_dispute.refunded',
+
+  // ── Provider tools (T4) ─────────────────────────────────────────────────
+  /**
+   * An operator approved a provider tool's review: a first review lists it,
+   * a change is published. `ProviderToolReviewService.afterDecision`.
+   */
+  PROVIDER_TOOL_APPROVED = 'provider_tool.approved',
+  /**
+   * An operator rejected a review, with a note saying what to fix ("Fix and
+   * resubmit", design spec §7.6). An approved version keeps serving.
+   */
+  PROVIDER_TOOL_REJECTED = 'provider_tool.rejected',
+  /** An operator took the tool down: REMOVED from every view, calls refused. `A-25`. */
+  PROVIDER_TOOL_TAKEN_DOWN = 'provider_tool.taken_down',
+  /**
+   * The tool's takedown was rejected, lifted, or lapsed unconfirmed. It serves
+   * again unless its handle's takedown still stands.
+   */
+  PROVIDER_TOOL_TAKEDOWN_LIFTED = 'provider_tool.takedown_lifted',
+  /**
+   * An operator drafted a standard contract from (or matched it to) one of
+   * this provider's tools, and invites the provider to bind to it (§7.5).
+   */
+  PROVIDER_TOOL_PROMOTION_INVITED = 'provider_tool.promotion_invited',
+
+  // ── Public names (handles) ──────────────────────────────────────────────
+  /**
+   * An operator took down this organization's public name (`A-17`): every URL
+   * under it stops, and its provider tools with it. One notice for the
+   * handle, not one per tool.
+   */
+  HANDLE_TAKEN_DOWN = 'handle.taken_down',
+  /** The handle's takedown was rejected, lifted or lapsed: it and its tools serve again. */
+  HANDLE_TAKEDOWN_LIFTED = 'handle.takedown_lifted',
 
   // ── Digest ──────────────────────────────────────────────────────────────
   /** No producer: the daily digest job is not built. */
@@ -247,6 +334,13 @@ export interface NotificationPort {
  */
 export interface NotificationOutcome {
   readonly deliveredNow: boolean;
+  /**
+   * `false` only when `notify` failed before the notification was written (its
+   * aggregation claim is then released, so a later call can send it). A
+   * suppressed duplicate counts as recorded: an earlier call holds it.
+   * Absent means recorded (fakes and older producers).
+   */
+  readonly recorded?: boolean;
 }
 
 export const NOTIFICATION_PORT = 'NOTIFICATION_PORT';

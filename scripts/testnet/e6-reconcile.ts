@@ -30,7 +30,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { ChainId, toAccountId, toAssetId } from '@modules/chains/ports/caip.types';
 import { TxRef } from '@modules/chains/ports/x402.types';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
@@ -156,7 +156,7 @@ async function run(phase: string): Promise<E6Result> {
     }
     const hash = await send('buyer depositFor', {
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'depositFor',
       args: [buyer.address, AMOUNT],
       chain,
@@ -169,7 +169,6 @@ async function run(phase: string): Promise<E6Result> {
       intent.id,
       hash as TxRef,
     );
-    await ledger.flush();
     if (settled.status !== 'SETTLED') {
       return {
         outcome: 'FAILED',
@@ -194,7 +193,6 @@ async function run(phase: string): Promise<E6Result> {
     const deadline = Date.now() + FINALITY_TIMEOUT_MS;
     for (;;) {
       const summary = await finality.promotePendingDeposits(50);
-      await ledger.flush();
       console.log(`  finality pass: ${json(summary)}`);
       if (summary.rejected > 0) {
         return {

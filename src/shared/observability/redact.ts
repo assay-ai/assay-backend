@@ -16,7 +16,8 @@
  * a secret that got interpolated into a free-text message before it reached
  * the logger. Redacting by key name at the object boundary means a field
  * named like a secret is safe *by construction*, wherever in the call graph
- * it was built.
+ * it was built. {@link redactSecretsInText} adds a narrow value backstop on
+ * top, for the few secret shapes that are recognisable on sight.
  */
 
 export const REDACTED = '[REDACTED]';
@@ -50,9 +51,6 @@ const FORBIDDEN_KEY_SUBSTRINGS = [
   'privatekey',
   'signingkey',
   'authorization',
-  // The retired `X-Operator-Approver` header carried a second operator's
-  // bearer token. Nothing reads it any more; an old client may still send one.
-  'operatorapprover',
   'apikey',
   'cookie',
 ] as const;
@@ -95,11 +93,89 @@ const FORBIDDEN_KEY_EXACT = new Set([
   'apitoken',
   'authtoken',
   'signature',
+  // OAuth (R-OA-27). `accesstoken`/`refreshtoken` above already cover the
+  // RFC 6749 `access_token`/`refresh_token` spellings once normalized. `rid`
+  // and `requestid` are the consent request id (`OAuthConsentRequestDto`
+  // names it `requestId`); the correlation `requestId` every log line
+  // carries is added by `StructuredLogger` after redaction, so it survives.
+  'codeverifier',
+  'codechallenge',
+  'rid',
+  'requestid',
+  // Hashes of tokens and codes (R-OA-27 forbids hashes) and a query's bound
+  // parameters, which hold them (`QueryFailedError.parameters`). `tokenHash`
+  // stays in SAFE_KEYS: it is the agent-credential exception (owner call).
+  'codehash',
+  'parenthash',
+  'parameters',
+  // OAuth names that are not secret-shaped words on their own. A bare
+  // `state` or `verifier` would blank job states and the verifier service.
+  'oauthstate',
+  'assayreplaces',
+  'authcode',
+  'pkceverifier',
+  'delegatesignature',
+  'authorizationsignature',
   'body',
   'requestbody',
   'responsebody',
   'rawbody',
 ]);
+
+/**
+ * `code` is forbidden as a key unless its value has the shape of an error
+ * code (`ECONNREFUSED`, `ERR_HTTP_HEADERS_SENT`, `invalid_grant`, a Postgres
+ * `23505`): those are diagnostics, and an OAuth authorization code never has
+ * that shape (it is `assay_ac_` plus a mixed-case base64url body, which the
+ * value backstop below catches on its own anyway).
+ */
+const CODE_KEY = 'code';
+const REQUEST_COOKIE_KEY_PREFIX = 'hostassayoar';
+const ERROR_CODE_SHAPE = /^(?:[A-Z][A-Z0-9_]*|[a-z][a-z0-9_]*|\d+)$/;
+
+function isLoggableCode(value: unknown): boolean {
+  // A JSON-RPC code or an errno.
+  if (typeof value === 'number') return Number.isInteger(value);
+  return (
+    typeof value === 'string' &&
+    value.length <= 64 &&
+    ERROR_CODE_SHAPE.test(value) &&
+    redactSecretsInText(value) === value
+  );
+}
+
+/**
+ * The value backstop (spec §7.13, R-OA-27): secrets that reach a string —
+ * interpolated into a message, an error, a URL — are replaced wherever they
+ * appear. Key names above remain the primary rule; this catches what a key
+ * name cannot see.
+ *
+ * - `assay_(at|rt|ac|sk_live)_…`: OAuth access/refresh tokens, authorization
+ *   codes and API keys.
+ * - `0x` + 130 hex: a 65-byte ECDSA signature; `0x` + 128 hex: an EIP-2098
+ *   compact one.
+ * - `__Host-assay_oar_…[=value]`: the consent request cookie, name and value.
+ *
+ * Deliberately **not** `0x` + 64 hex: on this server that is the shape of
+ * every EVM transaction hash, bytes32 id and slash request id the runbooks
+ * log. Private keys are covered by the key-name rules (`privatekey`,
+ * `signingkey`, `secret`).
+ */
+const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
+  /assay_(?:at|rt|ac|sk_live)_[A-Za-z0-9_-]+/gi,
+  /0x[0-9a-fA-F]{130}(?![0-9a-fA-F])/g,
+  /0x[0-9a-fA-F]{128}(?![0-9a-fA-F])/g,
+  /__Host-assay_oar_[0-9a-fA-F]*(?:=[^;\s,]*)?/gi,
+];
+
+/** Replaces every secret-shaped substring of `text` with {@link REDACTED}. */
+export function redactSecretsInText(text: string): string {
+  let output = text;
+  for (const pattern of SECRET_VALUE_PATTERNS) {
+    output = output.replace(pattern, REDACTED);
+  }
+  return output;
+}
 
 function normalizeKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
@@ -108,6 +184,9 @@ function normalizeKey(key: string): string {
 export function isForbiddenKey(key: string): boolean {
   const normalized = normalizeKey(key);
   if (SAFE_KEYS.has(normalized)) return false;
+  if (normalized === CODE_KEY) return true;
+  // The per-request consent cookie, `__Host-assay_oar_{mac16}`.
+  if (normalized.startsWith(REQUEST_COOKIE_KEY_PREFIX)) return true;
   if (FORBIDDEN_KEY_EXACT.has(normalized)) return true;
   return FORBIDDEN_KEY_SUBSTRINGS.some((pattern) => normalized.includes(pattern));
 }
@@ -123,6 +202,10 @@ const MAX_DEPTH = 12;
  * enough to be a bug rather than data.
  */
 export function redact(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
+  if (typeof value === 'string') {
+    return redactSecretsInText(value);
+  }
+
   if (value === null || typeof value !== 'object') {
     return value;
   }
@@ -148,14 +231,28 @@ export function redact(value: unknown, seen = new WeakSet<object>(), depth = 0):
     const extra: Record<string, unknown> = {};
     for (const key of Object.keys(value)) {
       const raw = (value as unknown as Record<string, unknown>)[key];
-      extra[key] = isForbiddenKey(key) ? REDACTED : redact(raw, seen, depth + 1);
+      extra[key] = redactEntry(key, raw, seen, depth);
     }
-    return { name: value.name, message: value.message, stack: value.stack, ...extra };
+    return {
+      name: value.name,
+      message: redactSecretsInText(value.message),
+      stack: value.stack === undefined ? undefined : redactSecretsInText(value.stack),
+      ...extra,
+    };
   }
 
   const output: Record<string, unknown> = {};
   for (const [key, entryValue] of Object.entries(value as Record<string, unknown>)) {
-    output[key] = isForbiddenKey(key) ? REDACTED : redact(entryValue, seen, depth + 1);
+    output[key] = redactEntry(key, entryValue, seen, depth);
   }
   return output;
+}
+
+function redactEntry(key: string, value: unknown, seen: WeakSet<object>, depth: number): unknown {
+  const normalized = normalizeKey(key);
+  // `prefix`/`tokenHash` are safe by definition (`agent-credential.entity.ts`);
+  // an API-key prefix would otherwise match the `assay_sk_live_` backstop.
+  if (SAFE_KEYS.has(normalized) && typeof value === 'string') return value;
+  if (normalized === CODE_KEY && isLoggableCode(value)) return value;
+  return isForbiddenKey(key) ? REDACTED : redact(value, seen, depth + 1);
 }

@@ -59,6 +59,7 @@ const SESSION: McpSession = {
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 /** What `EscrowAccountService.assetFor` raises once the chain cannot be read. */
@@ -92,6 +93,7 @@ function unreadableState(): EscrowState {
     nextSeq: '7',
     observedAt: null,
     chainReadable: false,
+    lifetime: null,
   };
 }
 

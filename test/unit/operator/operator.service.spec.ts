@@ -2,7 +2,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { OperatorService } from '@modules/operator/services/operator.service';
 
-import { expectErrorCode, expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { FakeOperatorRepository, buildOperator } from './helpers/fake-operator-repository';
 
 /**
@@ -76,21 +76,6 @@ describe('OperatorService', () => {
       repo.seed(buildOperator({ id: 'op-1', status: 'SUSPENDED' }));
 
       await expectErrorCodeAsync(() => service.requireActive('op-1'), 'OPERATOR_NOT_AUTHORIZED');
-    });
-  });
-
-  describe('assertDifferentPerson', () => {
-    it('passes for two different ids', () => {
-      const { service } = build();
-      expect(() => service.assertDifferentPerson('op-1', 'op-2')).not.toThrow();
-    });
-
-    it('refuses self-approval', () => {
-      const { service } = build();
-      expectErrorCode(
-        () => service.assertDifferentPerson('op-1', 'op-1'),
-        'OPERATOR_SELF_APPROVAL_REFUSED',
-      );
     });
   });
 });

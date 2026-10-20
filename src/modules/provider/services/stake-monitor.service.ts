@@ -1,4 +1,5 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import type { Redis } from 'ioredis';
 import { In, IsNull } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
@@ -8,6 +9,7 @@ import { ProviderRepository } from '@database/postgres/repositories/provider.rep
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { StakeSnapshotRepository } from '@database/postgres/repositories/stake-snapshot.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { AccountId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
@@ -20,7 +22,9 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import {
   STAKE_MONITOR_CONFIG,
@@ -106,7 +110,82 @@ export class StakeMonitorService {
     // knows both audiences, because `providerId === organizationId` here.
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     @Inject(STAKE_MONITOR_CONFIG) private readonly config: StakeMonitorConfig,
+    // The tool's name for the provider's notices. Optional: without it a
+    // notice says "one paid tool" rather than naming a binding id.
+    @Optional() private readonly tools: ToolRepository | null = null,
+    // Where a binding's stay in the low-headroom band is remembered, so the
+    // headroom notice is once per incident (see `warnIfHeadroomLow`).
+    @Optional() @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis | null = null,
   ) {}
+
+  /**
+   * The tool a binding serves, by name; null when unreadable. Never throws.
+   * A catalogue id that is not a uuid ("search_web") is already the tool's
+   * name, as `SlashCaseService` reads it; only a uuid is looked up.
+   */
+  private async toolNameOf(toolId: string): Promise<string | null> {
+    if (!toolId) return null;
+    if (!UUID_RE.test(toolId)) return toolId;
+    if (!this.tools) return null;
+    try {
+      const [tool] = await this.tools.findByIds([toolId]);
+      return tool?.name ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The tool behind a binding id, by name; null when unreadable. Never throws. */
+  private async bindingToolName(organizationId: string, bindingId: string): Promise<string | null> {
+    if (!this.tools) return null;
+    try {
+      const binding = await this.bindings.findOneBy({ organizationId, id: bindingId });
+      return binding ? await this.toolNameOf(binding.toolId) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The grace period in whole days, as the notices state it and their payloads carry it. */
+  private graceDayCount(): number {
+    return Math.max(1, Math.round(this.config.gracePeriodMs / 86_400_000));
+  }
+
+  /** "7 days": the grace period as the provider reads it. */
+  private graceDays(): string {
+    const days = this.graceDayCount();
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * When this binding entered the low-headroom band, set on first sight and
+   * kept until it leaves (`leaveHeadroomBand`). That instant names the
+   * incident, so the same figures in a later incident are a new notice.
+   * Null when the store cannot answer.
+   */
+  private async headroomBandSince(
+    organizationId: string,
+    bindingId: string,
+    now: Date,
+  ): Promise<string | null> {
+    if (!this.redis) return null;
+    try {
+      const key = headroomBandKey(organizationId, bindingId);
+      await this.redis.set(key, now.toISOString(), 'EX', HEADROOM_BAND_TTL_SECONDS, 'NX');
+      return await this.redis.get(key);
+    } catch {
+      return null;
+    }
+  }
+
+  private async leaveHeadroomBand(organizationId: string, bindingId: string): Promise<void> {
+    if (!this.redis) return;
+    try {
+      await this.redis.del(headroomBandKey(organizationId, bindingId));
+    } catch {
+      // Left behind, the marker is deleted again on the next healthy sweep.
+    }
+  }
 
   /** One pass over every provider. Never throws — see the class comment. */
   async sweep(): Promise<void> {
@@ -322,6 +401,10 @@ export class StakeMonitorService {
         continue;
       }
 
+      // Below the minimum is not a headroom incident: end the band stay, so a
+      // cure back into the band at the same figures is a new notice.
+      await this.leaveHeadroomBand(provider.organizationId, binding.id);
+
       if (!open) {
         await this.openGrace(provider, binding, staked, required, now);
         continue;
@@ -466,21 +549,28 @@ export class StakeMonitorService {
     // On both ports — see the constructor comment. The operator's alert above
     // is not a substitute for telling the provider their own binding is on the
     // clock.
+    const toolName = await this.toolNameOf(binding.toolId);
+    const subject = toolName ?? 'One paid tool';
+    const toolWord = toolName ?? 'the tool';
     await this.notifications.notify({
       organizationId: provider.organizationId,
       event: NotificationEvent.PROVIDER_STAKE_GRACE_OPENED,
-      title: 'Stake below your minimum — grace period started',
+      title: `${subject}: your stake is below the ${formatDollars(required)} minimum`,
       body:
-        `Your stake for one binding is below your ${MoneyUtil.format(required)} minimum. ` +
-        `A 7-day grace period starts, routing continues, and unpaid earnings are swept to ` +
-        `stake automatically until the floor is met. Grace ends ${expiresAt.toISOString()}.`,
+        `Your stake (${formatDollars(staked)}) is below the ${formatDollars(required)} minimum. ` +
+        `Paid calls continue for ${this.graceDays()}, until ${utcMinute(expiresAt)}; ` +
+        `unpaid earnings go to your stake until it is back above the minimum. If it is still ` +
+        `below then, ${toolWord} stops taking paid calls. Add stake.`,
       subjectType: 'binding',
       subjectId: binding.id,
       payload: {
         bindingId: binding.id,
+        toolName,
         staked: staked.amount,
         required: required.amount,
         asset: required.asset,
+        decimals: required.decimals,
+        graceDays: this.graceDayCount(),
         expiresAt: expiresAt.toISOString(),
       },
       dedupeKey: binding.id,
@@ -524,24 +614,31 @@ export class StakeMonitorService {
 
     // On both ports — see the constructor comment.
     const expired = resolution === StakeGraceResolution.EXPIRED;
+    const toolName = await this.bindingToolName(row.organizationId, row.bindingId);
+    const subject = toolName ?? 'One paid tool';
     await this.notifications.notify({
       organizationId: row.organizationId,
       event: expired
         ? NotificationEvent.PROVIDER_STAKE_GRACE_EXPIRED
         : NotificationEvent.PROVIDER_STAKE_GRACE_CURED,
-      title: expired ? 'Grace period expired — routing paused' : 'Stake restored — routing resumes',
+      title: expired
+        ? `${subject} stopped taking paid calls: stake below the minimum`
+        : `${subject}: your stake is back above the minimum`,
       body: expired
-        ? `Binding ${row.bindingId} ran out of its 7-day grace period still below the ` +
-          `${MoneyUtil.format(required)} minimum and has stopped taking paid traffic.`
-        : `Binding ${row.bindingId} is back above its ${MoneyUtil.format(required)} minimum. ` +
-          `Paid routing continues without interruption.`,
+        ? `Your stake (${formatDollars(staked)}) stayed below the ${formatDollars(required)} ` +
+          `minimum for ${this.graceDays()}, so paid calls stopped. Add stake to start them again.`
+        : `Your stake (${formatDollars(staked)}) covers the ${formatDollars(required)} minimum ` +
+          `again. Paid calls continue without interruption.`,
       subjectType: 'binding',
       subjectId: row.bindingId,
       payload: {
         bindingId: row.bindingId,
+        toolName,
         staked: staked.amount,
         required: required.amount,
         asset: required.asset,
+        decimals: required.decimals,
+        graceDays: this.graceDayCount(),
         startedAt: row.startedAt.toISOString(),
       },
       dedupeKey: row.bindingId,
@@ -575,6 +672,7 @@ export class StakeMonitorService {
     // fractional threshold survives without a float.
     const threshold = BigInt(Math.round(this.config.headroomWarningRatio * 10_000));
     if (headroom * 10_000n >= requiredAtomic * threshold) {
+      await this.leaveHeadroomBand(provider.organizationId, binding.id);
       return;
     }
 
@@ -595,23 +693,49 @@ export class StakeMonitorService {
     });
 
     // On both ports — see the constructor comment.
+    //
+    // Once per incident, not once a day. The key names the incident (when the
+    // binding entered the band) and the figures, so the notice is sent again
+    // when the stake or the minimum moves inside the band, or when the binding
+    // leaves the band and comes back — even to the very same figures — and
+    // never because a new UTC day began with nothing changed. The catalogue's
+    // `ONCE` rule holds the key. Without the band store the UTC day stands in
+    // for the incident, so a failure costs a daily repeat, never silence.
+    const bandSince =
+      (await this.headroomBandSince(
+        provider.organizationId,
+        binding.id,
+        new Date(this.config.now()),
+      )) ?? new Date(this.config.now()).toISOString().slice(0, 10);
+    const toolName = await this.toolNameOf(binding.toolId);
+    const margin = MoneyUtil.of(
+      ((requiredAtomic * threshold) / 10_000n).toString(),
+      required.asset,
+      required.decimals,
+    );
     await this.notifications.notify({
       organizationId: provider.organizationId,
       event: NotificationEvent.PROVIDER_STAKE_HEADROOM_LOW,
-      title: 'Stake headroom is running low',
+      title:
+        `${toolName ? `${toolName}: your` : 'Your'} stake (${formatDollars(staked)}) is within ` +
+        `${formatDollars(margin)} of the ${formatDollars(required)} minimum`,
       body:
-        `Binding ${binding.id} is within ${this.config.headroomWarningRatio * 100}% of its ` +
-        `${MoneyUtil.format(required)} stake floor (staked: ${MoneyUtil.format(staked)}). Top up ` +
-        `now to avoid a grace period.`,
+        `Below the minimum, paid calls continue for ${this.graceDays()}; after that ` +
+        `${toolName ?? 'the tool'} stops taking paid calls until you add stake. A penalty can ` +
+        `take you below it. Add stake to keep a margin.`,
       subjectType: 'binding',
       subjectId: binding.id,
       payload: {
         bindingId: binding.id,
+        toolName,
         staked: staked.amount,
         required: required.amount,
+        margin: margin.amount,
         asset: required.asset,
+        decimals: required.decimals,
+        graceDays: this.graceDayCount(),
       },
-      dedupeKey: binding.id,
+      dedupeKey: `${binding.id}:${bandSince}:${staked.amount}:${required.amount}`,
     });
   }
 
@@ -627,12 +751,9 @@ export class StakeMonitorService {
    * One row per sweep: what the whole fleet has bonded, and how many stake
    * accounts that covers (for the proof-of-reserves page).
    *
-   * `bonded` is a **pure chain reading**, never `PROVIDER_STAKE_SOURCE`. The
-   * composite source runs in `chain_with_config_fallback` and mixes chain reads
-   * with values from a JSON file for providers not yet proved on chain;
-   * publishing that under "stake locked in the settlement program" would put an
-   * unverifiable number on the one page whose entire purpose is verifiability —
-   * the same reason an unverifiable "3-of-5" multisig claim was dropped.
+   * `bonded` is a **pure chain reading**, never `PROVIDER_STAKE_SOURCE`, whose
+   * readings are cached for routing; the proof-of-reserves page publishes
+   * only what the chain says now.
    *
    * Skipped entirely on a failed read (the caller passes `null`), never written
    * as a zero: a zero is a claim that the fleet has no stake. A fleet whose
@@ -681,6 +802,21 @@ export class StakeMonitorService {
       this.logger.error(`Could not write the fleet stake snapshot: ${describe(error)}`);
     }
   }
+}
+
+/** The band marker outlives any real incident; it is deleted when the binding leaves the band. */
+const HEADROOM_BAND_TTL_SECONDS = 180 * 24 * 60 * 60;
+
+function headroomBandKey(organizationId: string, bindingId: string): string {
+  return `stake-headroom-band:${organizationId}:${bindingId}`;
+}
+
+/** `tools.id` is a uuid column; anything else is not looked up (Postgres would refuse it). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
+function utcMinute(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {

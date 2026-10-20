@@ -153,6 +153,20 @@ export interface CallExportResult {
 /** One CSV row, already ordered to match {@link CSV_HEADER}. */
 export type CallExportCsvRow = ReadonlyArray<string | number | null>;
 
+/**
+ * The columns, in order. The money columns per row:
+ *
+ * - `price_amount`: the call's listed price, always.
+ * - `provider_amount`: the provider's share of it. `0` where the call passed
+ *   but nothing was collected (`PROVIDER_FORFEITED`, `PAID_UNCOLLECTED`). On a
+ *   not-credited row (`PAID_UNCREDITED`, including a buyer debt voided by a
+ *   late rejecting verdict, reason `voided:`) it is the share the provider
+ *   forgoes: Σ per class equals the earnings report's `withheldByClass`.
+ * - `platform_fee`: the platform's share. `0` on the passed-but-uncollected
+ *   rows and on a voided debt, since nothing was collected and no fee taken.
+ *   A refunded or voided call (status `REFUNDED` / `VOIDED`) still carries its
+ *   price split here, as it always has: sum fees over credited rows only.
+ */
 export const CSV_HEADER: readonly string[] = Object.freeze([
   'call_id',
   'intent_id',
@@ -188,20 +202,19 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
     debtOutstanding: row.debtOutstanding,
-    uncollected:
-      row.absorbedReason !== null ||
-      (row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false),
+    uncollected: row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false,
     forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
     voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
     credited: row.credited,
   });
-  // A debt voided by a late rejecting verdict: nothing collected or credited.
+  // A debt voided by a late rejecting verdict: nothing collected or credited
+  // (its reason is the void cause).
   const voided =
     row.status === 'SETTLED' && (row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false);
   // Forfeited by the provider: nothing was collected, credited or taken.
   const forfeited = classification === CallReconciliationClass.PROVIDER_FORFEITED;
-  // Never collected (a written-off debt, or a legacy absorb): nothing was
-  // credited or taken, and nobody owes it — the platform never pays.
+  // Never collected (a written-off debt): nothing was credited or taken, and
+  // the platform never pays.
   const uncollected = classification === CallReconciliationClass.PAID_UNCOLLECTED;
   // SETTLED but classified PENDING: no credit was written for it.
   const uncredited = row.status === 'SETTLED' && classification === CallReconciliationClass.PENDING;
@@ -214,17 +227,20 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    forfeited || voided || (uncollected && row.absorbedReason === null)
+    forfeited || voided || uncollected
       ? row.redemptionLastError
-      : uncollected
-        ? `${UNCOLLECTED_PREFIX}legacy_platform_absorbed:${row.absorbedReason}`
-        : debt
-          ? `buyer_debt:${row.redemptionLastError ?? 'unknown'}`
-          : uncredited
-            ? (row.statusReason ?? 'settled, no credit recorded')
-            : row.statusReason,
+      : debt
+        ? `buyer_debt:${row.redemptionLastError ?? 'unknown'}`
+        : uncredited
+          ? (row.statusReason ?? 'settled, no credit recorded')
+          : row.statusReason,
     row.verificationVerdict,
-    forfeited || uncollected || voided ? '0' : row.providerAmount,
+    // Passed-but-unpaid rows carry 0: nothing was collected on them. A voided
+    // debt is not credited, like a refund, and carries its share like one, so
+    // Σ provider_amount per not-credited class equals the earnings report's
+    // `withheldByClass` (UX review 2026-10-18, B13 I2). Its fee is 0: nothing
+    // was collected, so no fee was taken (wave-1 audit M1). See CSV_HEADER.
+    forfeited || uncollected ? '0' : row.providerAmount,
     forfeited || uncollected || voided ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,

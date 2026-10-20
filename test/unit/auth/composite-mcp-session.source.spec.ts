@@ -9,9 +9,11 @@ import {
   CompositeMcpSessionSource,
   createSessionSource,
 } from '@modules/auth/services/composite-mcp-session.source';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import { unauthorizedReasonOf } from '@modules/mcp/ports/mcp-unauthorized.port';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { FakeAgentCredentialRepository } from './helpers/fake-agent-credential-repository';
@@ -82,6 +84,27 @@ describe('CompositeMcpSessionSource — one port, two issuers, one refusal', () 
     await expectErrorCodeAsync(() => composite.resolve('neither'), 'MCP_CREDENTIAL_INVALID');
   });
 
+  it("carries a source's private 401 reason out, still moving on to the next source", async () => {
+    const oauth = new StubSource(
+      'oauth-token',
+      SESSION,
+      McpErrors.credentialInvalid({ unauthorizedReason: 'revoked' }),
+    );
+    const privy = new StubSource('privy-token');
+    const composite = new CompositeMcpSessionSource([new StubSource('config-token'), oauth, privy]);
+
+    const error = await composite.resolve('assay_at_x').catch((e: unknown) => e);
+    expect(error).toMatchObject({ errorCode: 'MCP_CREDENTIAL_INVALID' });
+    expect(unauthorizedReasonOf(error)).toBe('revoked');
+    expect(privy.seen).toEqual(['assay_at_x']);
+  });
+
+  it('gives no reason when no source gave one', async () => {
+    const composite = new CompositeMcpSessionSource([new StubSource('a'), new StubSource('b')]);
+    const error = await composite.resolve('neither').catch((e: unknown) => e);
+    expect(unauthorizedReasonOf(error)).toBeNull();
+  });
+
   it('stops at a wallet-not-linked refusal instead of degrading it into a 401', async () => {
     const privy = new StubSource('privy-token', SESSION, AuthErrors.walletNotLinked());
     const composite = new CompositeMcpSessionSource([new StubSource('config-token'), privy]);
@@ -112,32 +135,63 @@ describe('CompositeMcpSessionSource — one port, two issuers, one refusal', () 
 describe('createSessionSource — AUTH_SESSION_SOURCE decides, and the default is unchanged behaviour', () => {
   const config = new StubSource('config-token');
   const db = new StubSource('db-token');
+  const oauth = new StubSource('oauth-token');
   const privy = new StubSource('privy-token');
 
   it('binds config only, by default and by name', () => {
-    expect(createSessionSource(SessionSourceMode.CONFIG, { config, db, privy })).toBe(config);
+    expect(createSessionSource(SessionSourceMode.CONFIG, { config, db, oauth, privy })).toBe(
+      config,
+    );
     expect(parseSessionSourceMode(undefined)).toBe(SessionSourceMode.CONFIG);
     expect(parseSessionSourceMode('nonsense')).toBe(SessionSourceMode.CONFIG);
   });
 
   it('binds privy only', () => {
-    expect(createSessionSource(SessionSourceMode.PRIVY, { config, db, privy })).toBe(privy);
+    expect(createSessionSource(SessionSourceMode.PRIVY, { config, db, oauth, privy })).toBe(privy);
     expect(parseSessionSourceMode('privy')).toBe(SessionSourceMode.PRIVY);
   });
 
   it('binds db only', () => {
-    expect(createSessionSource(SessionSourceMode.DB, { config, db, privy })).toBe(db);
+    expect(createSessionSource(SessionSourceMode.DB, { config, db, oauth, privy })).toBe(db);
     expect(parseSessionSourceMode('db')).toBe(SessionSourceMode.DB);
   });
 
-  it('binds all three, config first then db then privy', async () => {
-    const source = createSessionSource(SessionSourceMode.BOTH, { config, db, privy });
+  it('binds all four in both mode: config, db, oauth, privy', async () => {
+    const source = createSessionSource(SessionSourceMode.BOTH, { config, db, oauth, privy });
     expect(source).toBeInstanceOf(CompositeMcpSessionSource);
 
     await expect(source.resolve('config-token')).resolves.toBeDefined();
     await expect(source.resolve('db-token')).resolves.toBeDefined();
+    await expect(source.resolve('oauth-token')).resolves.toBeDefined();
     await expect(source.resolve('privy-token')).resolves.toBeDefined();
     expect(parseSessionSourceMode('both')).toBe(SessionSourceMode.BOTH);
+  });
+
+  it('both order is config, db, oauth, privy', async () => {
+    const order: string[] = [];
+    const recording = (name: string): McpSessionPort => ({
+      resolve: () => {
+        order.push(name);
+        return Promise.reject(McpErrors.credentialInvalid());
+      },
+    });
+
+    const source = createSessionSource(SessionSourceMode.BOTH, {
+      config: recording('config'),
+      db: recording('db'),
+      oauth: recording('oauth'),
+      privy: recording('privy'),
+    });
+
+    await expectErrorCodeAsync(() => source.resolve('unknown'), 'MCP_CREDENTIAL_INVALID');
+    expect(order).toEqual(['config', 'db', 'oauth', 'privy']);
+  });
+
+  it('includes the OAuth source only in both mode (OAuth needs the Privy consent)', async () => {
+    for (const mode of [SessionSourceMode.CONFIG, SessionSourceMode.DB, SessionSourceMode.PRIVY]) {
+      const source = createSessionSource(mode, { config, db, oauth, privy });
+      await expectErrorCodeAsync(() => source.resolve('oauth-token'), 'MCP_CREDENTIAL_INVALID');
+    }
   });
 });
 
@@ -148,9 +202,13 @@ describe('createSessionSource — AUTH_SESSION_SOURCE decides, and the default i
  */
 describe('DbCredentialMcpSessionSource ahead of Privy in the chain', () => {
   it('lets a JWT-shaped token fall through the db source and reach Privy', async () => {
+    const credentials = new FakeAgentCredentialRepository() as unknown as AgentCredentialRepository;
     const db = new DbCredentialMcpSessionSource(
-      new FakeAgentCredentialRepository() as unknown as AgentCredentialRepository,
-      new FakeAgentRepository() as unknown as AgentRepository,
+      credentials,
+      new CredentialSessionResolver(
+        credentials,
+        new FakeAgentRepository() as unknown as AgentRepository,
+      ),
     );
     const jwtShaped = 'eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJkaWQ6cHJpdnk6eCJ9.sig';
     const privy = new StubSource(jwtShaped);

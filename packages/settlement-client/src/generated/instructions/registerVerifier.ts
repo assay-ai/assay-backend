@@ -42,7 +42,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda, findVerifierKeyPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const REGISTER_VERIFIER_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   67, 234, 172, 169, 184, 188, 145, 156,
@@ -53,7 +53,7 @@ export function getRegisterVerifierDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type RegisterVerifierInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountAdmin extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TAccountVerifierKey extends string | AccountMeta<string> = string,
@@ -141,7 +141,7 @@ export async function getRegisterVerifierInstructionAsync<
   TAccountConfig extends string,
   TAccountVerifierKey extends string,
   TAccountSystemProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RegisterVerifierAsyncInput<
     TAccountAdmin,
@@ -160,7 +160,7 @@ export async function getRegisterVerifierInstructionAsync<
   >
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -232,7 +232,7 @@ export function getRegisterVerifierInstruction<
   TAccountConfig extends string,
   TAccountVerifierKey extends string,
   TAccountSystemProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RegisterVerifierInput<
     TAccountAdmin,
@@ -249,7 +249,7 @@ export function getRegisterVerifierInstruction<
   TAccountSystemProgram
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -294,7 +294,7 @@ export function getRegisterVerifierInstruction<
 }
 
 export type ParsedRegisterVerifierInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

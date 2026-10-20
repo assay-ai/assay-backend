@@ -26,10 +26,9 @@ import { CHAIN_ADAPTERS, ChainAdapter } from './ports/chain-adapter.port';
  * 2. **Nothing but an enabled chain is ever served.** `resolve()` and
  *    `enabledChains()` both read the *intersection*, so an adapter that
  *    hard-codes its `supportedChains` cannot advertise, reconcile or accept a
- *    chain the operator disabled. That direction is the original
- *    `SOLANA_ENABLED_CHAINS` bug — a devnet deployment reconciling mainnet
- *    forever and paging `RECONCILIATION_BLIND` about a vault that cannot
- *    exist — and asserting only `enabled ⊆ served` would leave it open,
+ *    chain the operator disabled. Without it, a devnet deployment could
+ *    reconcile mainnet forever, paging `RECONCILIATION_BLIND` about a vault
+ *    that cannot exist — and asserting only `enabled ⊆ served` would leave it open,
  *    depending on every adapter to filter voluntarily.
  * 3. **An adapter's chains lie in its own namespace.** `resolve()` finds the
  *    adapter by namespace, so an adapter declaring `namespace = 'solana'` while

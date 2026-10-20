@@ -25,7 +25,7 @@ function refusal(overrides: Partial<FreeQuotaRefused> = {}): FreeQuotaRefused {
  *
  * ```jsonc
  * "_meta": {
- *   "x402/error": { "code": "FREE_QUOTA_EXHAUSTED", "retryable": true, "resetsAt": "…" },
+ *   "assay/error": { "code": "FREE_QUOTA_EXHAUSTED", "retryable": true, "resetsAt": "…" },
  *   "x402/paymentRequired": { … }
  * }
  * ```

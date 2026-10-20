@@ -1,6 +1,6 @@
 import { encodeAbiParameters, encodeEventTopics, encodeFunctionData } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   decodeEscrowView,
   EvmChainAdapter,
@@ -73,7 +73,7 @@ function depositedLog(args: {
   return {
     address: args.address ?? DEPLOYMENT.escrow,
     topics: encodeEventTopics({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       eventName: 'Deposited',
       args: { buyer: args.buyer as `0x${string}`, funder: args.funder as `0x${string}` },
     }) as `0x${string}`[],
@@ -128,21 +128,24 @@ const ESCROW_REPLY = {
 interface Stub {
   readonly client: EvmReadClient;
   readonly finalizedBlock: { number: bigint | null };
+  readonly latestBlock: { number: bigint };
 }
 
 function stubClient(
   overrides: { receipt?: EvmTransactionReceipt | null; escrow?: unknown } = {},
 ): Stub {
   const finalizedBlock = { number: 100n as bigint | null };
+  const latestBlock = { number: 100n };
   const client: EvmReadClient = {
     getTransactionReceipt: async ({ hash }) =>
       hash === (SETTLED_HASH as string)
         ? (overrides.receipt ?? SETTLED_RECEIPT)
         : Promise.reject(new Error('TransactionReceiptNotFoundError')),
     getBlock: async () => finalizedBlock,
+    getBlockNumber: async () => latestBlock.number,
     readContract: async () => overrides.escrow ?? ESCROW_REPLY,
   };
-  return { client, finalizedBlock };
+  return { client, finalizedBlock, latestBlock };
 }
 
 function buildAdapter(overrides?: Parameters<typeof stubClient>[0]): {
@@ -377,7 +380,7 @@ describe('EvmChainAdapter payload binding', () => {
     // `withdraw()` is on the same contract and is signed by the same buyer, so
     // "calls our escrow" is not the binding — which function it calls is.
     const { adapter } = buildAdapter();
-    const data = encodeFunctionData({ abi: X402_ESCROW_ABI, functionName: 'withdraw' });
+    const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'withdraw' });
     expect(
       codeOf(() =>
         adapter.assertPayloadBoundToIntent(payloadOf(depositTransaction({ data })), intent),
@@ -633,6 +636,52 @@ describe('EvmChainAdapter observeTransfer', () => {
     await expect(
       adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
     ).resolves.not.toBeNull();
+  });
+});
+
+describe('EvmChainAdapter deposit confirmations (EVM_DEPOSIT_CONFIRMATIONS)', () => {
+  const withConfirmations = (count: number) => {
+    const stub = stubClient();
+    stub.finalizedBlock.number = 0n; // far behind: never what decides here
+    const adapter = new EvmChainAdapter(
+      new Map([[TESTNET, stub.client]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      [TESTNET],
+      count,
+    );
+    return { adapter, stub };
+  };
+
+  it('0: credited at the soft confirmation, without waiting for the finalized head', async () => {
+    const { adapter } = withConfirmations(0);
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).resolves.not.toBeNull();
+  });
+
+  it('N: withheld until N blocks sit on top of the transaction', async () => {
+    const { adapter, stub } = withConfirmations(3);
+    stub.latestBlock.number = SETTLED_RECEIPT.blockNumber + 2n;
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).resolves.toBeNull();
+    stub.latestBlock.number = SETTLED_RECEIPT.blockNumber + 3n;
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).resolves.not.toBeNull();
+  });
+
+  it('a reverted deposit is never credited, however early', async () => {
+    const stub = stubClient({ receipt: { ...SETTLED_RECEIPT, status: 'reverted' } });
+    const adapter = new EvmChainAdapter(
+      new Map([[TESTNET, stub.client]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      [TESTNET],
+      0,
+    );
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).resolves.toBeNull();
   });
 });
 

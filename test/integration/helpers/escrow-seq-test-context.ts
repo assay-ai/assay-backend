@@ -1,3 +1,4 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -38,6 +39,7 @@ import {
   TEST_POOL_SIZE,
   USDC_ASSET,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
@@ -141,6 +143,8 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',
@@ -148,6 +152,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const redis = new Redis({

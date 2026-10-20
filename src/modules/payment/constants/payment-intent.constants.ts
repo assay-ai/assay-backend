@@ -46,7 +46,7 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
  * is settled as served and unverified by the expiry sweep — the rule a failed
  * verification enqueue already follows. The EVM contract accepts the voucher
  * until `expiresAt + REDEEM_GRACE_SECONDS` (1,800 s) with NO clock-skew
- * allowance (`X402Escrow.sol:784`, mirrored by `evm-voucher-prevalidation.ts`),
+ * allowance (`AssayEscrow.sol:784`, mirrored by `evm-voucher-prevalidation.ts`),
  * so settling at 900 s leaves the per-minute redemption job about 15 minutes to
  * collect it. Without it a late verdict (judge queue backed up, worker down)
  * left a served call whose voucher could no longer be redeemed
@@ -96,3 +96,10 @@ export const PAYMENT_INTENT_HOLD_REPAIR_REASON =
 
 /** Written when funds are secured — the edge that opens the hold. */
 export const PAYMENT_INTENT_FUNDS_SECURED_REASON = 'payment authorised; ledger hold opened';
+
+/**
+ * Written when a keyed call's intent could not secure its funds and is expired
+ * at once, so its idempotency key is free for the agent's retry (G2.1).
+ */
+export const PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON =
+  'funds not secured: expired at once to release the idempotency key';

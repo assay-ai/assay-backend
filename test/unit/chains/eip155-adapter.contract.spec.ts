@@ -8,7 +8,7 @@ import {
   serializeTransaction,
 } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   EvmChainAdapter,
   EvmReadClient,
@@ -136,7 +136,7 @@ function depositedLog(args: { buyer: string; amount: bigint; balance: bigint }) 
   return {
     address: TESTNET_DEPLOYMENT.escrow,
     topics: encodeEventTopics({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       eventName: 'Deposited',
       args: { buyer: args.buyer as `0x${string}`, funder: args.buyer as `0x${string}` },
     }) as `0x${string}`[],
@@ -168,6 +168,7 @@ const stubClient = (): EvmReadClient => ({
       ? SETTLED_RECEIPT
       : Promise.reject(new Error('TransactionReceiptNotFoundError')),
   getBlock: async () => ({ number: 100n }),
+  getBlockNumber: async () => 100n,
   readContract: async () => ({
     balance: 10_000n,
     seqHigh: 7n,
@@ -262,7 +263,7 @@ function depositTransaction(buyer: `0x${string}`): `0x${string}` {
       maxFeePerGas: 1_000_000_000n,
       maxPriorityFeePerGas: 1n,
       data: encodeFunctionData({
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'depositFor',
         args: [buyer, 10_000n],
       }),

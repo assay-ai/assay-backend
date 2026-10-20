@@ -31,8 +31,8 @@
       "@filters/*": ["src/shared/filters/*"],
       "@utils/*": ["src/shared/utils/*"],
       "@bootstrap/*": ["src/bootstrap/*"],
-      "@schedule/*": ["src/modules/_examples/schedule/*"],
       "@websocket/*": ["src/websocket/*"]
     }
-  }
+  },
+  "exclude": ["node_modules", "dist", "workers"]
 }

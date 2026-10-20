@@ -142,6 +142,8 @@ export class SpendPolicyService {
     agentId: string,
     patch: UpdateSpendPolicyDto,
     actor: AuditActor,
+    /** The access policy, agent rules and pinned tools to set — `AgentAccessService` only. */
+    access: Partial<AccessFields> = {},
   ): Promise<SpendPolicyDto> {
     const current = await this.policies.findOne({
       where: { organizationId, agentId, supersededAt: IsNull() },
@@ -170,13 +172,17 @@ export class SpendPolicyService {
       maxCallsPerHour: resolveNullable(patch.maxCallsPerHour, base?.maxCallsPerHour ?? null),
       maxCallsPerMinute: resolveNullable(patch.maxCallsPerMinute, base?.maxCallsPerMinute ?? null),
       maxSpendPerHour: resolveNullable(patch.maxSpendPerHour, base?.maxSpendPerHour ?? null),
-      allowedTools: resolveNullable(patch.allowedTools, base?.allowedTools ?? null),
+      // The access policy and agent rules are carried over unchanged: they
+      // are written through `PATCH /agents/:id/access`, not here.
+      ...accessFieldsOf(base),
+      ...access,
       requireApprovalAbove: resolveNullable(
         patch.requireApprovalAbove,
         base?.requireApprovalAbove ?? null,
       ),
       paused: patch.paused ?? base?.paused ?? false,
-      // From the session, never the body: see `UpdateSpendPolicyDto.changedBy`.
+      // From the session, never the body: a caller-chosen value would let
+      // anyone write any name into the policy history.
       changedBy: `agent:${agentId}`,
       changeReason: patch.changeReason ?? null,
       supersededAt: null,
@@ -280,6 +286,37 @@ export class SpendPolicyService {
   }
 }
 
+/**
+ * The access policy, the agent rules and the pinned tools: versioned with the
+ * rest of the row and audited like it, but edited only by `AgentAccessService`.
+ */
+export const ACCESS_FIELDS = [
+  'accessMode',
+  'allowedToolsets',
+  'allowedToolIds',
+  'ruleExcludeProviderIds',
+  'ruleMaxPrice',
+  'ruleMinTier',
+  'ruleMinQuality',
+  'pinnedTools',
+] as const;
+
+export type AccessFields = Pick<SpendPolicyEntity, (typeof ACCESS_FIELDS)[number]>;
+
+/** `base`'s access fields, or the defaults (everything allowed, no rules). */
+export function accessFieldsOf(base: Partial<SpendPolicyEntity> | null | undefined): AccessFields {
+  return {
+    accessMode: base?.accessMode ?? 'ALL',
+    allowedToolsets: base?.allowedToolsets ?? [],
+    allowedToolIds: base?.allowedToolIds ?? [],
+    ruleExcludeProviderIds: base?.ruleExcludeProviderIds ?? [],
+    ruleMaxPrice: base?.ruleMaxPrice ?? null,
+    ruleMinTier: base?.ruleMinTier ?? null,
+    ruleMinQuality: base?.ruleMinQuality ?? null,
+    pinnedTools: base?.pinnedTools ?? [],
+  };
+}
+
 /** What a policy version decides — the fields an audit entry compares. */
 const AUDITED_FIELDS = [
   'perCallMax',
@@ -289,8 +326,8 @@ const AUDITED_FIELDS = [
   'maxCallsPerHour',
   'maxCallsPerMinute',
   'requireApprovalAbove',
-  'allowedTools',
   'paused',
+  ...ACCESS_FIELDS,
   'policyVersion',
 ] as const;
 
@@ -299,12 +336,14 @@ function decidesDifferently(
   current: SpendPolicyEntity,
   values: Partial<SpendPolicyEntity>,
 ): boolean {
-  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> =>
-    Object.fromEntries(
+  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> => {
+    const normalised = { ...row, ...accessFieldsOf(row) };
+    return Object.fromEntries(
       (['assetId', 'decimals', ...AUDITED_FIELDS] as const)
         .filter((field) => field !== 'policyVersion')
-        .map((field) => [field, row[field] ?? null]),
+        .map((field) => [field, normalised[field] ?? null]),
     );
+  };
   return Object.keys(changedFields(pick(current), pick(values)).after).length > 0;
 }
 
@@ -316,12 +355,21 @@ function auditDiff(
   current: SpendPolicyEntity | null,
   values: Partial<SpendPolicyEntity>,
 ): { before: Record<string, unknown> | null; after: Record<string, unknown> } {
-  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> =>
-    Object.fromEntries(AUDITED_FIELDS.map((field) => [field, row[field] ?? null]));
+  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> => {
+    const normalised = { ...row, ...accessFieldsOf(row) };
+    return Object.fromEntries(AUDITED_FIELDS.map((field) => [field, normalised[field] ?? null]));
+  };
   const reason = values.changeReason ? { changeReason: values.changeReason } : {};
+  const defaults: Record<string, unknown> = accessFieldsOf(null);
 
   if (!current) {
-    const set = Object.entries(pick(values)).filter(([, value]) => value !== null);
+    // Nulls omitted, and the access defaults too (everything allowed, no
+    // rules): a first version lists what it sets, not what it leaves alone.
+    const set = Object.entries(pick(values)).filter(
+      ([field, value]) =>
+        value !== null &&
+        !(field in defaults && JSON.stringify(defaults[field]) === JSON.stringify(value)),
+    );
     return { before: null, after: { ...Object.fromEntries(set), ...reason } };
   }
   const diff = changedFields(pick(current), pick(values));
@@ -370,7 +418,6 @@ function toDto(row: SpendPolicyEntity): SpendPolicyDto {
     maxCallsPerHour: row.maxCallsPerHour ?? null,
     maxCallsPerMinute: row.maxCallsPerMinute ?? null,
     maxSpendPerHour: moneyOrNull(row.maxSpendPerHour, asset, row.decimals),
-    allowedTools: row.allowedTools ?? null,
     requireApprovalAbove: moneyOrNull(row.requireApprovalAbove, asset, row.decimals),
     paused: row.paused,
     changedBy: row.changedBy,
@@ -392,7 +439,6 @@ function toHistoryDto(row: SpendPolicyEntity): SpendPolicyHistoryEntryDto {
     maxCallsPerHour: row.maxCallsPerHour ?? null,
     maxCallsPerMinute: row.maxCallsPerMinute ?? null,
     maxSpendPerHour: moneyOrNull(row.maxSpendPerHour, asset, row.decimals),
-    allowedTools: row.allowedTools ?? null,
     requireApprovalAbove: moneyOrNull(row.requireApprovalAbove, asset, row.decimals),
     paused: row.paused,
     changedBy: row.changedBy,

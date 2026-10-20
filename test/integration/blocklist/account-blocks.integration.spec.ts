@@ -9,7 +9,9 @@ import { DataSource } from 'typeorm';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
@@ -44,7 +46,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * wrote the block refuses at once, every other instance within seconds, and the
  * database is the source of truth either way.
  */
-const DATABASE = 'x402_account_blocks_test';
+const DATABASE = 'assay_account_blocks_test';
 const NOTE = 'Agent key leaked in a public repository; reported by the customer.';
 const WALLET = 'eip155:84532:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 
@@ -120,6 +122,8 @@ describe('account blocks, against a real database and Redis', () => {
       operators,
       blocklist,
       approvals,
+      new ProviderRepository(dataSource),
+      new OrganizationRepository(dataSource),
     );
     return {
       block: service.block.bind(service),
@@ -429,6 +433,7 @@ describe('account blocks, against a real database and Redis', () => {
       chainId: 'eip155:84532' as never,
       label: null,
       callerKind,
+      paymentsAllowed: true,
       delegateAccount: null,
     });
     const tokenKinds: Record<string, McpCallerKind> = {
@@ -462,7 +467,7 @@ describe('account blocks, against a real database and Redis', () => {
           useValue: {
             providerDispute: async (_org: string, chainId: string, requestIds: string[]) => ({
               chainId,
-              to: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
+              to: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
               data: '0x',
               value: '0',
               signer: '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45',

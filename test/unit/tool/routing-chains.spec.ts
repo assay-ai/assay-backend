@@ -853,3 +853,84 @@ describe('a tool sold on two chains in two assets', () => {
     expect(sol.settlementChain).toBe(DEVNET);
   });
 });
+
+/**
+ * Who sets a quote (review B3 I1): `pricedBy` and `listings` come from the
+ * router's own priced set — the eligible bindings on the quoted chain — so the
+ * catalogue never names a provider the router would not route to. Additive:
+ * every other field of the quote is what it was.
+ */
+describe('the providers a quote was priced by', () => {
+  const ctx: RoutingContext = {
+    payerChains: [DEVNET],
+    enabledChains: [DEVNET],
+    defaultChainId: null,
+    withdrawingChains: [],
+  };
+  const router = (
+    bindings: ReturnType<typeof buildBinding>[],
+    stakes: Record<string, ReturnType<typeof usdc>>,
+  ) =>
+    buildRouter({
+      bindings,
+      providers: bindings.map((binding) => buildProvider(binding.providerId)),
+      stakes,
+      invoker: new ScriptedInvoker({}),
+    }).router;
+
+  it('leaves every existing field of the quote unchanged and only adds pricedBy, listings and maxPrice', async () => {
+    const quote = await router([buildBinding('a', { priceAmount: '250000' })], {
+      a: usdc(1000),
+    }).quote(TOOL_ID, ctx);
+
+    const { pricedBy, listings, maxPrice, ...rest } = quote!;
+    // `maxPrice` (assay/price.maxAmount): one binding, no ceiling, so the price.
+    expect(maxPrice).toEqual(MoneyUtil.of('250000', ASSET_IDS.USDC_SOLANA_DEVNET, 6));
+    expect(rest).toEqual({
+      tool: rest.tool,
+      price: MoneyUtil.of('250000', ASSET_IDS.USDC_SOLANA_DEVNET, 6),
+      pricingMode: 'PAID',
+      routableBindings: 1,
+      paidBindings: 1,
+      freeBindings: [],
+      settlementChains: [DEVNET],
+      p95LatencyMs: rest.p95LatencyMs,
+      qualityRate: rest.qualityRate,
+      unroutableReason: null,
+      cheapestPrice: MoneyUtil.of('250000', ASSET_IDS.USDC_SOLANA_DEVNET, 6),
+    });
+    expect(pricedBy).toEqual(['a']);
+    expect(listings).toBe(1);
+  });
+
+  it('names only the dearest provider when two on one chain charge different prices', async () => {
+    const quote = await router(
+      [buildBinding('a', { priceAmount: '250000' }), buildBinding('b', { priceAmount: '100000' })],
+      { a: usdc(1000), b: usdc(1000) },
+    ).quote(TOOL_ID, ctx);
+
+    expect(quote?.price).toMatchObject({ amount: '250000' });
+    expect(quote?.pricedBy).toEqual(['a']);
+    expect(quote?.listings).toBe(2);
+  });
+
+  it('names both, sorted, when two on one chain charge the same price', async () => {
+    const quote = await router(
+      [buildBinding('b', { priceAmount: '250000' }), buildBinding('a', { priceAmount: '250000' })],
+      { a: usdc(1000), b: usdc(1000) },
+    ).quote(TOOL_ID, ctx);
+
+    expect(quote?.pricedBy).toEqual(['a', 'b']);
+    expect(quote?.listings).toBe(2);
+  });
+
+  it('never names an ACTIVE binding the router would not route to (no stake)', async () => {
+    const quote = await router(
+      [buildBinding('a', { priceAmount: '250000' }), buildBinding('b', { priceAmount: '250000' })],
+      { a: usdc(1000) },
+    ).quote(TOOL_ID, ctx);
+
+    expect(quote?.pricedBy).toEqual(['a']);
+    expect(quote?.listings).toBe(1);
+  });
+});

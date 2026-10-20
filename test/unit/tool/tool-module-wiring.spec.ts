@@ -20,8 +20,11 @@ import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invo
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from '@modules/tool/services/routing.config';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { BindingAttemptRepository } from '@database/postgres/repositories/binding-attempt.repository';
+import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { ALERT_PORT } from '@shared/alerting';
@@ -30,6 +33,8 @@ import { EvmChainStateRepository } from '@database/postgres/repositories/evm-cha
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
@@ -51,12 +56,9 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
  * for the same reason.
  *
  * The stake source is asserted **through `PROVIDER_STAKE_SOURCE`, never as a
- * class**, and that is deliberate rather than incidental. The class behind that
- * token was replaced once — `ConfigProviderStakeSource` became
- * `CompositeProviderStakeSource` — and this file did not have to say so,
- * because the router does not know either name. A test that named the class
- * would have failed on a change the router could not see, which is the opposite
- * of what it is for.
+ * class**, and that is deliberate rather than incidental: the router does not
+ * know the class name, so a test that named it would fail on a change the router
+ * could not see, which is the opposite of what it is for.
  */
 /**
  * The repositories and the cache that `ProviderModule` and `ToolModule` now
@@ -80,6 +82,13 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 @Module({
   providers: [
     { provide: ToolBindingRepository, useValue: { findByTool: async () => [] } },
+    // `ToolRegistrySeeder` mirrors the seeded tools into `tools` at boot.
+    {
+      provide: ToolRepository,
+      useValue: { upsertSeeded: async () => undefined, find: async () => [] },
+    },
+    // `DatabaseToolContracts` reads the contracts from `tool_versions` (T3).
+    { provide: ToolVersionRepository, useValue: { find: async () => [] } },
     // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
     { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
@@ -121,6 +130,11 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     // cache *client* rather than `CacheService` — the counter runs `INCR`,
     // which the JSON-serialising wrapper does not expose.
     { provide: PaymentIntentRepository, useValue: { countCallsByBinding: async () => 0 } },
+    // `BindingAttemptRecorder` appends every attempt the provider is
+    // accountable for to `binding_attempts`, the observed stats' raw window.
+    { provide: BindingAttemptRepository, useValue: { appendMany: async () => undefined } },
+    // The credential vault the invoker reads at dial time.
+    { provide: BindingCredentialRepository, useValue: { findForOrigin: async () => null } },
     {
       provide: REDIS_CACHE_CLIENT,
       useValue: {
@@ -133,6 +147,8 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
   ],
   exports: [
     ToolBindingRepository,
+    ToolRepository,
+    ToolVersionRepository,
     BindingVersionRepository,
     EvmGasGrantRepository,
     EvmChainStateRepository,
@@ -143,6 +159,8 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     ALERT_PORT,
     CacheService,
     PaymentIntentRepository,
+    BindingAttemptRepository,
+    BindingCredentialRepository,
     REDIS_CACHE_CLIENT,
   ],
 })
@@ -153,9 +171,21 @@ class StubRepositoriesModule {}
     ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
     StubRepositoriesModule,
     ToolModule,
+    // The invoker lives in its own module, imported by the processes that dial
+    // providers (api, mcp); see `provider-secrets-boot.spec.ts`.
+    ToolEgressModule,
   ],
 })
 class ToolWiringHarnessModule {}
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
+    StubRepositoriesModule,
+    ToolModule,
+  ],
+})
+class ToolWithoutEgressHarnessModule {}
 
 describe('ToolModule wiring', () => {
   jest.setTimeout(30_000);
@@ -199,7 +229,7 @@ describe('ToolModule wiring', () => {
       expect(app.get(CHAIN_ENROLMENT_SOURCE, { strict: false })).toBeInstanceOf(
         DbChainEnrolmentSource,
       );
-      expect(app.get(BINDING_INVOKER)).toBeInstanceOf(EgressBindingInvoker);
+      expect(app.get(BINDING_INVOKER, { strict: false })).toBeInstanceOf(EgressBindingInvoker);
       expect(typeof app.get(ROUTING_RANDOM)).toBe('function');
       // Exported, because the increment belongs to whoever writes
       // `payment_intents.binding_id` — the MCP loop — and not to the router.
@@ -314,6 +344,27 @@ describe('ToolModule wiring', () => {
       await app.close();
       if (previous === undefined) delete process.env.ENABLED_CHAINS;
       else process.env.ENABLED_CHAINS = previous;
+    }
+  });
+
+  it('without ToolEgressModule: boots for quotes, and route() refuses', async () => {
+    const app = await NestFactory.createApplicationContext(ToolWithoutEgressHarnessModule, {
+      logger: false,
+      abortOnError: false,
+    });
+
+    try {
+      expect(() => app.get(BINDING_INVOKER, { strict: false })).toThrow();
+      await expect(
+        app.get(ProviderRouterService).route({
+          toolId: 'search_web',
+          callId: 'test-call-id',
+          input: {},
+          context: ROUTING_CONTEXT,
+        }),
+      ).rejects.toThrow('no BINDING_INVOKER in this process');
+    } finally {
+      await app.close();
     }
   });
 

@@ -2,7 +2,7 @@ import { TypedDataDomain } from 'viem';
 
 import { ChainId, ChainNamespace, parseChainId } from '../../ports/caip.types';
 
-/** `"Assay Settlement"` — identical on `X402Escrow` and `X402Stake`. */
+/** `"Assay Settlement"` — identical on `AssayEscrow` and `AssayStake`. */
 export const EVM_DOMAIN_NAME = 'Assay Settlement';
 
 /**
@@ -22,8 +22,8 @@ export const EVM_DOMAIN_VERSION = '2';
  * address on every EVM chain, so without it a voucher signed for a testnet
  * escrow verifies against the mainnet escrow of the same buyer.
  *
- * `verifyingContract` closes cross-contract replay — `X402Escrow` and
- * `X402Stake` share the name and version, and this field is the only thing
+ * `verifyingContract` closes cross-contract replay — `AssayEscrow` and
+ * `AssayStake` share the name and version, and this field is the only thing
  * separating them — and makes a redeploy invalidate every outstanding voucher
  * automatically. It is the **proxy** address, which does not move across
  * an upgrade.

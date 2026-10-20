@@ -6,11 +6,11 @@ import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
-  X402_ERROR,
+  ASSAY_ERROR,
   X402_PAYMENT_REQUIRED,
-  X402_RAIL,
-  X402_RECEIPT,
-  X402_VOUCHER,
+  ASSAY_RAIL,
+  ASSAY_RECEIPT,
+  ASSAY_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
 import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -46,7 +46,7 @@ import { CHAIN_ID, SESSION, buildMcpHarness, fakeVoucherSignature } from './help
  *
  * ```text
  *  tools/call                       → isError, x402/paymentRequired {provider, payTo, seq, requestHash…}
- *  tools/call + _meta[x402/voucher] → the call, paid by that voucher
+ *  tools/call + _meta[assay/voucher] → the call, paid by that voucher
  * ```
  *
  * `VoucherService` is the REAL class here (see the harness), so every binding
@@ -59,7 +59,14 @@ const TOOL_NAME = 'Search the web';
 const RESOURCE = `/mcp/tools/${TOOL_NAME}`;
 const PRICE = usdc('0.05');
 
-function harness(options: { balance?: ReturnType<typeof usdc>; twoProviders?: boolean } = {}) {
+function harness(
+  options: {
+    balance?: ReturnType<typeof usdc>;
+    pending?: ReturnType<typeof usdc>;
+    twoProviders?: boolean;
+    depositCreditsOnSoftConfirmation?: boolean;
+  } = {},
+) {
   const ids = options.twoProviders ? ['provider-a', 'provider-b'] : ['provider-a'];
   const invoker = new ScriptedInvoker(
     Object.fromEntries(ids.map((id) => [`binding-${id}`, async () => ok('forty-two')])),
@@ -69,6 +76,8 @@ function harness(options: { balance?: ReturnType<typeof usdc>; twoProviders?: bo
     providers: ids.map((id) => buildProvider(id)),
     invoker,
     balance: options.balance,
+    pending: options.pending,
+    depositCreditsOnSoftConfirmation: options.depositCreditsOnSoftConfirmation,
   });
   return { ...built, invoker };
 }
@@ -211,6 +220,8 @@ describe('rail B over MCP', () => {
         provider: PAYOUT_ACCOUNT,
         providerId: 'provider-a',
         amount: { amount: PRICE.amount, asset: PRICE.asset, decimals: 6 },
+        // T3: the contract version the offer was drawn at; the retry echoes it.
+        contractVersion: 1,
         resource: RESOURCE,
         requestHash: computeRequestHash({
           method: 'POST',
@@ -482,22 +493,75 @@ describe('rail B over MCP', () => {
       });
       expect(h.invoker.invocations).toHaveLength(0);
     });
+
+    it('says a deposit is still confirming when one is pending', async () => {
+      const h = harness({ balance: usdc('0.01'), pending: usdc('20') });
+      const requirement = await requirementOf(h);
+
+      const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+
+      expect(outcome).toMatchObject({
+        kind: 'ERROR',
+        code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
+        detail: { pending: usdc('20').amount },
+      });
+      const message = (outcome as { message: string }).message;
+      // Dollars, as the console shows them — never atomic units or the asset id (BUG-A-10).
+      expect(message).toMatch(/^Insufficient balance: this call costs \$\d/);
+      expect(message).toContain('A deposit of $20.00 is still confirming on chain');
+      expect(message).not.toContain(usdc('20').amount);
+    });
+
+    it('promises "within a minute" only on a chain that credits on its first confirmation', async () => {
+      const textFor = async (soft: boolean | undefined) => {
+        const h = harness({
+          balance: usdc('0.01'),
+          pending: usdc('20'),
+          depositCreditsOnSoftConfirmation: soft,
+        });
+        const requirement = await requirementOf(h);
+        const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+        return (outcome as { message: string }).message;
+      };
+
+      expect(await textFor(true)).toContain('usually within a minute');
+      for (const soft of [false, undefined]) {
+        const message = await textFor(soft);
+        expect(message).not.toContain('within a minute');
+        expect(message).toContain('once the chain finalizes it, which can take several minutes');
+      }
+    });
   });
 
   describe('chooseRail — which rail a call takes', () => {
     it('takes rail B on a chain that offers nothing else', () => {
-      expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+      expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
     });
 
     it('takes rail A as the default only where it is offered', () => {
       // This suite re-opens rail B on Solana, not rail A, so with nothing asked
       // for the call goes to rail B.
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+    });
+
+    it('never takes rail A for a session that may not pay (free-only rule)', () => {
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_A_PER_CALL, false, false)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false, false)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
     });
 
     it('takes rail B whenever a voucher is presented, or the agent asks for it', () => {
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, true)).toBe(PaymentRail.RAIL_B_VOUCHER);
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_B_VOUCHER, false)).toBe(
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, true, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_B_VOUCHER, false, true)).toBe(
         PaymentRail.RAIL_B_VOUCHER,
       );
     });
@@ -532,7 +596,7 @@ describe('rail B over MCP', () => {
           (await client.callTool({
             name: TOOL_NAME,
             arguments: ARGS,
-            _meta: { [X402_RAIL]: 'B' },
+            _meta: { [ASSAY_RAIL]: 'B' },
           })) as CallToolResult
         )._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
       const pay = async (requirement: VoucherRequirement) =>
@@ -540,7 +604,7 @@ describe('rail B over MCP', () => {
           name: TOOL_NAME,
           arguments: ARGS,
           _meta: {
-            [X402_VOUCHER]: {
+            [ASSAY_VOUCHER]: {
               voucher: voucherFor(requirement),
               signature: fakeVoucherSignature(requirement.payer),
               providerId: requirement.providerId,
@@ -554,7 +618,7 @@ describe('rail B over MCP', () => {
 
       const stale = await pay(first);
       expect(stale.isError).toBe(true);
-      expect(stale._meta?.[X402_ERROR]).toMatchObject({
+      expect(stale._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
         retryable: true,
       });
@@ -567,7 +631,7 @@ describe('rail B over MCP', () => {
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_RAIL]: 'B' },
+        _meta: { [ASSAY_RAIL]: 'B' },
       })) as CallToolResult;
       const requirement = refused._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
       intents.pausedFor = 7;
@@ -576,7 +640,7 @@ describe('rail B over MCP', () => {
         name: TOOL_NAME,
         arguments: ARGS,
         _meta: {
-          [X402_VOUCHER]: {
+          [ASSAY_VOUCHER]: {
             voucher: voucherFor(requirement),
             signature: fakeVoucherSignature(requirement.payer),
             providerId: requirement.providerId,
@@ -585,7 +649,7 @@ describe('rail B over MCP', () => {
       })) as CallToolResult;
 
       expect(paused.isError).toBe(true);
-      expect(paused._meta?.[X402_ERROR]).toMatchObject({
+      expect(paused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
         retryable: true,
         retryAfter: 7,
@@ -604,11 +668,11 @@ describe('rail B over MCP', () => {
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_RAIL]: 'B' },
+        _meta: { [ASSAY_RAIL]: 'B' },
       })) as CallToolResult;
 
       expect(refused.isError).toBe(true);
-      expect(refused._meta?.[X402_ERROR]).toMatchObject({
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: McpFailureCode.PAYMENT_REQUIRED,
         retryable: true,
       });
@@ -620,7 +684,7 @@ describe('rail B over MCP', () => {
         name: TOOL_NAME,
         arguments: ARGS,
         _meta: {
-          [X402_VOUCHER]: {
+          [ASSAY_VOUCHER]: {
             voucher,
             signature: fakeVoucherSignature(voucher.payer),
             providerId: requirement.providerId,
@@ -629,21 +693,21 @@ describe('rail B over MCP', () => {
       })) as CallToolResult;
 
       expect(paid.isError).toBeFalsy();
-      expect(paid._meta?.[X402_RECEIPT]).toMatchObject({ status: PaymentIntentStatus.VERIFYING });
+      expect(paid._meta?.[ASSAY_RECEIPT]).toMatchObject({ status: PaymentIntentStatus.VERIFYING });
       expect(intents.only.rail).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
-    it('refuses a malformed _meta[x402/voucher] as PAYMENT_VOUCHER_MALFORMED', async () => {
+    it('refuses a malformed _meta[assay/voucher] as PAYMENT_VOUCHER_MALFORMED', async () => {
       const { client, invoker } = await connect();
 
       const refused = (await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_VOUCHER]: { voucher: 'not-an-object' } },
+        _meta: { [ASSAY_VOUCHER]: { voucher: 'not-an-object' } },
       })) as CallToolResult;
 
       expect(refused.isError).toBe(true);
-      expect(refused._meta?.[X402_ERROR]).toMatchObject({
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: PaymentErrorCode.PAYMENT_VOUCHER_MALFORMED,
       });
       expect(invoker.invocations).toHaveLength(0);
@@ -687,6 +751,6 @@ describe('rail B over MCP on Solana, with the real rail table', () => {
   });
 
   it('takes no paid rail on Solana by default: chooseRail falls to B, which is refused', () => {
-    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+    expect(chooseRail(CHAIN_ID, null, false, true)).toBe(PaymentRail.RAIL_B_VOUCHER);
   });
 });

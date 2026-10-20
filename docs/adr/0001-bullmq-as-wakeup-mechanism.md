@@ -69,7 +69,7 @@ Subtle pairing — discovered during scaffold smoke-test:
 - `AppWorkerModule` imports only `*-worker.module.ts` modules.
 - The shared `*.module.ts` provides the publisher to both sides (the api enqueues from the controller; the worker enqueues from the cron sweeper).
 
-The demo module (`src/modules/_examples/demo/`) is the minimal reference implementation of this split; `src/modules/_examples/posts/` shows it applied to a real feature with a repository and a controller.
+`src/modules/notification/` is a reference implementation of this split.
 
 ## Alternatives considered
 
@@ -88,7 +88,7 @@ Rejected. Halves the file count but obscures the intent for readers using the de
 ## Consequences
 
 - Every feature with background work has 3 module files instead of 1. Boilerplate cost is real but bounded; the demo module is the copy-paste template.
-- `@nestjs/schedule` runs in its own `scheduler` bootstrap in this backend (a deliberate deviation from the original template, which had no scheduler and hosted cron in the worker). Cron sweepers therefore go in `src/modules/_examples/schedule/`, and `AppSchedulerModule` mounts the BullMQ root so a sweeper can re-enqueue wakeups. The api process imports neither processors nor crons. Note the scheduler must run as a **single instance** — see `docs/architecture.md`.
+- `@nestjs/schedule` runs in its own `scheduler` bootstrap in this backend (a deliberate deviation from the original template, which had no scheduler and hosted cron in the worker). Cron sweepers therefore go in a `*-scheduler.module.ts`, and `AppSchedulerModule` mounts the BullMQ root so a sweeper can re-enqueue wakeups. The api process imports neither processors nor crons. Note the scheduler must run as a **single instance** — see `docs/architecture.md`.
 - Bull Board (mounted on the api server at `/api/admin/queues`) shows queues that any `*-api.module.ts` opts into via `registerQueueOnBoard()`. Worker-only queues are not visible — such a queue opts in to dashboard visibility by adding a corresponding api-side stub module that exists solely to call `registerQueueOnBoard`. `src/websocket/websocket-board.module.ts` is the worked example: the `websocket.events` queue is consumed by the websocket process, so nothing on the api side would otherwise register it.
 - Env-gated module imports must be written INLINE in the `imports` array after `ConfigModule.forRoot(...)`. `process.env` reads from top-of-file constants resolve before `.env` is loaded, silently disabling the module.
 - BullMQ job ids cannot contain `:` (Redis key separator). Publishers that compose job ids must use `-` or another safe delimiter.

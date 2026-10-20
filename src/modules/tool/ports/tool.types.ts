@@ -20,6 +20,14 @@ export enum ToolTier {
   GUARANTEED = 'GUARANTEED',
 }
 
+/** How a binding authenticates to the provider endpoint. Descriptive; not a versioned term. */
+export enum BindingAuthMode {
+  NONE = 'NONE',
+  API_KEY = 'API_KEY',
+  SIGNATURE = 'SIGNATURE',
+  BOTH = 'BOTH',
+}
+
 export enum BindingStatus {
   /** Written but never published — not routable, editable freely. */
   DRAFT = 'DRAFT',
@@ -82,6 +90,162 @@ export interface Tool {
   readonly outputSchema: JsonSchema;
   readonly verificationPolicyId: string;
   readonly tier: ToolTier;
+  /**
+   * The topic a view filter (`?category=`) and a toolset's inferred category
+   * read: `^[a-z][a-z0-9-]{1,63}$`. Optional on the type so hand-built
+   * fixtures stay valid; the seed loader always sets it, and a tool without
+   * one reads as {@link UNCATEGORISED}.
+   */
+  readonly category?: string;
+  /** Search keywords. Never sent to a model on their own. */
+  readonly tags?: readonly string[];
+  /**
+   * `tools.visibility`. Absent reads as LISTED: every seeded STANDARD tool is.
+   * Only a LISTED tool is part of the catalogue-wide views (`/`, `/c/…`).
+   */
+  readonly visibility?: ToolVisibility;
+  /**
+   * The contract version every field above is taken from (design spec §7.5):
+   * `tools.current_version` on a catalogue read, the routed version on a
+   * call. Absent on a hand-built fixture, which reads as 1.0.0.
+   */
+  readonly version?: ToolContractVersion;
+  /**
+   * Every published version (ACTIVE, DEPRECATED and RETIRED; never a DRAFT),
+   * newest first. Absent on a hand-built fixture: the tool's own fields are
+   * then its one version, 1.0.0 (`contractVersionsOf`).
+   */
+  readonly versions?: readonly ToolContractVersion[];
+  /** `tools.current_version`; absent reads as the newest ACTIVE version. */
+  readonly currentVersion?: number | null;
+  /** `tools.status`. Absent reads as ACTIVE. */
+  readonly status?: ToolStatus;
+  /** The tool deprecation and retirement notices point to (`tools.replacement_tool_id`). */
+  readonly replacementToolId?: string | null;
+  /** The tool deprecation and retirement notices point to, by name. */
+  readonly replacementToolName?: string | null;
+  /** The replacement tool's current version, when it has a served one. */
+  readonly replacementToolVersion?: { readonly major: number; readonly semver: string } | null;
+  /** `tools.kind`. Absent reads as STANDARD. */
+  readonly kind?: ToolKind;
+  /** The provider organization behind a PROVIDER tool (`tools.owner_org_id`). */
+  readonly ownerOrgId?: string | null;
+  /**
+   * PROVIDER only: an operator approved a version of it (`approved_version`
+   * set) — the "Not reviewed" badge is its absence (§7.6). Absent on a
+   * STANDARD tool, which needs no review.
+   */
+  readonly reviewed?: boolean;
+}
+
+/** `tool_versions.status`. */
+export enum ToolVersionStatus {
+  DRAFT = 'DRAFT',
+  ACTIVE = 'ACTIVE',
+  DEPRECATED = 'DEPRECATED',
+  RETIRED = 'RETIRED',
+}
+
+/** One worked example of a call, shown by `get_tool` and the catalogue. */
+export interface ToolExample {
+  readonly title?: string;
+  readonly arguments: Record<string, unknown>;
+  readonly result?: unknown;
+}
+
+/**
+ * One version of a tool's contract (`tool_versions`).
+ *
+ * `version` is the sequence number (`tools.current_version` names one);
+ * `semver` and `major` are what ranges and people read. The core fields are
+ * every schema property not listed in `optionalInputFields` /
+ * `optionalOutputFields`; a binding serves the core and opts in to the
+ * optional ones it declares.
+ */
+export interface ToolContractVersion {
+  readonly version: number;
+  readonly semver: string;
+  readonly major: number;
+  /** At most 200 characters; the only text `tools/list` sends. */
+  readonly summary: string;
+  readonly description: string;
+  readonly inputSchema: JsonSchema;
+  readonly outputSchema: JsonSchema;
+  readonly optionalInputFields: readonly string[];
+  readonly optionalOutputFields: readonly string[];
+  readonly examples: readonly ToolExample[];
+  readonly verificationPolicyId: string;
+  readonly tier: ToolTier;
+  readonly status: ToolVersionStatus;
+  readonly sunsetAt: Date | null;
+  readonly changelog: string | null;
+  readonly publishedAt: Date | null;
+}
+
+/** `tools.visibility`. */
+export enum ToolVisibility {
+  PRIVATE = 'PRIVATE',
+  UNLISTED = 'UNLISTED',
+  LISTED = 'LISTED',
+}
+
+/** Whether `tool` is in the public catalogue. */
+export function isListedTool(tool: Pick<Tool, 'visibility'>): boolean {
+  return (tool.visibility ?? ToolVisibility.LISTED) === ToolVisibility.LISTED;
+}
+
+/** A provider's own tool (`{handle}__{tool}`), rather than a platform contract. */
+export function isProviderTool(tool: Pick<Tool, 'kind'>): boolean {
+  return tool.kind === ToolKind.PROVIDER;
+}
+
+/** A provider tool no operator has approved yet: the "Not reviewed" badge (§7.6). */
+export function isNotReviewed(tool: Pick<Tool, 'kind' | 'reviewed'>): boolean {
+  return isProviderTool(tool) && tool.reviewed !== true;
+}
+
+/**
+ * Whether `organizationId` may see that `tool` exists outside a URL that
+ * serves it: every LISTED tool, and its own provider tools. Everything else
+ * reads exactly like a tool that does not exist.
+ */
+export function isVisibleToOrg(
+  tool: Pick<Tool, 'visibility' | 'ownerOrgId'>,
+  organizationId: string | null | undefined,
+): boolean {
+  if (isListedTool(tool)) return true;
+  return !!organizationId && !!tool.ownerOrgId && tool.ownerOrgId === organizationId;
+}
+
+/** The highest `ToolTier` a provider tool may carry (§7.6): never GUARANTEED. */
+export const PROVIDER_TOOL_MAX_TIER = ToolTier.VERIFIED;
+
+/** `tier` as a provider tool may carry it: GUARANTEED reads as VERIFIED. */
+export function cappedProviderTier(tier: ToolTier): ToolTier {
+  return tier === ToolTier.GUARANTEED ? PROVIDER_TOOL_MAX_TIER : tier;
+}
+
+/** The category of a tool that declares none. */
+export const UNCATEGORISED = 'uncategorised';
+
+/** `tool.category`, never undefined. */
+export function categoryOf(tool: Pick<Tool, 'category'>): string {
+  return tool.category ?? UNCATEGORISED;
+}
+
+/** `tools.kind`: a platform contract, or one provider's own tool (T4). */
+export enum ToolKind {
+  STANDARD = 'STANDARD',
+  PROVIDER = 'PROVIDER',
+}
+
+/** `tools.status`. `DRAFT`: no version published yet, so not in any catalogue. */
+export enum ToolStatus {
+  DRAFT = 'DRAFT',
+  ACTIVE = 'ACTIVE',
+  DEPRECATED = 'DEPRECATED',
+  RETIRED = 'RETIRED',
+  REMOVED = 'REMOVED',
 }
 
 /**
@@ -147,6 +311,24 @@ export interface ToolBinding {
   readonly slaFailureRate: number;
   readonly timeoutMs: number;
   readonly status: BindingStatus;
+
+  /**
+   * How the endpoint authenticates calls; absent reads as `NONE`. Not a
+   * versioned term, so a served binding carries the row's current value. The
+   * invoker refuses to dial an `API_KEY`/`BOTH` binding that has no credentials
+   * for the request's origin.
+   */
+  readonly authMode?: BindingAuthMode;
+
+  /**
+   * The contract majors this binding serves (`^1`, `^1 || ^2`). Absent reads
+   * as `^1`, the column default.
+   */
+  readonly toolVersionRange?: string;
+  /** Optional output fields this binding promises; absent reads as none. */
+  readonly providesOutputFields?: readonly string[];
+  /** Optional input fields this binding supports; absent reads as none. */
+  readonly supportsInputFields?: readonly string[];
 
   /**
    * Which stored revision of the mappings this is.

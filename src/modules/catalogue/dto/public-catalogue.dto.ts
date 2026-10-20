@@ -1,4 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ToolVersionBriefDto } from '@modules/tool/dto/tool-contract-version.dto';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsIn, IsOptional, Matches } from 'class-validator';
 
 import { ToolTier } from '@modules/tool/ports/tool.types';
 
@@ -28,8 +30,11 @@ import { ToolTier } from '@modules/tool/ports/tool.types';
  *   every write is scoped to the caller's own session.
  * - `stake` — the bonded amount per chain, the same figure that is readable on
  *   chain. Amounts only: no account or authority address.
- * - `quality` — the measured pass rate over closed SLA windows, aggregated
- *   across all buyers; it names no buyer.
+ * - `quality` — the measured pass rate over the last 30 days of SLA windows,
+ *   open and closed, aggregated across all buyers; it names no buyer.
+ * - `prices` — the quote per chain with the `providerId` setting it, the same
+ *   public id the provider list already carries.
+ * - `promisedFailureRate` — the rate a listing promises; the provider published it.
  */
 export class PublicMoneyDto {
   @ApiProperty({ description: 'Atomic units as a decimal integer string', example: '250000' })
@@ -56,6 +61,25 @@ export class PublicQualityDto {
 
   @ApiProperty()
   failedCalls: number;
+}
+
+export class PublicChainPriceDto {
+  @ApiProperty({ description: 'CAIP-2 chain a call settles on at this price' })
+  chainId: string;
+
+  @ApiProperty({ type: PublicMoneyDto, description: 'The most a call on this chain is charged.' })
+  price: PublicMoneyDto;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The provider whose listing sets this price; null when several eligible listings share it.',
+  })
+  providerId: string | null;
+
+  @ApiProperty({ description: 'Eligible listings on this chain. Name the provider only when 1.' })
+  listings: number;
 }
 
 export class PublicProviderDto {
@@ -109,6 +133,9 @@ export class PublicProviderToolDto {
   @ApiProperty({ type: PublicMoneyDto })
   price: PublicMoneyDto;
 
+  @ApiProperty({ description: 'The failure rate this listing promises, 0..1.', example: 0.05 })
+  promisedFailureRate: number;
+
   @ApiProperty({
     type: Number,
     nullable: true,
@@ -132,8 +159,86 @@ export class PublicToolDto {
   @ApiProperty()
   description: string;
 
-  @ApiProperty({ enum: ToolTier })
+  @ApiProperty({ description: 'The current version’s summary (at most 200 characters).' })
+  summary: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '1.1.0',
+    description: 'tools.current_version',
+  })
+  version: string | null;
+
+  @ApiProperty({
+    type: [ToolVersionBriefDto],
+    description: 'Every published version, newest first, with status, sunset and changelog.',
+  })
+  versions: ToolVersionBriefDto[];
+
+  @ApiProperty({
+    type: [Number],
+    example: [1],
+    description: 'Majors that are DEPRECATED (still serving until their sunset).',
+  })
+  deprecatedMajors: number[];
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'What replaces the deprecated majors: the tool to call (this tool at a newer major, or ' +
+      'the operator-named replacement tool, only when it is LISTED). `null` with no deprecated ' +
+      'major or no replacement.',
+  })
+  replacementToolId: string | null;
+
+  @ApiProperty({ type: String, nullable: true, example: 'get_weather' })
+  replacementName: string | null;
+
+  @ApiProperty({ type: Number, nullable: true, example: 2, description: 'The major to call it at' })
+  replacementMajor: number | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '2.0.0',
+    description: 'The replacement’s served version',
+  })
+  replacementVersion: string | null;
+
+  @ApiProperty({ enum: ToolTier, description: 'A provider tool is never GUARANTEED (§7.6).' })
   tier: ToolTier;
+
+  @ApiProperty({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'STANDARD: backed by several providers. PROVIDER: one maker’s own API.',
+  })
+  kind: 'STANDARD' | 'PROVIDER';
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'acme',
+    description: 'The maker’s public name, on a PROVIDER tool (`{handle}__{tool}`).',
+  })
+  handle: string | null;
+
+  @ApiProperty({
+    description:
+      'The "Not reviewed" badge: a provider tool no operator approved. Always false in the ' +
+      'catalogue, which lists reviewed (LISTED) tools only.',
+  })
+  notReviewed: boolean;
+
+  @ApiProperty({
+    example: 'weather',
+    description: 'The tool’s topic (`tools.category`), as `?category=` filters on.',
+  })
+  category: string;
+
+  @ApiProperty({ type: [String], example: ['temperature', 'conditions'] })
+  tags: string[];
 
   @ApiProperty({ description: 'Distinct providers serving this tool.' })
   providerCount: number;
@@ -178,9 +283,35 @@ export class PublicToolDto {
     description: 'CAIP-2 chains a call would settle on; null when nothing is routable.',
   })
   settlementChains: string[] | null;
+
+  @ApiProperty({
+    type: [PublicChainPriceDto],
+    description:
+      'The price per chain, with the provider setting it. Empty when nothing is routable.',
+  })
+  prices: PublicChainPriceDto[];
 }
 
 export class PublicToolListDto {
   @ApiProperty({ type: [PublicToolDto] })
   tools: PublicToolDto[];
+}
+
+/** `GET /public/catalogue/tools?category=` — one topic of the catalogue. */
+export class ListPublicToolsQueryDto {
+  @ApiPropertyOptional({
+    example: 'weather',
+    description: 'Only tools in this category. Unknown categories answer an empty list.',
+  })
+  @IsOptional()
+  @Matches(/^[a-z][a-z0-9-]{1,63}$/)
+  category?: string;
+
+  @ApiPropertyOptional({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'Only standard tools ("Backed by several providers") or provider tools.',
+  })
+  @IsOptional()
+  @IsIn(['STANDARD', 'PROVIDER'])
+  kind?: 'STANDARD' | 'PROVIDER';
 }

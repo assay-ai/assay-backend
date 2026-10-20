@@ -1,12 +1,10 @@
 import { foldJournal } from '@modules/ledger/domain/balance-fold';
-import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import {
   INTERNAL_ACCOUNTS,
   LedgerAccountId,
   LedgerEntryType,
 } from '@modules/ledger/ports/ledger.types';
 import { MoneyUtil } from '@shared/utils/money.util';
-import { expectErrorCodeAsync } from '../../unit/helpers/expect-error-code';
 import {
   USDC_ASSET,
   LedgerTestContext,
@@ -165,55 +163,5 @@ describe('ledger invariants — the real-database invariant run', () => {
     );
     expect(stillThere).toBeDefined();
     expect(stillThere.amount).toBe(row.amount);
-  });
-
-  describe('batch atomicity', () => {
-    it('a batch that fails to flush applies none of its entries, and every snapshot still verifies', async () => {
-      const agentA = context.account('agent-batch-a');
-      const agentB = context.account('agent-batch-b');
-
-      const journalBefore = await context.ledger.readJournal(context.organizationId);
-
-      context.ledger.append({
-        organizationId: context.organizationId,
-        accountId: agentA,
-        entryType: LedgerEntryType.DEPOSIT_PENDING,
-        money: context.usdc(100n),
-      });
-      context.ledger.append({
-        organizationId: context.organizationId,
-        accountId: agentB,
-        entryType: LedgerEntryType.DEPOSIT_PENDING,
-        money: context.usdc(50n),
-      });
-      // A poisoned entry that survives `append` and fails at flush.
-      //
-      // Most malformed input is rejected synchronously by `append` — a decimals
-      // scale disagreeing with the asset registry raises LEDGER_ASSET_MISMATCH
-      // at the call site, by design, so that a bad entry fails its own caller
-      // rather than four hundred innocent ones. `organizationId` is the
-      // exception: it is opaque to the ledger and only Postgres knows it must
-      // be a uuid, so it is the one value that can reach the INSERT and abort
-      // the transaction there. That makes it the honest way to test batch
-      // atomicity without a test-only seam in production code.
-      context.ledger.append({
-        organizationId: 'not-a-uuid',
-        accountId: agentA,
-        entryType: LedgerEntryType.DEPOSIT_PENDING,
-        money: context.usdc(10n),
-      });
-
-      await expectErrorCodeAsync(
-        () => context.ledger.flush(),
-        LedgerErrorCode.LEDGER_BATCH_FLUSH_FAILED,
-      );
-
-      const journalAfter = await context.ledger.readJournal(context.organizationId);
-      expect(journalAfter).toHaveLength(journalBefore.length);
-
-      const verification = await context.ledger.verifySnapshots(context.organizationId);
-      expect(verification.ok).toBe(true);
-      expect(verification.drifts).toHaveLength(0);
-    });
   });
 });

@@ -9,7 +9,7 @@ import { EvmReadClient } from '@modules/chains/evm/evm-chain.adapter';
 import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/verifier-registry.port';
 
 /**
- * `X402Config.verifierKey`, read through the port.
+ * `AssayConfig.verifierKey`, read through the port.
  *
  * Two things this suite has to hold that a happy-path test would not:
  *
@@ -179,6 +179,7 @@ function build(key?: OnChainKey) {
   const client: EvmReadClient = {
     getTransactionReceipt: async () => null,
     getBlock: async () => ({ number: 1n }),
+    getBlockNumber: async () => 1n,
     readContract: async (args) => {
       reads.push({ address: args.address, functionName: args.functionName, args: args.args });
       return key;

@@ -161,7 +161,7 @@ export class EconomicParameterRowDto {
 
 /** One row of `GET /operator/override-register` — `OVERRIDE_REGISTER`, listed. */
 export class OverrideRegisterRowDto {
-  @ApiProperty({ description: 'e.g. `S-3`' })
+  @ApiProperty({ description: 'e.g. `S-5`' })
   code: string;
 
   @ApiProperty({ enum: OverrideFamily })

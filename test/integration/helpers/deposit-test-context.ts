@@ -33,8 +33,6 @@ import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.service';
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
-import { LEDGER_MAX_FLUSH_ATTEMPTS } from '@modules/ledger/constants/ledger.constants';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { DepositIntentExpiryService } from '@modules/payment/services/deposit-intent-expiry.service';
 import { DepositIntentService } from '@modules/payment/services/deposit-intent.service';
@@ -45,6 +43,7 @@ import {
   TEST_POOL_SIZE,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
 } from './test-database';
@@ -173,6 +172,7 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
@@ -183,8 +183,7 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
   );
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-  const writer = new LedgerWriterService(journal, dataSource);
-  const ledger = new LedgerService(journal, writer, balances, holds);
+  const ledger = new LedgerService(journal, balances, holds);
 
   const repository = new DepositIntentRepository(dataSource);
   const deposits = new DepositIntentService(repository);
@@ -302,14 +301,6 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     organizationId: randomUUID(),
 
     async reset(): Promise<void> {
-      for (let attempt = 0; attempt <= LEDGER_MAX_FLUSH_ATTEMPTS && writer.pending > 0; attempt++) {
-        try {
-          await writer.flush();
-        } catch {
-          // A batch that cannot be written belongs to the test that abandoned it.
-        }
-      }
-      writer.drainQuarantine();
       context.organizationId = randomUUID();
       escrowRows.clear();
       jest.clearAllMocks();

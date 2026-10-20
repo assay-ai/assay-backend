@@ -99,15 +99,16 @@ export function loadProviderTerms(config: ConfigService): ProviderTerms {
         key: 'payouts',
         label: 'Payouts',
         // There is no payout batch: a provider is paid on chain when each
-        // call's voucher is redeemed, which is what every earnings screen says.
+        // call's voucher is redeemed, and the payment is final once the
+        // 1-hour buyer report window has closed.
         value: 'as each call settles',
-        caption: 'on-chain and final',
+        caption: 'on chain; final 1 hour after each call',
       },
       {
         key: 'reserveHeld',
         label: 'Reserve held',
         value: `$${reserveHeldUsd}`,
-        caption: 'we hold nothing back against your account',
+        caption: 'no standing reserve; each paid call is held 1 hour for buyer reports',
       },
       {
         key: 'clawback',

@@ -34,7 +34,7 @@ import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-t
  *
  * ## Why it is a port and not a call into the client
  *
- * ESLint's chain-SDK ban: `@x402/settlement-client` and `@solana/*` are
+ * ESLint's chain-SDK ban: `@assay/settlement-client` and `@solana/*` are
  * importable only under `src/modules/chains/`, and `yarn lint` is a gate. So
  * the consuming domain declares the interface and `chains/solana/` supplies the
  * implementation — the arrangement `OnChainStakeReaderPort` already has, for
@@ -177,16 +177,9 @@ export interface StakeIntentPreflight {
  * — the same union `EscrowIntentBuilderPort` returns and the same one
  * `POST /deposits` describes its requirements with.
  *
- * `UnsignedStakeTransaction` used to be declared here, field for field
- * identical to `UnsignedEscrowTransaction` two modules away. Both were Solana
- * transactions wearing a domain's name: `transactionBase64`, `feePayer`,
- * `signers`, `blockhash`, `lastValidBlockHeight`. Adding EVM to either copy
- * would have meant adding it to both, and the second copy is the one that gets
- * forgotten.
- *
- * The build-but-never-sign rule is unchanged and is the reason this port still
- * has no `send`, no `submit`, no `signature` and no signer parameter: the union
- * describes what to sign, never a signature.
+ * The build-but-never-sign rule is the reason this port has no `send`, no
+ * `submit`, no `signature` and no signer parameter: the union describes what
+ * to sign, never a signature.
  */
 
 /**
@@ -218,7 +211,7 @@ export interface StakeIntentBuilderPort {
    * before anything else.
    *
    * `true` on Solana, where the stake is a PDA that `open_stake` has to create
-   * and the provider pays rent for. `false` on eip155, where `X402Stake` keys a
+   * and the provider pays rent for. `false` on eip155, where `AssayStake` keys a
    * mapping on the provider's address and the first `depositStake` writes the
    * row — there is no account to open and no transaction that could open one.
    *

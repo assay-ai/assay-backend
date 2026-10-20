@@ -62,13 +62,13 @@ export class ReconciliationJob {
   }
 
   /**
-   * Which assets the vault custodies.
+   * Which assets a vault holds: the escrow contract's asset on every enabled
+   * `eip155` chain. Solana has no vault, so an enabled Solana chain adds
+   * nothing — the job neither runs nor fails for it.
    *
-   * Derived from the enabled chains rather than configured separately: the
-   * vault holds USDC and only USDC in the MVP, so the set is
-   * "the registered USDC of every chain this deployment serves". A separate
-   * env var would be a second place to forget to add a chain, and forgetting
-   * here means an asset nobody reconciles.
+   * Derived from the enabled chains rather than configured separately: a
+   * separate env var would be a second place to forget to add a chain, and
+   * forgetting here means an asset nobody reconciles.
    *
    * Unregistered chains are skipped rather than thrown on — a chain the asset
    * registry does not know is a configuration question for boot, not a reason

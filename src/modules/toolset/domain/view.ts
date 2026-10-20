@@ -1,0 +1,314 @@
+import { ProviderTier } from '@modules/provider/ports/provider.types';
+import { AssetId } from '@modules/chains/ports/caip.types';
+import { EntryRoutingRules, OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
+import {
+  ContractRequest,
+  contractVersionsOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import {
+  VersionRange,
+  intersectRanges,
+  parseVersionRange,
+} from '@modules/tool/domain/contract/version-range';
+import {
+  PricingMode,
+  Tool,
+  ToolVisibility,
+  categoryOf,
+  isListedTool,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
+import { MoneyUtil } from '@utils/money.util';
+
+import { DiscoveryMode, EndpointKind, McpPath, McpPathKind, ViewFilter } from './mcp-url';
+
+/**
+ * What one MCP URL serves, before access (design spec §7.3):
+ *
+ * ```text
+ * view = the URL's tools (the catalogue, or a toolset's entries, in order)
+ *        ∩ ?tools=  ∩ ?category=  ∩ (?free=1 → FREE or FREEMIUM only)
+ * ```
+ *
+ * Filters only narrow. `?free=1` needs a price to decide, so it is applied by
+ * whoever priced the tool ({@link servesPricingMode}); everything else is
+ * decided here from the catalogue alone.
+ */
+export interface McpEndpointView {
+  readonly canonicalUrl: string;
+  readonly path: McpPath;
+  readonly kind: EndpointKind;
+  readonly filter: ViewFilter;
+  /** The toolset this URL serves, or `null` on `/`, `/c/…` and `/@handle`. */
+  readonly toolset: ViewToolset | null;
+  readonly handle: string | null;
+  /** The URL's own tools in order, or `null` for the whole LISTED catalogue. */
+  readonly baseToolIds: readonly string[] | null;
+  /** The entry rules of the toolset this URL serves, by tool id. */
+  readonly entryRules: ReadonlyMap<string, EntryRoutingRules>;
+  /**
+   * T3: each entry's contract range and required outputs, by tool id. Absent
+   * or missing an id means the default major and nothing required.
+   */
+  readonly entryContracts?: ReadonlyMap<string, EntryContract>;
+  /**
+   * `/c/{category}`: the path's own topic, applied like `?category=` (and
+   * intersected with it). Absent or `null` elsewhere.
+   */
+  readonly baseCategory?: string | null;
+  /**
+   * How `tools/list` presents this URL (§7.4, "Discovery modes"), before a
+   * `?discovery=` override: the Draft's settings on `/my/{slug}`, the
+   * published snapshot's on `/my/{slug}@n`, `/@…` and `/u/…`. Absent means
+   * the path's static default with no pins — see `discoveryOf` — so a
+   * resolver case that predates T2 still serves a sensible list.
+   */
+  readonly discovery?: ViewDiscovery;
+  /** Set when a shared URL serves only through a grace period or a rename alias. */
+  readonly notice?: ViewNotice | null;
+  /**
+   * `/@{handle}`: the organization whose LISTED provider tools this URL
+   * serves (T4). Absent or `null` elsewhere.
+   */
+  readonly baseOwnerOrgId?: string | null;
+}
+
+export interface ViewNotice {
+  /** `_meta["assay/sharingEnds"]`: the URL stops serving then. */
+  readonly sharingEndsAt: Date | null;
+  /** `_meta["assay/renamed"]`: the handle in the URL is an old one; this is the current. */
+  readonly renamedTo: string | null;
+}
+
+/** A URL's discovery settings: the toolset's, or the path's defaults. */
+export interface ViewDiscovery {
+  readonly mode: DiscoveryMode;
+  /** AUTO turns to SEARCH above this many tools in view ∩ access. */
+  readonly searchThreshold: number;
+  /** The URL's "Always loaded" names (the toolset's, or the root's), at most 5. */
+  readonly pinnedTools: readonly string[];
+}
+
+/** The default `search_threshold` (design spec §13 D2). */
+export const DEFAULT_SEARCH_THRESHOLD = 25;
+
+export interface ViewToolset {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  /** The published version served, or `null` for the Draft (`/my/{slug}`). */
+  readonly version: number | null;
+  /** Set on a URL with no `@n`: it follows the latest version (`_meta["assay/toolsetVersion"]`). */
+  readonly latest: boolean;
+  /**
+   * The owner: the only organization whose own PRIVATE or UNLISTED provider
+   * tools this toolset may serve (§7.6). `null` for a platform toolset;
+   * absent on a hand-built view, which then serves LISTED tools only.
+   */
+  readonly ownerOrgId?: string | null;
+}
+
+/** A toolset entry's contract constraints (T3): hard, kept by FALLBACK_BEST. */
+export interface EntryContract {
+  /** `tool_version_range`; `null` follows the tool's current major. */
+  readonly range: VersionRange | null;
+  readonly requireOutputFields: readonly string[];
+}
+
+/** A stored entry's range and required outputs, or `null` when it sets neither. */
+export function entryContractOf(entry: {
+  readonly toolVersionRange?: string | null;
+  readonly requireOutputFields: readonly string[];
+}): EntryContract | null {
+  const range = parseVersionRange(entry.toolVersionRange);
+  const required = [...(entry.requireOutputFields ?? [])];
+  if (!range && required.length === 0) return null;
+  return { range, requireOutputFields: required };
+}
+
+/**
+ * What a call of `tool` through this URL asks of the contract: the entry's
+ * range intersected with a `?tools=name@N` pin, and the entry's required
+ * outputs. `range: []` when the two do not meet — no version can serve it.
+ */
+export function contractRequestOf(
+  view: Pick<McpEndpointView, 'entryContracts' | 'filter'>,
+  tool: Tool,
+): ContractRequest {
+  const entry = view.entryContracts?.get(tool.id) ?? null;
+  const entryRange = entry?.range ?? null;
+  const selectors = (view.filter.tools ?? []).filter((selector) => selector.name === tool.name);
+  // A plain selector serves the tool unpinned; otherwise the pin is every
+  // major the URL names that the view did not ignore (one that exists, and
+  // inside the entry's range) — the same test `selectViewTools` applies.
+  let pin: number[] | null = null;
+  if (selectors.length > 0 && selectors.every((selector) => selector.major !== null)) {
+    const majors = new Set(contractVersionsOf(tool).map((version) => version.major));
+    pin = selectors
+      .map((selector) => selector.major as number)
+      .filter((major) => majors.has(major) && (entryRange === null || entryRange.includes(major)));
+  }
+  const range = intersectRanges(entryRange, pin);
+  return { range, requireOutputFields: entry?.requireOutputFields ?? [] };
+}
+
+/** The fields of a `toolset_entries` row the rules are built from. */
+export interface StoredEntryRule {
+  readonly providerMode: string;
+  readonly providerIds: readonly string[];
+  readonly minTier: string | null;
+  readonly maxPriceAmount: string | null;
+  readonly maxPriceAssetId: string | null;
+  readonly maxPriceDecimals: number | null;
+  readonly minQuality: string | null;
+  readonly onEmpty: string;
+}
+
+/** A stored entry → the router's rules, or `null` when the entry sets nothing. */
+export function entryRulesOf(entry: StoredEntryRule): EntryRoutingRules | null {
+  const rules: EntryRoutingRules = {
+    mode: entry.providerMode as ProviderMode,
+    providerIds: [...entry.providerIds],
+    minTier: (entry.minTier as ProviderTier | null) ?? null,
+    maxPrice:
+      entry.maxPriceAmount !== null && entry.maxPriceAssetId && entry.maxPriceDecimals !== null
+        ? MoneyUtil.of(
+            entry.maxPriceAmount,
+            entry.maxPriceAssetId as AssetId,
+            entry.maxPriceDecimals,
+          )
+        : null,
+    minQuality: entry.minQuality === null ? null : Number(entry.minQuality),
+    onEmpty: entry.onEmpty as OnEmpty,
+  };
+  const empty =
+    rules.mode === ProviderMode.BEST &&
+    rules.minTier === null &&
+    rules.maxPrice === null &&
+    rules.minQuality === null;
+  return empty ? null : rules;
+}
+
+/**
+ * Whether a URL serving `view` may serve `tool` (design spec §7.6, "Reach of
+ * an UNLISTED provider tool"):
+ *
+ * ```text
+ * LISTED                           every URL whose view holds it
+ * UNLISTED provider tool           /my/{slug}[@n] of its own provider's toolset,
+ *                                  and /u/{token}[@n] of its provider's UNLISTED one
+ * PRIVATE provider tool            /my/{slug}[@n] of its own provider's toolset
+ * anything else                    nowhere — including /@{handle}/{slug}, /, /c/…, /@{handle}
+ * ```
+ *
+ * Checked on every serve, not only when an entry is saved: a snapshot taken
+ * while a tool was reachable never widens what it reaches later.
+ */
+export function reachableThrough(
+  tool: Pick<Tool, 'visibility' | 'kind' | 'ownerOrgId'>,
+  view: Pick<McpEndpointView, 'path' | 'toolset'>,
+): boolean {
+  if (isListedTool(tool)) return true;
+  if (!isProviderTool(tool) || !tool.ownerOrgId) return false;
+  const owner = view.toolset?.ownerOrgId;
+  if (!owner || owner !== tool.ownerOrgId) return false;
+  const kind = view.path?.kind;
+  if (kind === McpPathKind.MY_TOOLSET) {
+    return (
+      tool.visibility === ToolVisibility.PRIVATE || tool.visibility === ToolVisibility.UNLISTED
+    );
+  }
+  if (kind === McpPathKind.UNLISTED_TOOLSET) return tool.visibility === ToolVisibility.UNLISTED;
+  return false;
+}
+
+/** The view's tools from `catalogue`, in the URL's order, and the `?tools=` names it ignored. */
+export function selectViewTools(
+  view: Pick<
+    McpEndpointView,
+    'baseToolIds' | 'filter' | 'baseCategory' | 'entryContracts' | 'baseOwnerOrgId'
+  > &
+    Partial<Pick<McpEndpointView, 'path' | 'toolset'>>,
+  catalogue: readonly Tool[],
+): { readonly tools: readonly Tool[]; readonly ignoredTools: readonly string[] } {
+  const byId = new Map(catalogue.map((tool) => [tool.id, tool]));
+  let tools: Tool[] = view.baseToolIds
+    ? view.baseToolIds.flatMap((id) => {
+        const tool = byId.get(id);
+        // A toolset URL serves an unlisted tool only where §7.6 lets it reach.
+        return tool && reachableThrough(tool, view as Pick<McpEndpointView, 'path' | 'toolset'>)
+          ? [tool]
+          : [];
+      })
+    : // The catalogue-wide views serve the LISTED catalogue only: an UNLISTED
+      // or PRIVATE tool is reachable only through a toolset that holds it.
+      catalogue.filter(isListedTool);
+
+  if (view.baseOwnerOrgId) {
+    // `/@{handle}`: one maker's LISTED provider tools.
+    tools = tools.filter((tool) => isProviderTool(tool) && tool.ownerOrgId === view.baseOwnerOrgId);
+  }
+
+  const ignored: string[] = [];
+  if (view.filter.tools) {
+    const names = new Set<string>();
+    for (const selector of view.filter.tools) {
+      // A pin to a major the tool has no version of, or one outside the
+      // toolset entry's range, names nothing this URL can serve (T3).
+      if (selector.major !== null) {
+        const tool = tools.find((candidate) => candidate.name === selector.name);
+        const entryRange = tool ? (view.entryContracts?.get(tool.id)?.range ?? null) : null;
+        const majors = tool
+          ? new Set(contractVersionsOf(tool).map((version) => version.major))
+          : null;
+        if (
+          !tool ||
+          !majors?.has(selector.major) ||
+          (entryRange !== null && !entryRange.includes(selector.major))
+        ) {
+          ignored.push(`${selector.name}@${selector.major}`);
+          continue;
+        }
+      }
+      names.add(selector.name);
+    }
+    const present = new Set(tools.map((tool) => tool.name));
+    for (const name of names) if (!present.has(name)) ignored.push(name);
+    tools = tools.filter((tool) => names.has(tool.name));
+  }
+
+  if (view.filter.categories) {
+    const categories = new Set(view.filter.categories);
+    tools = tools.filter((tool) => categories.has(categoryOf(tool)));
+  }
+
+  if (view.baseCategory) {
+    tools = tools.filter((tool) => categoryOf(tool) === view.baseCategory);
+  }
+
+  return { tools, ignoredTools: ignored.sort() };
+}
+
+/** `?free=1` keeps only tools that can be served free (FR-2). */
+export function servesPricingMode(filter: ViewFilter, mode: PricingMode | null): boolean {
+  if (!filter.free) return true;
+  return mode === PricingMode.FREE || mode === PricingMode.FREEMIUM;
+}
+
+/**
+ * The `_meta` a list result carries for its URL (design spec §7.4):
+ * `assay/toolsetVersion` on a latest URL, `assay/sharingEnds` while a shared
+ * URL serves only through a grace period, `assay/renamed` on an old handle.
+ */
+export function listMetaOf(view: McpEndpointView | null | undefined): Record<string, unknown> {
+  const meta: Record<string, unknown> = {};
+  if (!view) return meta;
+  if (view.toolset?.latest && view.toolset.version !== null) {
+    meta['assay/toolsetVersion'] = view.toolset.version;
+  }
+  if (view.notice?.sharingEndsAt) {
+    meta['assay/sharingEnds'] = view.notice.sharingEndsAt.toISOString();
+  }
+  if (view.notice?.renamedTo) meta['assay/renamed'] = { to: view.notice.renamedTo };
+  return meta;
+}

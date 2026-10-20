@@ -3,7 +3,7 @@ import { Column, Entity, Index } from 'typeorm';
 import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
 
 /**
- * What one EVM chain's `X402Config` says about the pause and the dispute
+ * What one EVM chain's `AssayConfig` says about the pause and the dispute
  * terms, as `EvmChainStateIndexer` last read it — one row per chain.
  *
  * A CACHE of the chain, never its authority: the contracts refuse what they
@@ -23,15 +23,15 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'chain_id', type: 'varchar', length: 64 })
   chainId: string;
 
-  /** `X402Config.paused`, from `PauseToggled` and the periodic `paused()` read. */
+  /** `AssayConfig.paused`, from `PauseToggled` and the periodic `paused()` read. */
   @Column({ name: 'paused', type: 'boolean', default: false })
   paused: boolean;
 
-  /** `X402Config.arbiter()`, lower-case, or `null` for none. */
+  /** `AssayConfig.arbiter()`, lower-case, or `null` for none. */
   @Column({ name: 'arbiter', type: 'varchar', length: 42, nullable: true })
   arbiter: string | null;
 
-  /** `X402Config.slashDelaySeconds()` at the last reconcile. */
+  /** `AssayConfig.slashDelaySeconds()` at the last reconcile. */
   @Column({ name: 'slash_delay_seconds', type: 'integer', nullable: true })
   slashDelaySeconds: number | null;
 
@@ -44,6 +44,17 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
    */
   @Column({ name: 'slash_watch_cursor_block', type: 'bigint', nullable: true })
   slashWatchCursorBlock: string | null;
+
+  /**
+   * The last block `EvmEscrowWithdrawalIndexer` has read (B7), apart from the
+   * other two cursors for the same reason they are apart from each other.
+   */
+  @Column({ name: 'withdrawal_cursor_block', type: 'bigint', nullable: true })
+  withdrawalCursorBlock: string | null;
+
+  /** The withdrawal index's last read failure, without the node's prose; cleared by the next good range. */
+  @Column({ name: 'withdrawal_last_error', type: 'varchar', length: 256, nullable: true })
+  withdrawalLastError: string | null;
 
   @Column({ name: 'head_block', type: 'bigint', nullable: true })
   headBlock: string | null;

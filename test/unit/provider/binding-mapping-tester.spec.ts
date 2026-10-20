@@ -8,6 +8,7 @@ import {
   BindingTestLayerStatus,
   BindingTestOutcome,
   BindingTestPolicySource,
+  BindingTestWarningCode,
 } from '@modules/provider/ports/binding-test.types';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import { BindingMappingTesterService } from '@modules/provider/services/binding-mapping-tester.service';
@@ -15,8 +16,11 @@ import { ProviderEgressLimiter } from '@modules/provider/services/provider-egres
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { ONE_CREDENTIAL, plainInvoker } from '../tool/helpers/routing-fixtures';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { StageStatus, VerificationStage } from '@modules/verification/domain/stage';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -58,6 +62,9 @@ const lookup = jest.fn(async (hostname: string) => {
   error.code = 'ENOTFOUND';
   throw error;
 });
+
+/** No keys: what a deployment without `PROVIDER_REQUEST_SIGNING_KEYS` runs (never production). */
+const UNSIGNED_SIGNER = new RequestSignerService([]);
 
 let server: http.Server;
 let port: number;
@@ -105,6 +112,7 @@ function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEnti
     freeDailyBudget: null,
     slaFailureRate: '0.02000',
     timeoutMs: 30_000,
+    authMode: BindingAuthMode.API_KEY,
     status: BindingStatus.DRAFT,
     mappingVersion: 1,
     publishedVersion: null,
@@ -113,7 +121,12 @@ function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEnti
   } as ToolBindingEntity;
 }
 
-function buildTester(row: ToolBindingEntity, tool = buildTool()) {
+function buildTester(
+  row: ToolBindingEntity,
+  tool = buildTool(),
+  invokerOverride?: BindingInvokerPort,
+  signer: RequestSignerService = UNSIGNED_SIGNER,
+) {
   const saved: unknown[] = [];
 
   const editor = { loadEditable: jest.fn(async () => row) } as unknown as BindingEditorService;
@@ -137,13 +150,18 @@ function buildTester(row: ToolBindingEntity, tool = buildTool()) {
     resolveForTraffic: jest.fn(async () => null),
   } as unknown as DecisionPolicyService;
 
-  const invoker = new EgressBindingInvoker(
-    new EgressHttpClient(lookup, (target) => ({
-      address: '127.0.0.1',
-      family: 4,
-      port: target.port === 80 ? port : target.port,
-    })),
-  );
+  const invoker =
+    invokerOverride ??
+    plainInvoker(
+      new EgressHttpClient(lookup, (target) => ({
+        address: '127.0.0.1',
+        family: 4,
+        port: target.port === 80 ? port : target.port,
+      })),
+      // The default row is an API-key binding: without a stored key the invoker
+      // refuses to dial (platform fault), which is not what these cases probe.
+      ONE_CREDENTIAL,
+    );
 
   return {
     tester: new BindingMappingTesterService(
@@ -153,6 +171,7 @@ function buildTester(row: ToolBindingEntity, tool = buildTool()) {
       invoker,
       policies,
       new ProviderEgressLimiter(),
+      signer,
     ),
     saved,
   };
@@ -181,7 +200,10 @@ describe('BindingMappingTesterService — an endpoint that behaves', () => {
       res.end(JSON.stringify({ data: { answer: 'forty-two' }, meta: { ms: 12 } }));
     };
 
-    const { tester, saved } = buildTester(bindingRow());
+    const { tester, saved } = buildTester(
+      // NONE: no probe, so `received` below is the main request.
+      bindingRow({ authMode: BindingAuthMode.NONE }),
+    );
     const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
       query: 'the ultimate question',
     });
@@ -378,5 +400,197 @@ describe('BindingMappingTesterService — an endpoint that returns rubbish', () 
     );
     expect(received).toBeNull();
     expect(report.request).toBeNull();
+  });
+});
+
+describe('BindingMappingTesterService — unauthenticated probes', () => {
+  const ID = 'a3f1c2d4-0000-4000-8000-000000000001';
+  const ok = {
+    status: 200,
+    body: { kind: 'JSON', value: { data: { answer: 'x' } } },
+    headers: { 'content-type': 'application/json' },
+  };
+
+  function fake(answer: (omit: unknown) => { status: number }) {
+    const invoke = jest.fn(async (invocation: { omit?: unknown }) => ({
+      ...ok,
+      ...answer(invocation.omit),
+    }));
+    return { invoke, invoker: { invoke } as unknown as BindingInvokerPort };
+  }
+
+  const run = (mode: BindingAuthMode, invoker: BindingInvokerPort) =>
+    buildTester(bindingRow({ authMode: mode }), buildTool(), invoker).tester.run(
+      PROVIDER,
+      SUBJECT,
+      ID,
+      { query: 'q' },
+    );
+
+  it('SIGNATURE: warns ACCEPTS_UNSIGNED when the unsigned probe is answered 200, outcome still PASSED', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.SIGNATURE, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    expect(report.warnings).toEqual([
+      {
+        code: BindingTestWarningCode.ACCEPTS_UNSIGNED,
+        message: 'Your endpoint accepted a request without an Assay signature.',
+      },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1][0].omit).toEqual({ signature: true });
+  });
+
+  it('has no warnings when the probe is refused with 401', async () => {
+    const { invoker } = fake((omit) => ({ status: omit ? 401 : 200 }));
+    const report = await run(BindingAuthMode.SIGNATURE, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    expect(report.warnings).toEqual([]);
+  });
+
+  it('BOTH: probes signature and credentials separately', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.BOTH, invoker);
+    expect(report.warnings.map((w) => w.code)).toEqual([
+      BindingTestWarningCode.ACCEPTS_UNSIGNED,
+      BindingTestWarningCode.ACCEPTS_WITHOUT_CREDENTIALS,
+    ]);
+    expect(invoke.mock.calls.map((c) => c[0].omit)).toEqual([
+      undefined,
+      { signature: true },
+      { credentials: true },
+    ]);
+  });
+
+  it('API_KEY: warns ACCEPTS_WITHOUT_CREDENTIALS', async () => {
+    const { invoker } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.API_KEY, invoker);
+    expect(report.warnings[0].message).toBe(
+      'Your endpoint accepted a request without your API key.',
+    );
+  });
+
+  it('NONE: warns NO_AUTHENTICATION with exactly one invoke', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.NONE, invoker);
+    expect(report.warnings).toEqual([
+      {
+        code: BindingTestWarningCode.NO_AUTHENTICATION,
+        message: 'Anyone who learns your endpoint URL can call it directly, without paying.',
+      },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not probe when the main run fails', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 500 }));
+    const report = await run(BindingAuthMode.BOTH, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.FAILED);
+    expect(report.warnings).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BindingMappingTesterService — the signature headers in the request view', () => {
+  const signer = new RequestSignerService([
+    { keyId: 'tester-1', seed: Buffer.alloc(32, 7), claimedPublicKey: null },
+  ]);
+
+  function signedTester(row: ToolBindingEntity) {
+    const invoker = new EgressBindingInvoker(
+      new EgressHttpClient(lookup, (target) => ({
+        address: '127.0.0.1',
+        family: 4,
+        port: target.port === 80 ? port : target.port,
+      })),
+      ONE_CREDENTIAL,
+      signer,
+    );
+    return buildTester(row, buildTool(), invoker, signer).tester;
+  }
+
+  it('names the headers Assay adds, signature included, so a provider can code against them', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names).toEqual(
+      expect.arrayContaining(['x-assay-call-id', 'content-digest', 'signature-input', 'signature']),
+    );
+    // The view says what went on the wire: every name it lists was received.
+    for (const name of names) expect(received?.headers[name]).toBeDefined();
+    // Names only: no signature, digest or call id value is in the report.
+    const view = JSON.stringify(report.request);
+    expect(view).not.toContain(String(received?.headers['signature']));
+    expect(view).not.toContain(String(received?.headers['x-assay-call-id']));
+  });
+
+  it('lists a signature name once, even when the mapping also sets it', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(
+      bindingRow({
+        authMode: BindingAuthMode.NONE,
+        requestMapping: {
+          method: 'POST',
+          path: '/search',
+          headers: { Signature: { $const: 'x' } },
+          body: { q: { $path: '$.query' } },
+        },
+      }),
+    );
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names.filter((name) => name === 'signature')).toHaveLength(1);
+    expect(names.slice(-3)).toEqual(['content-digest', 'signature-input', 'signature']);
+  });
+
+  it('lists no signature header when this deployment does not sign', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const { tester } = buildTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names).toContain('x-assay-call-id');
+    expect(names).not.toContain('signature');
+    expect(names).not.toContain('signature-input');
+    expect(received?.headers['signature']).toBeUndefined();
+  });
+
+  it('never lists a stored credential header, by name or value', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    // A stored set is attached under every mode (NONE: no probe, so `received`
+    // is the main request). The stored key went out, but neither its name nor its value is in the view.
+    expect(received?.headers['x-provider-key']).toBe('test-key');
+    expect(report.request?.headerNames).not.toContain('x-provider-key');
+    expect(JSON.stringify(report.request)).not.toContain('test-key');
   });
 });

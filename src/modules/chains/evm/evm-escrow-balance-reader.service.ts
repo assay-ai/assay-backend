@@ -17,7 +17,7 @@ import {
   toAccountId,
   toAssetId,
 } from '../ports/caip.types';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 
 /**
@@ -70,7 +70,7 @@ export interface EvmEscrowStruct {
 }
 
 /**
- * `EscrowBalanceReaderPort` over `X402Escrow.escrowOf`.
+ * `EscrowBalanceReaderPort` over `AssayEscrow.escrowOf`.
  *
  * ## One read, no derivation
  *
@@ -113,7 +113,7 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
 
     const escrow = (await this.client(chainId).readContract({
       address: getAddress(deployment.escrow),
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'escrowOf',
       args: [address],
     })) as EvmEscrowStruct;
@@ -124,8 +124,8 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
   async readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
-    const found = new Map<AccountId, EscrowChainBalance>();
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     if (accounts.length === 0) {
       return found;
     }
@@ -141,7 +141,7 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
         // the ARGUMENT. There is no per-buyer address to call.
         contracts: group.map(({ address }) => ({
           address: escrow,
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'escrowOf',
           args: [address],
         })),
@@ -159,11 +159,10 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
         });
       }
 
+      // A never-funded buyer maps to `null`: read, and nothing there. A failed
+      // read throws above, so absence from the map never means "no escrow".
       group.forEach((entry, index) => {
-        const reading = this.toBalance(results[index] as EvmEscrowStruct, asset);
-        if (reading) {
-          found.set(entry.account, reading);
-        }
+        found.set(entry.account, this.toBalance(results[index] as EvmEscrowStruct, asset));
       });
     }
 
@@ -175,7 +174,7 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
    *
    * `escrowPda` and `escrowTokenAccount` are `EscrowBalanceReaderPort`'s Solana
    * vocabulary — there is no PDA here and no separate token account, because one
-   * `X402Escrow` holds every buyer's USDG and splits it in a mapping. Inventing
+   * `AssayEscrow` holds every buyer's USDG and splits it in a mapping. Inventing
    * a second port to rename two strings would fork an interface every caller
    * reads, so the names stay and this comment carries the difference.
    */
@@ -206,6 +205,11 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
       spentInWindow: escrow.spentInWindow,
       windowStartedAt: Number(escrow.windowStartedAt),
       observedAt: new Date(),
+      lifetime: {
+        funded: escrow.totalFunded,
+        redeemed: escrow.totalRedeemed,
+        withdrawn: escrow.totalWithdrawn,
+      },
     };
   }
 

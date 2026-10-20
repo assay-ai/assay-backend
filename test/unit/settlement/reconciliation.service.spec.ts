@@ -82,8 +82,10 @@ interface EscrowFixture {
   readonly pending?: bigint;
   readonly seqHigh?: bigint;
   readonly nextSeq?: bigint;
-  /** `true` when the chain read finds no escrow at all — unreadable, not zero. */
+  /** `true` when the chain read failed — unknown, not zero. */
   readonly unreadable?: boolean;
+  /** `true` when the chain read finds no escrow at all (never funded) — a zero. */
+  readonly absent?: boolean;
 }
 
 function fakeBalances(
@@ -149,9 +151,13 @@ function fakeEscrowRepository(escrows: readonly EscrowFixture[], asset: AssetId 
  */
 function fakeEscrowReader(escrows: readonly EscrowFixture[]) {
   const readMany = jest.fn((accounts: readonly AccountId[]) => {
-    const found = new Map<AccountId, EscrowChainBalance>();
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     for (const escrow of escrows) {
       if (escrow.unreadable || !accounts.includes(escrow.account)) {
+        continue;
+      }
+      if (escrow.absent) {
+        found.set(escrow.account, null);
         continue;
       }
       found.set(escrow.account, {
@@ -166,7 +172,7 @@ function fakeEscrowReader(escrows: readonly EscrowFixture[]) {
         observedAt: new Date(),
       });
     }
-    return Promise.resolve(found as ReadonlyMap<AccountId, EscrowChainBalance>);
+    return Promise.resolve(found as ReadonlyMap<AccountId, EscrowChainBalance | null>);
   });
 
   return {
@@ -210,6 +216,8 @@ function build(options: {
   escrows?: readonly EscrowFixture[];
   paidAtRedemption?: { providerCredits: bigint; platformFees: bigint };
   asset?: AssetId;
+  /** "Redeem into hold" (G3.B1): what the mirror holds per payer, and `totalHeld()`. */
+  held?: { perAccount: ReadonlyMap<string, bigint>; chainTotal: bigint | null };
 }) {
   const alerts = new RecordingAlertSink();
   const runs = options.runs ?? fakeRuns();
@@ -227,6 +235,19 @@ function build(options: {
     runs,
     escrowReader,
     escrowRepository,
+    options.held
+      ? ({
+          sumHeldOnChainByAccounts: jest.fn(() =>
+            Promise.resolve(new Map(options.held!.perAccount)),
+          ),
+          sumHeldOnChain: jest.fn(() =>
+            Promise.resolve([...options.held!.perAccount.values()].reduce((a, b) => a + b, 0n)),
+          ),
+        } as never)
+      : null,
+    options.held
+      ? ({ totalHeld: jest.fn(() => Promise.resolve(options.held!.chainTotal)) } as never)
+      : null,
   );
 
   return { service, alerts, runs, escrowReader, escrowRepository };
@@ -707,6 +728,43 @@ describe('ReconciliationService — every buyer’s own escrow', () => {
     expect(report.findings[0].details).toMatchObject({ unreadableEscrows: 1 });
   });
 
+  it('reads a never-funded mirror row (no escrow on chain) as a zero, not as unreadable', async () => {
+    // BUG-A-05 option a records a mirror row on the first rail-B offer for a
+    // buyer who never deposited. The chain has nothing there: a zero balance.
+    const { service } = build({
+      vaultBalance: 4_000_000n,
+      journal: { DEPOSIT: 4_000_000n },
+      snapshot: { available: 4_000_000n },
+      escrows: [
+        { account: BUYER_A, chain: 4_000_000n, mirror: 4_000_000n },
+        { account: BUYER_B, chain: 0n, mirror: 0n, absent: true },
+      ],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).not.toContain(
+      ReconciliationFindingCode.RECONCILIATION_FAILED,
+    );
+    expect(report.severity).toBe(ReconciliationSeverity.OK);
+    expect(report.escrowAccounts).toBe(2);
+    expect(report.escrowTotalAtomic).toBe(4_000_000n);
+  });
+
+  it('still flags a shortfall when the mirror holds money for a buyer with no escrow on chain', async () => {
+    const { service } = build({
+      vaultBalance: 0n,
+      escrows: [{ account: BUYER_A, chain: 0n, openHolds: 1_000_000n, absent: true }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.escrowShortfallAccounts).toBe(1);
+    expect(report.findings.map((finding) => finding.code)).not.toContain(
+      ReconciliationFindingCode.RECONCILIATION_FAILED,
+    );
+  });
+
   it('reads escrows a page at a time, not one chain call per buyer', async () => {
     // Batching is the mitigation that keeps failing closed affordable.
     // 250 escrows is three pages of RECONCILIATION_ESCROW_PAGE, so three calls
@@ -760,23 +818,6 @@ describe('ReconciliationService — every buyer’s own escrow', () => {
     await service.reconcile(USDC);
 
     expect(escrowRepository.bumpNextSeqTo).not.toHaveBeenCalled();
-  });
-
-  it('still checks the pooled vault, because legacy balances are still in it', async () => {
-    // Until the cutover completes, some buyers' money is in the Squads vault and
-    // some is in escrows. Dropping check 1 now would stop watching the half that
-    // has not moved yet.
-    const { service } = build({
-      vaultBalance: 1n,
-      journal: { [LedgerEntryType.DEPOSIT]: 5_000_000n },
-      snapshot: { available: 5_000_000n },
-    });
-
-    const report = await service.reconcile(USDC);
-
-    expect(report.findings.map((finding) => finding.code)).toContain(
-      ReconciliationFindingCode.RESERVES_BREACH,
-    );
   });
 });
 
@@ -948,5 +989,40 @@ describe('ReconciliationService — where an EVM surplus sits', () => {
     );
 
     expect(surplus?.details).not.toHaveProperty('outsideBuyerEscrows');
+  });
+});
+
+describe('ReconciliationService — held payments (G3.B1, redeem into hold)', () => {
+  it('takes a held payment off both sides: out of the escrow balance, still in the ledger hold', async () => {
+    // Redeemed into the hold: the chain balance dropped by 1, the buyer's ledger
+    // hold still carries it, the escrow contract holds it as `totalHeld`.
+    const { service } = build({
+      vaultBalance: 1_000_000n,
+      journal: { DEPOSIT: 4_000_000n },
+      snapshot: { available: 3_000_000n, held: 1_000_000n },
+      escrows: [{ account: BUYER_A, chain: 3_000_000n, mirror: 4_000_000n, openHolds: 1_000_000n }],
+      held: { perAccount: new Map([[BUYER_A, 1_000_000n]]), chainTotal: 1_000_000n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    const codes = report.findings.map((finding) => finding.code);
+    expect(codes).not.toContain(ReconciliationFindingCode.ESCROW_SHORTFALL);
+    expect(codes).not.toContain(ReconciliationFindingCode.ESCROW_MIRROR_DRIFT);
+    expect(codes).not.toContain(ReconciliationFindingCode.HELD_MIRROR_DRIFT);
+  });
+
+  it('warns when totalHeld() and the mirrored held payments disagree', async () => {
+    const { service } = build({
+      vaultBalance: 0n,
+      held: { perAccount: new Map([[BUYER_A, 1_000_000n]]), chainTotal: 3_000_000n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    const drift = report.findings.find(
+      (finding) => finding.code === ReconciliationFindingCode.HELD_MIRROR_DRIFT,
+    );
+    expect(drift?.details).toMatchObject({ totalHeld: '3000000', mirroredHeld: '1000000' });
   });
 });

@@ -1,7 +1,9 @@
+import { ToolVersionListDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { Controller, Get, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { SessionAuthGuard } from '@shared/auth';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import {
@@ -9,6 +11,7 @@ import {
   CatalogueProviderListDto,
   CatalogueToolListDto,
   GetCatalogueProviderParamsDto,
+  GetCatalogueToolParamsDto,
 } from '../dto/get-catalogue.dto';
 import { CatalogueService } from '../services/catalogue.service';
 
@@ -28,12 +31,14 @@ import { CatalogueService } from '../services/catalogue.service';
  * is the shop window, it is identical for every caller, and nothing under it is
  * about the caller at all.
  *
- * ## No `@CurrentSession()`, anywhere in this file
+ * ## One per-caller field, and only that
  *
  * The guard is on the controller — an unauthenticated catalogue is a separate
- * decision nobody has taken — but no handler reads the session, because no
- * answer depends on who is asking. Taking a session parameter only to ignore it
- * reads as an oversight; not taking one is the claim.
+ * decision nobody has taken. The market itself is identical for every caller.
+ * The provider routes read the session for one thing only: `servesYou`, whether
+ * the router takes a call from the caller's own agents (on their chains). It is
+ * computed from the shared, cached answer and the caller's own agents, so it
+ * reads nothing about any other organization. The tool routes take no session.
  *
  * ## Unpaged
  *
@@ -60,23 +65,37 @@ export class CatalogueController {
   @Get('providers')
   @ApiOperation({
     summary:
-      'Every provider serving traffic, with the stake they have at risk and the quality we ' +
-      'have measured on them. Platform-wide, identical for every caller.',
+      'Every provider serving traffic, with the stake they have at risk, the quality we ' +
+      'have measured on them and the chains they take payment on. Platform-wide; only ' +
+      '`servesYou` is per caller.',
   })
   @ApiResponse({ status: 200, type: CatalogueProviderListDto })
-  async listProviders(): Promise<CatalogueProviderListDto> {
-    return this.catalogue.listProviders();
+  async listProviders(@CurrentSession() session: McpSession): Promise<CatalogueProviderListDto> {
+    return this.catalogue.listProvidersFor(session.organizationId);
   }
 
   @Get('tools')
   @ApiOperation({
     summary:
       'Every tool at least one provider serves, with how many serve it, the market floor and ' +
-      'the price a call would actually be held for.',
+      'the price a call would actually be held for; deprecated majors name their replacement.',
   })
   @ApiResponse({ status: 200, type: CatalogueToolListDto })
   async listTools(): Promise<CatalogueToolListDto> {
     return this.catalogue.listTools();
+  }
+
+  @Get('tools/:toolId/versions')
+  @ApiOperation({
+    summary:
+      'A tool’s published contract versions, newest first: schemas, optional fields, ' +
+      'examples, status, sunset and changelog; and per listed provider, the majors and ' +
+      'optional fields it declares',
+  })
+  @ApiResponse({ status: 200, type: ToolVersionListDto })
+  @ApiResponse({ status: 404, description: 'TOOL_NOT_FOUND' })
+  async toolVersions(@Param() params: GetCatalogueToolParamsDto): Promise<ToolVersionListDto> {
+    return this.catalogue.toolVersions(params.toolId);
   }
 
   /**
@@ -93,7 +112,8 @@ export class CatalogueController {
   @ApiResponse({ status: 404, description: 'No such provider. Never 403 — that would confirm it.' })
   async getProvider(
     @Param() params: GetCatalogueProviderParamsDto,
+    @CurrentSession() session: McpSession,
   ): Promise<CatalogueProviderDetailDto> {
-    return this.catalogue.getProvider(params.providerId);
+    return this.catalogue.getProviderFor(params.providerId, session.organizationId);
   }
 }

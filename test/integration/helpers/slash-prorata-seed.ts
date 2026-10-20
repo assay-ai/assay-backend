@@ -35,8 +35,6 @@ export interface SeedProRataCase {
   readonly penalty: bigint;
   readonly agents: readonly SeedAgent[];
   readonly proposedAt: Date;
-  /** Defaults to `proposedAt + 48h`. */
-  readonly respondByAt?: Date;
   /** Defaults to `proposedAt + 72h`. */
   readonly earliestExecutionAt?: Date;
   readonly label?: string;
@@ -75,13 +73,20 @@ export async function seedProRataCase(
     [org, chainId, input.stakeAuthority],
   );
 
+  // `tool_bindings.tool_id` references `tools` (1761200000000).
+  await dataSource.query(
+    `INSERT INTO tools (id, name, kind, category, visibility, status)
+     VALUES ($1, $2, 'STANDARD', 'testing', 'LISTED', 'ACTIVE')`,
+    [toolId, `slash_tool_${toolId.replace(/-/g, '').slice(0, 24)}`],
+  );
+
   await dataSource.query(
     `INSERT INTO tool_bindings
        (id, organization_id, tool_id, endpoint, request_mapping, response_mapping, pricing_mode,
         price_amount, asset_id, sla_failure_rate, timeout_ms, settlement_chains, status)
      VALUES ($1, $2, $3, 'https://example.invalid', '{}'::jsonb, '{}'::jsonb, 'PAID',
              100000, $4, 0.02, 1000, ARRAY[$5]::varchar[], 'DRAFT')`,
-    [bindingId, org, `tool-${input.label ?? bindingId.slice(0, 8)}`, input.assetId, chainId],
+    [bindingId, org, toolId, input.assetId, chainId],
   );
 
   const failedCount = input.agents.reduce((sum, agent) => sum + agent.failed.length, 0);
@@ -138,9 +143,8 @@ export async function seedProRataCase(
     `INSERT INTO slash_proposals
        (id, organization_id, provider_id, binding_id, tool_id, source, strike_id, window_id,
         status, chain_request_id, penalty_amount, asset_id, decimals, proposed_at, notified_at,
-        respond_by_at, platform_decision_due_at, earliest_execution_at)
-     VALUES ($1, $2, $2, $3, $4, 'SLA_STRIKE', $5, $6, 'PROPOSED', $7, $8, $9, 6, $10, $10,
-             $11, $12, $13)`,
+        earliest_execution_at)
+     VALUES ($1, $2, $2, $3, $4, 'SLA_STRIKE', $5, $6, 'PROPOSED', $7, $8, $9, 6, $10, $10, $11)`,
     [
       proposalId,
       org,
@@ -152,8 +156,6 @@ export async function seedProRataCase(
       input.penalty.toString(),
       input.assetId,
       proposedAt,
-      input.respondByAt ?? new Date(proposedAt.getTime() + 48 * HOUR),
-      new Date(proposedAt.getTime() + 71 * HOUR),
       input.earliestExecutionAt ?? new Date(proposedAt.getTime() + 72 * HOUR),
     ],
   );

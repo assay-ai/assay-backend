@@ -4,7 +4,6 @@ import {
   CREDITED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
-import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ApiErrorCode } from '@shared/api';
 import { CallReconciliationClass } from '@modules/provider/domain/call-reconciliation';
@@ -35,13 +34,6 @@ interface GroupRow {
   holdCommitted?: boolean;
 }
 
-interface BatchRow {
-  asset: string;
-  decimals: string;
-  count: string;
-  paid: string;
-}
-
 function group(overrides: Partial<GroupRow>): GroupRow {
   return {
     callClass: 'PAID',
@@ -57,31 +49,18 @@ function group(overrides: Partial<GroupRow>): GroupRow {
   };
 }
 
-function batch(overrides: Partial<BatchRow>): BatchRow {
-  return { asset: USDC, decimals: '6', count: '0', paid: '0', ...overrides };
-}
-
-function build(
-  groupRows: GroupRow[],
-  batchRows: BatchRow[] = [],
-  configValues: Record<string, string> = {},
-) {
+function build(groupRows: GroupRow[], configValues: Record<string, string> = {}) {
   const groupsFake = fakeQueryBuilder(groupRows);
-  const batchesFake = fakeQueryBuilder(batchRows);
   const intents = {
     createQueryBuilder: jest.fn().mockReturnValue(groupsFake.qb),
   } as unknown as PaymentIntentRepository;
-  const payouts = {
-    createQueryBuilder: jest.fn().mockReturnValue(batchesFake.qb),
-  } as unknown as ProviderPayoutRepository;
   const config = {
     get: jest.fn((key: string) => configValues[key]),
   } as unknown as ConfigService;
 
   return {
-    service: new ProviderReconciliationService(intents, payouts, config),
+    service: new ProviderReconciliationService(intents, config),
     groupsFake,
-    batchesFake,
   };
 }
 
@@ -98,17 +77,6 @@ describe('ProviderReconciliationService — scoping', () => {
     const sql = groupsFake.wheres.map((w) => w.sql).join(' ');
     expect(sql).toMatch(/organizationId/);
     expect(groupsFake.wheres.some((w) => w.params.providerId === PROVIDER)).toBe(true);
-  });
-
-  it('scopes payout batches directly by organizationId — a provider’s own table, not cross-org', async () => {
-    const { service, batchesFake } = build([]);
-
-    await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(batchesFake.wheres.some((w) => w.params.providerId === PROVIDER)).toBe(true);
-    expect(
-      batchesFake.wheres.some((w) => w.sql.includes('status') && w.params.recorded === 'RECORDED'),
-    ).toBe(true);
   });
 });
 
@@ -435,58 +403,6 @@ describe('ProviderReconciliationService — unexplained is a real, referenced bu
   });
 });
 
-describe('ProviderReconciliationService — batches and reconciliation', () => {
-  it('reconciles when net equals the sum of RECORDED payouts in the window', async () => {
-    const groupRows = [
-      group({
-        callClass: 'PAID',
-        status: 'SETTLED',
-        calls: '1',
-        credited: '1000',
-        providerAmount: '900',
-        platformFee: '100',
-      }),
-    ];
-    const batchRows = [batch({ count: '3', paid: '900' })];
-    const { service } = build(groupRows, batchRows);
-
-    const result = await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(result.batches).toEqual({
-      count: 3,
-      paid: { amount: '900', asset: USDC, decimals: 6 },
-      reconciles: true,
-    });
-  });
-
-  it('flags a mismatch rather than asserting reconciliation that is not there', async () => {
-    const groupRows = [
-      group({
-        callClass: 'PAID',
-        status: 'SETTLED',
-        calls: '1',
-        credited: '1000',
-        providerAmount: '900',
-        platformFee: '100',
-      }),
-    ];
-    const batchRows = [batch({ count: '1', paid: '500' })];
-    const { service } = build(groupRows, batchRows);
-
-    const result = await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(result.batches.reconciles).toBe(false);
-  });
-
-  it('reconciles trivially (0 == 0) for a window with no calls and no payouts', async () => {
-    const { service } = build([]);
-
-    const result = await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(result.batches).toEqual({ count: 0, paid: null, reconciles: true });
-  });
-});
-
 describe('ProviderReconciliationService — asset resolution', () => {
   it('is null, and every Money field is null, for a window with no rows and no ?asset=', async () => {
     const { service } = build([]);
@@ -511,8 +427,8 @@ describe('ProviderReconciliationService — asset resolution', () => {
     expect(result.gross).toEqual({ amount: '0', asset: USDC, decimals: 0 });
   });
 
-  it('refuses a window spanning more than one asset across calls and payouts with no ?asset=', async () => {
-    const { service } = build([group({ asset: USDC })], [batch({ asset: OTHER })]);
+  it('refuses a window spanning more than one asset with no ?asset=', async () => {
+    const { service } = build([group({ asset: USDC }), group({ asset: OTHER })]);
 
     await expectErrorCodeAsync(
       () => service.getReconciliation(PROVIDER, WINDOW),
@@ -521,7 +437,7 @@ describe('ProviderReconciliationService — asset resolution', () => {
   });
 
   it('accepts a mixed window when ?asset= disambiguates it', async () => {
-    const { service } = build([group({ asset: USDC })], [batch({ asset: OTHER })]);
+    const { service } = build([group({ asset: USDC }), group({ asset: OTHER })]);
 
     const result = await service.getReconciliation(PROVIDER, { ...WINDOW, asset: USDC });
 
@@ -559,22 +475,10 @@ describe('ProviderReconciliationService — platform take rate', () => {
   });
 
   it('reads the charged rate PLATFORM_FEE_BPS, in percent', async () => {
-    const { service } = build([], [], { PLATFORM_FEE_BPS: '1250' });
+    const { service } = build([], { PLATFORM_FEE_BPS: '1250' });
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
     expect(result.platformTakeRatePercent).toBe(12.5);
-  });
-
-  // R17-R-03: the retired display-only setting no longer moves the rate.
-  it('ignores the retired PROVIDER_TERMS_TAKE_RATE_PERCENT', async () => {
-    const { service } = build([], [], {
-      PROVIDER_TERMS_TAKE_RATE_PERCENT: '20',
-      PLATFORM_FEE_BPS: '1000',
-    });
-
-    const result = await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(result.platformTakeRatePercent).toBe(10);
   });
 });

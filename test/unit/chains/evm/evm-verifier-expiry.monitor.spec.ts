@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { encodeFunctionResult } from 'viem';
 
-import { X402_STAKE_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_STAKE_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   EVM_VERIFIER_EXPIRY_ALERTS,
   EvmVerifierExpiryMonitor,
@@ -10,8 +10,8 @@ import {
 import { Alert, AlertSeverity } from '@shared/alerting';
 
 const CHAIN = 'eip155:46630' as never;
-const STAKE = '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c';
-const CONFIG = '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43';
+const STAKE = '0x7242F853db478A28Ae76Ace808212d4B68aa73e7';
+const CONFIG = '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5';
 const SOON = '0x1111111111111111111111111111111111111111';
 const LATER = '0x2222222222222222222222222222222222222222';
 const NOW = new Date('2026-10-14T00:00:00Z');
@@ -48,10 +48,10 @@ function build(records: { requestId: string; verifier: string }[]) {
       if (functionName === 'slashRecordOf') {
         const found = records.find((row) => `0x${row.requestId}` === args[0]);
         return (await import('viem')).decodeFunctionResult({
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'slashRecordOf',
           data: encodeFunctionResult({
-            abi: X402_STAKE_ABI,
+            abi: ASSAY_STAKE_ABI,
             functionName: 'slashRecordOf',
             result: record(found!.verifier) as never,
           }),

@@ -12,7 +12,7 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
  * `1759700000000-override-log-no-truncate` one statement emptied the log.
  */
 describe('override_log_entries refuses TRUNCATE', () => {
-  const DATABASE = 'x402_override_log_truncate_test';
+  const DATABASE = 'assay_override_log_truncate_test';
 
   let dataSource: DataSource;
 
@@ -30,7 +30,7 @@ describe('override_log_entries refuses TRUNCATE', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
   }, 300_000);
 
   afterAll(async () => {

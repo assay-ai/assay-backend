@@ -29,9 +29,20 @@ import { AccountBlockRepository } from '@database/postgres/repositories/account-
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
+import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { CompositeMcpSessionSource } from '@modules/auth/services/composite-mcp-session.source';
+import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
+import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
+import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { ConfigMcpSessionSource } from '@modules/mcp/services/config-mcp-session.source';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
 import { McpCatalogueService } from '@modules/mcp/services/mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from '@modules/mcp/services/mcp-pricing.config';
@@ -44,6 +55,21 @@ import {
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { PostgresModule } from '@database/postgres/postgres.module';
 import { McpApiModule } from '@modules/mcp/mcp-api.module';
+import { McpController } from '@modules/mcp/controllers/mcp.controller';
+import {
+  AgentServersController,
+  McpUrlsController,
+} from '@modules/mcp/controllers/mcp-urls.controller';
+import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { McpUrlsApiModule } from '@modules/mcp/mcp-urls-api.module';
+import { McpUrlPreviewService } from '@modules/mcp/services/mcp-url-preview.service';
+import {
+  AgentAccessController,
+  CredentialAccessController,
+} from '@modules/toolset/controllers/agent-access.controller';
+import { RefusedCallsController } from '@modules/toolset/controllers/refused-calls.controller';
+import { ToolsetsController } from '@modules/toolset/controllers/toolsets.controller';
+import { ToolsetApiModule } from '@modules/toolset/toolset-api.module';
 import { PublicDemoService } from '@modules/mcp/services/public-demo.service';
 import { DEMO_RATE_REDIS } from '@modules/mcp/services/redis-demo-rate-limiter.service';
 import { SIGNING_RATE_REDIS } from '@modules/verification/signing/signing.constants';
@@ -123,7 +149,15 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 @Module({
   providers: [
     { provide: ToolBindingRepository, useValue: { findByTool: async () => [] } },
+    // `ToolRegistrySeeder` mirrors the seeded tools into `tools` at boot.
+    {
+      provide: ToolRepository,
+      useValue: { upsertSeeded: async () => undefined, find: async () => [] },
+    },
+    // `DatabaseToolContracts` reads the contracts from `tool_versions` (T3).
+    { provide: ToolVersionRepository, useValue: { find: async () => [] } },
     // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
+    { provide: BindingCredentialRepository, useValue: { findForOrigin: async () => null } },
     { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
     // writes the EVM gas-grant ledger. Another `@Global` `PostgresModule` repository,
@@ -173,6 +207,9 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     // reads `agent_credentials` directly — same stub-the-boundary reasoning
     // as `AgentRepository` above.
     { provide: AgentCredentialRepository, useValue: {} },
+    // `AuthModule`'s OAuth access-token source reads both.
+    { provide: OAuthAccessTokenRepository, useValue: {} },
+    { provide: OAuthClientRepository, useValue: {} },
     { provide: EgressHttpClient, useValue: {} },
     { provide: SlaWindowCallRepository, useValue: {} },
     { provide: SlaStrikeRepository, useValue: {} },
@@ -188,7 +225,10 @@ import { ChainId } from '@modules/chains/ports/caip.types';
   ],
   exports: [
     ToolBindingRepository,
+    ToolRepository,
+    ToolVersionRepository,
     BindingVersionRepository,
+    BindingCredentialRepository,
     EvmGasGrantRepository,
     EvmChainStateRepository,
     ProviderRepository,
@@ -206,6 +246,8 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     SlaWindowRepository,
     AgentRepository,
     AgentCredentialRepository,
+    OAuthAccessTokenRepository,
+    OAuthClientRepository,
     EgressHttpClient,
     SlaWindowCallRepository,
     SlaStrikeRepository,
@@ -352,22 +394,15 @@ describe('McpApiModule wiring', () => {
     // registry down — `TypeError: pgPass is not a function`, reported against
     // whichever suite happened to be running. Swapped for stubs of every
     // repository it exports: the claim is that the tokens resolve.
+    // Strict: any compile error fails the test, DI or not. A tolerant branch
+    // here once let this test pass without resolving anything.
     const app = await Test.createTestingModule({ imports: [McpApiWiringHarnessModule] })
       .overrideModule(PostgresModule)
       .useModule(StubPostgresModule)
-      .compile()
-      .catch((error: unknown) => error as Error);
-
-    if (app instanceof Error) {
-      // Infrastructure being unreachable is not this test's business; a DI
-      // failure is. Assert on what a DI failure IS rather than on an allowlist
-      // of infrastructure messages: an allowlist has to be extended every time
-      // a machine fails a new way, and until someone extends it the test bails
-      // out early and proves nothing. `database "x" does not exist` is exactly
-      // such a message, and it is what this machine produces.
-      expect(app.message).not.toMatch(/can't resolve dependencies|Nest can not resolve/i);
-      return;
-    }
+      // `QuoteIndexInvalidationSubscriber` registers itself on the DataSource.
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
 
     const killSwitchRedis = app.get<Redis>(KILL_SWITCH_REDIS);
     const killSwitchSubscriber = app.get<Redis>(KILL_SWITCH_SUBSCRIBER);
@@ -383,6 +418,156 @@ describe('McpApiModule wiring', () => {
       killSwitchRedis.disconnect();
       killSwitchSubscriber.disconnect();
       for (const token of [SIGNING_RATE_REDIS, DEMO_RATE_REDIS]) {
+        try {
+          app.get<Redis>(token, { strict: false }).disconnect();
+        } catch {
+          // Not part of this graph.
+        }
+      }
+      await app.close().catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * The toolset routes on the API host, the Connect preview, and the MCP host
+ * itself — each built as a container, because a DI edge is only ever proved
+ * that way (the preview once asked for `TOOL_CATALOGUE` from a module that did
+ * not import it, and every unit test passed).
+ */
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
+    StubRepositoriesModule,
+    StubPostgresModule,
+    ToolsetApiModule,
+    McpUrlsApiModule,
+    McpHttpModule,
+  ],
+})
+class ToolsetWiringHarnessModule {}
+
+describe('toolset, Connect preview and MCP host wiring', () => {
+  jest.setTimeout(30_000);
+
+  const BOOT_ENV: Readonly<Record<string, string>> = {
+    ENABLED_CHAINS: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  };
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(BOOT_ENV)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('resolves the controllers and every service behind them', async () => {
+    const app = await Test.createTestingModule({ imports: [ToolsetWiringHarnessModule] })
+      .overrideModule(PostgresModule)
+      .useModule(StubPostgresModule)
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
+
+    try {
+      for (const token of [
+        ToolsetsController,
+        AgentAccessController,
+        CredentialAccessController,
+        RefusedCallsController,
+        McpUrlsController,
+        AgentServersController,
+        McpController,
+        McpUrlPreviewService,
+      ]) {
+        expect(app.get(token, { strict: false })).toBeInstanceOf(token);
+      }
+    } finally {
+      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
+        try {
+          app.get<Redis>(token, { strict: false }).disconnect();
+        } catch {
+          // Not part of this graph.
+        }
+      }
+      await app.close().catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * `MCP_SESSION_SOURCE` with `AUTH_SESSION_SOURCE=both`: the blocklist still
+ * wraps the whole chain, and the chain is config, API keys, OAuth access
+ * tokens, then Privy (spec §6.4 item 3). A blocked caller is refused whichever
+ * source recognised it, OAuth included.
+ */
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      ignoreEnvFile: true,
+      load: [() => ({ auth: { sessionSource: 'both' } })],
+    }),
+    StubRepositoriesModule,
+    StubPostgresModule,
+    McpModule,
+  ],
+})
+class SessionSourceWiringHarnessModule {}
+
+describe('MCP_SESSION_SOURCE wiring (AUTH_SESSION_SOURCE=both)', () => {
+  jest.setTimeout(30_000);
+
+  const BOOT_ENV: Readonly<Record<string, string>> = {
+    ENABLED_CHAINS: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  };
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(BOOT_ENV)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('the blocklist still wraps the composite: config, db, oauth, privy', async () => {
+    const app = await Test.createTestingModule({ imports: [SessionSourceWiringHarnessModule] })
+      .overrideModule(PostgresModule)
+      .useModule(StubPostgresModule)
+      // `QuoteIndexInvalidationSubscriber` registers itself on the DataSource.
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
+
+    try {
+      const source = app.get(MCP_SESSION_SOURCE);
+      expect(source).toBeInstanceOf(BlocklistSessionSource);
+
+      const inner = (source as unknown as { inner: unknown }).inner;
+      expect(inner).toBeInstanceOf(CompositeMcpSessionSource);
+
+      const sources = (inner as unknown as { sources: readonly unknown[] }).sources;
+      expect(sources.map((each) => (each as object).constructor)).toEqual([
+        ConfigMcpSessionSource,
+        DbCredentialMcpSessionSource,
+        OAuthAccessTokenMcpSessionSource,
+        PrivyMcpSessionSource,
+      ]);
+      // The same instance `AuthModule` exports, not a second one.
+      expect(sources[2]).toBe(app.get(OAuthAccessTokenMcpSessionSource, { strict: false }));
+    } finally {
+      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
         try {
           app.get<Redis>(token, { strict: false }).disconnect();
         } catch {

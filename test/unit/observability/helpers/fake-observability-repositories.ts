@@ -1,6 +1,13 @@
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
+import { OAUTH_COUNTERS, OAuthCounterName } from '@modules/oauth/domain/oauth-counters';
 import { ObservabilityMetricsRepository } from '@modules/observability/repositories/observability-metrics.repository';
+import {
+  OAuthCounterFigures,
+  OAuthDatabaseFacts,
+  OAuthSignalFigures,
+  OAuthSignalsReader,
+} from '@modules/observability/services/oauth-signals.reader';
 
 /**
  * Hand-written fakes for {@link MetricsCollectorService}'s dependencies, in
@@ -37,8 +44,6 @@ export interface FakeObservabilityOverrides {
   openHoldAge?: { count: number; oldestAgeSeconds: number | null };
   attestationsSigned?: number;
   slashesExecuted?: number;
-  payoutQueueDepth?: number;
-  disputeOverturnCounts?: { raised: number; overturned: number };
 }
 
 /** Every method defaults to the "empty database" answer — no calls, no rows, nothing null-crashing. */
@@ -56,9 +61,58 @@ export function fakeObservabilityMetricsRepository(
       .mockResolvedValue(overrides.openHoldAge ?? { count: 0, oldestAgeSeconds: null }),
     attestationsSigned: jest.fn().mockResolvedValue(overrides.attestationsSigned ?? 0),
     slashesExecuted: jest.fn().mockResolvedValue(overrides.slashesExecuted ?? 0),
-    payoutQueueDepth: jest.fn().mockResolvedValue(overrides.payoutQueueDepth ?? 0),
-    disputeOverturnCounts: jest
-      .fn()
-      .mockResolvedValue(overrides.disputeOverturnCounts ?? { raised: 0, overturned: 0 }),
   } as unknown as ObservabilityMetricsRepository;
+}
+
+export interface FakeOAuthSignals {
+  /** `null` reads as a failed database read. */
+  database?: Partial<OAuthDatabaseFacts> | null;
+  /** `null` reads as Redis unreachable. */
+  counters?: {
+    last24h?: { [K in OAuthCounterName]?: Record<string, number> };
+    lastHour?: Partial<OAuthCounterFigures['lastHour']>;
+  } | null;
+}
+
+/** An empty database and empty counters unless overridden. */
+export function oauthSignalFigures(overrides: FakeOAuthSignals = {}): OAuthSignalFigures {
+  const database: OAuthDatabaseFacts | null =
+    overrides.database === null
+      ? null
+      : {
+          liveGrants: 0,
+          maxLiveGrantsPerAgent: 0,
+          stoppedForRefreshReuse: 0,
+          stoppedForCodeReuse: 0,
+          refreshStaleReuse: 0,
+          refreshGraceUses: 0,
+          dcrRegistrations: 0,
+          dcrMaxPerClientName: 0,
+          cimdClients: 0,
+          ...overrides.database,
+        };
+  if (overrides.counters === null) return { database, counters: null };
+  const names = Object.keys(OAUTH_COUNTERS) as OAuthCounterName[];
+  const last24h = Object.fromEntries(
+    names.map((name) => [
+      name,
+      {
+        ...Object.fromEntries(OAUTH_COUNTERS[name].map((label) => [label, 0])),
+        ...overrides.counters?.last24h?.[name],
+      },
+    ]),
+  ) as OAuthCounterFigures['last24h'];
+  return {
+    database,
+    counters: {
+      last24h,
+      lastHour: { consentApproved: 0, continueCookieMissing: 0, ...overrides.counters?.lastHour },
+    },
+  };
+}
+
+export function fakeOAuthSignalsReader(overrides: FakeOAuthSignals = {}): OAuthSignalsReader {
+  return {
+    read: jest.fn().mockResolvedValue(oauthSignalFigures(overrides)),
+  } as unknown as OAuthSignalsReader;
 }

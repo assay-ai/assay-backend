@@ -1,0 +1,203 @@
+import { randomUUID } from 'node:crypto';
+
+import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
+import { OAuthClientUpsert } from '@database/postgres/repositories/oauth-client.repository';
+import { OAuthConfig } from '@modules/oauth/config/oauth.config';
+import { OAuthCounterName } from '@modules/oauth/domain/oauth-counters';
+import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
+import { OAuthRateLimiter } from '@modules/oauth/services/oauth-rate-limiter.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
+
+/**
+ * The Redis commands the OAuth services use: `INCR`, `PEXPIRE`, `GET`,
+ * `MGET`, `SET … EX`, `DEL`. Expiries are recorded, not enforced; a test moves the
+ * clock or calls `expire(key)` itself.
+ */
+export class FakeOAuthRedis {
+  readonly strings = new Map<string, string>();
+  readonly expiries = new Map<string, number>();
+  down = false;
+  /** Fail only the commands on keys this matches, to take one counter down at a time. */
+  failWhen: ((key: string) => boolean) | null = null;
+
+  private guard(key?: string): void {
+    if (this.down) throw new Error('redis is unreachable');
+    if (key !== undefined && this.failWhen?.(key)) throw new Error('redis is unreachable');
+  }
+
+  incr(key: string): Promise<number> {
+    try {
+      this.guard(key);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const next = Number(this.strings.get(key) ?? '0') + 1;
+    this.strings.set(key, String(next));
+    return Promise.resolve(next);
+  }
+
+  pexpire(key: string, ms: number): Promise<number> {
+    this.expiries.set(key, ms);
+    return Promise.resolve(1);
+  }
+
+  get(key: string): Promise<string | null> {
+    try {
+      this.guard();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return Promise.resolve(this.strings.get(key) ?? null);
+  }
+
+  mget(keys: string[]): Promise<(string | null)[]> {
+    try {
+      this.guard();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return Promise.resolve(keys.map((key) => this.strings.get(key) ?? null));
+  }
+
+  set(key: string, value: string, _ex: 'EX', seconds: number): Promise<'OK'> {
+    try {
+      this.guard();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    this.strings.set(key, value);
+    this.expiries.set(key, seconds * 1000);
+    return Promise.resolve('OK');
+  }
+
+  del(key: string): Promise<number> {
+    const had = this.strings.delete(key);
+    this.expiries.delete(key);
+    return Promise.resolve(had ? 1 : 0);
+  }
+
+  /** Forget a key, as Redis does when its expiry passes. */
+  expire(key: string): void {
+    this.strings.delete(key);
+    this.expiries.delete(key);
+  }
+
+  keys(prefix: string): string[] {
+    return [...this.strings.keys()].filter((key) => key.startsWith(prefix));
+  }
+}
+
+export function fakeCache(redis: FakeOAuthRedis): CacheService {
+  return { getRedisClient: () => redis } as unknown as CacheService;
+}
+
+/** An in-memory `OAuthClientRepository`: the two methods the registry uses. */
+export class FakeOAuthClientRepository {
+  readonly rows = new Map<string, OAuthClientEntity>();
+  upserts = 0;
+
+  findByClientId(clientId: string): Promise<OAuthClientEntity | null> {
+    return Promise.resolve(this.rows.get(clientId) ?? null);
+  }
+
+  insertClient(values: OAuthClientUpsert): Promise<OAuthClientEntity> {
+    if (this.rows.has(values.clientId)) return Promise.reject(new Error('duplicate client_id'));
+    return this.upsertByClientId(values) as Promise<OAuthClientEntity>;
+  }
+
+  upsertByClientId(values: OAuthClientUpsert): Promise<OAuthClientEntity | null> {
+    this.upserts += 1;
+    const existing = this.rows.get(values.clientId);
+    if (existing && existing.kind !== values.kind) return Promise.resolve(null);
+    const now = new Date();
+    const row = Object.assign(new OAuthClientEntity(), {
+      id: existing?.id ?? randomUUID(),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      version: (existing?.version ?? 0) + 1,
+      lastUsedAt: existing?.lastUsedAt ?? null,
+      ...values,
+    });
+    this.rows.set(values.clientId, row);
+    return Promise.resolve(row);
+  }
+}
+
+export const MCP = 'https://mcp.assay.ai';
+export const CHATGPT_REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
+
+export function oauthConfig(overrides: Partial<OAuthConfig> = {}): OAuthConfig {
+  return {
+    issuer: MCP,
+    webAppUrl: 'https://app.assay.ai',
+    verifiedClients: [],
+    redirectAllowlist: [
+      { uri: CHATGPT_REDIRECT, review: false },
+      { uri: 'https://claude.ai/api/mcp/auth_callback', review: true },
+    ],
+    paymentClients: [`${MCP}/oauth/clients/assay-mcp`],
+    allowHttpCimdLoopback: false,
+    requestCookieSecret: Buffer.alloc(32, 7),
+    dcrGlobalPerDay: 1000,
+    dcrPer48PerHour: 50,
+    ...overrides,
+  };
+}
+
+/** Real metrics over a fake Redis, so a test can read a counter back. */
+export function oauthMetrics(counters: FakeOAuthRedis = new FakeOAuthRedis()): {
+  metrics: OAuthMetrics;
+  counters: FakeOAuthRedis;
+} {
+  return { metrics: new OAuthMetrics(fakeCache(counters)), counters };
+}
+
+/**
+ * A request-path counter, summed over every hourly bucket. The token
+ * counter's label is `{grant_type}.{result}`.
+ */
+export async function counterValue(
+  counters: FakeOAuthRedis,
+  name: OAuthCounterName,
+  label: string,
+): Promise<number> {
+  const keys = counters.keys(`oauth:m:${name}:${label}:`);
+  const values = await Promise.all(keys.map((key) => counters.get(key)));
+  return values.reduce((total, value) => total + Number(value ?? 0), 0);
+}
+
+export class Clock {
+  constructor(public ms = Date.parse('2026-10-19T12:00:30Z')) {}
+  readonly now = (): number => this.ms;
+  advance(seconds: number): void {
+    this.ms += seconds * 1000;
+  }
+}
+
+export function rateLimiter(redis: FakeOAuthRedis, clock: Clock): OAuthRateLimiter {
+  return new OAuthRateLimiter(fakeCache(redis), clock.now);
+}
+
+/**
+ * A Redis that accepts every command and never answers, as a stalled server
+ * does: each call returns a promise that never settles.
+ */
+export function hungRedis(): Record<string, (...args: unknown[]) => Promise<never>> {
+  const never = (): Promise<never> => new Promise<never>(() => undefined);
+  return new Proxy({} as Record<string, (...args: unknown[]) => Promise<never>>, {
+    get: (_target, property) => (property === 'then' ? undefined : never),
+  });
+}
+
+/** A `CacheService` over {@link hungRedis}. */
+export function hungCache(): CacheService {
+  const redis = hungRedis();
+  return { getRedisClient: () => redis } as unknown as CacheService;
+}
+
+/** Resolves `promise` and how long it took, in milliseconds. */
+export async function timed<T>(promise: Promise<T>): Promise<{ value: T; ms: number }> {
+  const started = Date.now();
+  const value = await promise;
+  return { value, ms: Date.now() - started };
+}

@@ -3,6 +3,7 @@ import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { NotificationEvent, NotificationPort } from '@modules/notification/ports/notification.port';
 import {
@@ -46,7 +47,7 @@ function policyRow(overrides: Partial<SpendPolicyEntity> = {}): SpendPolicyEntit
     maxCallsPerHour: null,
     maxCallsPerMinute: 60,
     maxSpendPerHour: '5000000',
-    allowedTools: null,
+    accessMode: 'ALL',
     requireApprovalAbove: '2000000',
     paused: false,
     changedBy: 'system',
@@ -56,6 +57,11 @@ function policyRow(overrides: Partial<SpendPolicyEntity> = {}): SpendPolicyEntit
     updatedAt: new Date('2026-08-07T09:14:00.000Z'),
     ...overrides,
   } as unknown as SpendPolicyEntity;
+}
+
+/** The band notices are fired without awaiting; let them land. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
 }
 
 function zeroUsage(): AgentSpendUsage {
@@ -68,6 +74,7 @@ function build(options: {
   spendSoFar?: jest.Mock;
   consume?: jest.Mock;
   notify?: jest.Mock;
+  findAgent?: jest.Mock;
 }) {
   const policies = {
     findLive: options.findLive ?? jest.fn().mockResolvedValue(policyRow()),
@@ -86,8 +93,17 @@ function build(options: {
   const notify = options.notify ?? jest.fn().mockResolvedValue(undefined);
   const notifications: NotificationPort = { notify };
 
-  const service = new SpendPolicyEnforcementService(policies, usage, velocity, notifications);
-  return { service, policies, usage, velocity, notify };
+  const findAgent = options.findAgent ?? jest.fn().mockResolvedValue({ label: 'research-bot' });
+  const agents = { findOne: findAgent } as unknown as AgentRepository;
+
+  const service = new SpendPolicyEnforcementService(
+    policies,
+    usage,
+    velocity,
+    notifications,
+    agents,
+  );
+  return { service, policies, usage, velocity, notify, findAgent };
 }
 
 function input(overrides: Partial<AssertCallAllowedInput> = {}): AssertCallAllowedInput {
@@ -134,32 +150,18 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — order and pause', 
   });
 });
 
-describe('SpendPolicyEnforcementService.assertCallAllowed — allowlist', () => {
-  it('2. refuses a tool not on the allowlist with MCP_TOOL_NOT_ALLOWED', async () => {
-    const { service, velocity } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: ['other-tool'] })),
-    });
-
-    const code = await errorCodeOf(() => service.assertCallAllowed(input({ toolId: TOOL })));
-
-    expect(code).toBe(McpErrorCode.MCP_TOOL_NOT_ALLOWED);
-    expect(velocity.consume).not.toHaveBeenCalled();
-  });
-
-  it('permits a tool that is on the allowlist', async () => {
+describe('SpendPolicyEnforcementService.assertCallAllowed — which tools', () => {
+  // The access policy decides which tools an agent may call, before a call is
+  // priced (`AccessResolver`); this gate only weighs money, so a RESTRICTED row
+  // changes nothing here.
+  it('does not refuse a call on the access policy, which is enforced earlier', async () => {
     const { service } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: [TOOL, 'other-tool'] })),
+      findLive: jest
+        .fn()
+        .mockResolvedValue(policyRow({ accessMode: 'RESTRICTED', allowedToolIds: [] })),
     });
 
     await expect(service.assertCallAllowed(input({ toolId: TOOL }))).resolves.toBe(3);
-  });
-
-  it('null allowedTools means every tool is permitted', async () => {
-    const { service } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: null })),
-    });
-
-    await expect(service.assertCallAllowed(input())).resolves.toBe(3);
   });
 });
 
@@ -259,6 +261,24 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — velocity', () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ event: NotificationEvent.VELOCITY_ANOMALY }),
     );
+  });
+
+  it('names the agent by its label in the velocity notice, never its id', async () => {
+    const fresh: VelocityViolation = {
+      kind: VelocityViolationKind.DUPLICATE_REQUEST,
+      retryAfterSeconds: 30,
+      freshAnomaly: true,
+    };
+    const { service, notify, findAgent } = build({ consume: jest.fn().mockResolvedValue(fresh) });
+
+    await expect(service.assertCallAllowed(input())).rejects.toBeInstanceOf(BaseError);
+
+    expect(findAgent).toHaveBeenCalledWith({ where: { id: AGENT, organizationId: ORG } });
+    const body = notify.mock.calls[0][0].body as string;
+    expect(body).toBe(
+      '"research-bot" sent the same request repeatedly in a short window and has been throttled.',
+    );
+    expect(body).not.toContain(AGENT);
   });
 
   it('does not re-notify a duplicate-request anomaly that is already suppressed for the incident', async () => {
@@ -391,12 +411,56 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
 
     // +50000 crosses 80% (800000) without exceeding the cap.
     const version = await service.assertCallAllowed(input({ price: money('50000') }));
+    await flushMicrotasks();
 
     expect(version).toBe(3);
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({
         event: NotificationEvent.SPEND_THRESHOLD_CROSSED,
         dedupeKey: `${AGENT}:daily:80`,
+      }),
+    );
+  });
+
+  it('writes the band notice with the agent label and dollar amounts', async () => {
+    const { service, notify } = build({
+      findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '5000000', monthlyCap: null })),
+      spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
+        spendToday: money('4900000'),
+        spendThisMonth: money('4900000'),
+      }),
+    });
+
+    await service.assertCallAllowed(input({ price: money('100000') }));
+    await flushMicrotasks();
+
+    const band = notify.mock.calls.find((call) => call[0].dedupeKey === `${AGENT}:daily:100`)?.[0];
+    expect(band?.body).toBe('"research-bot" has spent $5.00 of its $5.00 daily limit (100%).');
+    // The payload keeps the exact figures and the asset for anything that needs them.
+    expect(band?.payload).toEqual(
+      expect.objectContaining({ scope: 'daily', band: 100, cap: '5000000', spendAfter: '5000000' }),
+    );
+  });
+
+  it('says "Your agent" when the label cannot be read, and still notifies', async () => {
+    const { service, notify } = build({
+      findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
+      spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
+        spendToday: money('750000'),
+        spendThisMonth: money('750000'),
+      }),
+      findAgent: jest.fn().mockRejectedValue(new Error('db down')),
+    });
+
+    await expect(service.assertCallAllowed(input({ price: money('50000') }))).resolves.toBe(3);
+    await flushMicrotasks();
+
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dedupeKey: `${AGENT}:daily:80`,
+        body: 'Your agent has spent $0.80 of its $1.00 daily limit (80%).',
       }),
     );
   });
@@ -412,6 +476,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     });
 
     await service.assertCallAllowed(input({ price: money('1000') }));
+    await flushMicrotasks();
 
     expect(notify).not.toHaveBeenCalledWith(
       expect.objectContaining({ dedupeKey: `${AGENT}:daily:80` }),

@@ -40,6 +40,13 @@ export interface BindingInvocation {
    * that ignores it would otherwise hang the call an agent is blocked on.
    */
   readonly timeoutMs: number;
+  /**
+   * Leave out the vault credentials and/or the Assay signature headers.
+   *
+   * ONLY the binding tester sets this, for its unauthenticated probes; the
+   * router never does. Honoured by `EgressBindingInvoker`.
+   */
+  readonly omit?: { readonly credentials?: boolean; readonly signature?: boolean };
 }
 
 export interface BindingInvokerPort {

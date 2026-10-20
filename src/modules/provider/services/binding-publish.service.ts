@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
 import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
+import { AuditLogWriter } from '@shared/audit';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
 import {
@@ -12,8 +13,15 @@ import {
   evaluateStakeGateOnChain,
 } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { BindingStatus } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import {
+  contractVersionsOf,
+  currentContractVersion,
+  isServable,
+} from '@modules/tool/domain/contract/contract-versions';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
 
 import {
   PublishCheck,
@@ -21,6 +29,8 @@ import {
   evaluatePublishGate,
   unmetRequirements,
 } from '../domain/publish-gate';
+import { CredentialVaultService } from '../credentials/credential-vault.service';
+import { originOf } from '../credentials/credential-rules';
 import { PublishCheckDto, PublishedToolBindingDto } from '../dto/publish-tool-binding.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingTestLayer, BindingTestOutcome } from '../ports/binding-test.types';
@@ -80,6 +90,15 @@ export class BindingPublishService {
     @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
     private readonly minimumStakeByChain: MinimumStakeByChain,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    // The contract versions a run's `tool_version` names, to group runs by
+    // major. Optional only for hand-built harnesses, which then gate on the
+    // newest run as before.
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort | undefined,
+    // Prunes credential sets whose origin the new revision no longer uses.
+    // Required: a missing vault module must fail at boot.
+    private readonly vault: CredentialVaultService,
+    // Records pruned credential sets (names only) in the publish transaction.
+    @Optional() private readonly audit?: AuditLogWriter,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -90,7 +109,10 @@ export class BindingPublishService {
     return {
       publishable: check.publishable,
       mappingVersion: row.mappingVersion,
-      requirements: check.requirements.map((requirement) => ({ ...requirement })),
+      requirements: check.requirements.map((requirement) => ({
+        ...requirement,
+        major: requirement.major ?? null,
+      })),
     };
   }
 
@@ -161,17 +183,34 @@ export class BindingPublishService {
         });
       }
 
+      // The published endpoint is the draft's at this moment, so any credential
+      // set for another origin can never be sent again: drop it with the stamp.
+      const pruned = await this.vault.pruneExcept(manager, organizationId, bindingId, [
+        originOf(row.endpoint),
+      ]);
+      for (const { origin, headerNames } of pruned) {
+        await this.audit?.record(manager, {
+          organizationId,
+          actor: { type: 'user', id: subject },
+          action: 'binding_credentials.pruned',
+          resourceType: 'tool_binding',
+          resourceId: bindingId,
+          before: { origin, header_names: headerNames },
+        });
+      }
+
       return updated;
     });
 
     this.logger.log(`Binding ${bindingId} published at revision ${row.mappingVersion}`);
 
-    return { ...toSavedDto(saved), publishedAt };
+    return { ...toSavedDto(saved, saved.endpoint), publishedAt };
   }
 
   private async evaluate(organizationId: string, row: ToolBindingEntity): Promise<PublishCheck> {
-    const [latestRun, built] = await Promise.all([
+    const [latestRun, runsByMajor, built] = await Promise.all([
       this.latestRun(organizationId, row),
+      this.runsByMajor(organizationId, row),
       this.candidate(organizationId, row),
     ]);
     const { candidate, settlementChains } = built;
@@ -210,12 +249,65 @@ export class BindingPublishService {
       );
     }
 
+    const origin = originOf(row.endpoint);
+    const required =
+      row.authMode === BindingAuthMode.API_KEY || row.authMode === BindingAuthMode.BOTH;
+    // The draft endpoint's origin: it is what goes live. Skipped for other modes
+    // so no read is wasted.
+    const present = required
+      ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
+      : false;
+
     return evaluatePublishGate({
+      credentials: { required, origin, present },
       mappingVersion: row.mappingVersion,
       latestRun,
       payoutByChain,
       stakeByChain,
+      runsByMajor,
     });
+  }
+
+  /**
+   * The newest run at this revision for each contract major the binding
+   * serves (T3, §7.5: a major needs a passing test run for that major). A run
+   * recorded without a contract version counts for the tool's current major.
+   */
+  private async runsByMajor(
+    organizationId: string,
+    row: ToolBindingEntity,
+  ): Promise<Map<number, PublishGateTestRun | null> | undefined> {
+    if (!this.catalogue) return undefined;
+    const majors = bindingRange(row.toolVersionRange ?? '^1');
+    const [tool, runs] = await Promise.all([
+      this.catalogue.findTool(row.toolId),
+      this.runs.findForRevision(organizationId, row.id, row.mappingVersion),
+    ]);
+    // Each major's run must be at its NEWEST published version (review P2-2):
+    // a run at an old minor never checked the fields a later minor added. A
+    // run recorded without a contract version counts as one at the current.
+    const versions = tool ? contractVersionsOf(tool).filter(isServable) : [];
+    const newestOf = new Map<number, number>();
+    for (const version of versions) {
+      if (!newestOf.has(version.major)) newestOf.set(version.major, version.version);
+    }
+    const currentNumber = tool ? (currentContractVersion(tool)?.version ?? 1) : 1;
+
+    const byMajor = new Map<number, PublishGateTestRun | null>(
+      majors.map((major) => [major, null]),
+    );
+    for (const run of runs) {
+      const tested = run.toolVersion ?? currentNumber;
+      const major = majors.find((m) => newestOf.get(m) === tested);
+      if (major === undefined || byMajor.get(major)) continue;
+      byMajor.set(major, {
+        mappingVersion: run.mappingVersion,
+        outcome: run.outcome as BindingTestOutcome,
+        failedLayer: run.failedLayer as BindingTestLayer | null,
+        ranAt: run.createdAt,
+      });
+    }
+    return byMajor;
   }
 
   private async latestRun(

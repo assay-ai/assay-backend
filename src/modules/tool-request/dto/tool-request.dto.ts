@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsEnum,
   IsInt,
@@ -7,6 +8,7 @@ import {
   IsUUID,
   IsUrl,
   Length,
+  Matches,
   Min,
   ValidateIf,
 } from 'class-validator';
@@ -110,6 +112,12 @@ export class ToolRequestDto {
   @ApiPropertyOptional({ nullable: true })
   closedAt: Date | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'The DRAFT standard tool an accepted request created (design spec §7.5)',
+  })
+  toolId: string | null;
+
   @ApiProperty()
   createdAt: Date;
 
@@ -126,6 +134,7 @@ export class ToolRequestDto {
     dto.firstRespondedAt = entity.firstRespondedAt;
     dto.resolutionNote = entity.resolutionNote;
     dto.closedAt = entity.closedAt;
+    dto.toolId = entity.toolId ?? null;
     dto.createdAt = entity.createdAt;
     return dto;
   }
@@ -201,6 +210,19 @@ export class ListToolRequestQueueQueryDto extends ListQueryDto {
   @IsOptional()
   @IsEnum(SortDirection)
   override order: SortDirection = SortDirection.ASC;
+
+  @ApiPropertyOptional({
+    enum: ToolRequestStatus,
+    isArray: true,
+    description:
+      'Only requests in these states, e.g. `?status=ACKNOWLEDGED` to accept an acknowledged ' +
+      'one later, or `?status=OPEN&status=ACKNOWLEDGED`. Omitted: the unanswered queue ' +
+      '(nobody has responded yet).',
+  })
+  @IsOptional()
+  @Transform(({ value }) => (Array.isArray(value) ? value : String(value).split(',')))
+  @IsEnum(ToolRequestStatus, { each: true })
+  status?: ToolRequestStatus[];
 }
 
 /**
@@ -230,4 +252,22 @@ export class AnswerToolRequestBodyDto {
   @IsString()
   @Length(1, 4000)
   resolutionNote?: string;
+
+  @ApiPropertyOptional({
+    example: 'get_tide_times',
+    description:
+      'ACCEPTED only: the name of the DRAFT standard tool the request creates. Derived ' +
+      'from the title when omitted (snake_case, made unique).',
+  })
+  @IsOptional()
+  @Matches(/^[a-z][a-z0-9_]{1,47}$/)
+  toolName?: string;
+
+  @ApiPropertyOptional({
+    example: 'weather',
+    description: 'ACCEPTED only; `uncategorised` when omitted',
+  })
+  @IsOptional()
+  @Matches(/^[a-z][a-z0-9-]{1,63}$/)
+  toolCategory?: string;
 }

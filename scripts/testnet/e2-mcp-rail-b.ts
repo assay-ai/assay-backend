@@ -8,7 +8,7 @@
  *  (optional) POST /deposits + approve + signed depositFor + settle   the agent funds its escrow
  *  tools/call                         → PAYMENT_REQUIRED, _meta[x402/paymentRequired]
  *  sign the EIP-712 voucher from that requirement, and nothing else
- *  tools/call + _meta[x402/voucher]   → the result, receipt status VERIFYING
+ *  tools/call + _meta[assay/voucher]   → the result, receipt status VERIFYING
  * ```
  *
  * Redemption is NOT done here: the platform's own `VoucherRedemptionJob` redeems the voucher on
@@ -25,7 +25,7 @@
  *
  * ```bash
  * set -a; . path/to/e2-buyer.env; set +a
- * E2_MCP_URL=https://mcp.example.com/mcp E2_API_URL=https://api.example.com/api/v1 \
+ * E2_MCP_URL=https://mcp.example.com/ E2_API_URL=https://api.example.com/api/v1 \
  *   E2_MCP_TOKEN=assay_sk_live_… E2_DEPOSIT_ATOMIC=5000000 yarn testnet:e2-mcp
  * ```
  */
@@ -53,7 +53,7 @@ import { ChainId, parseAccountId } from '@modules/chains/ports/caip.types';
  * The deployment under test. No default on purpose: a script that pays real (testnet) money must
  * be told which platform it is paying, rather than guessing one.
  */
-const MCP_URL = requiredEndpoint('E2_MCP_URL', 'https://mcp.example.com/mcp');
+const MCP_URL = requiredEndpoint('E2_MCP_URL', 'https://mcp.example.com/');
 const API_URL = requiredEndpoint('E2_API_URL', 'https://api.example.com/api/v1');
 const RPC_URL = process.env.E2_RPC_URL ?? 'https://rpc.testnet.chain.robinhood.com';
 const TOOL = process.env.E2_TOOL ?? 'get_weather';
@@ -234,15 +234,15 @@ async function run(): Promise<void> {
   const paid = (await client.callTool({
     name: TOOL,
     arguments: ARGS,
-    _meta: { 'x402/voucher': await signVoucher(requirement) },
+    _meta: { 'assay/voucher': await signVoucher(requirement) },
   })) as CallToolResult;
   await client.close();
 
   console.log(
     `E2_MCP_RESULT ${JSON.stringify({
       isError: paid.isError ?? false,
-      receipt: paid._meta?.['x402/receipt'] ?? null,
-      error: paid._meta?.['x402/error'] ?? null,
+      receipt: paid._meta?.['assay/receipt'] ?? null,
+      error: paid._meta?.['assay/error'] ?? null,
       result: paid.structuredContent ?? null,
     })}`,
   );

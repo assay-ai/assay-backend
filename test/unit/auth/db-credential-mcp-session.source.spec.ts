@@ -1,6 +1,7 @@
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { digestToken } from '@shared/crypto/token-digest';
 
@@ -27,7 +28,10 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     const agents = new FakeAgentRepository();
     const source = new DbCredentialMcpSessionSource(
       credentials as unknown as AgentCredentialRepository,
-      agents as unknown as AgentRepository,
+      new CredentialSessionResolver(
+        credentials as unknown as AgentCredentialRepository,
+        agents as unknown as AgentRepository,
+      ),
     );
     return { source, credentials, agents };
   }
@@ -141,7 +145,7 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_ORGANIZATION_SUSPENDED');
   });
 
-  it('resolves a valid credential to a session with all six fields correct', async () => {
+  it('resolves a valid credential to a session with every field correct', async () => {
     const { source, credentials, agents } = build();
     seedLinkedAgent(agents);
     credentials.seed(buildCredential({ id: 'cred-42', tokenHash: digestToken(TOKEN) }));
@@ -161,6 +165,8 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
       callerKind: McpCallerKind.AGENT,
       // No delegate key bound to this credential yet.
       delegateAccount: null,
+      // An API key may always take part in paid calls (spec §6.3.13).
+      paymentsAllowed: true,
     });
   });
 

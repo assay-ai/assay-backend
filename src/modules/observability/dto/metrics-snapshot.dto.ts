@@ -52,6 +52,9 @@ export class PolicyFailRateRowDto {
   failRate: number;
 }
 
+/** Which dashboard table a reading belongs to. */
+export type SignalSection = 'money' | 'traffic' | 'oauth' | 'other';
+
 export class SignalReadingDto {
   @ApiProperty({
     description: 'ObservabilitySignal member, or a bonus reading name — see the service.',
@@ -61,15 +64,15 @@ export class SignalReadingDto {
   @ApiProperty()
   label: string;
 
-  @ApiProperty({ enum: ['money', 'traffic', 'other'] })
-  section: 'money' | 'traffic' | 'other';
+  @ApiProperty({ enum: ['money', 'traffic', 'oauth', 'other'] })
+  section: SignalSection;
 
   @ApiProperty({ enum: SignalAvailability })
   availability: SignalAvailability;
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'Null when NONE/AWAITING_INSTRUMENTATION, or when the window has no data.',
+    description: 'Null when NONE, or when the window has no data.',
   })
   value: number | null;
 
@@ -92,7 +95,7 @@ export class SignalReadingDto {
   extra?: Record<string, number | undefined>;
 }
 
-/** `GET /operator/dashboard/data.json` and the object `GET /metrics` is rendered from. */
+/** `GET /operator/dashboard/data.json`, and the object the HTML dashboard is rendered from. */
 export class MetricsSnapshotDto {
   @ApiProperty()
   generatedAt: string;

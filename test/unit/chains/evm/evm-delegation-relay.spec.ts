@@ -1,7 +1,7 @@
 import { decodeFunctionData, getAddress, hashTypedData, recoverTypedDataAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { hashAuthorizeDelegate } from '@modules/chains/evm/eip712/delegation';
 import {
@@ -379,7 +379,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
 
       const call = (sendCall.mock.calls[0] as unknown[])[0] as { to: string; data: `0x${string}` };
       expect(call.to).toBe(toAccountId(TESTNET, getAddress(DEPLOYMENT.escrow)));
-      const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+      const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data });
       expect(decoded.functionName).toBe('authorizeDelegateBySig');
       expect(decoded.args).toEqual([
         PAYER,
@@ -404,7 +404,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
         signature: SIGNATURE,
       } as RelayedEscrowIntent);
       const call = (sendCall.mock.calls[0] as unknown[])[0] as { data: `0x${string}` };
-      const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+      const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data });
       expect(decoded.functionName).toBe('revokeDelegateBySig');
       expect(decoded.args).toEqual([PAYER, DELEGATE, 4n, 1_800_000_300n, SIGNATURE]);
     });

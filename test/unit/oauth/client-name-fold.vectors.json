@@ -1,0 +1,1064 @@
+{
+  "description": "Shared fold vectors for an app's name. assay-backend client-name.ts and assay-frontend consent.ts keep identical copies of this file, and each tests its own foldForMatch, mixesScripts and checks against it. Change both copies together.",
+  "fold": [
+    {
+      "input": "а",
+      "folded": "a",
+      "group": "cyrillic"
+    },
+    {
+      "input": "е",
+      "folded": "e",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ё",
+      "folded": "e",
+      "group": "cyrillic"
+    },
+    {
+      "input": "о",
+      "folded": "o",
+      "group": "cyrillic"
+    },
+    {
+      "input": "р",
+      "folded": "p",
+      "group": "cyrillic"
+    },
+    {
+      "input": "с",
+      "folded": "c",
+      "group": "cyrillic"
+    },
+    {
+      "input": "х",
+      "folded": "x",
+      "group": "cyrillic"
+    },
+    {
+      "input": "у",
+      "folded": "y",
+      "group": "cyrillic"
+    },
+    {
+      "input": "і",
+      "folded": "i",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ї",
+      "folded": "i",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ј",
+      "folded": "j",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ѕ",
+      "folded": "s",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ԁ",
+      "folded": "d",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ѵ",
+      "folded": "v",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ӏ",
+      "folded": "i",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ҽ",
+      "folded": "e",
+      "group": "cyrillic"
+    },
+    {
+      "input": "г",
+      "folded": "r",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ғ",
+      "folded": "f",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ԛ",
+      "folded": "q",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ԝ",
+      "folded": "w",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ɡ",
+      "folded": "g",
+      "group": "cyrillic"
+    },
+    {
+      "input": "А",
+      "folded": "a",
+      "group": "cyrillic"
+    },
+    {
+      "input": "Е",
+      "folded": "e",
+      "group": "cyrillic"
+    },
+    {
+      "input": "В",
+      "folded": "в",
+      "group": "cyrillic"
+    },
+    {
+      "input": "ο",
+      "folded": "o",
+      "group": "greek"
+    },
+    {
+      "input": "ν",
+      "folded": "v",
+      "group": "greek"
+    },
+    {
+      "input": "ι",
+      "folded": "i",
+      "group": "greek"
+    },
+    {
+      "input": "ε",
+      "folded": "e",
+      "group": "greek"
+    },
+    {
+      "input": "ϵ",
+      "folded": "e",
+      "group": "greek"
+    },
+    {
+      "input": "ρ",
+      "folded": "p",
+      "group": "greek"
+    },
+    {
+      "input": "κ",
+      "folded": "k",
+      "group": "greek"
+    },
+    {
+      "input": "υ",
+      "folded": "u",
+      "group": "greek"
+    },
+    {
+      "input": "τ",
+      "folded": "t",
+      "group": "greek"
+    },
+    {
+      "input": "α",
+      "folded": "a",
+      "group": "greek"
+    },
+    {
+      "input": "ϝ",
+      "folded": "f",
+      "group": "greek"
+    },
+    {
+      "input": "ϲ",
+      "folded": "c",
+      "group": "greek"
+    },
+    {
+      "input": "γ",
+      "folded": "y",
+      "group": "greek"
+    },
+    {
+      "input": "χ",
+      "folded": "x",
+      "group": "greek"
+    },
+    {
+      "input": "Ο",
+      "folded": "o",
+      "group": "greek"
+    },
+    {
+      "input": "Ν",
+      "folded": "v",
+      "group": "greek"
+    },
+    {
+      "input": "ı",
+      "folded": "i",
+      "group": "latinVariants"
+    },
+    {
+      "input": "ɩ",
+      "folded": "i",
+      "group": "latinVariants"
+    },
+    {
+      "input": "ɗ",
+      "folded": "d",
+      "group": "latinVariants"
+    },
+    {
+      "input": "ƒ",
+      "folded": "f",
+      "group": "latinVariants"
+    },
+    {
+      "input": "đ",
+      "folded": "d",
+      "group": "latinVariants"
+    },
+    {
+      "input": "Đ",
+      "folded": "d",
+      "group": "latinVariants"
+    },
+    {
+      "input": "ᴀ",
+      "folded": "a",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ʙ",
+      "folded": "b",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴄ",
+      "folded": "c",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴅ",
+      "folded": "d",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴇ",
+      "folded": "e",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ꜰ",
+      "folded": "f",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ɢ",
+      "folded": "g",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ʜ",
+      "folded": "h",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ɪ",
+      "folded": "i",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴊ",
+      "folded": "j",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴋ",
+      "folded": "k",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ʟ",
+      "folded": "l",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴍ",
+      "folded": "m",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ɴ",
+      "folded": "n",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴏ",
+      "folded": "o",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴘ",
+      "folded": "p",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ꞯ",
+      "folded": "q",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ʀ",
+      "folded": "r",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ꜱ",
+      "folded": "s",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴛ",
+      "folded": "t",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴜ",
+      "folded": "u",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴠ",
+      "folded": "v",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴡ",
+      "folded": "w",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ʏ",
+      "folded": "y",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "ᴢ",
+      "folded": "z",
+      "group": "smallCapitals"
+    },
+    {
+      "input": "Ꭺ",
+      "folded": "a",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ᏼ",
+      "folded": "b",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮟ",
+      "folded": "b",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮯ",
+      "folded": "c",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭰ",
+      "folded": "d",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭼ",
+      "folded": "e",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮐ",
+      "folded": "g",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮋ",
+      "folded": "h",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮒ",
+      "folded": "h",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭵ",
+      "folded": "i",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭻ",
+      "folded": "j",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮶ",
+      "folded": "k",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮮ",
+      "folded": "l",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮇ",
+      "folded": "m",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮲ",
+      "folded": "p",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮢ",
+      "folded": "r",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭱ",
+      "folded": "r",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮪ",
+      "folded": "s",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭲ",
+      "folded": "t",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮩ",
+      "folded": "v",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮃ",
+      "folded": "w",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮤ",
+      "folded": "w",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꭹ",
+      "folded": "y",
+      "group": "cherokee"
+    },
+    {
+      "input": "Ꮓ",
+      "folded": "z",
+      "group": "cherokee"
+    },
+    {
+      "input": "ꮩ",
+      "folded": "v",
+      "group": "cherokee"
+    },
+    {
+      "input": "ꭺ",
+      "folded": "a",
+      "group": "cherokee"
+    },
+    {
+      "input": "ꓮ",
+      "folded": "a",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓐ",
+      "folded": "b",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓚ",
+      "folded": "c",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓓ",
+      "folded": "d",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓰ",
+      "folded": "e",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓝ",
+      "folded": "f",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓖ",
+      "folded": "g",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓧ",
+      "folded": "h",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓲ",
+      "folded": "i",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓙ",
+      "folded": "j",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓗ",
+      "folded": "k",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓡ",
+      "folded": "l",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓟ",
+      "folded": "m",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓠ",
+      "folded": "n",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓳ",
+      "folded": "o",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓑ",
+      "folded": "p",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓣ",
+      "folded": "r",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓢ",
+      "folded": "s",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓔ",
+      "folded": "t",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓴ",
+      "folded": "u",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓦ",
+      "folded": "v",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓪ",
+      "folded": "w",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓫ",
+      "folded": "x",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓬ",
+      "folded": "y",
+      "group": "lisu"
+    },
+    {
+      "input": "ꓜ",
+      "folded": "z",
+      "group": "lisu"
+    },
+    {
+      "input": "ᗅ",
+      "folded": "a",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᗷ",
+      "folded": "b",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᑕ",
+      "folded": "c",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᗪ",
+      "folded": "d",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᗴ",
+      "folded": "e",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᖴ",
+      "folded": "f",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᕼ",
+      "folded": "h",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᒍ",
+      "folded": "j",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᒪ",
+      "folded": "l",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᗰ",
+      "folded": "m",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᑎ",
+      "folded": "n",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᑭ",
+      "folded": "p",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᑫ",
+      "folded": "q",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᖇ",
+      "folded": "r",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᔕ",
+      "folded": "s",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᑌ",
+      "folded": "u",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᐯ",
+      "folded": "v",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᗯ",
+      "folded": "w",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "ᘔ",
+      "folded": "z",
+      "group": "canadianSyllabics"
+    },
+    {
+      "input": "1",
+      "folded": "i",
+      "group": "standIns"
+    },
+    {
+      "input": "l",
+      "folded": "i",
+      "group": "standIns"
+    },
+    {
+      "input": "|",
+      "folded": "i",
+      "group": "standIns"
+    },
+    {
+      "input": "3",
+      "folded": "e",
+      "group": "standIns"
+    },
+    {
+      "input": "0",
+      "folded": "o",
+      "group": "standIns"
+    },
+    {
+      "input": "5",
+      "folded": "s",
+      "group": "standIns"
+    },
+    {
+      "input": "4",
+      "folded": "a",
+      "group": "standIns"
+    },
+    {
+      "input": "L",
+      "folded": "i",
+      "group": "standIns"
+    },
+    {
+      "input": "I",
+      "folded": "i",
+      "group": "standIns"
+    },
+    {
+      "input": "V",
+      "folded": "v",
+      "group": "plain"
+    },
+    {
+      "input": "e",
+      "folded": "e",
+      "group": "plain"
+    },
+    {
+      "input": "ß",
+      "folded": "ß",
+      "group": "plain"
+    },
+    {
+      "input": "ж",
+      "folded": "ж",
+      "group": "plain"
+    },
+    {
+      "input": "日",
+      "folded": "日",
+      "group": "plain"
+    },
+    {
+      "input": "ツ",
+      "folded": "ツ",
+      "group": "plain"
+    },
+    {
+      "input": "2",
+      "folded": "2",
+      "group": "plain"
+    },
+    {
+      "input": "7",
+      "folded": "7",
+      "group": "plain"
+    },
+    {
+      "input": "Ｖ",
+      "folded": "v",
+      "group": "compatibility"
+    },
+    {
+      "input": "ｅ",
+      "folded": "e",
+      "group": "compatibility"
+    },
+    {
+      "input": "𝐕",
+      "folded": "v",
+      "group": "compatibility"
+    },
+    {
+      "input": "𝐞",
+      "folded": "e",
+      "group": "compatibility"
+    },
+    {
+      "input": "ﬁ",
+      "folded": "fi",
+      "group": "compatibility"
+    },
+    {
+      "input": "é",
+      "folded": "e",
+      "group": "compatibility"
+    },
+    {
+      "input": "ⓡ",
+      "folded": "r",
+      "group": "compatibility"
+    },
+    {
+      "input": "Ⓡ",
+      "folded": "r",
+      "group": "compatibility"
+    },
+    {
+      "input": "ⓥ",
+      "folded": "v",
+      "group": "compatibility"
+    },
+    {
+      "input": "⑴",
+      "folded": "i",
+      "group": "compatibility"
+    },
+    {
+      "input": "①",
+      "folded": "i",
+      "group": "compatibility"
+    },
+    {
+      "input": "㉑",
+      "folded": "2i",
+      "group": "compatibility"
+    },
+    {
+      "input": "ᵛ",
+      "folded": "v",
+      "group": "compatibility"
+    },
+    {
+      "input": "ʳ",
+      "folded": "r",
+      "group": "compatibility"
+    },
+    {
+      "input": "🄥",
+      "folded": "v",
+      "group": "compatibility"
+    },
+    {
+      "input": " ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "_",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": ".",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "-",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "—",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": " ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "ʼ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "ʻ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "ـ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "ー",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "々",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "ꓸ",
+      "folded": "",
+      "group": "nothing"
+    },
+    {
+      "input": "í",
+      "folded": "i",
+      "group": "compatibility"
+    },
+    {
+      "input": "é",
+      "folded": "e",
+      "group": "compatibility"
+    }
+  ],
+  "mixesScripts": [
+    {
+      "name": "Vеrified",
+      "mixed": true
+    },
+    {
+      "name": "Ꮩerified",
+      "mixed": true
+    },
+    {
+      "name": "ꓦerified",
+      "mixed": true
+    },
+    {
+      "name": "ᐯerified",
+      "mixed": true
+    },
+    {
+      "name": "Claude Νode",
+      "mixed": true
+    },
+    {
+      "name": "Αssay helper",
+      "mixed": true
+    },
+    {
+      "name": "Assay Ꭺpp",
+      "mixed": true
+    },
+    {
+      "name": "𝐕еrified",
+      "mixed": true
+    },
+    {
+      "name": "Verifiedـх",
+      "mixed": false
+    },
+    {
+      "name": "Claude Code",
+      "mixed": false
+    },
+    {
+      "name": "Verifone",
+      "mixed": false
+    },
+    {
+      "name": "l33t tools",
+      "mixed": false
+    },
+    {
+      "name": "Ассистент",
+      "mixed": false
+    },
+    {
+      "name": "Ελληνικά εργαλεία",
+      "mixed": false
+    },
+    {
+      "name": "日本語ツール",
+      "mixed": false
+    },
+    {
+      "name": "ツール・ボックス",
+      "mixed": false
+    },
+    {
+      "name": "Gitクライアント",
+      "mixed": false
+    },
+    {
+      "name": "Claude Ассистент",
+      "mixed": false
+    },
+    {
+      "name": "Café Ñandú",
+      "mixed": false
+    },
+    {
+      "name": "Ｖｅｒｉｆｙ",
+      "mixed": false
+    }
+  ],
+  "caught": [
+    "Claude Verifiedⓡ",
+    "Claude Verifiedʼ",
+    "Claude ʼVerified",
+    "Claude Verifiedـ",
+    "Claude Veriـfied",
+    "Claude Veriʼfied",
+    "Claude Verifieds",
+    "Claudeⓥerified",
+    "toolʼverified",
+    "Claude Verified2026",
+    "Claude Ꮩerified",
+    "Claude ꓦerified",
+    "Claude ᐯerified",
+    "Claude Verifieᴅ",
+    "Claude Verɪfɪed",
+    "Claude ᴠᴇʀɪꜰɪᴇᴅ",
+    "Claude Verifieđ",
+    "Claude ᐯᗴᖇꓲᖴꓲᗴᗪ",
+    "Claude ꓦꓰꓣꓲꓝꓲꓰꓓ",
+    "Claude ᴠᴇʀɪꜰɪᴇᴅ app",
+    "Claude Vеrified",
+    "Claude Verified",
+    "Αssay helper"
+  ],
+  "legitimate": [
+    "Verifone",
+    "Assayer Labs",
+    "Cursor",
+    "Claude Code",
+    "Zed",
+    "VS Code",
+    "l33t tools",
+    "Visual Studio Code",
+    "Verifier Tools",
+    "Ассистент",
+    "Ελληνικά εργαλεία",
+    "日本語ツール",
+    "ツール・ボックス",
+    "Gitクライアント",
+    "Café Tool"
+  ]
+}

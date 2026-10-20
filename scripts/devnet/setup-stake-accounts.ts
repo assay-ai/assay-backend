@@ -3,13 +3,12 @@
  * accounts that the routing stake-gate check needs in order to mean anything.
  *
  *     yarn devnet:stake-accounts                        # dry run, sends nothing
- *     yarn devnet:stake-accounts --execute --operator ~/keys/x402-admin.json
+ *     yarn devnet:stake-accounts --execute --operator ~/keys/assay-admin.json
  *
  * ## Why this script exists
  *
  * The check is *"a provider below the stake minimum is dropped from routing,
- * using real on-chain state on devnet"*. At `PROVIDER_STAKE_SOURCE_MODE=chain`
- * that check is **vacuous unless real stake accounts exist**: a provider with no
+ * using real on-chain state on devnet"*. That check is **vacuous unless real stake accounts exist**: a provider with no
  * `ProviderStake` PDA is absent from `OnChainProviderStakeSource`, absent becomes
  * `STAKE_UNKNOWN`, and `evaluateStakeGate` fails closed. With zero stake accounts
  * in existence the check "passes" by excluding everybody, and proves nothing
@@ -50,8 +49,8 @@
  * and the second run says what it skipped.
  */
 // `.env` is loaded by `-r dotenv/config` in the package.json script entry, before
-// this file or any of its imports run — the same ordering note `deposit.ts`
-// carries, and for the same reason: `@modules/chains` reads env at import time.
+// this file or any of its imports run, because `@modules/chains` reads env at
+// import time.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -75,7 +74,7 @@ import {
   findStakeVaultPda,
   getDepositStakeInstructionAsync,
   getOpenStakeInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { loadMinimumStakeParameters } from '@modules/provider/services/provider-stake.service';
@@ -613,8 +612,7 @@ async function main(): Promise<void> {
   // two provider rows the chain source cannot answer for either of them and both
   // are excluded — which is the vacuous pass this script exists to prevent.
   console.log("  Apply these for the stake-gate check — set each provider's enrolment");
-  console.log('  (POST /providers/me/stake-authority, or the column directly) and run at');
-  console.log('  PROVIDER_STAKE_SOURCE_MODE=chain:');
+  console.log('  (POST /providers/me/stake-authority, or the column directly):');
   console.log('');
   for (const state of resolved) {
     console.log(

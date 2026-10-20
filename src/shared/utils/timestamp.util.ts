@@ -1,5 +1,3 @@
-const SECONDS_PER_DAY = 86400;
-
 /**
  * Normalize timestamp to 10-digit Unix timestamp (seconds)
  * Handles both seconds (10 digits) and milliseconds (13 digits) timestamps
@@ -47,13 +45,4 @@ export function dateToSeconds(date: Date | string): number {
  */
 export function secondsToDate(timestamp: number): Date {
   return new Date(timestamp * 1000);
-}
-
-// Helper methods
-export function getCurrentTimestamp(): number {
-  return Math.floor(Date.now() / 1000);
-}
-
-export function secondsToDays(seconds: number): number {
-  return seconds / SECONDS_PER_DAY;
 }

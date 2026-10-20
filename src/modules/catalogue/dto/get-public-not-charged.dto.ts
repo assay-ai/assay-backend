@@ -59,7 +59,9 @@ export class PublicNotChargedCallDto {
   reasonText: string;
 
   @ApiProperty({
-    enum: WithheldBucket,
+    // The Explorer never emits NOT_COLLECTED (it files those calls under
+    // PROVIDER_OR_PLATFORM_ERROR); advertise only what it sends.
+    enum: [WithheldBucket.FAILED_VERIFICATION, WithheldBucket.PROVIDER_OR_PLATFORM_ERROR],
     description:
       'FAILED_VERIFICATION is the guarantee firing; PROVIDER_OR_PLATFORM_ERROR is a call that ' +
       'never produced usable data, or whose payment was not collected ' +

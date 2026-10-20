@@ -5,6 +5,7 @@ import {
 } from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { In, Not } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -19,10 +20,14 @@ import {
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
-import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { LedgerAccountId, RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
+
+/** A redemption its receipt and the logs cannot classify is paged after this many tries. */
+const UNCLASSIFIED_PAGE_AFTER = 5;
 
 import {
   LATE_VERDICT_LAPSE_CAUSE,
@@ -31,8 +36,23 @@ import {
   PAYMENT_INTENT_TTL_MS,
   PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
 } from '../constants/payment-intent.constants';
-import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
+import {
+  DEBT_VOIDED_PREFIX,
+  PROVIDER_FORFEIT_PREFIX,
+} from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
+import {
+  COLLECTION_HOLD_WINDOW_SECONDS,
+  HELD,
+  HELD_COLLECTED,
+  HELD_REFUNDED,
+} from '../constants/collection-hold.constants';
+import {
+  HELD_PAYMENTS,
+  HELD_TIMEOUT_SECONDS,
+  HeldPaymentsPort,
+  HeldStatus,
+} from '../ports/held-payments.port';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
   CreatePaymentIntentInput,
@@ -44,22 +64,34 @@ import {
 } from '../ports/payment.types';
 
 /**
- * The unique index on `payment_intents.voucher_nonce` (voucher v1).
- *
- * Matched by name because Postgres reports which constraint refused an insert,
- * and this table has three unique indexes whose violations mean different
- * things. No caller writes `voucherNonce` any more — `VoucherService` writes
- * {@link VOUCHER_SEQ_CONSTRAINT} instead — but the index and this branch stay
- * for rows written before the v2 cutover.
- */
-const VOUCHER_NONCE_CONSTRAINT = 'idx_payment_intents_voucher_nonce';
-
-/**
- * Voucher v2's replacement: unique on `(agent_account, voucher_seq)`, not global —
- * voucher v2's `seq` is per-buyer, so buyer A's seq 5 and buyer B's seq 5 are
+ * The voucher replay guard: unique on `(agent_account, voucher_seq)`, not
+ * global — a `seq` is per-buyer, so buyer A's seq 5 and buyer B's seq 5 are
  * different vouchers and must not collide.
  */
 const VOUCHER_SEQ_CONSTRAINT = 'uq_payment_intents_account_voucher_seq';
+
+/**
+ * The partial unique index on `(organization_id, agent_id, idempotency_key)`,
+ * and the name it is rebuilt under while migration 1761000000000 swaps it.
+ */
+const IDEMPOTENCY_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
+  'idx_payment_intents_idempotency_key',
+  'idx_payment_intents_idempotency_key_staged',
+]);
+
+/**
+ * The statuses whose intent no longer holds its idempotency key: the agent was
+ * not charged (`VOIDED`, `EXPIRED`, `REFUNDED`), so a retry with the same key
+ * is a fresh attempt. Mirrors the predicate of
+ * `idx_payment_intents_idempotency_key` (migration 1761000000000) — the index
+ * is the guarantee, and this list only lets {@link PaymentIntentService} read
+ * back the one row the index still arbitrates.
+ */
+export const IDEMPOTENCY_RELEASED_STATUSES: readonly PaymentIntentStatus[] = [
+  PaymentIntentStatus.VOIDED,
+  PaymentIntentStatus.EXPIRED,
+  PaymentIntentStatus.REFUNDED,
+];
 
 /**
  * What a rail-B voucher's intent must fit before it is written: the scope of
@@ -97,6 +129,12 @@ export class PaymentIntentService {
     private readonly chainState: ChainStateGatePort | null = null,
     // The per-chain slash holds: no new intent names a held provider there.
     @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
+    // The escrow's hold ("redeem into hold", G3.B1). Absent, or reading `null`
+    // (an escrow before the upgrade): a redemption pays the provider at once.
+    @Optional()
+    @Inject(HELD_PAYMENTS)
+    private readonly held: HeldPaymentsPort | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   /**
@@ -115,6 +153,11 @@ export class PaymentIntentService {
    * A key replayed against a *different* request is not a retry — it is a
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
+   *
+   * A key is held only while its intent may still charge the agent: once the
+   * intent is `VOIDED`, `EXPIRED` or `REFUNDED` the index releases it (see
+   * {@link IDEMPOTENCY_RELEASED_STATUSES}), and the same key creates a new
+   * intent. A failed call that cost nothing can therefore be retried.
    *
    * **No intent names a blocked party.** Every new payment, on every rail,
    * starts here, so this is the one place the account blocklist refuses the
@@ -195,7 +238,6 @@ export class PaymentIntentService {
       chainId: input.chainId,
       expiresAt: input.expiresAt ?? new Date(Date.now() + PAYMENT_INTENT_TTL_MS),
       idempotencyKey: input.idempotencyKey ?? null,
-      voucherNonce: input.voucherNonce ?? null,
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
@@ -209,47 +251,92 @@ export class PaymentIntentService {
       verificationVerdict: null,
     };
 
-    try {
-      if (admission) {
-        await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
-      } else {
-        await this.intents.insert(row);
-      }
-    } catch (error) {
-      const violation = error as { code?: string; constraint?: string };
-      if (violation?.code !== UNIQUE_VIOLATION_CODE) {
-        throw error;
-      }
+    // Twice at most, and only for one race: see the end of the catch block.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.insertRow(row, admission);
+        break;
+      } catch (error) {
+        const violation = error as { code?: string; constraint?: string };
+        if (violation?.code !== UNIQUE_VIOLATION_CODE) {
+          throw error;
+        }
 
-      // Two unique indexes can refuse this insert and they mean opposite
-      // things, so the constraint name decides rather than the presence of a
-      // key. A voucher nonce collision is a **replay** — the authorization has
-      // already been spent and there is nothing to return — while an
-      // idempotency collision is a **retry**, and the caller wants the intent
-      // the first copy created. Inferring one from the other would answer a
-      // replayed voucher with someone's earlier intent.
-      if (violation.constraint === VOUCHER_NONCE_CONSTRAINT) {
-        throw PaymentErrors.voucherNonceReplayed({ nonce: row.voucherNonce });
+        // Two unique indexes can refuse this insert and they mean opposite
+        // things, so the constraint name decides rather than the presence of a
+        // key. A voucher seq collision is a **replay** — the authorization has
+        // already been spent and there is nothing to return — while an
+        // idempotency collision is a **retry**, and the caller wants the intent
+        // the first copy created. Inferring one from the other would answer a
+        // replayed voucher with someone's earlier intent.
+        //
+        // The voucher replay guard: `VoucherService.assertIssuedSeq` already
+        // confirmed the seq was issued to this account and not yet used before
+        // this insert ran, so a collision here means a second call reached the
+        // insert for the same `(account, seq)` first — a genuine concurrent
+        // replay. The seq WAS issued, so this is "already used", never
+        // "not issued".
+        if (violation.constraint === VOUCHER_SEQ_CONSTRAINT) {
+          throw PaymentErrors.voucherSeqAlreadyUsed({
+            account: row.agentAccount,
+            actual: row.voucherSeq,
+          });
+        }
+        // Any other unique index (or no key at all) is not a retry, and is
+        // not answered as one.
+        if (
+          !row.idempotencyKey ||
+          (violation.constraint && !IDEMPOTENCY_KEY_CONSTRAINTS.has(violation.constraint))
+        ) {
+          throw error;
+        }
+        const live = await this.findLiveByIdempotencyKey(
+          input.organizationId,
+          input.agentId,
+          row.idempotencyKey,
+        );
+        if (live) return this.resolveReplay(input, row.idempotencyKey, live);
+        // The row that refused this insert left the index — voided, expired or
+        // refunded — before it could be read back, so the key is free now and
+        // the insert is tried once more. A second refusal with nothing live to
+        // read is not a race any longer.
+        if (attempt >= 1) {
+          throw PaymentErrors.idempotencyKeyReused({ idempotencyKey: row.idempotencyKey });
+        }
       }
-      // Voucher v2's replay guard: `VoucherService.assertIssuedSeq` already
-      // confirmed the seq was issued to this account and not yet used before
-      // this insert ran, so a collision here means a second call reached the
-      // insert for the same `(account, seq)` first — a genuine concurrent
-      // replay. The seq WAS issued, so this is "already used", never
-      // "not issued".
-      if (violation.constraint === VOUCHER_SEQ_CONSTRAINT) {
-        throw PaymentErrors.voucherSeqAlreadyUsed({
-          account: row.agentAccount,
-          actual: row.voucherSeq,
-        });
-      }
-      if (!row.idempotencyKey) {
-        throw error;
-      }
-      return this.resolveReplay(input, row.idempotencyKey);
     }
 
     return this.findById(input.organizationId, row.id as string);
+  }
+
+  private async insertRow(
+    row: Partial<PaymentIntentEntity>,
+    admission: VoucherAdmission | undefined,
+  ): Promise<void> {
+    if (admission) {
+      await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
+    } else {
+      await this.intents.insert(row);
+    }
+  }
+
+  /**
+   * The intent that holds this idempotency key — the one live row the partial
+   * unique index arbitrates (`VOIDED`, `EXPIRED` and `REFUNDED` rows have
+   * released it) — or null when the key is free.
+   */
+  async findLiveByIdempotencyKey(
+    organizationId: string,
+    agentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentIntent | null> {
+    const row = await this.intents.findOneBy({
+      organizationId,
+      agentId,
+      idempotencyKey,
+      status: Not(In([...IDEMPOTENCY_RELEASED_STATUSES])),
+    });
+    return row ? toPaymentIntent(row) : null;
   }
 
   /**
@@ -334,6 +421,14 @@ export class PaymentIntentService {
         : {}),
       ...(context.lapseCause !== undefined
         ? { redemptionLapsedAt: new Date(), redemptionLastError: context.lapseCause }
+        : {}),
+      // Rail A's dispute hold (G3.B1): the provider's credit waits for the window.
+      ...(context.holdForDispute
+        ? {
+            heldStatus: HELD,
+            heldAt: () => 'now()',
+            collectableAt: () => `now() + interval '${COLLECTION_HOLD_WINDOW_SECONDS} seconds'`,
+          }
         : {}),
     });
 
@@ -479,16 +574,22 @@ export class PaymentIntentService {
     // then lapsed with a transaction in flight. Read first — the decision
     // needs the voucher's `expiresAt` — which costs one read per settle.
     let lapseCause: string | undefined;
+    let holdForDispute = false;
     if (rule.holdEffect === HoldEffect.COMMIT && to === PaymentIntentStatus.SETTLED) {
       const current = await this.findById(organizationId, intentId);
       if (current.rail === PaymentRail.RAIL_B_VOUCHER && this.pastRedemptionLatest(current)) {
         lapseCause = LATE_VERDICT_LAPSE_CAUSE;
       }
+      // Rail A settles through the facilitator at call time, so its dispute hold
+      // (G3.B1) is the provider's ledger credit — and so its payout — withheld
+      // for the window. Rail B's hold is on chain, at redemption.
+      if (current.rail === PaymentRail.RAIL_A_PER_CALL) holdForDispute = true;
     }
 
     const intent = await this.transition(organizationId, intentId, from, to, {
       ...context,
       ...(lapseCause ? { lapseCause } : {}),
+      ...(holdForDispute ? { holdForDispute } : {}),
     });
 
     if (rule.holdEffect === HoldEffect.NONE || !intent.holdId) {
@@ -547,13 +648,20 @@ export class PaymentIntentService {
       throw PaymentErrors.providerNotAssigned({ intentId });
     }
 
+    if (intent.heldStatus === HELD) {
+      // Rail A, held for the dispute window (G3.B1): `HeldCollectionService`
+      // credits the provider once it has passed, unless an upheld dispute
+      // refunds the buyer from the uncredited amount.
+      return intent;
+    }
+
     await this.ledger.commitHoldAndCredit(organizationId, intent.holdId, {
       providerOrganizationId: intent.providerId,
       providerAccountId: intent.providerAccount as LedgerAccountId,
       providerAmount: intent.providerAmount,
       platformFee: intent.platformFee,
       intentId,
-      chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+      chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
     });
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
 
@@ -620,6 +728,50 @@ export class PaymentIntentService {
 
     if (!intent.holdId || intent.holdReleasedAt !== null) {
       return intent;
+    }
+    if (intent.heldStatus === HELD) return intent;
+
+    // Redeemed INTO THE HOLD (G3.B1)? Decided from the redemption's RECEIPT
+    // (review P0-1): a `PaymentHeld` log — the money is in `held[payer][seq]`,
+    // the buyer's ledger hold stays open and the provider is credited on
+    // `HeldCollected`, never here; a bare `VoucherRedeemed` — the escrow paid
+    // the provider at once (a redemption before the upgrade). Anything else is
+    // retried: on a chain whose hold is live, a missing answer is never a
+    // reason to credit the provider while the chain may still hold the money.
+    if (this.held && intent.rail === PaymentRail.RAIL_B_VOUCHER && intent.voucherSeq) {
+      const asset = intent.price.asset as AssetId;
+      const decided = await this.held.classifyRedemption(
+        asset,
+        /^0x[0-9a-fA-F]{64}$/.test(chainTxRef) ? chainTxRef : null,
+        { payer: intent.agentAccount, seq: intent.voucherSeq },
+      );
+      if (decided.kind === 'HELD') {
+        await this.intents.markHeld(organizationId, intentId, new Date(), decided.collectableAt);
+        return this.findById(organizationId, intentId);
+      }
+      if (decided.kind === 'UNKNOWN' && (await this.held.holdLive(asset))) {
+        // Counted, and paged after a few passes (review P2-6 of the second pass):
+        // a no-hash landing the logs cannot place needs a human.
+        await this.intents.recordHeldFailure(organizationId, intentId, 'redemption unclassified');
+        if ((intent.heldAttempts ?? 0) + 1 >= UNCLASSIFIED_PAGE_AFTER) {
+          await this.alerts?.emit({
+            severity: AlertSeverity.CRITICAL,
+            name: 'redemption_unclassified',
+            summary:
+              `Intent ${intentId}: redeemed, but neither its receipt nor the escrow's logs say ` +
+              `whether it was held — not credited; look it up on chain`,
+            details: { intentId, seq: intent.voucherSeq ?? 'none' },
+            aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+            dedupeKey: intentId,
+          });
+        }
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: 'redeemed, but the receipt does not say yet whether it was held — retried',
+        });
+      }
     }
 
     if (!intent.providerId || !intent.providerAccount) {
@@ -716,6 +868,182 @@ export class PaymentIntentService {
     return true;
   }
 
+  /** `held(payer, seq)` for a rail-B intent, or `null` when there is no chain hold. */
+  async readHeldRecord(intent: PaymentIntent) {
+    if (!this.held || intent.rail !== PaymentRail.RAIL_B_VOUCHER || !intent.voucherSeq) {
+      return null;
+    }
+    return this.held.readHeld(intent.price.asset as AssetId, {
+      payer: intent.agentAccount,
+      seq: intent.voucherSeq,
+    });
+  }
+
+  /**
+   * Books a collected hold (G3.B1): `HOLD_COMMIT + PROVIDER_CREDIT +
+   * PLATFORM_FEE` — the provider is credited now, on `HeldCollected` — then the
+   * row (`held_status = 'COLLECTED'`). Both idempotent: a repeat writes nothing
+   * twice. `txRef` is the collect transaction; rail A has none.
+   */
+  async bookHeldCollected(
+    organizationId: string,
+    intentId: string,
+    txRef: string | null,
+  ): Promise<PaymentIntent> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) return intent;
+    if (!intent.providerId || !intent.providerAccount) {
+      throw PaymentErrors.providerNotAssigned({ intentId });
+    }
+    await this.ledger.commitHoldAndCredit(organizationId, intent.holdId, {
+      providerOrganizationId: intent.providerId,
+      providerAccountId: intent.providerAccount as LedgerAccountId,
+      providerAmount: intent.providerAmount,
+      platformFee: intent.platformFee,
+      intentId,
+      chainTxRef:
+        intent.rail === PaymentRail.RAIL_A_PER_CALL
+          ? RAIL_A_BOOK_CREDIT_TX_REF
+          : (txRef ?? `held_collected:seq=${intent.voucherSeq}`),
+    });
+    await this.intents.manager.transaction((manager) =>
+      this.intents.markHeldCollected(
+        manager,
+        { organizationId, id: intentId, payer: intent.agentAccount },
+        txRef,
+      ),
+    );
+    return this.findById(organizationId, intentId);
+  }
+
+  /**
+   * Refunds a call an upheld dispute holds (G3.B1). Rail B: reads the escrow's
+   * record first — the job may have collected it in a race — then
+   * `refundHeld`, and books the release only once the chain says `REFUNDED`.
+   * Rail A: the provider was never credited, so the buyer's hold is released.
+   * One `HOLD_RELEASE`, nobody credited. Returns what the money did.
+   */
+  async refundHeldForDispute(
+    organizationId: string,
+    intentId: string,
+    outcome: string,
+  ): Promise<'REFUNDED' | 'COLLECTED' | 'NOT_HELD' | 'TIMED_OUT'> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) {
+      return intent.heldStatus === HELD_COLLECTED
+        ? 'COLLECTED'
+        : intent.heldStatus === HELD_REFUNDED
+          ? 'REFUNDED'
+          : 'NOT_HELD';
+    }
+
+    let txRef: string | null = null;
+    if (intent.rail === PaymentRail.RAIL_B_VOUCHER) {
+      const key = { payer: intent.agentAccount, seq: intent.voucherSeq as string };
+      const asset = intent.price.asset as AssetId;
+      let record = await this.readHeldRecord(intent);
+      if (!record || !this.held) {
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: 'held, but the escrow has no hold to refund',
+        });
+      }
+      if (record.status === HeldStatus.COLLECTED) {
+        await this.bookHeldCollected(organizationId, intentId, null);
+        return 'COLLECTED';
+      }
+      if (
+        record.status === HeldStatus.HELD &&
+        Date.now() >= record.collectableAt.getTime() + HELD_TIMEOUT_SECONDS * 1000
+      ) {
+        // Past the chain's timeout `refundHeld` is closed and anyone may
+        // collect, in the provider's favour. Nothing to send: the collection
+        // job books the collect once it lands, and the SLA job pages.
+        return 'TIMED_OUT';
+      }
+      if (record.status === HeldStatus.HELD) {
+        txRef = (await this.held.refund(asset, [key])).txRef;
+        record = await this.held.readHeld(asset, key);
+      }
+      if (record?.status !== HeldStatus.REFUNDED) {
+        if (record?.status === HeldStatus.COLLECTED) {
+          await this.bookHeldCollected(organizationId, intentId, null);
+          return 'COLLECTED';
+        }
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: `refundHeld did not refund (${record?.status ?? 'unknown'}) — retried`,
+        });
+      }
+    }
+
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markHeldRefunded(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`, txRef),
+    );
+    return 'REFUNDED';
+  }
+
+  /**
+   * Books the refund of a held payment the platform made for its provider
+   * (owner decision 2026-10-18): rail B once the chain says `REFUNDED` (sent by
+   * `HeldCollectionService`, which holds the redeemer key — the only sender
+   * `refundHeld` accepts), rail A by releasing the withheld credit. The
+   * provider forfeits the call: `provider_forfeit:<cause>` closes the row, the
+   * buyer's hold is released, nobody is credited, and a dispute still open on
+   * the call is written as refunded. A call an upheld dispute holds is booked
+   * as that dispute's refund instead. `booked: false` when the row is no
+   * longer held (already booked, or collected); `disputeIds`: the open
+   * disputes written as refunded, for the caller to tell the buyer.
+   */
+  async bookBlockedProviderRefund(
+    organizationId: string,
+    intentId: string,
+    cause: string,
+    txRef: string | null,
+  ): Promise<{ readonly booked: boolean; readonly disputeIds: readonly string[] }> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) return { booked: false, disputeIds: [] };
+    if (intent.disputeOutcome === 'UPHELD') {
+      const result = await this.refundHeldForDispute(organizationId, intentId, 'DISPUTE_UPHELD');
+      return { booked: result === 'REFUNDED', disputeIds: [] };
+    }
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    let disputeIds: readonly string[] = [];
+    const released = await this.ledger.releaseHoldIf(
+      organizationId,
+      intent.holdId,
+      async (runner) => {
+        const marked = await this.intents.markHeldRefunded(
+          runner,
+          target,
+          `${PROVIDER_FORFEIT_PREFIX}${cause}`,
+          txRef,
+          false,
+        );
+        if (marked) {
+          disputeIds = await this.intents.markDisputeRefunded(runner, organizationId, intentId);
+        }
+        return marked;
+      },
+    );
+    return { booked: released !== null, disputeIds };
+  }
+
   /**
    * Opens a NEW hold for a written-off debt the buyer is re-signing (H1
    * interim): the write-off released the old one, and the redemption commits a
@@ -748,22 +1076,15 @@ export class PaymentIntentService {
     await this.ledger.releaseHold(organizationId, holdId);
   }
 
-  private async resolveReplay(
+  /**
+   * The live row that refused the insert: the same request is a retry and
+   * gets that intent back; another request under the same key is a collision.
+   */
+  private resolveReplay(
     input: CreatePaymentIntentInput,
     idempotencyKey: string,
-  ): Promise<PaymentIntent> {
-    const existing = await this.intents.findOneBy({
-      organizationId: input.organizationId,
-      agentId: input.agentId,
-      idempotencyKey,
-    });
-
-    if (!existing) {
-      // The unique violation came from some other index. Do not pretend the
-      // request was a replay of something we cannot find.
-      throw PaymentErrors.idempotencyKeyReused({ idempotencyKey });
-    }
-
+    existing: PaymentIntent,
+  ): PaymentIntent {
     if (existing.requestHash !== input.requestHash) {
       throw PaymentErrors.idempotencyKeyReused({
         idempotencyKey,
@@ -772,7 +1093,7 @@ export class PaymentIntentService {
       });
     }
 
-    return toPaymentIntent(existing);
+    return existing;
   }
 }
 
@@ -802,7 +1123,6 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     chainId: row.chainId as ChainId,
     expiresAt: row.expiresAt,
     idempotencyKey: row.idempotencyKey,
-    voucherNonce: row.voucherNonce,
     voucherSeq: row.voucherSeq,
     voucherSignature: row.voucherSignature ?? null,
     voucherResourceHash: row.voucherResourceHash ?? null,
@@ -811,6 +1131,11 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     credentialId: row.credentialId ?? null,
     holdId: row.holdId,
     holdReleasedAt: row.holdReleasedAt,
+    collectableAt: row.collectableAt ?? null,
+    disputeOutcome: row.disputeOutcome ?? null,
+    heldStatus: row.heldStatus ?? null,
+    heldAt: row.heldAt ?? null,
+    heldAttempts: row.heldAttempts ?? 0,
     classification: row.classification,
     verificationVerdict: row.verificationVerdict,
     createdAt: row.createdAt,

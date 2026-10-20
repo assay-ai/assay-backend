@@ -6,17 +6,64 @@ import { DataSource } from 'typeorm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
+import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
+import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
+import { OrganizationEntity } from '@database/postgres/entities/organization.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { AgentDelegateService } from '@modules/account/services/agent-delegate.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { EscrowDelegationStatus } from '@modules/settlement/ports/escrow-delegation.port';
+import {
+  EscrowDelegationService,
+  EscrowDelegationWithUnsettled,
+} from '@modules/settlement/services/escrow-delegation.service';
+import { hashOpaqueToken, mint } from '@modules/oauth/domain/opaque-token';
 
 import { deployment } from '../../unit/chains/evm/evm-fixtures';
-import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from '../helpers/test-database';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
+
+/**
+ * The payer's standing delegations as `EscrowDelegationService.list` reads
+ * them from the escrow (`delegatesOf` + `delegationOf`); `authorize` stands for
+ * the payer's own `AuthorizeDelegate`, which the server can never sign.
+ */
+class AuthorizedDelegations {
+  private readonly standing = new Map<AccountId, EscrowDelegationWithUnsettled[]>();
+  readonly reads: AccountId[] = [];
+
+  authorize(payer: AccountId, delegate: AccountId, validUntil: bigint): void {
+    const list = this.standing.get(payer) ?? [];
+    list.push({
+      delegate,
+      maxVoucherAmount: 500_000n,
+      maxPerWindow: 5_000_000n,
+      spentInWindow: 0n,
+      validUntil,
+      status: EscrowDelegationStatus.ACTIVE,
+    } as EscrowDelegationWithUnsettled);
+    this.standing.set(payer, list);
+  }
+
+  async list(payer: AccountId): Promise<readonly EscrowDelegationWithUnsettled[]> {
+    this.reads.push(payer);
+    return this.standing.get(payer) ?? [];
+  }
+}
 
 /**
  * Binding an agent credential to its delegate key, against the real migrations
@@ -26,11 +73,12 @@ const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
  * into every MCP session.
  */
 describe('agent_credentials.delegate_account — binding a credential to its delegate key', () => {
-  const DATABASE = 'x402_agent_delegate_test';
+  const DATABASE = 'assay_agent_delegate_test';
   let dataSource: DataSource;
   let redis: Redis;
   let service: AgentDelegateService;
   let credentials: AgentCredentialRepository;
+  const chain = new AuthorizedDelegations();
   const organizationId = randomUUID();
   const agentId = randomUUID();
   // A fresh key per test: the database outlives a run, and a key is bound to one
@@ -46,13 +94,20 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       type: 'postgres',
       ...testConnectionOptions(),
       database: DATABASE,
-      entities: [AgentCredentialEntity],
+      entities: [
+        AgentCredentialEntity,
+        AgentEntity,
+        OrganizationEntity,
+        OAuthClientEntity,
+        OAuthAccessTokenEntity,
+      ],
       migrations: [join(__dirname, '../../../src/database/postgres/migrations/*.ts')],
       synchronize: false,
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await resetSchemaIfMigrationsChanged(dataSource);
+    await dataSource.runMigrations({ transaction: 'each' });
 
     redis = new Redis({
       host: process.env.REDIS_HOST || 'localhost',
@@ -64,6 +119,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       credentials,
       new ChainAdapterRegistry([adapter], [CHAIN]),
       redis,
+      chain as unknown as EscrowDelegationService,
     );
   }, 300_000);
 
@@ -71,6 +127,15 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     await redis?.quit();
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
+
+  /** Polls `condition` until it holds; fails after about two seconds. */
+  async function waitFor(condition: () => Promise<boolean>): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('condition never held');
+  }
 
   async function credential(): Promise<string> {
     const id = randomUUID();
@@ -90,6 +155,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.AGENT,
+    paymentsAllowed: true,
     storedCredential: true,
   });
 
@@ -129,6 +195,46 @@ describe('agent_credentials.delegate_account — binding a credential to its del
         errorCode: 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
       },
     );
+  });
+
+  /** §7.10 item 1, R-PAY-3: the delegate status, with the agent's label beside the credential. */
+  it('paidCalls ACTIVE with the caps after an authorize fixture; null without a bound delegate', async () => {
+    const id = await credential();
+    const labelled = { ...session(id), label: 'research bot' };
+    const before = chain.reads.length;
+    expect(await service.current(labelled)).toEqual({
+      credentialId: id,
+      agentLabel: 'research bot',
+      delegate: null,
+      boundAt: null,
+      paidCalls: null,
+      paidCallsUnknown: false,
+    });
+    // No key bound, no chain read.
+    expect(chain.reads).toHaveLength(before);
+
+    const challenge = await service.challenge(labelled, delegateKey.address);
+    await service.bind(labelled, challenge.challengeId, await sign(challenge.typedData));
+    const delegate = `${CHAIN}:${delegateKey.address}` as AccountId;
+    expect((await service.current(labelled)).paidCalls).toMatchObject({ status: 'NONE' });
+
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + 30 * 86_400);
+    chain.authorize(labelled.agentAccount, delegate, validUntil);
+    const status = await service.current(labelled);
+    expect(status).toMatchObject({
+      credentialId: id,
+      agentLabel: 'research bot',
+      delegate,
+      paidCalls: {
+        status: 'ACTIVE',
+        maxVoucherAmount: '500000',
+        maxPerWindow: '5000000',
+        spentInWindow: '0',
+        validUntil: new Date(Number(validUntil) * 1000).toISOString(),
+      },
+    });
+    expect(status.boundAt).not.toBeNull();
+    expect(chain.reads.at(-1)).toBe(labelled.agentAccount);
   });
 
   /** D1-S03: one key, one live credential, across organizations. */
@@ -221,7 +327,8 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       const [last] = (await dataSource.query(
         `SELECT "name" FROM "migrations" ORDER BY "timestamp" DESC, "id" DESC LIMIT 1`,
       )) as Array<{ name: string }>;
-      await dataSource.undoLastMigration({ transaction: 'all' });
+      // No wrapping transaction: some down() steps drop an index CONCURRENTLY.
+      await dataSource.undoLastMigration({ transaction: 'none' });
       if (last?.name === 'AgentCredentialDelegateUnique1759600000002') break;
     }
     const key = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
@@ -240,7 +347,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now(), "revoked_at" = now(), "revoked_by" = 'test' WHERE "id" = $1`,
       [revoked, key],
     );
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
 
     const rows: { id: string; delegate_account: string | null }[] = await dataSource.query(
       `SELECT "id", "delegate_account" FROM "agent_credentials" WHERE "id" = ANY($1)`,
@@ -250,6 +357,99 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     expect(byId[early]).toBeNull();
     expect(byId[late]).toBeNull();
     expect(byId[revoked]).toBe(key);
+  });
+
+  /**
+   * R-OA-22: a grant of a client outside `OAUTH_PAYMENT_CLIENTS`, resolved by
+   * the real OAuth session source on the MCP host, cannot ask for a challenge
+   * or bind a key. Nothing is written to Redis or to the credential row.
+   */
+  it('third-party OAuth session → challenge and bind refused ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED', async () => {
+    const mcp = 'https://mcp.example.com';
+    const orgId = randomUUID();
+    const oauthAgentId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO "organizations" ("id", "name", "status") VALUES ($1, 'Example org', 'ACTIVE')`,
+      [orgId],
+    );
+    await dataSource.query(
+      `INSERT INTO "agents" ("id", "organization_id", "privy_user_id", "status", "primary_account_id", "chain_id")
+       VALUES ($1, $2, $3, 'ACTIVE', $4, $5)`,
+      [
+        oauthAgentId,
+        orgId,
+        `did:privy:test-${oauthAgentId}`,
+        `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`,
+        CHAIN,
+      ],
+    );
+    const [client] = (await dataSource.query(
+      `INSERT INTO "oauth_clients" ("client_id", "kind", "client_name", "redirect_uris", "metadata")
+       VALUES ($1, 'DCR', 'Example app', ARRAY['https://app.example.com/callback'], '{}')
+       RETURNING "id"`,
+      [`dcr_${randomUUID().replace(/-/g, '').slice(0, 22)}`],
+    )) as { id: string }[];
+    const [grant] = (await dataSource.query(
+      `INSERT INTO "agent_credentials"
+         ("organization_id", "agent_id", "name", "issued_via", "oauth_client_id", "scopes", "expires_at")
+       VALUES ($1, $2, 'Example app', 'OAUTH', $3, '{}', now() + interval '30 days')
+       RETURNING "id"`,
+      [orgId, oauthAgentId, client.id],
+    )) as { id: string }[];
+    const accessToken = mint('assay_at_');
+    await dataSource.query(
+      `INSERT INTO "oauth_access_tokens"
+         ("organization_id", "credential_id", "token_hash", "scope", "audience", "expires_at")
+       VALUES ($1, $2, $3, 'assay:agent', $4, now() + interval '1 hour')`,
+      [orgId, grant.id, hashOpaqueToken(accessToken), mcp],
+    );
+
+    const source = new OAuthAccessTokenMcpSessionSource(
+      new OAuthAccessTokenRepository(dataSource),
+      credentials,
+      new OAuthClientRepository(dataSource),
+      new CredentialSessionResolver(credentials, new AgentRepository(dataSource)),
+      { audience: mcp, paymentClients: [`${mcp}/oauth/clients/assay-mcp`] },
+      'mcp',
+    );
+    try {
+      const oauthSession = await source.resolve(accessToken);
+      expect(oauthSession).toMatchObject({ credentialId: grant.id, paymentsAllowed: false });
+
+      await expect(service.challenge(oauthSession, delegateKey.address)).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+      });
+      await expect(service.bind(oauthSession, randomUUID(), '0x00')).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+      });
+
+      expect(await redis.exists(`agent-delegate-challenge:${grant.id}`)).toBe(0);
+      const [row] = await dataSource.query(
+        `SELECT "delegate_account", "delegate_bound_at" FROM "agent_credentials" WHERE "id" = $1`,
+        [grant.id],
+      );
+      expect(row).toEqual({ delegate_account: null, delegate_bound_at: null });
+    } finally {
+      // The database outlives a run, and the migration-revert test above cannot
+      // undo the OAuth migration while an OAuth credential row exists.
+      // Let the source's fire-and-forget stamps land first, so none races the DELETEs.
+      await waitFor(async () => {
+        const [stamps] = (await dataSource.query(
+          `SELECT
+             (SELECT "first_used_at" FROM "oauth_access_tokens" WHERE "credential_id" = $1) AS "first_used_at",
+             (SELECT "last_used_at" FROM "agent_credentials" WHERE "id" = $1) AS "last_used_at"`,
+          [grant.id],
+        )) as { first_used_at: Date | null; last_used_at: Date | null }[];
+        return stamps.first_used_at !== null && stamps.last_used_at !== null;
+      }).catch(() => undefined); // never resolved: no stamp is coming, clean up anyway
+      await dataSource.query(`DELETE FROM "oauth_access_tokens" WHERE "credential_id" = $1`, [
+        grant.id,
+      ]);
+      await dataSource.query(`DELETE FROM "agent_credentials" WHERE "id" = $1`, [grant.id]);
+      await dataSource.query(`DELETE FROM "oauth_clients" WHERE "id" = $1`, [client.id]);
+      await dataSource.query(`DELETE FROM "agents" WHERE "id" = $1`, [oauthAgentId]);
+      await dataSource.query(`DELETE FROM "organizations" WHERE "id" = $1`, [orgId]);
+    }
   });
 
   it('keeps the account and the instant together, by CHECK', async () => {

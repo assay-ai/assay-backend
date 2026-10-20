@@ -15,9 +15,9 @@ import {
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import {
-  ConfigProviderStakeSource,
+  InMemoryProviderStakeSource,
   ProviderStakeSnapshot,
-} from '@modules/provider/services/config-provider-stake.source';
+} from '../../helpers/in-memory-provider-stake.source';
 import { MinimumStakeByChain } from '@modules/tool/domain/routing/routing.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
@@ -29,8 +29,8 @@ import { buildTool } from '../../tool/helpers/routing-fixtures';
  * A hand-assembled {@link BindingEditorService}, for the write-time chain gate.
  *
  * Modelled on `test/unit/tool/helpers/routing-fixtures.ts`'s `buildRouter`: no
- * Nest testing module, an in-memory repository, the **production**
- * `ConfigProviderStakeSource` keyed the production way, and a stub
+ * Nest testing module, an in-memory repository, an in-memory stake source
+ * keyed the production way, and a stub
  * {@link ChainEnrolmentPort} over the enrolments the test declares. Standing up
  * a DI graph would answer "does the module wire" and the subject here is what
  * the gate refuses.
@@ -112,14 +112,23 @@ export function buildBindingEditorHarness(
     }),
     findOne: jest.fn(
       async (
-        _entity: unknown,
-        { where }: { where: { bindingId: string; mappingVersion: number } },
+        entity: unknown,
+        {
+          where,
+        }: {
+          where: { bindingId: string; mappingVersion: number; organizationId: string; id: string };
+        },
       ) =>
-        versions.find(
-          (version) =>
-            version.bindingId === where.bindingId &&
-            version.mappingVersion === where.mappingVersion,
-        ) ?? null,
+        // The save's locked re-read of the binding row, else a stored revision.
+        (entity as { name?: string })?.name === ToolBindingEntity.name
+          ? (rows.find(
+              (row) => row.organizationId === where.organizationId && row.id === where.id,
+            ) ?? null)
+          : (versions.find(
+              (version) =>
+                version.bindingId === where.bindingId &&
+                version.mappingVersion === where.mappingVersion,
+            ) ?? null),
     ),
     maximum: jest.fn(async (_entity: unknown, _column: string, where: { bindingId: string }) => {
       const stored = versions.filter((version) => version.bindingId === where.bindingId);
@@ -182,9 +191,11 @@ export function buildBindingEditorHarness(
     catalogue,
     dataSource,
     enrolments,
-    new ConfigProviderStakeSource(snapshot),
+    new InMemoryProviderStakeSource(snapshot),
     options.enabledChains,
     minimumStakeByChain(options.enabledChains),
+    null,
+    { list: async () => [], pruneExcept: async () => [] } as never,
   );
 
   const validBody = {

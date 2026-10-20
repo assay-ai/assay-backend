@@ -27,7 +27,7 @@ if (!token) {
   process.exit(1);
 }
 
-const url = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/mcp';
+const url = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/';
 const args = JSON.parse(rawArgs ?? '{}');
 
 const transport = new StreamableHTTPClientTransport(new URL(url), {
@@ -42,8 +42,8 @@ console.log('tools:', listed.tools.map((entry) => entry.name).join(', '));
 
 if (tool !== '--list') {
   const result = await client.callTool({ name: tool, arguments: args });
-  const receipt = result._meta?.['x402/receipt'];
-  const failure = result._meta?.['x402/error'];
+  const receipt = result._meta?.['assay/receipt'];
+  const failure = result._meta?.['assay/error'];
 
   if (receipt) {
     console.log(

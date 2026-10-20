@@ -89,9 +89,8 @@ export function depositAssetFor(chainId: ChainId): AssetId {
  *
  * Still worth asserting even though `DepositsController` derives the asset from
  * the same function two lines earlier and therefore cannot fail it: the
- * controller is not the only caller of `createDeposit` (`scripts/devnet/
- * deposit.ts` builds its own input), and the amount arrives as a `Money` whose
- * asset could be anything a caller put in it.
+ * controller need not be the only caller of `createDeposit`, and the amount
+ * arrives as a `Money` whose asset could be anything a caller put in it.
  */
 export function assertDepositAssetIsSettlementAsset(chainId: ChainId, asset: AssetId): void {
   const expected = depositAssetFor(chainId);

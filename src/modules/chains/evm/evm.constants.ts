@@ -103,7 +103,7 @@ export const EVM_CONSTANTS = {
  * rename away from advertising one function and instructing another.
  *
  * `depositFor(address,uint64)` and not `transfer`: a plain ERC-20
- * transfer into `X402Escrow` moves the tokens and credits nobody.
+ * transfer into `AssayEscrow` moves the tokens and credits nobody.
  */
 export const EVM_DEPOSIT_METHOD = 'depositFor(address,uint64)' as const;
 
@@ -127,7 +127,7 @@ export interface EvmDeployment {
    * compare the live ERC-1967 slot against, and "control" on EVM is *"is the
    * code behind this address the code we deployed?"* — a question that has no
    * answer without a recorded expectation. Copied from
-   * assay-evm's `deployments/<chainId>.json` → `contracts.X402Escrow.implementation`,
+   * assay-evm's `deployments/<chainId>.json` → `contracts.AssayEscrow.implementation`,
    * which is the same field `assay-evm/script/verify-deployment.sh` check 2 reads.
    *
    * **It moves on every upgrade, and that is the point.** An upgrade that does
@@ -136,7 +136,7 @@ export interface EvmDeployment {
    */
   readonly escrowImplementation: `0x${string}`;
   /**
-   * `X402Config.admin` — the OPERATIONAL key (`updateConfig`, `setPaused`, the
+   * `AssayConfig.admin` — the OPERATIONAL key (`updateConfig`, `setPaused`, the
    * verifier registry, `cancelSlash`). It is **not** the upgrade authority:
    * since D-17 that is {@link owner}, and the owner appoints the admin.
    *
@@ -147,7 +147,7 @@ export interface EvmDeployment {
    */
   readonly admin: `0x${string}`;
   /**
-   * `X402Config.owner()` — the UUPS upgrade authority of all three contracts
+   * `AssayConfig.owner()` — the UUPS upgrade authority of all three contracts
    * (the stake and escrow read `CONFIG.owner()` live) and the key that
    * appoints the admin. Kept cold (Ledger or Safe), moves in two steps, can
    * never be renounced (assay-evm D-17).

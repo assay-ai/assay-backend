@@ -79,6 +79,12 @@ export enum PublishRequirement {
    * `evaluatePayoutGate`. `FREE` bindings pass.
    */
   PAYOUT_ACCOUNT = 'PAYOUT_ACCOUNT',
+  /**
+   * An API-key binding (`API_KEY` or `BOTH`) has a credential set stored for the
+   * origin of the endpoint about to go live. Asked only when the input carries
+   * {@link PublishGateInput.credentials}.
+   */
+  API_KEY_CREDENTIALS = 'API_KEY_CREDENTIALS',
   /** `stake >= minimumStake` **on every settlement chain**, by `evaluateStakeGate`. */
   STAKE_AT_MINIMUM_ON_EVERY_CHAIN = 'STAKE_AT_MINIMUM_ON_EVERY_CHAIN',
 }
@@ -90,6 +96,12 @@ export interface PublishRequirementResult {
   readonly code: string | null;
   /** One human sentence with the specifics — the shortfall, the failed layer. */
   readonly detail: string | null;
+  /**
+   * T3: the contract major a tester requirement was asked for — one entry per
+   * major in the binding's range, met or not. `null` on every other
+   * requirement, and on a tester requirement asked without majors.
+   */
+  readonly major?: number | null;
 }
 
 export interface PublishCheck {
@@ -132,20 +144,71 @@ export interface PublishGateInput {
   readonly payoutByChain: ReadonlyMap<ChainId, PayoutGateVerdict>;
   /** The router's own stake verdict, one per settlement chain. */
   readonly stakeByChain: ReadonlyMap<ChainId, StakeGateVerdict>;
+  /**
+   * T3: the newest run at this revision **per contract major the binding
+   * serves** (`tool_version_range`), `null` for a major never tested. When
+   * given, the two tester requirements are asked once per major (§7.5: a
+   * major needs a re-map and a passing test run for that major), and
+   * {@link latestRun} is not read.
+   */
+  readonly runsByMajor?: ReadonlyMap<number, PublishGateTestRun | null>;
+  /**
+   * The credential facts for an API-key binding: whether the auth mode needs a
+   * key, the origin the endpoint will call, and whether a set is stored for it.
+   * Absent, the requirement is not asked.
+   */
+  readonly credentials?: {
+    readonly required: boolean;
+    readonly origin: string;
+    readonly present: boolean;
+  };
 }
 
 export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
   const requirements = [
-    testerRunRequirement(input),
-    testerPassedRequirement(input),
+    ...perMajor(input, testerRunRequirement, PublishRequirement.TESTER_RUN),
+    ...perMajor(input, testerPassedRequirement, PublishRequirement.TESTER_PASSED),
+    ...credentialRequirements(input),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
-  ];
+  ].map((result) => ({ ...result, major: result.major ?? null }));
 
   return {
     publishable: requirements.every((requirement) => requirement.met),
     requirements,
   };
+}
+
+/**
+ * A tester requirement asked once per contract major in the binding's range:
+ * one entry per major, met or not, each carrying its `major` (unmet ones
+ * also name it in `detail`), so the checklist shows every major's own result.
+ */
+function perMajor(
+  input: PublishGateInput,
+  requirementOf: (input: PublishGateInput) => PublishRequirementResult,
+  requirement: PublishRequirement,
+): readonly PublishRequirementResult[] {
+  if (!input.runsByMajor) return [{ ...requirementOf(input), major: null }];
+  if (input.runsByMajor.size === 0) {
+    return [
+      {
+        requirement,
+        met: false,
+        code: 'no_contract_major',
+        detail: 'This binding serves no contract major, so there is nothing to test it against.',
+        major: null,
+      },
+    ];
+  }
+  return [...input.runsByMajor]
+    .sort(([a], [b]) => a - b)
+    .map(([major, run]) => {
+      const result = requirementOf({ ...input, latestRun: run, runsByMajor: undefined });
+      return result.met
+        ? { ...result, major }
+        : { ...result, major, detail: `Contract v${major}: ${result.detail ?? ''}`.trim() };
+    });
 }
 
 function testerRunRequirement(input: PublishGateInput): PublishRequirementResult {
@@ -203,6 +266,31 @@ function testerPassedRequirement(input: PublishGateInput): PublishRequirementRes
   }
 
   return { requirement: PublishRequirement.TESTER_PASSED, met: true, code: null, detail: null };
+}
+
+/**
+ * An API-key binding cannot go live without its key: every call would reach the
+ * provider unauthenticated, or, with the runtime guard, be refused as a platform
+ * fault. The detail tells the provider what to do.
+ */
+function credentialRequirements(input: PublishGateInput): readonly PublishRequirementResult[] {
+  const { credentials } = input;
+  if (!credentials) return [];
+  if (!credentials.required || credentials.present) {
+    return [
+      { requirement: PublishRequirement.API_KEY_CREDENTIALS, met: true, code: null, detail: null },
+    ];
+  }
+  return [
+    {
+      requirement: PublishRequirement.API_KEY_CREDENTIALS,
+      met: false,
+      code: 'credentials_missing_for_origin',
+      detail:
+        `No API key is stored for ${credentials.origin}. Add it under Authentication → ` +
+        `API key, or set the authentication mode to none or signature only.`,
+    },
+  ];
 }
 
 /**

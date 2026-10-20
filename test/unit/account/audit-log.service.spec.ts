@@ -57,6 +57,13 @@ describe('AuditLogService.list', () => {
     expect(fake.wheres).toContainEqual({ sql, params: { [param]: value } });
   });
 
+  it('matches % and _ in the search literally, not as wildcards', async () => {
+    const { service, fake } = buildHarness();
+    await service.list(ORGANIZATION_ID, baseQuery({ search: '50%_a\\b' }));
+
+    expect(fake.wheres.some((w) => w.params.search === '%50\\%\\_a\\\\b%')).toBe(true);
+  });
+
   it('filters on search across actor, action and resource (BUG-R2-B4-02)', async () => {
     const { service, fake } = buildHarness();
     await service.list(ORGANIZATION_ID, baseQuery({ search: 'zzz' }));

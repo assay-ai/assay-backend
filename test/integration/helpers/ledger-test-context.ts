@@ -9,7 +9,6 @@ import { AccountBalanceRepository } from '@database/postgres/repositories/accoun
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
 import { CreateLedger1755100000000 } from '@database/postgres/migrations/1755100000000-create-ledger';
-import { LEDGER_MAX_FLUSH_ATTEMPTS } from '@modules/ledger/constants/ledger.constants';
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
@@ -17,7 +16,6 @@ import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.se
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -25,6 +23,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
 } from './test-database';
@@ -35,8 +34,6 @@ export { USDC_ASSET, USDC_DECIMALS };
 
 export interface LedgerTestContext {
   readonly ledger: LedgerService;
-  /** The buffer itself, for suites testing batching rather than through it. */
-  readonly writer: LedgerWriterService;
   readonly dataSource: DataSource;
   /** Rotated by `reset()`; read it fresh in every test. */
   organizationId: string;
@@ -74,6 +71,7 @@ export async function createLedgerTestContext(): Promise<LedgerTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   // Idempotent — the migrations table makes a second run a no-op. Nothing is
   // ever truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE
   // by design, and a fresh `organizationId` per test isolates far better than
@@ -85,33 +83,16 @@ export async function createLedgerTestContext(): Promise<LedgerTestContext> {
   const balanceRepository = new AccountBalanceRepository(dataSource);
 
   const journal = new LedgerJournalService(entryRepository, balanceRepository, dataSource);
-  const writer = new LedgerWriterService(journal, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(holdRepository, journal, dataSource);
-  const ledger = new LedgerService(journal, writer, balances, holds);
+  const ledger = new LedgerService(journal, balances, holds);
 
   const context: LedgerTestContext = {
     ledger,
-    writer,
     dataSource,
     organizationId: randomUUID(),
 
     async reset(): Promise<void> {
-      // Drain anything a previous test left buffered, so it cannot land in the
-      // middle of the next one and be mistaken for that test's own writes.
-      //
-      // One flush is not enough: a test that deliberately poisons the buffer
-      // leaves an entry that fails, and a failed batch is re-queued rather than
-      // dropped. It takes `LEDGER_MAX_FLUSH_ATTEMPTS` failures before the
-      // writer sets it aside, so the drain is bounded by the same number.
-      for (let attempt = 0; attempt <= LEDGER_MAX_FLUSH_ATTEMPTS && writer.pending > 0; attempt++) {
-        try {
-          await writer.flush();
-        } catch {
-          // A batch that cannot be written belongs to the test that abandoned it.
-        }
-      }
-      writer.drainQuarantine();
       context.organizationId = randomUUID();
     },
 

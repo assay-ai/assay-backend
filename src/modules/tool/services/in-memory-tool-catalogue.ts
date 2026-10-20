@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 
+import { assertNoReservedToolNames } from '../domain/reserved-tool-names';
 import { ToolCataloguePort } from '../ports/tool-catalogue.port';
 import { Tool, ToolBinding } from '../ports/tool.types';
 
@@ -33,6 +34,10 @@ export class InMemoryToolCatalogue implements ToolCataloguePort {
   private readonly bindingsByTool: ReadonlyMap<string, ToolBinding[]>;
 
   constructor(@Inject(TOOL_CATALOGUE_SNAPSHOT) snapshot: ToolCatalogueSnapshot) {
+    assertNoReservedToolNames(
+      snapshot.tools.map((tool) => tool.name),
+      'tool catalogue',
+    );
     this.tools = new Map(snapshot.tools.map((tool) => [tool.id, tool]));
 
     const grouped = new Map<string, ToolBinding[]>();

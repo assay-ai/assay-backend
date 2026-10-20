@@ -418,13 +418,11 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     ).toBe(1);
   });
   /**
-   * Every reason the split can name, each driven through the columns the feed
-   * reads, plus a legacy absorb: a SETTLED row with a `platform_absorbed:`
-   * credit and a NULL `redemption_last_error`. That NULL once made the
-   * failed-check test NULL, so the row fell out of the split and the cells
-   * stopped adding up to the totals.
+   * Every reason the split can name for a VOIDED or EXPIRED row, each driven
+   * through the columns the feed reads, and the cells still add up to the
+   * totals.
    */
-  it('gives every reason, and a legacy absorb, the reason the rows carry', async () => {
+  it('gives every reason the reason the rows carry', async () => {
     const window = wideWindow();
     const reasonsBefore = await context.repository.summarizeNotChargedReasons(window);
     const totalsBefore = await context.repository.summarizeNotCharged(window);
@@ -444,16 +442,6 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     await call(TOOL, 'VOIDED');
     await set(await call(TOOL, 'VOIDED'), `status = 'EXPIRED', classification = NULL`);
 
-    const absorbed = await collected(await call(TOOL, 'SETTLED'));
-    await set(absorbed, `redemption_last_error = NULL`);
-    await context.dataSource.query(
-      `INSERT INTO ledger_entries
-         (organization_id, account_id, entry_type, amount, asset_id, decimals, intent_id, chain_tx_ref)
-       SELECT provider_id, $2, 'PROVIDER_CREDIT', price_amount, asset_id, decimals, id, $3
-         FROM payment_intents WHERE id = $1`,
-      [absorbed, context.account(`provider-${PROVIDER}`), `platform_absorbed:${randomUUID()}`],
-    );
-
     const reasonsAfter = await context.repository.summarizeNotChargedReasons(window);
     const totalsAfter = await context.repository.summarizeNotCharged(window);
 
@@ -470,7 +458,6 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     );
 
     const rows = await rowsOf(window, TOOL);
-    expect(rows.find((row) => row.status === 'SETTLED')?.settledCause).toBe('ABSORBED');
     const expected = new Map<string, number>();
     for (const row of rows) {
       const outcome = notChargedReason(row);
@@ -486,13 +473,12 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
         one('OUT_OF_SCOPE'),
         one('NO_USABLE_RESULT'),
         one('EXPIRED'),
-        one('NOT_COLLECTED'),
       ]),
     );
     expect(delta).toEqual(expected);
 
-    // The absorb is not a failed check, and every cell still adds up.
-    expect(sum(totalsAfter, 'notChargedCalls') - sum(totalsBefore, 'notChargedCalls')).toBe(6);
+    // None is a failed check, and every cell still adds up.
+    expect(sum(totalsAfter, 'notChargedCalls') - sum(totalsBefore, 'notChargedCalls')).toBe(5);
     expect(sum(totalsAfter, 'failedCheckCalls') - sum(totalsBefore, 'failedCheckCalls')).toBe(0);
     const cells = reasonsAfter.reduce((total, row) => total + row.calls, 0);
     expect(cells).toBe(sum(totalsAfter, 'notChargedCalls') - sum(totalsAfter, 'failedCheckCalls'));

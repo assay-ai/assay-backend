@@ -21,6 +21,31 @@ export interface ToolCallRecordInput {
   readonly latencyMs: number;
   /** The routed-call hash, same construction as `payment_intents.request_hash`. `null` when unroutable. */
   readonly requestHash: string | null;
+  /** Which MCP URL the call came through (design spec §7.8); absent off the MCP path. */
+  readonly attribution?: ToolCallAttribution | null;
+}
+
+/** The attribution columns `tool_call_records` shares with `payment_intents`. */
+export interface ToolCallAttribution {
+  readonly endpointKind: string;
+  readonly toolsetId: string | null;
+  readonly toolsetVersion: number | null;
+  readonly endpointHandle: string | null;
+  readonly viewFilter: Record<string, unknown> | null;
+}
+
+/** A call refused before anything was charged (FR-16). */
+export interface RefusedCallRecordInput {
+  readonly organizationId: string;
+  readonly agentId: string;
+  readonly callId: string;
+  readonly toolId: string | null;
+  readonly toolName: string;
+  readonly refusalCode: string;
+  readonly refusalLayer: string;
+  readonly refusalDetail: Record<string, unknown> | null;
+  readonly latencyMs: number;
+  readonly attribution: ToolCallAttribution | null;
 }
 
 /**
@@ -75,6 +100,7 @@ export class ToolCallRecordWriter {
         classification: input.classification,
         latencyMs: input.latencyMs,
         requestHash: input.requestHash,
+        ...attributionColumns(input.attribution ?? null),
         // Free calls are meant to be verified at 1% flat, sampled by a worker
         // that does not exist yet (`VerificationSettlementService.enqueue` is
         // keyed on a payment intent id, and a free call has none). `NULL` is
@@ -96,6 +122,43 @@ export class ToolCallRecordWriter {
       );
     }
   }
+
+  /**
+   * A refused call's row: no binding, no provider, no pricing mode or
+   * classification — nothing reached a provider and nothing was charged. The
+   * free-quota counts skip it. Never throws, for the reason `write` does not:
+   * the refusal still reaches the agent.
+   */
+  async writeRefusal(input: RefusedCallRecordInput, now: Date = new Date()): Promise<void> {
+    const expiresAt = new Date(
+      now.getTime() + TOOL_CALL_RECORD_RETENTION_DAYS * 24 * 60 * 60 * 1_000,
+    );
+    try {
+      await this.records.insert({
+        organizationId: input.organizationId,
+        agentId: input.agentId,
+        callId: input.callId,
+        toolId: input.toolId,
+        toolName: input.toolName.slice(0, 128),
+        bindingId: null,
+        providerId: null,
+        pricingMode: null,
+        classification: null,
+        latencyMs: Math.max(0, Math.round(input.latencyMs)),
+        requestHash: null,
+        verdict: null,
+        refusalCode: input.refusalCode,
+        refusalLayer: input.refusalLayer,
+        refusalDetail: input.refusalDetail,
+        ...attributionColumns(input.attribution),
+        expiresAt,
+      });
+    } catch (error) {
+      this.logger.error(
+        `call ${input.callId}: refused-call record not written (${input.refusalCode}). ${describe(error)}`,
+      );
+    }
+  }
 }
 
 /** Postgres `23505`, whatever driver wrapper it arrives inside — same check `stake-monitor.service.ts` uses. */
@@ -107,4 +170,14 @@ function isUniqueViolation(error: unknown): boolean {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function attributionColumns(attribution: ToolCallAttribution | null) {
+  return {
+    endpointKind: attribution?.endpointKind ?? null,
+    toolsetId: attribution?.toolsetId ?? null,
+    toolsetVersion: attribution?.toolsetVersion ?? null,
+    endpointHandle: attribution?.endpointHandle ?? null,
+    viewFilter: attribution?.viewFilter ?? null,
+  };
 }

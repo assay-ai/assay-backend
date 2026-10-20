@@ -37,6 +37,13 @@ export enum ReconciliationFindingCode {
    * long as that gap lasts. The chain is the tiebreak.
    */
   ESCROW_MIRROR_DRIFT = 'ESCROW_MIRROR_DRIFT',
+  /**
+   * The escrow's `totalHeld()` (G3.B1, "redeem into hold") and the calls the
+   * platform mirrors as held disagree. WARN and transient for a pass while a
+   * redemption, collect or refund is being booked; persistent is a missed
+   * `PaymentHeld` / `HeldCollected` / `HeldRefunded`.
+   */
+  HELD_MIRROR_DRIFT = 'HELD_MIRROR_DRIFT',
   /** The pass could not complete; the figures are unknown, not healthy. */
   RECONCILIATION_FAILED = 'RECONCILIATION_FAILED',
   /** Enough consecutive failures that nobody has checked the money in a while. */
@@ -55,11 +62,9 @@ export interface ReconciliationFinding {
 /**
  * The result of one pass.
  *
- * Unlike `ProofOfReserves`, a breach is a **field** here, not a throw. The two
- * are used differently on purpose: `checkReserves` answers "may I move money
- * right now" and must be impossible to ignore, while the reconciler's job is
- * to observe, record and alert — throwing would abort the run before the row
- * that records the breach is written, which is the one artefact an incident
+ * A breach is a **field** here, not a throw: the reconciler's job is to
+ * observe, record and alert — throwing would abort the run before the row that
+ * records the breach is written, which is the one artefact an incident
  * actually needs.
  */
 export interface ReconciliationReport {

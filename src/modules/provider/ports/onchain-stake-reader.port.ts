@@ -11,7 +11,7 @@ import { Money } from '@modules/chains/ports/money.types';
  * `providers.stake_authority`, about Redis, and about how long a reading may
  * be trusted after the RPC stops answering. What it must not know is that the
  * number comes out of an Anchor account at `["stake", provider_pubkey]`, eight
- * discriminator bytes in. ESLint enforces exactly that — `@x402/settlement-client`
+ * discriminator bytes in. ESLint enforces exactly that — `@assay/settlement-client`
  * and `@solana/*` are importable only under `src/modules/chains/` — so the
  * account read has to be reachable through an interface rather than by calling
  * the decoder directly.

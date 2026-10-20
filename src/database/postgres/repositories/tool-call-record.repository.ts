@@ -27,12 +27,16 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
     bindingId: string,
     since: Date,
   ): Promise<number> {
-    return this.createQueryBuilder('record')
-      .where('record.organizationId = :organizationId', { organizationId })
-      .andWhere('record.agentId = :agentId', { agentId })
-      .andWhere('record.bindingId = :bindingId', { bindingId })
-      .andWhere('record.createdAt >= :since', { since })
-      .getCount();
+    return (
+      this.createQueryBuilder('record')
+        .where('record.organizationId = :organizationId', { organizationId })
+        .andWhere('record.agentId = :agentId', { agentId })
+        .andWhere('record.bindingId = :bindingId', { bindingId })
+        .andWhere('record.createdAt >= :since', { since })
+        // A refused call served nothing and used no free call.
+        .andWhere('record.refusalCode IS NULL')
+        .getCount()
+    );
   }
 
   /**
@@ -40,11 +44,15 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
    * platform-wide per-agent daily allowance (`platformAgentDaily`, 1,000).
    */
   async countForAgentSince(organizationId: string, agentId: string, since: Date): Promise<number> {
-    return this.createQueryBuilder('record')
-      .where('record.organizationId = :organizationId', { organizationId })
-      .andWhere('record.agentId = :agentId', { agentId })
-      .andWhere('record.createdAt >= :since', { since })
-      .getCount();
+    return (
+      this.createQueryBuilder('record')
+        .where('record.organizationId = :organizationId', { organizationId })
+        .andWhere('record.agentId = :agentId', { agentId })
+        .andWhere('record.createdAt >= :since', { since })
+        // A refused call served nothing and used no free call.
+        .andWhere('record.refusalCode IS NULL')
+        .getCount()
+    );
   }
 
   /**
@@ -62,11 +70,15 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
    * counter behind the provider daily budget after a cache miss.
    */
   async countForBindingSince(bindingId: string, since: Date): Promise<number> {
-    return this.createQueryBuilder('record')
-      .where('record.organizationId IS NOT NULL')
-      .andWhere('record.bindingId = :bindingId', { bindingId })
-      .andWhere('record.createdAt >= :since', { since })
-      .getCount();
+    return (
+      this.createQueryBuilder('record')
+        .where('record.organizationId IS NOT NULL')
+        .andWhere('record.bindingId = :bindingId', { bindingId })
+        .andWhere('record.createdAt >= :since', { since })
+        // A refused call served nothing and used no free call.
+        .andWhere('record.refusalCode IS NULL')
+        .getCount()
+    );
   }
 
   /**
@@ -87,6 +99,8 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
       .where('record.organizationId = :organizationId', { organizationId })
       .andWhere('record.agentId = :agentId', { agentId })
       .andWhere('record.createdAt >= :since', { since })
+      // A refused call served nothing and used no free call.
+      .andWhere('record.refusalCode IS NULL')
       .getRawMany<{ toolId: string }>();
 
     return rows.map((row) => row.toolId);

@@ -1,8 +1,20 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import { auditActorOf } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { JsonObject } from '@modules/tool/domain/mapping/mapping.types';
 
@@ -92,13 +104,13 @@ export class ProviderToolBindingsController {
   @ApiOperation({
     summary:
       'The tools you can bind, with the contract each one has to satisfy, and the asset ' +
-      'a binding is priced in. Platform-wide, identical for every provider.',
+      'a binding is priced in: every listed standard tool, plus your own provider tools.',
   })
   @ApiResponse({ status: 200, type: ToolCatalogueDto })
-  async catalogue(@CurrentSession() _session: McpSession): Promise<ToolCatalogueDto> {
-    // The session is required (the guard is on the controller) but not read:
-    // there is no per-provider catalogue to scope to.
-    return this.bindings.getCatalogue();
+  async catalogue(@CurrentSession() session: McpSession): Promise<ToolCatalogueDto> {
+    // Standard tools are the same for every provider; a provider tool is
+    // bindable by its own provider only (§7.6).
+    return this.bindings.getCatalogue(session.organizationId);
   }
 
   @Get(':id')
@@ -128,6 +140,28 @@ export class ProviderToolBindingsController {
     return this.editor.update(session.organizationId, subjectOf(session), params.id, body);
   }
 
+  @Delete(':id')
+  @HttpCode(204)
+  @ApiOperation({
+    summary:
+      'Discard a draft that was never published: its credential sets (through the vault), ' +
+      'its tester runs and draft revisions, and the binding itself. Audited.',
+  })
+  @ApiResponse({ status: 204 })
+  @ApiResponse({ status: 404, description: 'No binding of yours with this id' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'PROVIDER_BINDING_NOT_DISCARDABLE — not a draft, published once, or already named by ' +
+      'a call, payment, dispute, check window, penalty or stake grace. Pause it instead.',
+  })
+  async discard(
+    @CurrentSession() session: McpSession,
+    @Param() params: GetToolBindingParamsDto,
+  ): Promise<void> {
+    await this.bindings.discardDraft(session.organizationId, auditActorOf(session), params.id);
+  }
+
   @Post(':id/test')
   @ApiOperation({
     summary:
@@ -145,11 +179,16 @@ export class ProviderToolBindingsController {
       subjectOf(session),
       params.id,
       body.input as JsonObject,
+      body.toolVersion,
     );
   }
 
   @Get(':id/publish-check')
-  @ApiOperation({ summary: 'Which publish conditions are met, and what is missing' })
+  @ApiOperation({
+    summary:
+      'Which publish conditions are met, and what is missing; the tester conditions one row ' +
+      'per contract major in the range (`major`)',
+  })
   @ApiResponse({ status: 200, type: PublishCheckDto })
   async publishCheck(
     @CurrentSession() session: McpSession,
@@ -184,6 +223,12 @@ export class ProviderToolBindingsController {
     description:
       'PROVIDER_BINDING_NOT_PAUSED — nothing to resume; or ' +
       'PROVIDER_BINDING_NEVER_PUBLISHED — publish it instead',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE — an API-key binding with no credential ' +
+      'set for its published address',
   })
   async resume(
     @CurrentSession() session: McpSession,

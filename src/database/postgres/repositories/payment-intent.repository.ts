@@ -51,7 +51,7 @@ export interface PaymentIntentPeriod {
 }
 
 /**
- * `Σ` listed price over the withheld statuses that had a hold, grouped by asset
+ * `Σ` held amount over the withheld intents that had a hold, grouped by asset
  * and by status so `LedgerWithheldService` can fold rows into `WithheldBucket`s
  * without loading one row per intent.
  */
@@ -59,6 +59,11 @@ export interface WithheldStatusAssetTotal {
   readonly asset: string;
   readonly decimals: number;
   readonly status: string;
+  /**
+   * The row is `SETTLED` and never collected ({@link NOT_CHARGED_SETTLED_SQL}).
+   * Always true on a `SETTLED` row here, since no other `SETTLED` row is read.
+   */
+  readonly notCollected: boolean;
   readonly calls: number;
   readonly amount: bigint;
 }
@@ -110,6 +115,8 @@ export interface ReceiptsSummaryRow {
   /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
   readonly inProgressTotal: bigint;
   readonly inProgressCalls: number;
+  /** Calls listed at zero (free tier). Counted in `calls`, adding nothing to any amount. */
+  readonly freeCalls: number;
 }
 
 /**
@@ -149,11 +156,10 @@ export interface NotChargedCallRow {
  * - `FORFEITED`: the provider caused the voucher to fail ({@link FORFEITED_SQL}).
  * - `VOIDED_REFUND` / `VOIDED_VOID`: a buyer debt voided by a late REFUND or
  *   VOID verdict ({@link VOIDED_SQL}).
- * - `ABSORBED`: a legacy platform-absorbed credit ({@link PLATFORM_ABSORBED_SQL}).
  *
  * A WRITTEN-OFF debt is not here: the buyer still owes it (receipts `owed`).
  */
-export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOID' | 'ABSORBED';
+export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOID';
 
 /** The Explorer's query window, and who counts as a buyer within it. */
 export interface NotChargedWindow {
@@ -304,6 +310,18 @@ export const DEBT_REFUSING_SQL =
   `AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%'))`;
 
 /** A `redemption_last_error` that closed the row for good: nothing may redeem it any more. */
+/** The mark an upheld call dispute's refund writes (`voided:DISPUTE_UPHELD`). */
+export const DISPUTE_REFUND_MARK = 'voided:DISPUTE_UPHELD';
+
+/**
+ * A provider-block cause recorded on the row (`ProviderBlocked`,
+ * `PayeeBlocked`, `PayeeBlockedOnChain`, with any suffix): written by the
+ * redemption pass and just before a blocked provider's refund is sent.
+ */
+const RECORDED_BLOCK_CAUSE_SQL = (alias: string): string =>
+  `(${alias}.redemption_last_error LIKE 'ProviderBlocked%' ` +
+  `OR ${alias}.redemption_last_error LIKE 'PayeeBlocked%')`;
+
 const CLOSED_OUTCOME_SQL = (alias: string): string =>
   `(${alias}.redemption_last_error LIKE 'provider_forfeit:%' ` +
   `OR ${alias}.redemption_last_error LIKE 'uncollected:%' ` +
@@ -334,53 +352,17 @@ const ELIGIBLE_BUYER_SQL =
   `AND s.call_class = :paid AND s.status = :settledStatus ` +
   `AND s.hold_id IS NOT NULL AND s.hold_released_at IS NOT NULL ` +
   `AND s.hold_released_at < :buyerCollectedBefore ` +
-  `AND NOT COALESCE(${CLOSED_OUTCOME_SQL('s')}, false) ` +
-  `AND NOT EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = s.provider_id AND absorbed.intent_id = s.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')))`;
-
-/**
- * Read on a credited intent: a LEGACY credit out of platform funds
- * (`platform_absorbed:<error>`), written before buyer debt replaced it. Nothing
- * writes one any more: the platform never pays or owes a provider. Kept only to
- * label the historical rows, which are reported as uncollected (the buyer's
- * hold was released and no buyer money backs the credit). The credit's
- * `organization_id` is the provider's, which puts the probe on
- * `idx_ledger_entries_intent_id`.
- *
- * RECONCILIATION FLAG (review-buyer-debt L4): these credits are labelled, not
- * reversed — no money moves — so they still sit in the provider's ledger
- * balance. Any payout writer must leave them out; see
- * `docs/runbooks/buyer-debt-deploy.md` §4 for the query that lists them.
- */
-export const PLATFORM_ABSORBED_SQL =
-  `EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
-
-/**
- * The same legacy credit as {@link PLATFORM_ABSORBED_SQL}, read for its reason
- * (the program error after the prefix, e.g. `DelegateIsRevoked`); `NULL` when
- * the call was not absorbed. One credit per intent (partial unique index).
- */
-export const PLATFORM_ABSORBED_REASON_SQL =
-  `(SELECT substring(absorbed.chain_tx_ref FROM 19) ` + // after the 18-char prefix
-  `FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%' LIMIT 1)`;
+  `AND NOT COALESCE(${CLOSED_OUTCOME_SQL('s')}, false)))`;
 
 /**
  * Read on a `SETTLED` intent: the buyer was NOT charged although the verdict
- * passed — the provider forfeited, the debt was written off, or (legacy) the
- * platform absorbed it. The one predicate every buyer-facing "charged" figure
+ * passed — the provider forfeited, or the debt was written off or voided. The
+ * one predicate every buyer-facing "charged" figure
  * and the spend caps leave out (review 2026-10-15 #2, M4).
  */
 export const NOT_COLLECTED_SQL =
   `(COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${WRITTEN_OFF_SQL}, false) ` +
-  `OR COALESCE(${VOIDED_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+  `OR COALESCE(${VOIDED_SQL}, false))`;
 
 /**
  * `GET /receipts/summary`'s buckets. Every call is in exactly one, so
@@ -397,16 +379,25 @@ export const NOT_COLLECTED_SQL =
  *   (final review M2).
  * - in progress: not finished yet.
  * - not charged: the rest — `REFUNDED`, `VOIDED`, `EXPIRED`, and a served call
- *   that was never collected and is not owed (forfeited, voided debt, legacy
- *   absorb). Derived by subtraction so it cannot drift from the other three.
+ *   that was never collected and is not owed (forfeited, voided debt).
+ *   Derived by subtraction so it cannot drift from the other three.
  */
 const SUMMARY_OWED_SQL =
   `(intent.status = '${SETTLED_STATUS}' ` +
   `AND (${DEBT_OUTSTANDING_SQL} OR COALESCE(${WRITTEN_OFF_SQL}, false)) ` +
-  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false) ` +
-  `AND NOT ${PLATFORM_ABSORBED_SQL})`;
+  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false))`;
 const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
 const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
+
+/**
+ * A terminal call that withheld nothing because nothing was ever reserved
+ * (`domain/withheld.ts`: "a hold must have existed"): an unfunded keyed call
+ * moved `CREATED → EXPIRED`, for one. It never ran, so the summary leaves it
+ * out of every bucket, listed included — otherwise it is "not charged" here
+ * and absent from `GET /withheld` (UX review 2026-10-18, B1 I1).
+ * Bound parameter: `:...withheldStatuses`.
+ */
+const SUMMARY_NEVER_RESERVED_SQL = `(intent.status IN (:...withheldStatuses) AND intent.hold_id IS NULL)`;
 
 /**
  * Read on a `SETTLED` intent: the provider has been credited OUT OF THE
@@ -415,8 +406,8 @@ const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 
  * rail B in `commitRedeemedHold` once `redeem_voucher` lands). Every "earned"
  * figure filters on this, so it matches the earnings ledger by construction.
  *
- * A released hold is not a committed one: a forfeit, a write-off and a legacy
- * absorb all released the buyer's hold and are left out (review 2026-10-15, M2;
+ * A released hold is not a committed one: a forfeit and a write-off both
+ * released the buyer's hold and are left out (review 2026-10-15, M2;
  * review #2, M4).
  */
 export const CREDITED_SQL =
@@ -425,7 +416,7 @@ export const CREDITED_SQL =
 
 /**
  * The public Explorer's "not charged" share of `SETTLED` rows: served, never
- * collected, and NOT owed — forfeited, voided debt, legacy absorb. Exactly
+ * collected, and NOT owed — forfeited, or voided debt. Exactly
  * {@link NOT_COLLECTED_SQL} without {@link WRITTEN_OFF_SQL}: a written-off debt
  * is still owed by the buyer (receipts `owed`), so the feed never calls it
  * "not charged". With the withheld statuses this is the receipts summary's
@@ -433,16 +424,14 @@ export const CREDITED_SQL =
  */
 const NOT_CHARGED_SETTLED_SQL =
   `(intent.status = '${SETTLED_STATUS}' AND NOT COALESCE(${WRITTEN_OFF_SQL}, false) ` +
-  `AND (COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${VOIDED_SQL}, false) ` +
-  `OR ${PLATFORM_ABSORBED_SQL}))`;
+  `AND (COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${VOIDED_SQL}, false)))`;
 
 /** {@link NotChargedSettledCause} for a row, `NULL` when it is not {@link NOT_CHARGED_SETTLED_SQL}. */
 const NOT_CHARGED_SETTLED_CAUSE_SQL =
   `CASE WHEN NOT ${NOT_CHARGED_SETTLED_SQL} THEN NULL ` +
   `WHEN COALESCE(${FORFEITED_SQL}, false) THEN 'FORFEITED' ` +
   `WHEN intent.redemption_last_error = 'voided:REFUND' THEN 'VOIDED_REFUND' ` +
-  `WHEN COALESCE(${VOIDED_SQL}, false) THEN 'VOIDED_VOID' ` +
-  `ELSE 'ABSORBED' END`;
+  `WHEN COALESCE(${VOIDED_SQL}, false) THEN 'VOIDED_VOID' END`;
 
 /** Every paid call the Explorer reports as not charged: withheld statuses, or {@link NOT_CHARGED_SETTLED_SQL}. */
 const NOT_CHARGED_SQL = `(intent.status IN (:...withheldStatuses) OR ${NOT_CHARGED_SETTLED_SQL})`;
@@ -506,8 +495,6 @@ export interface CallExportRow {
   readonly awaitingRedemption: boolean;
   /** {@link CREDITED_SQL}: the hold was committed. Only meaningful on a `SETTLED` row. */
   readonly credited: boolean;
-  /** A LEGACY platform-absorbed credit's reason, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
-  readonly absorbedReason: string | null;
   /**
    * `provider_forfeit:<cause>` when the provider forfeited ({@link FORFEITED_SQL}),
    * `uncollected:<cause>` once a debt was written off ({@link WRITTEN_OFF_SQL}),
@@ -830,7 +817,8 @@ export interface UnsettledVoucherTotals {
  */
 const UNSETTLED_VOUCHER_SQL =
   `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
-  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
+  // Redeemed into the escrow's hold already (G3.B1): not unsettled.
+  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "held_at" IS NULL AND "status" IN (` +
   [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
   `) AND "expires_at" > now() - interval '${REDEEM_GRACE_SECONDS} seconds'))`;
 
@@ -843,10 +831,13 @@ const earliest = (a: Date, b: Date): Date => (a.getTime() <= b.getTime() ? a : b
 
 const OPEN_VOUCHER_SQL = (since: string): string =>
   `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
-  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
+  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "held_at" IS NULL AND "status" IN (` +
   [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
   `))` +
-  ` OR ("status" = '${SETTLED_STATUS}' AND "hold_released_at" >= ${since}::timestamptz))`;
+  // Redeemed at `held_at` when it went into the escrow's hold (G3.B1), not at
+  // the later collect: the chain counted it then, and a refund does not
+  // give it back (I5).
+  ` OR ("status" = '${SETTLED_STATUS}' AND COALESCE("held_at", "hold_released_at") >= ${since}::timestamptz))`;
 
 @Injectable()
 export class PaymentIntentRepository extends OrganizationScopedRepository<PaymentIntentEntity> {
@@ -1146,6 +1137,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // must never be redeemed, or the buyer pays for a call reported as not
       // charged (review-buyer-debt L2). The expiry sweep finishes the release.
       .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
+      // Redeemed into the escrow's hold already (G3.B1): its hold stays open
+      // until `HeldCollectionJob` collects or a dispute refunds it.
+      .andWhere('intent.heldAt IS NULL')
       // A row waits while a LOWER seq of its payer is still in flight or open
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
@@ -1195,6 +1189,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND held.status = :settledStatus
               AND held.hold_id IS NOT NULL
               AND held.hold_released_at IS NULL
+              AND held.held_at IS NULL
               AND held.voucher_seq IS NOT NULL
               AND held.voucher_signature IS NOT NULL
               AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
@@ -1462,6 +1457,452 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%')
         RETURNING "id"`,
       [target.organizationId, target.id, target.payer, target.holdId, reason],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Holds a call for a buyer's dispute filed while the payment is still held
+   * (G3.B1), under the payer's admission lock: `dispute_outcome = 'OPEN'` keeps
+   * `HeldCollectionJob` from collecting it until the decision. Either held and
+   * more than `guardSeconds` before `collectable_at`, or — rail B — served and
+   * not redeemed yet (it is redeemed into the hold as usual; a full window
+   * starts then). `false` when the window has passed: the dispute is then not
+   * guaranteed.
+   */
+  async holdForDispute(
+    runner: Pick<QueryRunner, 'query'>,
+    target: { organizationId: string; id: string; payer: string },
+    guardSeconds: number,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents" SET "dispute_outcome" = 'OPEN'
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3
+          AND "status" = 'SETTLED' AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL
+          AND "dispute_outcome" IS NULL
+          AND (("held_status" = 'HELD' AND "collectable_at" - make_interval(secs => $4) > now())
+               OR ("held_status" IS NULL AND "rail" = 'RAIL_B_VOUCHER'
+                   AND "redemption_lapsed_at" IS NULL AND "redemption_last_error" IS NULL))
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, guardSeconds],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * `Σ price_amount` the escrow holds for each of these payers (G3.B1): rail-B
+   * calls redeemed into the hold and not collected or refunded yet. Out of the
+   * buyer's escrow balance on chain, still in its ledger hold. Cross-tenant:
+   * the reconciler's per-escrow walk.
+   */
+  async sumHeldOnChainByAccounts(
+    assetId: string,
+    accounts: readonly string[],
+  ): Promise<Map<string, bigint>> {
+    if (accounts.length === 0) return new Map();
+    const rows = (await this.manager.query(
+      `SELECT "agent_account" AS "account", COALESCE(SUM("price_amount"), 0)::text AS "held"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND "asset_id" = $1 AND "rail" = 'RAIL_B_VOUCHER'
+          AND "held_status" = 'HELD' AND "agent_account" = ANY($2)
+        GROUP BY "agent_account"`,
+      [assetId, [...accounts]],
+    )) as { account: string; held: string }[];
+    return new Map(rows.map((row) => [row.account, BigInt(row.held)]));
+  }
+
+  /** `Σ price_amount` the escrow holds, every payer: the mirror of `totalHeld()`. */
+  async sumHeldOnChain(assetId: string): Promise<bigint> {
+    const [row] = (await this.manager.query(
+      `SELECT COALESCE(SUM("price_amount"), 0)::text AS "held"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND "asset_id" = $1 AND "rail" = 'RAIL_B_VOUCHER'
+          AND "held_status" = 'HELD'`,
+      [assetId],
+    )) as { held: string }[];
+    return BigInt(row?.held ?? '0');
+  }
+
+  /**
+   * Marks a call's payment held (G3.B1): rail B once `redeemVoucher` put it in
+   * the escrow's hold (`PaymentHeld`), rail A at settlement. Only once, and
+   * only while the call's hold is open. `false` when nothing matched.
+   */
+  async markHeld(
+    organizationId: string,
+    id: string,
+    heldAt: Date,
+    collectableAt: Date,
+  ): Promise<boolean> {
+    const result = (await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "held_status" = 'HELD', "held_at" = $3, "collectable_at" = $4
+        WHERE "organization_id" = $1 AND "id" = $2 AND "status" = 'SETTLED'
+          AND "held_status" IS NULL AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL
+        RETURNING "id"`,
+      [organizationId, id, heldAt, collectableAt],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Held payments the collection job may collect now (G3.B1): past
+   * `collectable_at`, not held by an open or upheld dispute, hold still open,
+   * not backing off after a failure, no blocked party (review P1-3 — the
+   * contract refuses them, and they would block the pass every minute) — in
+   * seq order per payer. Deliberately cross-organization: a platform job.
+   *
+   * `beforeSeconds` (rail B): only rows whose `collectable_at + beforeSeconds`
+   * is still in the future — the rest are past (or about to pass) the chain's
+   * timeout and are {@link findTimedOutCollectable}'s, collected singly.
+   */
+  async findCollectable(
+    rail: string,
+    limit: number,
+    exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+    beforeSeconds: number | null = null,
+  ): Promise<PaymentIntentEntity[]> {
+    const query = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.collectableAt <= now()')
+      .andWhere(`(intent.disputeOutcome IS NULL OR intent.disputeOutcome = 'REJECTED')`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())');
+    if (beforeSeconds !== null) {
+      query.andWhere(`intent.collectableAt > now() - make_interval(secs => :before)`, {
+        before: beforeSeconds,
+      });
+    }
+    if (hasExclusions(exclude)) {
+      query.andWhere(`NOT (${blockedCollectSql('intent')})`, blockedPartyParams(exclude));
+    }
+    return query
+      .orderBy('intent.agentAccount', 'ASC')
+      .addOrderBy('intent.voucherSeq', 'ASC', 'NULLS LAST')
+      .addOrderBy('intent.collectableAt', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Held payments the collection job collects SINGLY (G3.B1): past, or about
+   * to pass, the chain's timeout (`collect_at + timeoutSeconds <= now()`, the
+   * caller's margin already taken off), when anyone may collect them and one
+   * collected by a stranger would revert a whole batch. Otherwise exactly
+   * {@link findCollectable}'s filters: undisputed (or rejected), hold open, not
+   * backing off, no blocked party — so a row that will never be sent cannot sit
+   * at the head of the queue. Cross-organization: a job.
+   */
+  async findTimedOutCollectable(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const query = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere(`(intent.disputeOutcome IS NULL OR intent.disputeOutcome = 'REJECTED')`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :timeout)`, {
+        timeout: timeoutSeconds,
+      })
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())');
+    if (hasExclusions(exclude)) {
+      query.andWhere(`NOT (${blockedCollectSql('intent')})`, blockedPartyParams(exclude));
+    }
+    return query
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Held payments past the chain's timeout (`collectable_at + timeoutSeconds`)
+   * that the platform never collects and only SYNCS — an open or upheld
+   * dispute's, or a blocked provider's ({@link blockedProviderSql}): booked once
+   * someone collects them. Not backing off: the caller backs a row off after
+   * each read that finds it still held, so these never crowd out newer ones.
+   * Cross-organization: a job.
+   */
+  async findHeldPastTimeout(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const blockedProvider = hasExclusions(exclude) ? ` OR (${blockedProviderSql('intent')})` : '';
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :timeout)`, {
+        timeout: timeoutSeconds,
+      })
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .andWhere(
+        `(intent.disputeOutcome IN ('OPEN', 'UPHELD')${blockedProvider})`,
+        blockedPartyParams(exclude),
+      )
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Held payments of a BLOCKED provider the escrow can still refund (owner
+   * decision 2026-10-18): held, hold open, not backing off, the provider's
+   * organization or payout account blocked ({@link blockedProviderSql} — only
+   * the provider side of `exclude` is read), and `refundHeld` still open
+   * (`collectable_at + timeoutSeconds` in the future; `null` for rail A,
+   * whose hold is the ledger's and has no timeout). Any dispute state: the
+   * buyer is refunded whatever a dispute would have decided. Closest to the
+   * timeout first. Cross-organization: a job.
+   *
+   * Also a held row whose provider-block cause is RECORDED
+   * ({@link RECORDED_BLOCK_CAUSE_SQL}), blocked or not now: its refund may have
+   * landed without being booked before the block was lifted, and no other
+   * queue would pick it up while a dispute holds it. The caller books it, or
+   * clears the cause when the chain still holds it.
+   */
+  async findHeldOfBlockedProviders(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number | null,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const blocked = hasExclusions(exclude) ? ` OR (${blockedProviderSql('intent')})` : '';
+    const query = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL');
+    if (timeoutSeconds !== null) {
+      query.andWhere(`intent.collectableAt > now() - make_interval(secs => :timeout)`, {
+        timeout: timeoutSeconds,
+      });
+    }
+    return query
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .andWhere(`(${RECORDED_BLOCK_CAUSE_SQL('intent')}${blocked})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Clears a provider-block cause recorded on a held row whose provider is no
+   * longer blocked and whose payment the chain still holds: the row goes back
+   * to plain collection.
+   */
+  async clearHeldRefundCause(organizationId: string, id: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = NULL
+        WHERE "organization_id" = $1 AND "id" = $2 AND "held_status" = 'HELD'
+          AND ${RECORDED_BLOCK_CAUSE_SQL('payment_intents')}`,
+      [organizationId, id],
+    );
+  }
+
+  /**
+   * Held payments of a BLOCKED provider from `warnSeconds` before the chain's
+   * timeout (`collectable_at + timeoutSeconds`) to `pastSeconds` after it: a
+   * refund that has not landed by then is lost to the provider, so these are
+   * paged. Bounded on both sides, so rows long past the timeout that nobody
+   * collects cannot crowd out the ones still inside the window. Backing off or
+   * not. Cross-organization: a job.
+   */
+  async findBlockedHeldNearTimeout(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    warnSeconds: number,
+    pastSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    if (!hasExclusions(exclude)) return [];
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :lead)`, {
+        lead: timeoutSeconds - warnSeconds,
+      })
+      .andWhere(`intent.collectableAt > now() - make_interval(secs => :lag)`, {
+        lag: timeoutSeconds + pastSeconds,
+      })
+      .andWhere(`(${blockedProviderSql('intent')})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Records why a held payment is about to be refunded for its provider
+   * (`ProviderBlocked` | `PayeeBlocked` | `PayeeBlockedOnChain`), BEFORE the
+   * refund is sent: if the block is lifted before the refund is booked, the
+   * booking still knows its cause. Never over a closed outcome.
+   */
+  async recordHeldRefundCause(organizationId: string, id: string, cause: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2 AND "held_status" = 'HELD'
+          AND ("redemption_last_error" IS NULL OR NOT ${CLOSED_OUTCOME_SQL('payment_intents')})`,
+      [organizationId, id, cause],
+    );
+  }
+
+  /**
+   * A blocked provider's refund landed while a buyer's dispute on the call is
+   * still undecided (or decided, its refund pending): the dispute's money side
+   * is written as refunded — the full amount restored, as an upheld refund
+   * would — inside the caller's transaction. The decision itself stays the
+   * operator's (the dispute stays `OPEN` in the queue); deciding later keeps
+   * `REFUNDED` (`planRefund`). `sla_due_at` is cleared: the SLA neither pages
+   * about nor auto-upholds a call already refunded. Returns the disputes
+   * written.
+   */
+  async markDisputeRefunded(
+    runner: Pick<QueryRunner, 'query'>,
+    organizationId: string,
+    intentId: string,
+  ): Promise<string[]> {
+    const result = (await runner.query(
+      `UPDATE "disputes" d
+          SET "refund_source" = 'UNCOLLECTED_EARNINGS', "refund_state" = 'REFUNDED',
+              "refund_amount" = CASE WHEN d."asset_id" IS NULL THEN NULL
+                                     ELSE COALESCE(i."settled_amount", i."price_amount") END,
+              "restored_amount" = CASE WHEN d."asset_id" IS NULL THEN NULL
+                                       ELSE COALESCE(i."settled_amount", i."price_amount") END,
+              "sla_due_at" = NULL, "updated_at" = now()
+         FROM "payment_intents" i
+        WHERE i."organization_id" = $1 AND i."id" = $2
+          AND d."organization_id" = $1 AND d."intent_id" = $2
+          AND (d."state" IN ('OPEN', 'UNDER_REVIEW')
+               OR (d."state" = 'UPHELD' AND d."refund_state" = 'PENDING'))
+        RETURNING d."id"`,
+      [organizationId, intentId],
+    )) as unknown;
+    const rows =
+      Array.isArray(result) && result.length === 2 && Array.isArray(result[0])
+        ? (result[0] as { id: string }[])
+        : (result as { id: string }[]);
+    return rows.map((row) => row.id);
+  }
+
+  /** The assets with a payment still held on chain: whose chains' blocklists matter. */
+  async findHeldAssetIds(rail: string): Promise<string[]> {
+    const rows = (await this.manager.query(
+      `SELECT DISTINCT "asset_id" AS "assetId" FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND "rail" = $1 AND "held_status" = 'HELD'`,
+      [rail],
+    )) as { assetId: string }[];
+    return rows.map((row) => row.assetId);
+  }
+
+  /**
+   * A collect or refund of this held payment failed: back off — 1, 2, 4 …
+   * minutes, at most an hour — so a stuck row neither blocks the pass nor
+   * burns gas every minute (review P1-3).
+   */
+  async recordHeldFailure(organizationId: string, id: string, error: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "held_attempts" = "held_attempts" + 1,
+              "held_retry_at" = now() + LEAST(interval '60 minutes',
+                                              interval '1 minute' * power(2, LEAST("held_attempts", 6))),
+              "held_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id, error.slice(0, 500)],
+    );
+  }
+
+  /**
+   * Books a collected hold's outcome on the row, INSIDE the caller's
+   * transaction and under the payer's lock: `held_status = 'COLLECTED'` and the
+   * transaction. The ledger commit beside it is the caller's.
+   */
+  async markHeldCollected(
+    runner: Pick<QueryRunner, 'query'>,
+    target: { organizationId: string; id: string; payer: string },
+    txRef: string | null,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "held_status" = 'COLLECTED', "held_tx_ref" = COALESCE($3, "held_tx_ref"),
+              "hold_released_at" = COALESCE("hold_released_at", now())
+        WHERE "organization_id" = $1 AND "id" = $2 AND "held_status" = 'HELD'
+        RETURNING "id"`,
+      [target.organizationId, target.id, txRef],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Sets the call's dispute mark, inside the caller's transaction: the decision
+   * (`UPHELD` | `REJECTED`), or `null` when a held dispute is withdrawn. A
+   * `REJECTED` or cleared row is back in the redemption queue.
+   */
+  async setDisputeOutcome(
+    runner: Pick<QueryRunner, 'query'>,
+    organizationId: string,
+    id: string,
+    outcome: 'UPHELD' | 'REJECTED' | null,
+    onlyIfOpen = false,
+  ): Promise<void> {
+    await runner.query(
+      `UPDATE "payment_intents" SET "dispute_outcome" = $3
+        WHERE "organization_id" = $1 AND "id" = $2
+          ${onlyIfOpen ? `AND "dispute_outcome" = 'OPEN'` : ''}`,
+      [organizationId, id, outcome],
+    );
+  }
+
+  /**
+   * Books a refunded hold (G3.B1), INSIDE the ledger transaction that releases
+   * the buyer's hold, under the payer's admission lock: `<reason>` closes the
+   * row for good, `held_status = 'REFUNDED'`, `hold_released_at` stamped with
+   * the release. Only a row an upheld dispute holds — unless `requireUpheld`
+   * is `false` (a blocked provider's refund, whatever the dispute state).
+   * `false` when nothing matched — already booked, or collected.
+   */
+  async markHeldRefunded(
+    runner: QueryRunner,
+    target: DebtCloseTarget,
+    reason: string,
+    txRef: string | null,
+    requireUpheld = true,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = $5, "hold_released_at" = now(),
+              "held_status" = 'REFUNDED', "held_tx_ref" = COALESCE($6, "held_tx_ref")
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
+          AND "status" = 'SETTLED' AND "held_status" = 'HELD'
+          AND ("dispute_outcome" = 'UPHELD' OR NOT $7) AND "hold_released_at" IS NULL
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, target.holdId, reason, txRef, requireUpheld],
     )) as [unknown[], number] | unknown[];
     return affected(result) > 0;
   }
@@ -1774,8 +2215,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * The intent side of `withheld`: `Σ` held amount over
-   * {@link WITHHELD_STATUSES}, restricted to intents that actually reserved
-   * something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
+   * {@link WITHHELD_STATUSES} plus the `SETTLED` rows never collected and not
+   * owed ({@link NOT_CHARGED_SETTLED_SQL}, the `NOT_COLLECTED` bucket), so the
+   * total is the receipts summary's `notCharged`. Restricted to intents that
+   * actually reserved something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
    * intent that expired in `CREATED` must not appear here), grouped by asset
    * and by status so a caller can fold the rows into `WithheldBucket`s without
    * loading one row per intent.
@@ -1800,7 +2243,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         'hold.id = intent.hold_id AND hold.organization_id = intent.organization_id',
       )
       .where('intent.organizationId = :organizationId', { organizationId })
-      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
+      .andWhere(`(intent.status IN (:...statuses) OR ${NOT_CHARGED_SETTLED_SQL})`, {
+        statuses: WITHHELD_STATUSES,
+      })
       .andWhere('intent.holdId IS NOT NULL');
 
     this.applyPeriod(qb, period);
@@ -1821,6 +2266,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       asset: row.asset,
       decimals: Number(row.decimals),
       status: row.status,
+      notCollected: row.status === SETTLED_STATUS,
       calls: Number(row.calls),
       amount: BigInt(row.amount),
     }));
@@ -1878,7 +2324,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // the buyer still owes it. Legacy absorbs are left to their few rows.
       .andWhere(
         `NOT (intent.status = '${SETTLED_STATUS}' AND (COALESCE(${FORFEITED_SQL}, false) ` +
-          `OR COALESCE(${WRITTEN_OFF_SQL}, false) OR COALESCE(${VOIDED_SQL}, false)))`,
+          `OR COALESCE(${WRITTEN_OFF_SQL}, false) OR (COALESCE(${VOIDED_SQL}, false) ` +
+          // A dispute refund does not give the caps back (G3.B1, I5).
+          `AND intent.redemption_last_error <> '${DISPUTE_REFUND_MARK}')))`,
       )
       .andWhere('intent.createdAt >= :monthStart', { monthStart })
       .setParameters({ hourStart, dayStart })
@@ -1939,7 +2387,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         'withheldTotal',
       )
       .addSelect('COUNT(*) FILTER (WHERE intent.status = :refundedStatus)', 'refundedCalls')
+      .addSelect('COUNT(*) FILTER (WHERE intent.price_amount = 0)', 'freeCalls')
       .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere(`NOT ${SUMMARY_NEVER_RESERVED_SQL}`)
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .setParameters({
@@ -1974,6 +2424,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         owedCalls: string;
         inProgressTotal: string;
         inProgressCalls: string;
+        freeCalls: string;
       }>();
 
     return rows.map((row) => {
@@ -1999,6 +2450,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         owedCalls,
         inProgressTotal,
         inProgressCalls,
+        freeCalls: Number(row.freeCalls ?? 0),
       };
     });
   }
@@ -2102,7 +2554,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.platformFee', 'platformFee')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(CREDITED_SQL, 'credited')
-      .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect('intent.createdAt', 'createdAt')
@@ -2140,7 +2591,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         platformFee: string;
         awaitingRedemption: boolean | string;
         credited: boolean | string;
-        absorbedReason: string | null;
         redemptionLastError: string | null;
         debtOutstanding: boolean | string;
         createdAt: Date;
@@ -2390,6 +2840,176 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
     return qb;
   }
+
+  /**
+   * What this organization's escrow account paid for calls in `[from, to)`,
+   * by call time: rail-B calls charged as `GET /receipts/summary` counts
+   * them (not owed, not collected-never). Atomic units. A statement line
+   * (B7), read-only.
+   */
+  async sumEscrowPaid(
+    organizationId: string,
+    accountId: string,
+    assetId: string,
+    from: Date | null,
+    to: Date,
+  ): Promise<bigint> {
+    const qb = this.createQueryBuilder('intent')
+      .select(`COALESCE(SUM(intent.priceAmount), 0)`, 'total')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('lower(intent.agentAccount) = lower(:accountId)', { accountId })
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere(SUMMARY_CHARGED_SQL)
+      .andWhere('intent.createdAt < :to', { to });
+    if (from) qb.andWhere('intent.createdAt >= :from', { from });
+    const row = await qb.getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
+  }
+
+  /**
+   * Of {@link sumEscrowPaid}, what the chain has not taken from the escrow yet:
+   * charged rail-B calls whose hold is still open ({@link AWAITING_REDEMPTION_SQL}:
+   * the redemption has not landed) and that were not redeemed into the dispute
+   * hold either. Atomic units. Read by the statement's check against the escrow
+   * balance (B7).
+   *
+   * Not `redemption_tx_refs`: a ref is written before its broadcast (so it does
+   * not prove the chain took anything), and calls redeemed before refs were
+   * recorded have none. Counting those as unsettled made the statement say
+   * money was "still being collected" that Funding's chain counters showed
+   * collected (V1-5).
+   */
+  async sumEscrowChargedNotRedeemed(
+    organizationId: string,
+    accountId: string,
+    assetId: string,
+  ): Promise<bigint> {
+    const row = await this.createQueryBuilder('intent')
+      .select(`COALESCE(SUM(intent.priceAmount), 0)`, 'total')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('lower(intent.agentAccount) = lower(:accountId)', { accountId })
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere(SUMMARY_CHARGED_SQL)
+      .andWhere(AWAITING_REDEMPTION_SQL)
+      .andWhere('intent.heldStatus IS NULL')
+      .getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
+  }
+
+  /**
+   * Whether this payment key (`voucher_delegate`) signed a voucher that held
+   * money before `intent` did: an earlier row, by `(created_at, id)`, with a
+   * hold. `PaymentKeyFirstSpendService` asks it so that "first" is a fact of
+   * the table and not only of the notification suppression cache, which fails
+   * open. A row that never held money (refused for funds) is not a spend.
+   *
+   * Two concurrent first vouchers may both answer `false`; the notification's
+   * own `ONCE` suppression then keeps it to one. Served by
+   * `idx_payment_intents_delegate_created`.
+   */
+  async hasEarlierDelegateSpend(
+    organizationId: string,
+    delegate: string,
+    intent: { readonly id: string; readonly createdAt: Date },
+  ): Promise<boolean> {
+    const row = await this.createQueryBuilder('intent')
+      .select('1', 'one')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('intent.voucherDelegate = :delegate', { delegate })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.id <> :id', { id: intent.id })
+      .andWhere(
+        `(${CREATED_AT} < :createdAt OR (${CREATED_AT} = :createdAt AND intent.id < :id))`,
+        { createdAt: intent.createdAt },
+      )
+      .limit(1)
+      .getRawOne<{ one: number }>();
+    return row !== undefined && row !== null;
+  }
+
+  /**
+   * What each payment key spent in `[from, to)`, across every organization,
+   * for `PaymentKeyDailySummaryService`: rail-B vouchers signed by a delegate
+   * whose funds were secured and that are not refunded, voided or expired,
+   * grouped by organization, credential, key and asset. A key that spent
+   * nothing has no row.
+   *
+   * Deliberately cross-organization: the summary is the platform's own daily
+   * pass over every tenant, like the redemption queue above; each row is then
+   * sent to its own organization only. Amounts are sums of `numeric(78,0)`
+   * returned as decimal strings and read as `bigint`. Served by
+   * `idx_payment_intents_delegate_recent`.
+   */
+  async sumDelegateSpendByKey(from: Date, to: Date): Promise<DelegateSpendRow[]> {
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.organizationId', 'organizationId')
+      .addSelect('intent.credentialId', 'credentialId')
+      .addSelect('MIN(intent.agent_id::text)', 'agentId')
+      .addSelect('intent.voucherDelegate', 'delegate')
+      .addSelect('intent.chainId', 'chainId')
+      .addSelect('intent.assetId', 'assetId')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('COUNT(*)', 'calls')
+      .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'amount')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.voucherDelegate IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.status IN (:...spent)', {
+        spent: ['FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING', SETTLED_STATUS],
+      })
+      .andWhere(`${CREATED_AT} >= :from`, { from })
+      .andWhere(`${CREATED_AT} < :to`, { to })
+      .groupBy('intent.organizationId')
+      .addGroupBy('intent.credentialId')
+      .addGroupBy('intent.voucherDelegate')
+      .addGroupBy('intent.chainId')
+      .addGroupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .orderBy('intent.organizationId', 'ASC')
+      .addOrderBy('intent.voucherDelegate', 'ASC')
+      .addOrderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        organizationId: string;
+        credentialId: string | null;
+        agentId: string;
+        delegate: string;
+        chainId: string;
+        assetId: string;
+        decimals: number | string;
+        calls: number | string;
+        amount: string;
+      }>();
+    return rows.map((row) => ({
+      organizationId: row.organizationId,
+      credentialId: row.credentialId ?? null,
+      agentId: row.agentId,
+      delegate: row.delegate,
+      chainId: row.chainId,
+      assetId: row.assetId,
+      decimals: Number(row.decimals),
+      calls: Number(row.calls),
+      amount: BigInt(row.amount),
+    }));
+  }
+}
+
+/** One payment key's spend in one asset over a window (`sumDelegateSpendByKey`). */
+export interface DelegateSpendRow {
+  readonly organizationId: string;
+  /** The credential that made the calls; null on a row written without one. */
+  readonly credentialId: string | null;
+  readonly agentId: string;
+  /** The payment key (CAIP-10). */
+  readonly delegate: string;
+  readonly chainId: string;
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly calls: number;
+  /** Atomic units, exact. */
+  readonly amount: bigint;
 }
 
 /**
@@ -2421,7 +3041,8 @@ async function readVoucherAdmission(
        AND "asset_id" = $2
        AND "rail" = 'RAIL_B_VOUCHER'
        AND ($6::uuid IS NULL OR "id" <> $6::uuid)
-       AND ("hold_released_at" IS NULL OR "hold_released_at" >= LEAST($4::timestamptz, $5::timestamptz))`,
+       AND ("hold_released_at" IS NULL OR "hold_released_at" >= LEAST($4::timestamptz, $5::timestamptz)
+            OR "held_at" >= LEAST($4::timestamptz, $5::timestamptz))`,
     [
       scope.payer,
       scope.assetId,
@@ -2529,14 +3150,16 @@ async function readUnsettledVouchers(
        COALESCE(MAX("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "largest",
        MAX("expires_at") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "latestExpiry",
        COALESCE(SUM("price_amount") FILTER (
-         WHERE "status" = '${SETTLED_STATUS}' AND "hold_released_at" >= $3::timestamptz
+         WHERE "status" = '${SETTLED_STATUS}'
+           AND COALESCE("held_at", "hold_released_at") >= $3::timestamptz
        ), 0)::text AS "redeemedSince"
      FROM "payment_intents"
      WHERE "organization_id" IS NOT NULL
        AND "agent_account" = $1
        AND "asset_id" = $2
        AND "rail" = 'RAIL_B_VOUCHER'
-       AND ("hold_released_at" IS NULL OR "hold_released_at" >= $3::timestamptz)${byDelegate}`,
+       AND ("hold_released_at" IS NULL OR "hold_released_at" >= $3::timestamptz
+            OR "held_at" >= $3::timestamptz)${byDelegate}`,
     scope.delegate
       ? [scope.payer, scope.assetId, scope.since, scope.delegate]
       : [scope.payer, scope.assetId, scope.since],
@@ -2562,6 +3185,11 @@ async function readUnsettledVouchers(
  * Whether a payer-side party of the row aliased `alias` is blocked: the
  * payer's organization, the payer or the delegate (by blocklist key or by
  * on-chain account). Named parameters: {@link blockedPartyParams}.
+ *
+ * Never NULL: each term is `COALESCE(…, false)`. A NULL column (no delegate,
+ * no provider) compared with a non-empty array is NULL, and `NOT (… OR NULL)`
+ * is NULL too — which would drop every honest row without a delegate from
+ * every `NOT (blocked)` query the moment one wallet is blocked.
  */
 function blockedPartySql(alias: string): string {
   const key = (column: string) =>
@@ -2573,7 +3201,41 @@ function blockedPartySql(alias: string): string {
       `${key(column)} = ANY(:blockedWalletKeys)`,
       `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
     ]),
-  ].join(' OR ');
+  ]
+    .map(notNull)
+    .join(' OR ');
+}
+
+/**
+ * {@link blockedPartySql} for a COLLECT: the contract's `assertActive(payer,
+ * provider)` refuses the provider side too, so the provider's organization and
+ * payout account count as well.
+ */
+function blockedCollectSql(alias: string): string {
+  return [blockedPartySql(alias), blockedProviderSql(alias)].join(' OR ');
+}
+
+/**
+ * Whether the PROVIDER side of the row aliased `alias` is blocked: the
+ * provider's organization, or its payout account by blocklist key or by
+ * on-chain account. Named parameters: {@link blockedPartyParams}.
+ */
+function blockedProviderSql(alias: string): string {
+  const key = (column: string) =>
+    `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
+    `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
+  return [
+    `${alias}.provider_id::text = ANY(:blockedOrgs)`,
+    `${key('provider_account')} = ANY(:blockedWalletKeys)`,
+    `lower(${alias}.provider_account) = ANY(:blockedChainAccounts)`,
+  ]
+    .map(notNull)
+    .join(' OR ');
+}
+
+/** A boolean SQL term that is `false`, never NULL, when its column is NULL. */
+function notNull(term: string): string {
+  return `COALESCE(${term}, false)`;
 }
 
 function blockedPartyParams(exclude: RedemptionExclusions): Record<string, string[]> {

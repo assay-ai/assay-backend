@@ -53,6 +53,9 @@ export class FakeAgentRepository {
   /** Makes `stampLogin` reject — the best-effort write that must not fail a login. */
   stampFails = false;
 
+  /** How many times `findByIdWithOrganization` ran — the credential join. */
+  findByIdWithOrganizationCalls = 0;
+
   seed(agent: AgentEntity, organizationStatus = 'ACTIVE'): AgentEntity {
     this.rows.set(agent.privyUserId, agent);
     this.organizations.set(agent.organizationId, {
@@ -76,6 +79,7 @@ export class FakeAgentRepository {
   }
 
   findByIdWithOrganization(id: string): Promise<AgentWithOrganization | null> {
+    this.findByIdWithOrganizationCalls += 1;
     for (const agent of this.rows.values()) {
       if (agent.id !== id) continue;
       return Promise.resolve({

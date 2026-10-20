@@ -8,7 +8,7 @@ import {
   getProgramDerivedAddress,
   getTransactionDecoder,
 } from '@solana/kit';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '@x402/settlement-client';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '@assay/settlement-client';
 
 /**
  * The account-list drift gate — a check that once had no test at all.
@@ -65,7 +65,7 @@ const IDL = JSON.parse(
       'packages',
       'settlement-client',
       'idl',
-      'x402_payment.json',
+      'assay_payment.json',
     ),
     'utf8',
   ),
@@ -96,7 +96,7 @@ export function accountsOfLastInstruction(transactionBase64: string): readonly A
  * Assert the built instruction matches the IDL's account list, and that no
  * constant-seed PDA on it was derived under the compiled-in program address.
  *
- * `deployedProgramAddress` must differ from `X402_PAYMENT_PROGRAM_ADDRESS` for
+ * `deployedProgramAddress` must differ from `ASSAY_PAYMENT_PROGRAM_ADDRESS` for
  * the second half to have teeth; the callers all use a distinct test id, and
  * this refuses outright if one ever stops.
  */
@@ -105,7 +105,7 @@ export async function expectSettlementAccountList(
   snakeInstructionName: string,
   deployedProgramAddress: Address,
 ): Promise<void> {
-  if (deployedProgramAddress === X402_PAYMENT_PROGRAM_ADDRESS) {
+  if (deployedProgramAddress === ASSAY_PAYMENT_PROGRAM_ADDRESS) {
     throw new Error(
       'this gate needs a deployed program id that differs from the compiled-in one, ' +
         'or a PDA derived under the wrong id is indistinguishable from a correct one',

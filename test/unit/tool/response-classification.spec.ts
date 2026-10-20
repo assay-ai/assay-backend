@@ -269,6 +269,13 @@ const CASES: readonly Case[] = [
     reason: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
   },
   {
+    name: 'Assay could not prepare the call (vault unavailable) → SYSTEM_ERROR, platform fault',
+    response: transport(TransportErrorKind.PLATFORM_UNAVAILABLE),
+    policy: DEFAULT_POLICY,
+    expected: ResponseClass.SYSTEM_ERROR,
+    reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+  },
+  {
     name: 'an unrecognised transport failure → SYSTEM_ERROR (uncertainty never penalises)',
     response: transport(TransportErrorKind.UNKNOWN),
     policy: DEFAULT_POLICY,
