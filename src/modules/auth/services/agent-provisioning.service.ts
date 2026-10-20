@@ -11,6 +11,7 @@ import { PRIVY_AUTH_CONFIG, PrivyAuthConfig } from '../domain/privy-auth.config'
 import { PrivyClaims } from '../domain/privy-claims';
 import { AuthErrors } from '../errors/auth.errors';
 import { PrivyIdentityFacts, PrivyUserDirectory } from './privy-user.directory';
+import { SessionEvictions } from '../session-cache/session-evictions.service';
 
 /** How this organization came to exist, recorded on the row. */
 export const CREATED_VIA_PRIVY_SIGNUP = 'PRIVY_SIGNUP';
@@ -99,6 +100,7 @@ export class AgentProvisioningService {
     private readonly directory: PrivyUserDirectory,
     @Inject(PRIVY_AUTH_CONFIG) private readonly config: PrivyAuthConfig,
     @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   /**
@@ -234,6 +236,8 @@ export class AgentProvisioningService {
 
     resolved.agent.primaryAccountId = accountId;
     resolved.agent.chainId = chainId;
+    // A session names the agent's account: none cached may name the old one.
+    await this.sessions?.evictOrganization(resolved.agent.organizationId);
   }
 
   private async lookupIdentity(privyUserId: string, cooldownMs: number) {
