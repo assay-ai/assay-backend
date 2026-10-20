@@ -790,6 +790,8 @@ export interface McpHarnessOptions {
   readonly balance?: Money;
   /** A not-yet-final deposit `getBalance` reports beside the balance. */
   readonly pending?: Money;
+  /** The chain credits a deposit on its first confirmation (the "within a minute" text). */
+  readonly depositCreditsOnSoftConfirmation?: boolean;
   readonly platformFeeBps?: number;
   readonly random?: () => number;
   /** What `FakeSettlement.enqueue` does after recording the call. Defaults to succeeding. */
@@ -905,6 +907,15 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
         return { intentId, response: settlement.scrubbed ? null : handed.response };
       },
     } as unknown as VerificationRecordRepository,
+    undefined,
+    undefined,
+    options.depositCreditsOnSoftConfirmation === undefined
+      ? undefined
+      : ({
+          resolve: () => ({
+            depositCreditsOnSoftConfirmation: options.depositCreditsOnSoftConfirmation,
+          }),
+        } as never),
   );
 
   return {

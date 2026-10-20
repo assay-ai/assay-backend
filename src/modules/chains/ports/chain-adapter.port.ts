@@ -55,6 +55,14 @@ export interface ChainAdapter {
    */
   readonly requiresFeePayer: boolean;
 
+  /**
+   * A deposit is credited on the chain's first (soft) confirmation, so a
+   * pending deposit is usually spendable within a minute. Absent or false: it
+   * waits for finality or for blocks on top of it, which can take minutes.
+   * Display only (the insufficient-funds text).
+   */
+  readonly depositCreditsOnSoftConfirmation?: boolean;
+
   // ── Identity ─────────────────────────────────────────────────────────────
 
   isValidAddress(chainId: ChainId, address: string): boolean;

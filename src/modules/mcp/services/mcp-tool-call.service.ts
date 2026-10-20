@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
+import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
 import { checksummedAccount, checksummedAsset } from '@modules/chains/evm/eip55';
@@ -190,6 +191,9 @@ export class McpToolCallService {
     // `WEB_APP_URL`, the base of the enable-paid `fixUrl` (§7.10 item 2).
     // Optional so a hand-built harness needs none; absent, no link is given.
     @Optional() @Inject(MCP_HOST_CONFIG) private readonly host?: McpHostConfig,
+    // How long a pending deposit waits (the insufficient-funds text). Optional
+    // so a hand-built harness needs none; absent, the cautious text is used.
+    @Optional() private readonly chains?: ChainAdapterRegistry,
   ) {}
 
   /**
@@ -1202,7 +1206,9 @@ export class McpToolCallService {
         `Insufficient balance: this call costs ${formatDollars(price)}` +
         (pending
           ? `. A deposit of ${formatDollars({ ...price, amount: pending })} is still confirming on chain; it becomes spendable once ` +
-            'the chain confirms it, usually within a minute'
+            (this.depositConfirmsQuickly(session.chainId)
+              ? 'the chain confirms it, usually within a minute'
+              : 'the chain finalizes it, which can take several minutes')
           : fixUrl
             ? `. Add funds, then call again: ${fixUrl}`
             : ''),
@@ -1215,6 +1221,15 @@ export class McpToolCallService {
         ...(fixUrl ? { fixUrl } : {}),
       },
     };
+  }
+
+  /** Whether this chain credits a deposit on its first confirmation. Unknown → false. */
+  private depositConfirmsQuickly(chainId: string): boolean {
+    try {
+      return this.chains?.resolve(chainId as ChainId)?.depositCreditsOnSoftConfirmation === true;
+    } catch {
+      return false;
+    }
   }
 
   // ── The relay path ────────────────────────────────────────────────────────
