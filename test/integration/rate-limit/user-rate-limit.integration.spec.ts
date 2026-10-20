@@ -153,8 +153,10 @@ describe('UserRateLimitInterceptor (integration, real Redis)', () => {
     app.setGlobalPrefix('api');
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
     app.useGlobalFilters(new AllExceptionsFilter());
-    await app.init();
-    await app.listen(0);
+    // Bound once, on 127.0.0.1 exactly: supertest then reuses this address
+    // instead of an ephemeral wildcard listen per request, which another local
+    // process holding the same port on 127.0.0.1 could answer.
+    await app.listen(0, '127.0.0.1');
     // The limiter's clock, moved by the tests: five minutes run in seconds.
     app.get(UserRateLimitInterceptor).now = () => clock;
   });

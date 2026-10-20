@@ -143,7 +143,10 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     mcpApp.set('trust proxy', 1);
     mcpApp.enableCors(mcpCorsOptions);
     mcpApp.useGlobalFilters(new McpExceptionsFilter());
-    await mcpApp.init();
+    // Bound once, on 127.0.0.1 exactly: supertest then reuses this address
+    // instead of an ephemeral wildcard listen per request, which another local
+    // process holding the same port on 127.0.0.1 could answer.
+    await mcpApp.listen(0, '127.0.0.1');
     mcp = mcpApp;
 
     const apiRef = await Test.createTestingModule({ imports: [AppApiModule] })
@@ -158,7 +161,7 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     );
     api.useGlobalFilters(new AllExceptionsFilter());
     api.useGlobalInterceptors(new TransformInterceptor());
-    await api.init();
+    await api.listen(0, '127.0.0.1');
   }, 300_000);
 
   afterAll(async () => {

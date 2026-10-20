@@ -112,7 +112,10 @@ describe('operator access, over HTTP, against a real database and Redis', () => 
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     app.useGlobalFilters(new AllExceptionsFilter());
     app.useGlobalInterceptors(new TransformInterceptor(app.get(Reflector)));
-    await app.init();
+    // Bound once, on 127.0.0.1 exactly: supertest then reuses this address
+    // instead of an ephemeral wildcard listen per request, which another local
+    // process holding the same port on 127.0.0.1 could answer.
+    await app.listen(0, '127.0.0.1');
   }, 300_000);
 
   beforeEach(async () => {
