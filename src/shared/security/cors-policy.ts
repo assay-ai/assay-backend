@@ -87,12 +87,25 @@ export function isPublicReadRequest(req: CorsRequestLike): boolean {
   return typeof value === 'string' && PUBLIC_READ_METHODS.has(value.trim().toUpperCase());
 }
 
+/**
+ * How long a browser may reuse an allowlist preflight, in seconds.
+ *
+ * The dashboard sends `Authorization` on every signed-in call, which is not
+ * CORS-safelisted, so each request is preceded by an `OPTIONS`. Without
+ * `Access-Control-Max-Age` the browser keeps that answer for 5 s only, and
+ * nearly every call pays a second round trip through the CDN and the tunnel.
+ * 7200 is Chromium's cap (Firefox allows longer, Safari less); the answer it
+ * caches depends only on the origin and the route, never on the session.
+ */
+export const ALLOWLIST_PREFLIGHT_MAX_AGE_SECONDS = 7200;
+
 /** The allowlist policy for every non-public request. */
 export function allowlistCorsOptions(allowedOrigins: readonly string[]): CorsOptions {
   return {
     origin: [...allowedOrigins],
     credentials: true,
     exposedHeaders: [...API_EXPOSED_HEADERS],
+    maxAge: ALLOWLIST_PREFLIGHT_MAX_AGE_SECONDS,
   };
 }
 
