@@ -201,8 +201,12 @@ async function bootstrapApi() {
     customSiteTitle: 'GoAssay.AI API',
   };
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document, customOptions);
+  // Not served in production unless asked for (`parseApiDocsEnabled`).
+  const docsEnabled = configService.get<boolean>('app.api.docsEnabled') ?? false;
+  if (docsEnabled) {
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, customOptions);
+  }
 
   await app.listen(port);
 
@@ -214,7 +218,7 @@ async function bootstrapApi() {
 
   console.log(`
   🚀 [API SERVER] Application is running on: http://localhost:${port}
-  📚 Swagger documentation: http://localhost:${port}/api/docs${bullBoardLine}
+  📚 Swagger documentation: ${docsEnabled ? `http://localhost:${port}/api/docs` : 'off (API_DOCS_ENABLED)'}${bullBoardLine}
   `);
 }
 

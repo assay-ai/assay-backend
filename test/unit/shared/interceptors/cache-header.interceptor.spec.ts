@@ -6,6 +6,8 @@ import { of } from 'rxjs';
 import { CacheHeader, NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { CacheHeaderInterceptor } from '@shared/interceptors/cache-header.interceptor';
 import { PublicReservesController } from '@modules/settlement/controllers/public-reserves.controller';
+import { PublicCatalogueController } from '@modules/catalogue/controllers/public-catalogue.controller';
+import { PublicToolsetsController } from '@modules/toolset/controllers/public-toolsets.controller';
 
 /**
  * Browser caching is opt-in per route.
@@ -143,6 +145,40 @@ describe('CacheHeaderInterceptor', () => {
 
       expect(headers['Cache-Control']).toContain('no-store');
       expect(headers['Pragma']).toBe('no-cache');
+    });
+  });
+
+  /**
+   * The public reads Cloudflare caches (`PUBLIC_EDGE_CACHE`): a minute at the
+   * edge with a short stale window, while the browser keeps its own 30 s.
+   */
+  describe('the public edge window', () => {
+    it.each([
+      ['toolsets', PublicToolsetsController.prototype.list],
+      ['catalogue tools', PublicCatalogueController.prototype.listTools],
+    ])(
+      '%s: 60 s at the edge, revalidated in the background, kept through an outage',
+      (_, route) => {
+        const headers = run(route);
+
+        expect(headers['Cache-Control']).toBe('public, max-age=30, s-maxage=60, must-revalidate');
+        expect(headers['CDN-Cache-Control']).toBe(
+          'max-age=60, stale-while-revalidate=60, stale-if-error=3600',
+        );
+      },
+    );
+
+    it('is still private and kept out of the CDN for a credentialed request', () => {
+      const headers = run(PublicToolsetsController.prototype.list, { requestHeaders: AUTH });
+
+      expect(headers['Cache-Control']).toBe('private, max-age=30, must-revalidate');
+      expect(headers['CDN-Cache-Control']).toBe('no-store');
+    });
+
+    it('leaves proof of reserves with no stale window at the edge', () => {
+      const headers = run(PublicReservesController.prototype.get);
+
+      expect(headers['CDN-Cache-Control']).toBe('max-age=30');
     });
   });
 });

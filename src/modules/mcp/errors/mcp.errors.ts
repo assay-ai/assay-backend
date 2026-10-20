@@ -10,6 +10,12 @@ export enum McpErrorCode {
   MCP_METHOD_NOT_SUPPORTED = 'MCP_METHOD_NOT_SUPPORTED',
   MCP_TOOL_NOT_FOUND = 'MCP_TOOL_NOT_FOUND',
   MCP_CREDENTIAL_INVALID = 'MCP_CREDENTIAL_INVALID',
+  /**
+   * This address sent too many refused credentials inside the window
+   * (`McpAuthFailureThrottle`). Refused before any credential is looked up;
+   * retryable once the window rolls over.
+   */
+  MCP_AUTH_RATE_LIMITED = 'MCP_AUTH_RATE_LIMITED',
   MCP_QUOTA_EXCEEDED = 'MCP_QUOTA_EXCEEDED',
   /**
    * The path of an MCP URL is not one the host serves, or names something
@@ -90,6 +96,12 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     // the wire, and the message is the same for every reason.
     message: (_context?: { unauthorizedReason?: McpUnauthorizedReason }) =>
       `MCP credential is missing or invalid`,
+  },
+  /** See `McpErrorCode.MCP_AUTH_RATE_LIMITED`. */
+  authRateLimited: {
+    code: McpErrorCode.MCP_AUTH_RATE_LIMITED,
+    statusCode: 429,
+    message: () => `Too many invalid credentials from this address. Try again shortly.`,
   },
   urlNotFound: {
     code: McpErrorCode.MCP_URL_NOT_FOUND,

@@ -1,7 +1,8 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, UseInterceptors } from '@nestjs/common';
 import { ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CacheHeader } from '@shared/decorators/cache-header.decorator';
+import { CacheHeader, PUBLIC_EDGE_CACHE } from '@shared/decorators/cache-header.decorator';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 import { isPublicDemoConfigured } from '@modules/mcp/mcp-api.module';
 import { isPublicReservesConfigured } from '@modules/settlement/public-reserves-api.module';
 
@@ -31,10 +32,17 @@ export class PublicFeaturesResponseDto {
  * always `true` would only invite a page to branch on it.
  */
 @ApiTags('Public')
+@UseInterceptors(PublicReadRateLimitInterceptor)
 @Controller('public/features')
 export class PublicFeaturesController {
   @Get()
-  @CacheHeader({ maxAge: 60, staleWhileRevalidate: 0, staleIfError: 0, mustRevalidate: true })
+  @CacheHeader({
+    maxAge: 60,
+    staleWhileRevalidate: 0,
+    staleIfError: 0,
+    mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
+  })
   @ApiOperation({ summary: 'Which optional public pages this deployment serves' })
   @ApiResponse({ status: 200, type: PublicFeaturesResponseDto })
   get(): PublicFeaturesResponseDto {
