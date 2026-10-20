@@ -284,6 +284,9 @@ export class ReconciliationService {
    * that keeps failing closed affordable as buyers grow — without it this pass
    * is one RPC round trip per buyer, every five minutes, forever.
    *
+   * **An escrow with no account on chain is a zero** (`readMany` maps it to
+   * `null`) and is compared like any other.
+   *
    * **An escrow that could not be read is neither a shortfall nor silence.** It
    * is absent from the reading map, counted, and reported as a finding of its
    * own, because a pass that skipped unreadable accounts would report clean
@@ -320,14 +323,17 @@ export class ReconciliationService {
 
       for (const row of page) {
         const account = row.accountId as AccountId;
-        const reading = readings.get(account);
-        if (!reading) {
+        if (!readings.has(account)) {
           unreadable += 1;
           continue;
         }
+        // `null` is a read that found no escrow on chain — a mirror row for a
+        // buyer who never funded (an unfunded rail-B offer, an abandoned first
+        // deposit). That is a zero balance, checked like any other, not unknown.
+        const reading = readings.get(account) ?? null;
 
         read += 1;
-        const chain = MoneyUtil.toAtomic(reading.balance);
+        const chain = reading ? MoneyUtil.toAtomic(reading.balance) : 0n;
         total += chain;
 
         const inHold = heldOnChain.get(account) ?? 0n;
@@ -345,7 +351,9 @@ export class ReconciliationService {
           findings.push(this.escrowDrift(asset, decimals, account, chain, mirrored));
         }
 
-        this.realignSeq(row, reading);
+        if (reading) {
+          this.realignSeq(row, reading);
+        }
       }
 
       if (page.length < RECONCILIATION_ESCROW_PAGE) {
@@ -359,8 +367,7 @@ export class ReconciliationService {
         severity: ReconciliationSeverity.WARN,
         summary:
           `${unreadable} buyer escrow${unreadable === 1 ? '' : 's'} on ${asset} could not be ` +
-          `read this pass — either no escrow account exists at those seeds or the chain read ` +
-          `failed. Their balances are unknown, not healthy.`,
+          `read this pass — the chain read failed. Their balances are unknown, not healthy.`,
         details: { asset, unreadableEscrows: unreadable, escrowsRead: read },
       });
     }

@@ -277,7 +277,7 @@ describe('SolanaEscrowBalanceReader.readMany — batched, because the reconciler
     expect(rpc.calls).toBe(2);
   });
 
-  it('leaves an unopened escrow out of the map rather than reporting a zero balance', async () => {
+  it('maps an unopened escrow to null (read, nothing there) rather than leaving it out', async () => {
     const { reader, rpc } = harness();
     const opened = buyerAt(3);
     const never = buyerAt(4);
@@ -286,8 +286,10 @@ describe('SolanaEscrowBalanceReader.readMany — batched, because the reconciler
 
     const readings = await reader.readMany([opened.account, never.account], USDC);
 
-    expect(readings.has(opened.account)).toBe(true);
-    expect(readings.has(never.account)).toBe(false);
+    expect(readings.get(opened.account)).toBeTruthy();
+    // Present with `null`: absence from the map is reserved for a failed read.
+    expect(readings.has(never.account)).toBe(true);
+    expect(readings.get(never.account)).toBeNull();
   });
 
   it('skips a failed batch instead of taking the whole pass down', async () => {

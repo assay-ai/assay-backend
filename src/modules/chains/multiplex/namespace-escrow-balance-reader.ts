@@ -41,8 +41,8 @@ export class NamespaceEscrowBalanceReader implements EscrowBalanceReaderPort {
   async readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
-    const merged = new Map<AccountId, EscrowChainBalance>();
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
+    const merged = new Map<AccountId, EscrowChainBalance | null>();
 
     // Sequential, not `Promise.all`. `DepositFinalityWatcher.onModuleInit`
     // taught this codebase what an unsettled `Promise.all` costs at boot, and

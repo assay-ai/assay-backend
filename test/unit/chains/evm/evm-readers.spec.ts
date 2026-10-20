@@ -286,14 +286,15 @@ describe('EvmEscrowBalanceReader', () => {
     expect(MoneyUtil.toAtomic(found.get(BUYER_ACCOUNT)!.balance)).toBe(101n);
   });
 
-  it('readMany omits an unfunded buyer rather than reporting a zero', async () => {
+  it('readMany maps an unfunded buyer to null rather than leaving it out', async () => {
     const zero = Object.fromEntries(
       Object.keys(await escrowFields()).map((name) => [name, 0n]),
     ) as Record<string, bigint>;
 
     const found = await escrowReader({ escrow: zero }).readMany([BUYER_ACCOUNT], USDG);
 
-    expect(found.size).toBe(0);
+    expect(found.size).toBe(1);
+    expect(found.get(BUYER_ACCOUNT)).toBeNull();
   });
 
   it('names the escrow contract as BOTH escrow addresses, in the port Solana vocabulary', async () => {

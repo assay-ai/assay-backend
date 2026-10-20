@@ -63,11 +63,16 @@ export interface EscrowLifetimeTotals {
 export interface EscrowBalanceReaderPort {
   read(account: AccountId, asset: AssetId): Promise<EscrowChainBalance | null>;
 
-  /** Batched, for the reconciler. Absent accounts are absent from the map. */
+  /**
+   * Batched, for the reconciler. An account that was read and has no escrow
+   * maps to `null` (the same answer `read` gives); an account whose read
+   * failed is absent from the map. The two must stay apart: the first is a
+   * zero balance, the second is unknown.
+   */
   readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>>;
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>>;
 
   /** Pure PDA derivation — no RPC. */
   escrowAddresses(
