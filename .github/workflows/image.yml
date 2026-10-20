@@ -14,7 +14,8 @@ name: Image
 # Tags: `sha-<commit>` (immutable, what gets deployed, by digest) and the
 # branch name (moves with every push).
 #
-# Secret (optional; without it the image is pushed and nothing is deployed)
+# Secret (optional; without it the image is pushed and nothing is deployed),
+# stored in the "deploy-dispatch" environment (deployment branches: main, develop)
 #   DEPLOY_DISPATCH_TOKEN   fine-grained token on the deploy repository only,
 #                           "Contents: Read and write" (needed to send a
 #                           repository_dispatch event)
@@ -38,6 +39,8 @@ jobs:
   image:
     if: github.ref_name == 'main' || github.ref_name == 'develop'
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -82,11 +85,20 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+  # Separate job so the dispatch token is only ever handed to this one step:
+  # it lives in the "deploy-dispatch" environment, which only main and develop
+  # may use, so a workflow pushed on any other branch cannot read it.
+  dispatch:
+    needs: image
+    runs-on: ubuntu-latest
+    environment: deploy-dispatch
+    permissions: {}
+    steps:
       - name: Ask the deploy repository to roll it out
         env:
           DEPLOY_DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
           ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || 'develop' }}
-          IMAGE_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
         run: |
           if [ -z "$DEPLOY_DISPATCH_TOKEN" ]; then
             echo "::notice::DEPLOY_DISPATCH_TOKEN is not set: image pushed, nothing deployed"
