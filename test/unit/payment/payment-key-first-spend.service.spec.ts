@@ -62,7 +62,14 @@ function intent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
   } as unknown as PaymentIntent;
 }
 
-function harness(opts: { earlier?: boolean | Error } = {}) {
+/** Answers "was a notice of this key written?" from what the port recorded. */
+function noticesFrom(sent: readonly NotificationRequest[], recorded = () => true) {
+  return {
+    existsWithPayload: jest.fn(async () => recorded() && sent.length > 0),
+  } as unknown as NotificationRepository & { existsWithPayload: jest.Mock };
+}
+
+function harness(opts: { earlier?: boolean | Error; noticeWritten?: boolean } = {}) {
   const sent: NotificationRequest[] = [];
   const notifications: NotificationPort = {
     notify: jest.fn(async (request: NotificationRequest) => {
@@ -70,6 +77,9 @@ function harness(opts: { earlier?: boolean | Error } = {}) {
       return { deliveredNow: true };
     }),
   };
+  const notices = {
+    existsWithPayload: jest.fn(async () => opts.noticeWritten ?? true),
+  } as unknown as NotificationRepository & { existsWithPayload: jest.Mock };
   const intents = {
     hasEarlierDelegateSpend: jest.fn(async () => {
       if (opts.earlier instanceof Error) throw opts.earlier;
@@ -82,8 +92,9 @@ function harness(opts: { earlier?: boolean | Error } = {}) {
     { findOne: jest.fn(async () => ({ name: 'Laptop' })) } as unknown as AgentCredentialRepository,
     { findOne: jest.fn(async () => ({ label: 'research-bot' })) } as unknown as AgentRepository,
     { findOne: jest.fn(async () => ({ name: 'get_weather' })) } as unknown as ToolRepository,
+    notices,
   );
-  return { service, sent, intents };
+  return { service, sent, intents, notices };
 }
 
 describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
@@ -182,6 +193,7 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
       { findOne: jest.fn(async () => null) } as unknown as AgentCredentialRepository,
       { findOne: jest.fn(async () => null) } as unknown as AgentRepository,
       { findOne: jest.fn(async () => null) } as unknown as ToolRepository,
+      noticesFrom(sent),
       redis as unknown as Redis,
     );
 
@@ -202,6 +214,72 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
     expect(paymentKeyFirstSpendDedupeKey(CHAIN, DELEGATE)).toBe(
       paymentKeyFirstSpendDedupeKey(CHAIN, `${CHAIN}:${ADDRESS.toLowerCase()}`),
     );
+  });
+
+  it('a key that spent before but whose notice was never written gets it on its next voucher', async () => {
+    const { service, sent, notices } = harness({ earlier: true, noticeWritten: false });
+    await expect(service.notifyIfFirst(intent({ id: 'later' }))).resolves.toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body).toContain('It has made paid calls before; this is the first notice');
+    expect(sent[0].payload).toMatchObject({ chainId: CHAIN, keyDigest: expect.any(String) });
+    expect(notices.existsWithPayload).toHaveBeenCalledWith(
+      ORG,
+      NotificationEvent.PAYMENT_KEY_FIRST_SPEND,
+      { chainId: CHAIN, keyDigest: sent[0].payload?.keyDigest },
+    );
+  });
+
+  /**
+   * The lost-for-good path: the notification service claimed the ONCE window,
+   * then failed to write the row. It now releases the claim and reports the
+   * notice as not recorded; no marker is set, and the next voucher sends it.
+   */
+  it('through the real notification service: a failed write is sent again on the next voucher', async () => {
+    const spies = (['error', 'warn', 'debug'] as const).map((method) =>
+      jest.spyOn(Logger.prototype, method).mockImplementation(() => undefined),
+    );
+    try {
+      const redis = new FakeRedis();
+      const inserted: unknown[] = [];
+      const insert = jest
+        .fn(async (row: unknown) => inserted.push(row))
+        .mockRejectedValueOnce(new Error('db blip'));
+      const notifications = new NotificationService(
+        { insert } as unknown as NotificationRepository,
+        {
+          findForOrganization: jest.fn(async () => []),
+        } as unknown as NotificationChannelRepository,
+        { findForEvent: jest.fn(async () => []) } as unknown as NotificationPreferenceRepository,
+        { insert: jest.fn(async () => undefined) } as unknown as NotificationDeliveryRepository,
+        {
+          publishDeliver: jest.fn(async () => undefined),
+        } as unknown as NotificationDeliverPublisher,
+        redis as unknown as Redis,
+      );
+      const earlier = jest.fn(async () => false);
+      const service = new PaymentKeyFirstSpendService(
+        { hasEarlierDelegateSpend: earlier } as unknown as PaymentIntentRepository,
+        notifications,
+        { findOne: jest.fn(async () => null) } as unknown as AgentCredentialRepository,
+        { findOne: jest.fn(async () => null) } as unknown as AgentRepository,
+        { findOne: jest.fn(async () => null) } as unknown as ToolRepository,
+        noticesFrom(inserted as never[]),
+        redis as unknown as Redis,
+      );
+
+      await service.notifyIfFirst(intent({ id: 'a' }));
+      expect(inserted).toHaveLength(0);
+
+      earlier.mockResolvedValue(true);
+      await service.notifyIfFirst(intent({ id: 'b' }));
+      expect(inserted).toHaveLength(1);
+
+      // Written now: the next voucher sends nothing more.
+      await service.notifyIfFirst(intent({ id: 'c' }));
+      expect(inserted).toHaveLength(1);
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+    }
   });
 
   it('afterAdmitted neither waits nor throws when the check fails', async () => {
@@ -249,6 +327,7 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
         { findOne: jest.fn(async () => null) } as unknown as AgentCredentialRepository,
         { findOne: jest.fn(async () => null) } as unknown as AgentRepository,
         { findOne: jest.fn(async () => null) } as unknown as ToolRepository,
+        noticesFrom([]),
       );
 
       await Promise.all([

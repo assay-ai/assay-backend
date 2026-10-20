@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { PaymentKeyDailySummaryService } from '@modules/account/services/payment-key-daily-summary.service';
 import {
@@ -42,18 +43,23 @@ describe('payment-key notices — first spend and the daily summary', () => {
         return { deliveredNow: true };
       },
     };
-    return { sent, port };
+    // The port fake writes no row: a recorded send stands for one.
+    const notices = {
+      existsWithPayload: async () => sent.length > 0,
+    } as unknown as NotificationRepository;
+    return { sent, port, notices };
   };
 
   const noName = { findOne: async () => null };
 
-  const firstSpend = (port: NotificationPort) =>
+  const firstSpend = (port: NotificationPort, notices: NotificationRepository) =>
     new PaymentKeyFirstSpendService(
       context.repository,
       port,
       noName as unknown as AgentCredentialRepository,
       noName as unknown as AgentRepository,
       noName as unknown as ToolRepository,
+      notices,
     );
 
   /** A voucher of `delegate` (null: the payer's own key) whose funds are secured. */
@@ -77,8 +83,8 @@ describe('payment-key notices — first spend and the daily summary', () => {
 
   describe('payment_key.first_spend', () => {
     it('first delegate-signed redemption → one notification; second → none', async () => {
-      const { sent, port } = recordingPort();
-      const service = firstSpend(port);
+      const { sent, port, notices } = recordingPort();
+      const service = firstSpend(port, notices);
       const delegate = context.account(`delegate-${randomUUID().slice(0, 8)}`);
 
       const first = await spend('first', delegate);
@@ -94,21 +100,21 @@ describe('payment-key notices — first spend and the daily summary', () => {
     });
 
     it('payer-signed voucher → none', async () => {
-      const { sent, port } = recordingPort();
+      const { sent, port, notices } = recordingPort();
       const own = await spend('own', null);
-      expect(await firstSpend(port).notifyIfFirst(own)).toBe(false);
+      expect(await firstSpend(port, notices).notifyIfFirst(own)).toBe(false);
       expect(sent).toHaveLength(0);
     });
 
     it('an earlier voucher that never held money is not a spend', async () => {
-      const { sent, port } = recordingPort();
+      const { sent, port, notices } = recordingPort();
       const delegate = context.account(`delegate-${randomUUID().slice(0, 8)}`);
       // Admitted, then refused for funds: no hold, nothing spent.
       const unfunded = await context.createIntent('unfunded', { voucherDelegate: delegate });
       await context.intents.abandonUnsecuredVoucher(context.organizationId, unfunded.id);
 
       const first = await spend('after-unfunded', delegate);
-      expect(await firstSpend(port).notifyIfFirst(first)).toBe(true);
+      expect(await firstSpend(port, notices).notifyIfFirst(first)).toBe(true);
       expect(sent).toHaveLength(1);
     });
   });

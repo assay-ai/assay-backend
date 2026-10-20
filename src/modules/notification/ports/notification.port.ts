@@ -334,6 +334,13 @@ export interface NotificationPort {
  */
 export interface NotificationOutcome {
   readonly deliveredNow: boolean;
+  /**
+   * `false` only when `notify` failed before the notification was written (its
+   * aggregation claim is then released, so a later call can send it). A
+   * suppressed duplicate counts as recorded: an earlier call holds it.
+   * Absent means recorded (fakes and older producers).
+   */
+  readonly recorded?: boolean;
 }
 
 export const NOTIFICATION_PORT = 'NOTIFICATION_PORT';
