@@ -51,9 +51,21 @@ export function pendingKey(kind: LastSeenKind): string {
   return `assay:last-seen:${kind}`;
 }
 
-/** The hash a flush is writing; still read by {@link LastSeenRecorder.pending}. */
-export function flushingKey(kind: LastSeenKind): string {
-  return `assay:last-seen:${kind}:flushing`;
+/**
+ * The hash one flush run is writing, its own: two overlapping runs never
+ * touch each other's. Listed in {@link twinsKey} for as long as it exists.
+ */
+export function flushingKey(kind: LastSeenKind, runId: string): string {
+  return `assay:last-seen:${kind}:flushing:${runId}`;
+}
+
+/**
+ * The set of a kind's `flushing` hashes not yet written and deleted:
+ * {@link LastSeenRecorder.pending} reads every one, and a flush writes any it
+ * finds there (a run that failed or died) before taking a new one.
+ */
+export function twinsKey(kind: LastSeenKind): string {
+  return `assay:last-seen:${kind}:twins`;
 }
 
 /** The key of a credential stamp. */

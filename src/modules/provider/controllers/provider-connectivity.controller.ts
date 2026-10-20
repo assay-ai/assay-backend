@@ -87,7 +87,7 @@ export class ProviderConnectivityController {
     status: 404,
     description:
       "No provider with this id, or not one the caller may read: only the caller's own " +
-      'provider, or a provider the caller has a call with',
+      'provider, or a provider one of its calls was routed to (any outcome)',
   })
   async getVerification(
     @CurrentSession() session: McpSession,

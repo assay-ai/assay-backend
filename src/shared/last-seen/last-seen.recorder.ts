@@ -8,9 +8,9 @@ import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 import {
   LastSeenKind,
   batchUpdate,
-  flushingKey,
   isWellFormedKey,
   pendingKey,
+  twinsKey,
 } from './last-seen.kinds';
 
 /**
@@ -81,14 +81,12 @@ export class LastSeenRecorder {
     if (keys.length === 0 || !this.cache) return found;
     try {
       const redis = this.cache.getRedisClient();
-      const [buffered, flushing] = await withRedisTimeout(() =>
-        Promise.all([
-          redis.hmget(pendingKey(kind), ...keys),
-          redis.hmget(flushingKey(kind), ...keys),
-        ]),
-      );
+      const values = await withRedisTimeout(async () => {
+        const twins = await redis.smembers(twinsKey(kind));
+        return Promise.all([pendingKey(kind), ...twins].map((hash) => redis.hmget(hash, ...keys)));
+      });
       keys.forEach((key, index) => {
-        const ms = Math.max(Number(buffered[index] ?? 0), Number(flushing[index] ?? 0));
+        const ms = Math.max(0, ...values.map((hash) => Number(hash[index] ?? 0)));
         if (ms > 0) found.set(key, new Date(ms));
       });
     } catch (error) {
