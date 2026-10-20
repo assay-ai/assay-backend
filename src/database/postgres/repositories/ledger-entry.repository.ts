@@ -394,6 +394,33 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
     const row = await qb.getRawOne<{ total: string }>();
     return BigInt(row?.total ?? '0');
   }
+
+  /**
+   * The entry that resolved each of these deposit intents' finality, by
+   * intent id: `DEPOSIT_CONFIRM` (pending moved to available), `DEPOSIT_REJECT`
+   * (a reorg dropped it), or the legacy instant `DEPOSIT`. An intent still
+   * waiting for the finality sweep has no key.
+   *
+   * The journal is the record of the verdict; `deposit_intents` keeps only
+   * when it was reached (`finality_resolved_at`, written after the entry).
+   * One probe of `idx_ledger_entries_intent_id` per intent.
+   */
+  async depositResolutions(
+    organizationId: string,
+    intentIds: readonly string[],
+  ): Promise<Map<string, string>> {
+    if (intentIds.length === 0) return new Map();
+    const rows = await this.createQueryBuilder('entry')
+      .select('entry.intentId', 'intentId')
+      .addSelect('entry.entryType', 'entryType')
+      .where('entry.organizationId = :organizationId', { organizationId })
+      .andWhere('entry.intentId IN (:...intentIds)', { intentIds: [...intentIds] })
+      .andWhere('entry.entryType IN (:...types)', {
+        types: ['DEPOSIT_CONFIRM', 'DEPOSIT_REJECT', 'DEPOSIT'],
+      })
+      .getRawMany<{ intentId: string; entryType: string }>();
+    return new Map(rows.map((row) => [row.intentId, row.entryType]));
+  }
 }
 
 /** See {@link LedgerEntryRepository.sumPaidAtRedemption}. Unsigned, atomic units. */

@@ -1,10 +1,12 @@
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
   DEFAULT_PROVIDER_EGRESS_LIMITS,
+  EGRESS_SLOT_TTL_MS,
   ProviderEgressLimiter,
 } from '@modules/provider/services/provider-egress-limiter.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { fakeRateRedis } from '../shared/rate-limit/fake-rate-redis';
 
 /**
  * Review P-4 / P-5: the mapping tester and the connectivity check run in the
@@ -178,5 +180,148 @@ describe('ProviderEgressLimiter', () => {
       ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
     );
     expect(work).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The per-organization counts in Redis: one bound across API replicas, the
+ * process pools still per replica, and this process's own counts when Redis
+ * is out.
+ */
+describe('ProviderEgressLimiter with Redis', () => {
+  const LIMITS = {
+    perOrganizationConcurrent: 2,
+    globalConcurrent: 8,
+    globalConnectivityConcurrent: 8,
+    perOrganizationConnectivityConcurrent: 1,
+    perOrganizationPerWindow: 4,
+    windowMs: 60_000,
+  };
+
+  function gate(): { promise: Promise<void>; open: () => void } {
+    let open = () => {};
+    const promise = new Promise<void>((resolve) => (open = resolve));
+    return { promise, open };
+  }
+
+  const replicas = (redis: unknown) => [
+    new ProviderEgressLimiter(LIMITS, redis as never),
+    new ProviderEgressLimiter(LIMITS, redis as never),
+  ];
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('holds one organization to its concurrency across replicas', async () => {
+    const { redis, sets } = fakeRateRedis();
+    const [a, b] = replicas(redis);
+    const g = gate();
+    const running = [a.run('org-a', () => g.promise), b.run('org-a', () => g.promise)];
+    await settle();
+
+    await expectErrorCodeAsync(
+      () => a.run('org-a', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    await expect(b.run('org-b', () => Promise.resolve('other org'))).resolves.toBe('other org');
+
+    g.open();
+    await Promise.all(running);
+    await settle();
+    expect(sets.get('rate:egress:in-flight:org-a')?.size).toBe(0);
+    await expect(b.run('org-a', () => Promise.resolve('ok'))).resolves.toBe('ok');
+  });
+
+  it('counts the per-minute starts across replicas, and a refused run uses none', async () => {
+    const { redis } = fakeRateRedis();
+    const [a, b] = replicas(redis);
+    const g = gate();
+
+    // Two in flight, then two refused for concurrency: those do not count.
+    const running = [a.run('org-a', () => g.promise), b.run('org-a', () => g.promise)];
+    await settle();
+    for (const limiter of [a, b]) {
+      await expectErrorCodeAsync(
+        () => limiter.run('org-a', () => Promise.resolve()),
+        ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+      );
+    }
+    g.open();
+    await Promise.all(running);
+    await settle();
+
+    await a.run('org-a', () => Promise.resolve());
+    await b.run('org-a', () => Promise.resolve());
+    await expectErrorCodeAsync(
+      () => a.run('org-a', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+  });
+
+  it('allows one connectivity check per organization across replicas', async () => {
+    const { redis } = fakeRateRedis();
+    const [a, b] = replicas(redis);
+    const g = gate();
+    const check = a.run('org-a', () => g.promise, 'connectivity');
+    await settle();
+
+    await expectErrorCodeAsync(
+      () => b.run('org-a', () => Promise.resolve(), 'connectivity'),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    // The organization's other slot is still there for the tester.
+    const tester = b.run('org-a', () => g.promise);
+
+    g.open();
+    await Promise.all([check, tester]);
+  });
+
+  it('falls back to this process’s counts when Redis fails, which still limit', async () => {
+    const { redis } = fakeRateRedis();
+    redis.fail = true;
+    const limiter = new ProviderEgressLimiter(LIMITS, redis as never);
+
+    for (let i = 0; i < LIMITS.perOrganizationPerWindow; i += 1) {
+      await limiter.run('org-a', () => Promise.resolve());
+    }
+    await expectErrorCodeAsync(
+      () => limiter.run('org-a', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    // One failed call, then Redis is left alone for a while.
+    expect(redis.calls).toBe(1);
+  });
+
+  it('frees the Redis slot when the work throws', async () => {
+    const { redis, sets } = fakeRateRedis();
+    const limiter = new ProviderEgressLimiter(LIMITS, redis as never);
+
+    await expect(limiter.run('org-a', () => Promise.reject(new Error('boom')))).rejects.toThrow(
+      'boom',
+    );
+    await settle();
+    expect(sets.get('rate:egress:in-flight:org-a')?.size).toBe(0);
+  });
+
+  it('frees a slot whose release was lost once it expires, however often the org retries', async () => {
+    const { redis } = fakeRateRedis();
+    const limiter = new ProviderEgressLimiter(
+      { ...LIMITS, perOrganizationConcurrent: 1, perOrganizationPerWindow: 1_000 },
+      redis as never,
+    );
+    let now = 20_000_000;
+    limiter.now = () => now;
+    // A replica that died mid-run: its slot is taken and never given back.
+    const hung = limiter.run('org-a', () => new Promise<void>(() => undefined));
+    await settle();
+
+    for (let i = 0; i < 30; i += 1) {
+      now += 3_000;
+      await expectErrorCodeAsync(
+        () => limiter.run('org-a', () => Promise.resolve()),
+        ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+      );
+    }
+    now = 20_000_000 + EGRESS_SLOT_TTL_MS;
+    await expect(limiter.run('org-a', () => Promise.resolve('freed'))).resolves.toBe('freed');
+    void hung;
   });
 });

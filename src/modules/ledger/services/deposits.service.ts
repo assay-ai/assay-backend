@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
+import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { DepositIntentEntity } from '@database/postgres/entities/deposit-intent.entity';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
@@ -8,7 +9,7 @@ import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
-import { DepositDto, ListDepositsQueryDto } from '../dto/list-deposits.dto';
+import { DepositDto, DepositFinality, ListDepositsQueryDto } from '../dto/list-deposits.dto';
 
 /** `GET /deposits` — the deposit history behind the funding screen. */
 const DEPOSIT_LIST: ListSpec = {
@@ -25,7 +26,10 @@ const DEPOSIT_LIST: ListSpec = {
 
 @Injectable()
 export class DepositsService {
-  constructor(private readonly deposits: DepositIntentRepository) {}
+  constructor(
+    private readonly deposits: DepositIntentRepository,
+    private readonly entries: LedgerEntryRepository,
+  ) {}
 
   async list(
     organizationId: string,
@@ -42,7 +46,8 @@ export class DepositsService {
     }
 
     const page = await paginate(qb, query, DEPOSIT_LIST);
-    return page.map(toDepositDto);
+    const resolutions = await this.resolutions(organizationId, page.items);
+    return page.map((row) => toDepositDto(row, resolutions));
   }
 
   /**
@@ -55,11 +60,42 @@ export class DepositsService {
     if (!row) {
       throw PaymentErrors.depositIntentNotFound({ id: depositId });
     }
-    return toDepositDto(row);
+    return toDepositDto(row, await this.resolutions(organizationId, [row]));
+  }
+
+  /** The finality verdicts of the `SETTLED` rows among `rows`; one query, none when there are none. */
+  private resolutions(
+    organizationId: string,
+    rows: readonly DepositIntentEntity[],
+  ): Promise<Map<string, string>> {
+    const settled = rows.filter((row) => row.status === DepositIntentStatus.SETTLED);
+    return this.entries.depositResolutions(
+      organizationId,
+      settled.map((row) => row.id),
+    );
   }
 }
 
-function toDepositDto(row: DepositIntentEntity): DepositDto {
+function finalityOf(
+  row: DepositIntentEntity,
+  resolutions: ReadonlyMap<string, string>,
+): DepositFinality | null {
+  if (row.status !== DepositIntentStatus.SETTLED) return null;
+  switch (resolutions.get(row.id)) {
+    case 'DEPOSIT_CONFIRM':
+    case 'DEPOSIT':
+      return DepositFinality.CONFIRMED;
+    case 'DEPOSIT_REJECT':
+      return DepositFinality.REJECTED;
+    default:
+      return DepositFinality.PENDING;
+  }
+}
+
+function toDepositDto(
+  row: DepositIntentEntity,
+  resolutions: ReadonlyMap<string, string>,
+): DepositDto {
   const asset = row.assetId as AssetId;
   const requested = MoneyUtil.of(row.requestedAmount, asset, row.decimals);
   const settled =
@@ -81,6 +117,7 @@ function toDepositDto(row: DepositIntentEntity): DepositDto {
       : null,
     chainId: row.chainId,
     chainTxRef: row.chainTxRef,
+    finality: finalityOf(row, resolutions),
     expiresAt: row.expiresAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
   };
