@@ -113,9 +113,9 @@ describe('McpAuthFailureThrottle', () => {
 describe('the MCP catch-all and the refused-credential throttle', () => {
   const HOST = { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' };
 
-  function setup(blockedFor = 0) {
+  function setup(blockedFor = 0, refusal: Error = McpErrors.credentialInvalid()) {
     const sessions = {
-      resolve: jest.fn(() => Promise.reject(McpErrors.credentialInvalid())),
+      resolve: jest.fn(() => Promise.reject(refusal)),
     } as unknown as McpSessionPort & { resolve: jest.Mock };
     const throttle = {
       blockedForSeconds: jest.fn(() => Promise.resolve(blockedFor)),
@@ -154,6 +154,22 @@ describe('the MCP catch-all and the refused-credential throttle', () => {
     });
     expect(throttle.recordFailure).toHaveBeenCalledWith('203.0.113.9');
   });
+
+  it.each(['expired', 'revoked', 'audience'] as const)(
+    'never counts a %s token — it was a real credential, and access tokens expire hourly',
+    async (unauthorizedReason) => {
+      const { controller, throttle } = setup(
+        0,
+        McpErrors.credentialInvalid({ unauthorizedReason }),
+      );
+      const { request, response } = call('Bearer assay_at_x');
+
+      await expect(controller.handle(request, response)).rejects.toMatchObject({
+        errorCode: McpErrorCode.MCP_CREDENTIAL_INVALID,
+      });
+      expect(throttle.recordFailure).not.toHaveBeenCalled();
+    },
+  );
 
   it('never counts a request with no token — the first step of an OAuth sign-in', async () => {
     const { controller, throttle } = setup();

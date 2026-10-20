@@ -143,9 +143,13 @@ export class McpController {
       return await this.sessions.resolve(token);
     } catch (error) {
       if (error instanceof BaseError && error.errorCode === McpErrorCode.MCP_CREDENTIAL_INVALID) {
-        // A missing token is the first step of an OAuth sign-in and costs no
-        // read; only a presented, refused one is counted.
-        if (token !== null) await this.authFailures?.recordFailure(request.ip);
+        // Only a made-up token is counted. A missing one is the first step of
+        // an OAuth sign-in, and an expired, revoked or wrong-audience one was a
+        // real credential: OAuth access tokens expire every hour, so counting
+        // them would block a hosted connector's whole shared egress address.
+        if (token !== null && (unauthorizedReasonOf(error) ?? 'unknown') === 'unknown') {
+          await this.authFailures?.recordFailure(request.ip);
+        }
         this.unauthorized?.record(
           token === null ? 'missing' : (unauthorizedReasonOf(error) ?? 'unknown'),
         );
