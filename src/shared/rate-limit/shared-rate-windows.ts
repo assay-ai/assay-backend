@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -57,9 +59,9 @@ export interface SharedRateWindowsOptions {
  *   to every request. The in-process count is still a limit, only a
  *   per-instance one.
  *
- * Concurrency slots ({@link acquireSlot}) follow the same rule: an `INCR`
- * with a safety expiry, given back with `DECR`, and an in-process count when
- * Redis is out.
+ * Concurrency slots ({@link acquireSlot}) are members of a sorted set
+ * scored by their own expiry, given back with `ZREM`, and an in-process count
+ * when Redis is out.
  */
 export class SharedRateWindows {
   private readonly windows = new Map<string, LocalWindow>();
@@ -123,25 +125,28 @@ export class SharedRateWindows {
 
   /**
    * Take one of `max` concurrent slots under `key`, or `null` when all are in
-   * use. The returned function gives the slot back; call it exactly once.
+   * use. The returned function gives the slot back; calling it again does
+   * nothing.
    *
-   * `ttlMs` bounds a slot whose release never ran (the process died with the
-   * request in flight): the counter expires and the key is free again.
+   * In Redis a slot is a member of a sorted set (see {@link queueSlot}), so
+   * a slot whose release was lost (a replica killed mid-run, a `ZREM` that
+   * timed out) frees itself `ttlMs` after it was taken, however often the
+   * caller retries meanwhile.
    */
   async acquireSlot(key: string, max: number, ttlMs: number): Promise<(() => void) | null> {
     const now = this.options.now();
     const redis = this.options.redis;
     if (redis && now >= this.skipSharedUntil) {
       const sharedKey = `${this.options.keyPrefix}${key}`;
+      const runId = randomUUID();
       try {
         const results = await withRedisTimeout(() =>
-          redis.multi().incr(sharedKey).pexpire(sharedKey, ttlMs).exec(),
+          queueSlot(redis.multi(), sharedKey, runId, now, ttlMs).exec(),
         );
-        const [error, count] = results?.[0] ?? [new Error('transaction discarded'), null];
+        if (!results) throw new Error('transaction discarded');
+        const [error, count] = results[SLOT_COUNT_OFFSET];
         if (error) throw error;
-        const release = once(() => {
-          withRedisTimeout(() => redis.decr(sharedKey)).catch(() => undefined);
-        });
+        const release = once(() => releaseSlot(redis, sharedKey, runId));
         if (Number(count) > max) {
           release();
           return null;
@@ -184,6 +189,48 @@ export class SharedRateWindows {
       this.windows.delete(key);
     }
   }
+}
+
+/**
+ * Queue the commands that take a concurrency slot: drop the members whose
+ * expiry passed, add this run scored by its own expiry, and count the set.
+ * One `MULTI`, so the count includes every run admitted before this one: the
+ * run holds a slot when the count is within the limit, and otherwise removes
+ * itself (`releaseSlot`) and is refused. A run that is past the limit for an
+ * instant, before it removes itself, can only make another one refused,
+ * never let one too many in. The key's own expiry only collects an idle set;
+ * each member expires by its score, so retries never extend a lost slot.
+ */
+export function queueSlot<T extends SlotPipeline>(
+  tx: T,
+  key: string,
+  runId: string,
+  now: number,
+  ttlMs: number,
+): T {
+  tx.zremrangebyscore(key, '-inf', now);
+  tx.zadd(key, now + ttlMs, runId);
+  tx.zcard(key);
+  tx.pexpire(key, ttlMs);
+  return tx;
+}
+
+/** Where {@link queueSlot}'s `ZCARD` answer (runs holding a slot, this one included) sits. */
+export const SLOT_COUNT_OFFSET = 2;
+/** How many commands {@link queueSlot} queues. */
+export const SLOT_COMMANDS = 4;
+
+/** The subset of an ioredis pipeline {@link queueSlot} uses. */
+export interface SlotPipeline {
+  zremrangebyscore(key: string, min: string | number, max: string | number): unknown;
+  zadd(key: string, score: number, member: string): unknown;
+  zcard(key: string): unknown;
+  pexpire(key: string, ms: number): unknown;
+}
+
+/** Give a slot back: remove the run from the set. Safe to repeat and after its expiry. */
+export function releaseSlot(redis: Redis, key: string, runId: string): void {
+  withRedisTimeout(() => redis.zrem(key, runId)).catch(() => undefined);
 }
 
 function once(fn: () => void): () => void {

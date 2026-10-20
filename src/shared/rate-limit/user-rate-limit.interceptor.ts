@@ -36,11 +36,15 @@ import {
 /** DI token: whether {@link UserRateLimitInterceptor} counts anything (`API_USER_RATE_LIMITS_ENABLED`). */
 export const USER_RATE_LIMITS_ENABLED = Symbol('USER_RATE_LIMITS_ENABLED');
 
-/** What one request counts against: the rule, and whose window. */
+/** What one request counts against: the rule, whose window, and the window keys. */
 export interface RateDecision {
   readonly route: string;
   readonly rule: RateRule;
   readonly subject: string;
+  /** The rule's window: `bucket:subject`, or `bucket:<concrete path>:subject` for a per-path rule. */
+  readonly key: string;
+  /** The A1 window this request also counts in, for a rule `withinRead`. */
+  readonly readKey?: string;
 }
 
 const OWN_LIMITER = new Set(OWN_LIMITER_ROUTES);
@@ -107,20 +111,36 @@ export class UserRateLimitInterceptor implements NestInterceptor {
     );
   }
 
-  /** Count the request; take a concurrency slot when the rule has one. */
+  /**
+   * Take the concurrency slot when the rule has one, then count the request.
+   * The slot comes first so a request refused for it (one already running)
+   * does not use up the rule's window.
+   */
   async admit(decision: RateDecision): Promise<RateOutcome & { release?: () => void }> {
     const { rule, subject } = decision;
-    const outcome = await this.windows.take(`${rule.bucket}:${subject}`, rule);
-    if (!outcome.allowed || rule.concurrent === undefined) return outcome;
+    let release: (() => void) | undefined;
+    if (rule.concurrent !== undefined) {
+      const slot = await this.windows.acquireSlot(
+        `${rule.bucket}:inflight:${subject}`,
+        rule.concurrent,
+        CONCURRENT_SLOT_TTL_MS,
+      );
+      // One already running: try again in a few seconds, not at the window's end.
+      if (!slot) return { allowed: false, retryAfterSeconds: 5 };
+      release = slot;
+    }
 
-    const release = await this.windows.acquireSlot(
-      `${rule.bucket}:inflight:${subject}`,
-      rule.concurrent,
-      CONCURRENT_SLOT_TTL_MS,
-    );
-    // One already running: try again in a few seconds, not at the window's end.
-    if (!release) return { allowed: false, retryAfterSeconds: 5 };
-    return { ...outcome, release };
+    const outcomes = [await this.windows.take(decision.key, rule)];
+    if (decision.readKey) outcomes.push(await this.windows.take(decision.readKey, READ_RULE));
+    const refused = outcomes.filter((outcome) => !outcome.allowed);
+    if (refused.length > 0) {
+      release?.();
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.max(...refused.map((outcome) => outcome.retryAfterSeconds)),
+      };
+    }
+    return { ...outcomes[0], release };
   }
 }
 
@@ -142,13 +162,33 @@ export function decide(request: Request): RateDecision | null {
 
   const rule = ROUTE_RULES[route] ?? (method === 'GET' ? READ_RULE : WRITE_RULE);
   const subject = subjectOf(request, rule.subject);
-  return subject ? { route, rule, subject } : null;
+  if (!subject) return null;
+  const key = rule.perPath
+    ? `${rule.bucket}:${concretePath(request)}:${subject}`
+    : `${rule.bucket}:${subject}`;
+  return {
+    route,
+    rule,
+    subject,
+    key,
+    ...(rule.withinRead ? { readKey: `${READ_RULE.bucket}:${subject}` } : {}),
+  };
+}
+
+/** The path as requested, without prefix, version or query: `/agents/<id>/servers`. */
+export function concretePath(request: Request): string {
+  return withoutPrefix(request.path ?? request.url ?? '/');
 }
 
 /** The matched route as its controller declares it: `/api/v1/deposits/:depositId` → `/deposits/:depositId`. */
 export function routePath(request: Request): string {
   const matched = (request.route as { path?: unknown } | undefined)?.path;
-  const raw = typeof matched === 'string' ? matched : (request.path ?? request.url ?? '/');
+  return withoutPrefix(
+    typeof matched === 'string' ? matched : (request.path ?? request.url ?? '/'),
+  );
+}
+
+function withoutPrefix(raw: string): string {
   const path = raw.split('?')[0].replace(/^\/api(?:\/v\d+)?(?=\/|$)/, '') || '/';
   return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
 }

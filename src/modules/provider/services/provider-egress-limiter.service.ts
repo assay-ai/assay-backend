@@ -1,9 +1,17 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
-import { SHARED_WINDOW_RETRY_MS } from '@shared/rate-limit/shared-rate-windows';
+import {
+  SHARED_WINDOW_RETRY_MS,
+  SLOT_COMMANDS,
+  SLOT_COUNT_OFFSET,
+  queueSlot,
+  releaseSlot,
+} from '@shared/rate-limit/shared-rate-windows';
 
 import { ProviderErrors } from '../errors/provider.errors';
 
@@ -56,9 +64,10 @@ export const PROVIDER_EGRESS_LIMITS = Symbol('PROVIDER_EGRESS_LIMITS');
 export type ProviderEgressPool = 'tester' | 'connectivity';
 
 /**
- * How long an organization's in-flight count in Redis outlives its last
- * start: longer than any run (a tester run has a 30 s deadline), so a replica
- * that died mid-run frees the organization's slots on its own.
+ * How long a run's slot in Redis lasts if it is never given back: longer than
+ * any run (a tester run has a 30 s deadline), so a replica that died mid-run,
+ * or a release lost with Redis, frees the slot on its own. Each slot expires
+ * by its own score; retries do not extend it.
  */
 export const EGRESS_SLOT_TTL_MS = 2 * 60_000;
 
@@ -68,8 +77,9 @@ export const EGRESS_SLOT_TTL_MS = 2 * 60_000;
  * - **Per organization** (the per-minute starts, the in-flight count, the one
  *   connectivity check) in Redis, so the bound holds across API replicas: in
  *   process, N replicas let an organization through N times the rate and N
- *   times the concurrency. One `MULTI` takes all of an organization's counts
- *   at once; a count past its limit is given back and the run refused. The
+ *   times the concurrency. One `MULTI` counts the start and takes the run's
+ *   slots (sorted-set members scored by expiry, `queueSlot`); past a limit
+ *   they are given back and the run refused. The
  *   minute is a fixed window (its index is in the key), not the sliding one
  *   the in-process fallback keeps.
  * - **Per process** (the tester and connectivity pools) in memory, always:
@@ -79,7 +89,7 @@ export const EGRESS_SLOT_TTL_MS = 2 * 60_000;
  * per-organization counts fall back to this process's own, as they were
  * before, and Redis is skipped for {@link SHARED_WINDOW_RETRY_MS}: provider
  * testing keeps working, bounded per replica. A slot whose release was lost
- * with Redis expires after {@link EGRESS_SLOT_TTL_MS}.
+ * frees itself {@link EGRESS_SLOT_TTL_MS} after it was taken.
  */
 @Injectable()
 export class ProviderEgressLimiter {
@@ -168,41 +178,41 @@ export class ProviderEgressLimiter {
     const checkKey = `rate:egress:connectivity:${organizationId}`;
     const checking = pool === 'connectivity';
 
+    const runId = randomUUID();
+
+    // One transaction: the minute's start count, and a slot in the
+    // organization's in-flight set (and its connectivity set, for a check).
     const results = await withRedisTimeout(() => {
-      const tx = redis
-        .multi()
-        .incr(windowKey)
-        .pexpire(windowKey, limits.windowMs)
-        .incr(inFlightKey)
-        .pexpire(inFlightKey, EGRESS_SLOT_TTL_MS);
-      if (checking) tx.incr(checkKey).pexpire(checkKey, EGRESS_SLOT_TTL_MS);
+      const tx = redis.multi().incr(windowKey).pexpire(windowKey, limits.windowMs);
+      queueSlot(tx, inFlightKey, runId, now, EGRESS_SLOT_TTL_MS);
+      if (checking) queueSlot(tx, checkKey, runId, now, EGRESS_SLOT_TTL_MS);
       return tx.exec();
     });
     if (!results) throw new Error('transaction discarded');
-    const counts = results.map(([error, value]) => {
+    const answers = results.map(([error, value]) => {
       if (error) throw error;
-      return Number(value);
+      return value;
     });
-    const [started, active] = [counts[0], counts[2]];
-    const checks = checking ? counts[4] : 0;
+    const started = Number(answers[0]);
+    const inFlight = Number(answers[2 + SLOT_COUNT_OFFSET]);
+    const checks = checking ? Number(answers[2 + SLOT_COMMANDS + SLOT_COUNT_OFFSET]) : 0;
 
-    // Given back on refusal too, so a refused run does not use up the minute.
-    const giveBack = (includeWindow: boolean) => {
-      const tx = redis.multi().decr(inFlightKey);
-      if (checking) tx.decr(checkKey);
-      if (includeWindow) tx.decr(windowKey);
-      withRedisTimeout(() => tx.exec()).catch(() => undefined);
+    const releaseSlots = () => {
+      releaseSlot(redis, inFlightKey, runId);
+      if (checking) releaseSlot(redis, checkKey, runId);
     };
 
     let reason: string | null = null;
     if (started > limits.perOrganizationPerWindow) reason = 'per-minute limit';
-    else if (active > limits.perOrganizationConcurrent) {
+    else if (inFlight > limits.perOrganizationConcurrent) {
       reason = 'too many in flight for this organization';
     } else if (checking && checks > limits.perOrganizationConnectivityConcurrent) {
       reason = 'a connectivity check is already running for this organization';
     }
     if (reason) {
-      giveBack(true);
+      // Given back on refusal, so a refused run does not use up the minute.
+      releaseSlots();
+      withRedisTimeout(() => redis.decr(windowKey)).catch(() => undefined);
       return reason;
     }
 
@@ -210,7 +220,7 @@ export class ProviderEgressLimiter {
     return () => {
       if (released) return;
       released = true;
-      giveBack(false);
+      releaseSlots();
     };
   }
 

@@ -8,6 +8,7 @@ import {
   Global,
   INestApplication,
   Injectable,
+  Logger,
   Module,
   Post,
   UseGuards,
@@ -23,6 +24,7 @@ import { SESSION_REQUEST_KEY } from '@shared/auth/session-request.key';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { HEAVY_READ_LIMIT, READ_RULE } from '@shared/rate-limit/user-rate-limit.config';
+import { SharedRateWindows } from '@shared/rate-limit/shared-rate-windows';
 import { UserRateLimitInterceptor } from '@shared/rate-limit/user-rate-limit.interceptor';
 import { UserRateLimitModule } from '@shared/rate-limit/user-rate-limit.module';
 
@@ -268,5 +270,28 @@ describe('UserRateLimitInterceptor (integration, real Redis)', () => {
     // No caller: the guard answers 403 and nothing is counted.
     expect((await request(app.getHttpServer()).get('/api/v1/tool-calls')).status).toBe(403);
     expect(await redis.keys('rate:user:*:ip:*')).toEqual([]);
+  });
+
+  it('holds concurrency slots in a Redis sorted set that frees a lost slot on its own', async () => {
+    let now = Date.now();
+    const windows = new SharedRateWindows({
+      redis,
+      keyPrefix: `rate:it:${randomUUID()}:`,
+      maxKeys: 10,
+      now: () => now,
+      logger: new Logger('test'),
+    });
+
+    const held = await windows.acquireSlot('export', 1, 2_000);
+    expect(held).not.toBeNull();
+    expect(await windows.acquireSlot('export', 1, 2_000)).toBeNull();
+    held?.();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Taken again and never given back; retried until its expiry, then free.
+    expect(await windows.acquireSlot('export', 1, 2_000)).not.toBeNull();
+    now += 1_000;
+    expect(await windows.acquireSlot('export', 1, 2_000)).toBeNull();
+    now += 1_000;
+    expect(await windows.acquireSlot('export', 1, 2_000)).not.toBeNull();
   });
 });
