@@ -261,8 +261,7 @@ export class CallDisputeService {
         // Guaranteed only where the hold is real (review P2-1): rail B needs the
         // escrow hold live on the call's chain; rail A's hold is the ledger's.
         const holdIsLive =
-          intent.rail !== 'RAIL_B_VOUCHER' ||
-          (await this.held.holdLive(intent.assetId as AssetId));
+          intent.rail !== 'RAIL_B_VOUCHER' || (await this.held.holdLive(intent.assetId as AssetId));
         entity.refundGuaranteed =
           holdIsLive &&
           (await this.paymentIntents.holdForDispute(
