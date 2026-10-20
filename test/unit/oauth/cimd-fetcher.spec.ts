@@ -93,7 +93,8 @@ describe('CimdFetcher (§6.3.7)', () => {
       expect(request.body).toBeUndefined();
       expect(request.policy?.trust).toBe(EgressTrust.PUBLIC_ONLY);
       expect(request.policy?.allowedProtocols).toEqual(['https:']);
-      expect(request.policy?.relay).toBeFalsy();
+      // Third-party-chosen URL: leaves through the egress relay, never from this server's IP.
+      expect(request.policy?.relay).toBe(true);
       expect(request.policy?.limits).toMatchObject({
         maxRedirects: 0,
         totalTimeoutMs: 5000,
