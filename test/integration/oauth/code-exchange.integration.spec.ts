@@ -475,6 +475,15 @@ describe('OAuth code exchange — real migrations', () => {
     expect(await credentialsOf(minted.agentId)).toHaveLength(0);
   });
 
+  it('unknown client_id → invalid_client, and the code is not burned', async () => {
+    const minted = await mint();
+    expect(await exchange(minted, { clientId: 'dcr_AAAAAAAAAAAAAAAAAAAAAA' })).toEqual({
+      error: 'invalid_client',
+    });
+    // Not spent: the client it was issued to still exchanges it.
+    expect(await exchange(minted)).toEqual(expect.objectContaining({ token_type: 'Bearer' }));
+  });
+
   it('wrong client_id → invalid_grant, oauth.code_rejected', async () => {
     const other = await insertClient();
     const minted = await mint();
