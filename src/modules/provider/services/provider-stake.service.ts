@@ -360,16 +360,21 @@ export class ProviderStakeService {
    *
    * Read through `TOOL_CATALOGUE` rather than the repository because the
    * catalogue is already this service's dependency and is the port the rest of
-   * the provider API reads bindings through; the repository's own method is
-   * cross-tenant, which this endpoint has no business being.
+   * the provider API reads bindings through. `findBindingsOfProvider` reads only
+   * this provider's rows; the fallback (a catalogue without it) is the union of
+   * every tool's bindings, filtered here, which is the same set.
    */
   private async findStakedBindings(providerId: string): Promise<ToolBinding[]> {
-    const tools = await this.catalogue.listTools();
-    const perTool = await Promise.all(tools.map((tool) => this.catalogue.findBindings(tool.id)));
+    const own = this.catalogue.findBindingsOfProvider
+      ? await this.catalogue.findBindingsOfProvider(providerId)
+      : (
+          await Promise.all(
+            (await this.catalogue.listTools()).map((tool) => this.catalogue.findBindings(tool.id)),
+          )
+        ).flat();
 
     return (
-      perTool
-        .flat()
+      own
         .filter((binding) => binding.providerId === providerId)
         .filter((binding) => binding.status === BindingStatus.ACTIVE)
         // `FREE` only. `FREEMIUM` requires stake exactly as `evaluateStakeGate`
