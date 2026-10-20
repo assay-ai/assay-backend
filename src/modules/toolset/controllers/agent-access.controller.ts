@@ -15,6 +15,7 @@ import {
   UpdateCredentialAccessBodyDto,
 } from '../dto/agent-access.dto';
 import { AgentAccessService } from '../services/agent-access.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * "What this agent can use" — the access policy, the agent rules and the
@@ -30,6 +31,12 @@ export class AgentAccessController {
   constructor(private readonly access: AgentAccessService) {}
 
   @Get()
+  @TenantCache({
+    ttl: 30,
+    vary: 'agent',
+    epochs: ['toolsets', 'agents', 'shared'],
+    singleFlight: true,
+  })
   @ApiOperation({ summary: 'Access, agent rules, pinned tools, and the combined result per tool' })
   @ApiResponse({ status: 200, type: AgentAccessDto })
   @ApiResponse({ status: 404, description: 'ACCOUNT_AGENT_NOT_FOUND — also another organization' })

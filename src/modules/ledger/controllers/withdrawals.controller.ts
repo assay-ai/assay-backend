@@ -6,6 +6,7 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import { ListWithdrawalsResponseDto } from '../dto/list-withdrawals.dto';
 import { WithdrawalsService } from '../services/withdrawals.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/withdrawals` — the withdrawal history behind the funding
@@ -22,6 +23,7 @@ export class WithdrawalsController {
   constructor(private readonly withdrawals: WithdrawalsService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'] })
   @ApiOperation({ summary: 'Withdrawals from this buyer’s escrows, newest first' })
   @ApiResponse({ status: 200, type: ListWithdrawalsResponseDto })
   async list(@CurrentSession() session: McpSession): Promise<ListWithdrawalsResponseDto> {

@@ -32,6 +32,7 @@ import {
 } from '../dto/list-agent-credentials.dto';
 import { RevokeAgentCredentialParamsDto } from '../dto/revoke-agent-credential.dto';
 import { AgentCredentialsService } from '../services/agent-credentials.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * Machine tokens for an agent.
@@ -54,6 +55,7 @@ export class AgentCredentialsController {
   // not be able to enumerate. An agent reads its own binding through
   // `GET /agents/me/delegate`.
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
   @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Credentials for one agent, newest first' })
   @ApiCursorPage(AgentCredentialDto)

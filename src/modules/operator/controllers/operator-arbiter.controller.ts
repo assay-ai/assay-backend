@@ -33,6 +33,7 @@ import { OperatorSession } from '../ports/operator-session.port';
 import { isApprovalQueued } from '../services/operator-approval.service';
 import { OperatorArbiterService } from '../services/operator-arbiter.service';
 import { answerOrQueued } from './approval-response';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The arbiter page (assay-evm D-19): the records disputed on chain, and the
@@ -53,12 +54,14 @@ export class OperatorArbiterController {
   ) {}
 
   @Get('terms')
+  @TenantCache({ ttl: 300, vary: 'operator', epochs: ['operator'], singleFlight: true })
   @ApiOperation({ summary: 'The Config’s arbiter, admin, pause flag and slash delay, read live' })
   async terms(@Query() query: ArbiterTermsQueryDto) {
     return this.disputes.chainTerms(query.chainId);
   }
 
   @Get('disputes')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'], singleFlight: true })
   @ApiOperation({ summary: 'Every slash record disputed on chain, oldest dispute first' })
   async disputed() {
     return { items: await this.disputes.disputedOnChain() };
@@ -70,6 +73,7 @@ export class OperatorArbiterController {
    * arbiter cancels it (`superseded/cancel-intent`).
    */
   @Get('superseded')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'], singleFlight: true })
   @ApiOperation({ summary: 'Superseded earlier-epoch slash records still standing on chain' })
   async superseded() {
     return { items: await this.disputes.supersededOnChain() };

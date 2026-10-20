@@ -13,6 +13,7 @@ import {
   ListCallDisputesQueryDto,
 } from '../dto/call-dispute.dto';
 import { CallDisputeService } from '../services/call-dispute.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `POST /api/v1/call-disputes`, `GET /api/v1/call-disputes`,
@@ -54,6 +55,7 @@ export class CallDisputesController {
   }
 
   @Get()
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'This organization’s call disputes, newest first' })
   @ApiCursorPage(CallDisputeDto)
   async list(
@@ -64,6 +66,7 @@ export class CallDisputesController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'One call dispute, with its captured evidence' })
   @ApiResponse({ status: 200, type: CallDisputeDetailDto })
   @ApiResponse({ status: 404, description: 'No such dispute in this organization' })

@@ -9,6 +9,7 @@ import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { GetToolCallParamsDto } from '../dto/get-tool-call.dto';
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
 import { ToolCallsService } from '../services/tool-calls.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The call list every buyer screen opens with.
@@ -30,6 +31,7 @@ export class ToolCallsController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money', 'disputes'] })
   @ApiOperation({
     summary:
       'Tool calls, newest first — filterable by status, tool, provider, verdict, and calls ' +

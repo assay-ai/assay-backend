@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { readEpoch } from '@shared/cache/redis-cache/epoch-counter';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 
 /**
@@ -27,6 +28,7 @@ export class AccessEpochService {
   constructor(
     private readonly cache: CacheService,
     @Optional() private readonly sessions: SessionEvictions | null = null,
+    @Optional() private readonly tenantEpochs: TenantEpochService | null = null,
   ) {}
 
   /** The organization's current epoch, or `null` when it cannot be read. */
@@ -63,6 +65,9 @@ export class AccessEpochService {
   }
 
   async bumpShared(): Promise<void> {
+    // The REST reads that show shared state (toolset entries, an agent's
+    // access and servers) are keyed on this too.
+    await this.tenantEpochs?.bump(null, 'shared');
     try {
       await this.cache.getRedisClient().incr(SHARED_EPOCH_KEY);
     } catch (error) {
@@ -77,6 +82,9 @@ export class AccessEpochService {
     // A bump follows a write about this organization's access or credentials
     // (a revocation among them): cached sessions go too, here and elsewhere.
     await this.sessions?.evictOrganization(organizationId);
+    // The REST reads of the same access (toolsets, agents, credentials,
+    // servers) miss as well.
+    await this.tenantEpochs?.bump(organizationId, 'toolsets', 'agents');
     try {
       await this.cache.getRedisClient().incr(epochKey(organizationId));
     } catch (error) {

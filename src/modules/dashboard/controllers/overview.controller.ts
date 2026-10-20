@@ -6,6 +6,7 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import { OverviewQueryDto, OverviewResponseDto } from '../dto/overview.dto';
 import { OverviewService } from '../services/overview.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/overview` — the buyer Overview in one read. See
@@ -24,6 +25,7 @@ export class OverviewController {
   constructor(private readonly overview: OverviewService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money', 'notifications'], singleFlight: true })
   @ApiOperation({
     summary: 'Balances, holds, withheld, summaries, the 7-day chart, recent calls and alerts',
   })

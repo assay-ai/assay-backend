@@ -19,6 +19,8 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { SingleFlightService } from '@shared/services/single-flight.service';
 import { SingleFlightInterceptor } from '@shared/interceptors/single-flight.interceptor';
 import { StructuredLogger } from '@shared/observability';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
+import { TenantWriteEpochInterceptor } from '@shared/interceptors/tenant-write-epoch.interceptor';
 
 async function bootstrapApi() {
   const app = await NestFactory.create<NestExpressApplication>(AppApiModule, {
@@ -120,8 +122,16 @@ async function bootstrapApi() {
     new LoggingInterceptor(),
     new TransformInterceptor(reflector),
     new CacheHeaderInterceptor(reflector, configServiceInstance),
+    // After every signed-in write, the caller's cached reads miss (`@TenantCache`).
+    new TenantWriteEpochInterceptor(reflector, app.get(TenantEpochService)),
     new SingleFlightInterceptor(reflector, app.get(SingleFlightService)),
-    new HttpCacheInterceptor(app.get(CacheService), reflector, configServiceInstance),
+    new HttpCacheInterceptor(
+      app.get(CacheService),
+      reflector,
+      configServiceInstance,
+      app.get(TenantEpochService),
+      app.get(SingleFlightService),
+    ),
   );
 
   // Swagger

@@ -6,6 +6,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { GetWithheldQueryDto, GetWithheldResponseDto } from '../dto/get-withheld.dto';
 import { BalancesService } from '../services/balances.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/withheld` — the `withheld` aggregate on its own,
@@ -24,6 +25,7 @@ export class WithheldController {
   constructor(private readonly balances: BalancesService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'], singleFlight: true })
   @ApiOperation({
     summary: 'The `withheld` aggregate — call count, decomposed by terminal state',
   })

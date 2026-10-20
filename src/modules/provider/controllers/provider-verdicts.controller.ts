@@ -14,6 +14,7 @@ import {
   ProviderVerdictListItemDto,
 } from '../dto/provider-verdict.dto';
 import { ProviderVerdictService } from '../services/provider-verdict.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /providers/me/verdicts`, `GET /providers/me/verdicts/:id`, and
@@ -65,6 +66,7 @@ export class ProviderVerdictsController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'] })
   @ApiOperation({
     summary: 'The verdict feed for calls this provider served, newest first',
   })
@@ -78,6 +80,7 @@ export class ProviderVerdictsController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'] })
   @ApiOperation({
     summary:
       'The verdict decomposition and production consequence for one call this provider ' +
