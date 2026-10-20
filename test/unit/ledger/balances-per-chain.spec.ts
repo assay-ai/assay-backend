@@ -72,10 +72,10 @@ async function buildBalances(rows: readonly Row[]): Promise<GetBalancesResponseD
   } as unknown as LedgerService;
 
   const withheld = {
-    reconcile: jest
+    reconcileAssets: jest
       .fn()
-      .mockImplementation((_org: string, asset: string) =>
-        Promise.resolve(emptyReconciliation(asset)),
+      .mockImplementation((_org: string, assets: { asset: string }[]) =>
+        Promise.resolve(assets.map(({ asset }) => emptyReconciliation(asset))),
       ),
   } as unknown as LedgerWithheldService;
 
