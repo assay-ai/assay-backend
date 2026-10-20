@@ -7,6 +7,7 @@ import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/aut
 
 import { ClaimHandleBodyDto, OrgHandleDto } from '../dto/handle.dto';
 import { HandlesService, OrgHandleView } from '../services/handles.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /** `/org/handle` — the organization's public name (design spec §7.1). */
 @ApiTags('Toolsets')
@@ -17,6 +18,7 @@ export class HandlesController {
   constructor(private readonly handles: HandlesService) {}
 
   @Get()
+  @TenantCache({ ttl: 60, vary: 'org', epochs: ['toolsets'] })
   @ApiOperation({ summary: "The organization's public name" })
   @ApiResponse({ status: 200, type: OrgHandleDto })
   async get(@CurrentSession() session: McpSession): Promise<OrgHandleDto> {

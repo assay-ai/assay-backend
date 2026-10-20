@@ -1,6 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
+import {
+  ORGANIZATION_EPOCH_SCOPES,
+  TenantEpochService,
+} from '@shared/cache/redis-cache/tenant-epoch.service';
 
 import { OverrideLogEntryEntity } from '@database/postgres/entities/override-log-entry.entity';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
@@ -111,6 +115,7 @@ export class OverrideLogService {
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     private readonly entries: OverrideLogEntryRepository,
     private readonly approvals: OperatorApprovalRepository,
+    @Optional() private readonly epochs?: TenantEpochService,
   ) {}
 
   /**
@@ -163,6 +168,14 @@ export class OverrideLogService {
       });
 
       await queryRunner.commitTransaction();
+      // Every operator mutation lands here: the console's cached lists, what
+      // others see of shared state, and the target organization's own reads
+      // miss from now on. A mutation that touches another organization
+      // registers it with `bumpAfterCommit` on this transaction.
+      await this.epochs?.bump(null, 'operator', 'shared');
+      if (context.organizationId) {
+        await this.epochs?.bump(context.organizationId, ...ORGANIZATION_EPOCH_SCOPES);
+      }
       return result.value;
     } catch (error) {
       await queryRunner.rollbackTransaction();

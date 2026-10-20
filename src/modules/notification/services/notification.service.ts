@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
 import { NotificationChannelRepository } from '@database/postgres/repositories/notification-channel.repository';
@@ -7,6 +7,7 @@ import { NotificationDeliveryRepository } from '@database/postgres/repositories/
 import { NotificationPreferenceRepository } from '@database/postgres/repositories/notification-preference.repository';
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 
 import {
   NOTIFICATION_CATALOGUE,
@@ -67,6 +68,7 @@ export class NotificationService implements NotificationPort {
     private readonly deliveries: NotificationDeliveryRepository,
     private readonly publisher: NotificationDeliverPublisher,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
+    @Optional() private readonly epochs?: TenantEpochService,
   ) {}
 
   async notify(request: NotificationRequest): Promise<NotificationOutcome> {
@@ -152,6 +154,8 @@ export class NotificationService implements NotificationPort {
     // key's first spend) costs the security signal this event exists for.
     pending.claim = null;
     pending.recorded = true;
+    // The inbox, the badge and `/me/status` show the new row at once.
+    await this.epochs?.bump(request.organizationId, 'notifications');
 
     // Step 5 — one delivery row per catalogue channel. Ids are assigned here,
     // before the insert, so step 6 can enqueue against them without a second

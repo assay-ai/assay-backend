@@ -13,6 +13,7 @@ import {
   DelegateChallengeResponseDto,
 } from '../dto/agent-delegate.dto';
 import { AgentDelegateService } from '../services/agent-delegate.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `/agents/me/delegate` — the calling AGENT credential binds the delegate key
@@ -28,6 +29,7 @@ export class AgentDelegateController {
   constructor(private readonly delegates: AgentDelegateService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['money', 'agents'], singleFlight: true })
   @ApiOperation({
     summary: "This credential's bound delegate key, if any, and its on-chain paid-call status",
   })

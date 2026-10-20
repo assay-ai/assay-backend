@@ -14,6 +14,7 @@ import {
   SlaWindowSummaryDto,
 } from '../dto/get-sla-windows.dto';
 import { ProviderSlaWindowsService } from '../services/provider-sla-windows.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `sla_windows` / `sla_window_calls` — the provider's own read side. Three
@@ -29,6 +30,7 @@ export class ProviderSlaWindowsController {
   constructor(private readonly slaWindows: ProviderSlaWindowsService) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: 'This provider’s SLA windows, newest first by default' })
   @ApiCursorPage(SlaWindowSummaryDto)
   async list(
@@ -39,6 +41,7 @@ export class ProviderSlaWindowsController {
   }
 
   @Get(':windowId')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: 'One window’s full live position' })
   @ApiResponse({ status: 200, type: GetSlaWindowResponseDto })
   @ApiResponse({ status: 404, description: 'No window of yours with this id' })

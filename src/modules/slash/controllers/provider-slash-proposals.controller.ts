@@ -12,6 +12,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { SlashProposalCaseDto, SlashProposalIdParamsDto } from '../dto/slash-proposal.dto';
 import { SlashCaseService } from '../services/slash-case.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * The provider's own view of a penalty proposed against them: the case
@@ -26,6 +27,8 @@ import { SlashProposalService } from '../services/slash-proposal.service';
 @ApiTags('Provider')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('providers/me/slash-proposals')
 export class ProviderSlashProposalsController {
   constructor(

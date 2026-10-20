@@ -7,6 +7,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { ListProviderPayoutsQueryDto, ProviderPayoutDto } from '../dto/get-provider-payouts.dto';
 import { ProviderPayoutsService } from '../services/provider-payouts.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 @ApiTags('Provider')
 @ApiBearerAuth()
@@ -16,6 +17,7 @@ export class ProviderPayoutsController {
   constructor(private readonly payouts: ProviderPayoutsService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({ summary: 'Payout batches, newest first' })
   @ApiCursorPage(ProviderPayoutDto)
   async list(

@@ -41,6 +41,7 @@ import { ToolsetStatsService } from '@modules/toolset/services/toolset-stats.ser
 import { ToolsetsService } from '@modules/toolset/services/toolsets.service';
 import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 
 export interface ToolsetTestContextOptions {
   readonly dataSource: DataSource;
@@ -50,13 +51,19 @@ export interface ToolsetTestContextOptions {
   readonly chainId: string;
   readonly notifications?: NotificationPort;
   readonly clock?: ToolsetClock;
+  /** The REST read cache's epochs, bumped with every access epoch. */
+  readonly tenantEpochs?: TenantEpochService;
 }
 
 /** Every toolset service, wired the way `ToolsetModule` wires them, on a real database and Redis. */
 export function toolsetTestContext(options: ToolsetTestContextOptions) {
   const { dataSource, host } = options;
   const clock = options.clock;
-  const epochs = new AccessEpochService(new CacheService(options.redis));
+  const epochs = new AccessEpochService(
+    new CacheService(options.redis),
+    null,
+    options.tenantEpochs ?? null,
+  );
   const toolsets = new ToolsetRepository(dataSource);
   const entries = new ToolsetEntryRepository(dataSource);
   const tools = new ToolRepository(dataSource);

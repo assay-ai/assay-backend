@@ -17,6 +17,7 @@ import {
   ToolRequestIdParamsDto,
 } from '../dto/tool-request.dto';
 import { ToolRequestQueueService } from '../services/operator-tool-request-queue.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The operator side of the tool request queue.
@@ -39,6 +40,7 @@ export class OperatorToolRequestsController {
   constructor(private readonly queueService: ToolRequestQueueService) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'] })
   @ApiOperation({
     summary:
       'The queue: everything unanswered, oldest due date first; `?status=` lists requests in ' +

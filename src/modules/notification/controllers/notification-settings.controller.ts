@@ -17,6 +17,7 @@ import {
 } from '../dto/notification-preference.dto';
 import { NotificationChannel } from '../ports/notification.port';
 import { NotificationSettingsService } from '../services/notification-settings.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * Where an organization sees and edits its own
@@ -34,6 +35,7 @@ export class NotificationSettingsController {
   constructor(private readonly settings: NotificationSettingsService) {}
 
   @Get('notification-channels')
+  @TenantCache({ ttl: 60, vary: 'org', epochs: ['notifications'] })
   @ApiOperation({ summary: "An organization's configured notification destinations" })
   @ApiResponse({ status: 200, type: [NotificationChannelDto] })
   async listChannels(@CurrentSession() session: McpSession): Promise<NotificationChannelDto[]> {
@@ -76,6 +78,7 @@ export class NotificationSettingsController {
   }
 
   @Get('notification-preferences')
+  @TenantCache({ ttl: 60, vary: 'org', epochs: ['notifications'] })
   @ApiOperation({ summary: 'Per-event opt-outs; absence means the catalogue default' })
   @ApiResponse({ status: 200, type: [NotificationPreferenceDto] })
   async listPreferences(

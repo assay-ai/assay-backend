@@ -7,6 +7,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { HoldDto, ListHoldsQueryDto } from '../dto/list-holds.dto';
 import { HoldsService } from '../services/holds.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/holds` — enumerated holds, `OPEN` by default.
@@ -23,6 +24,7 @@ export class HoldsController {
   constructor(private readonly holds: HoldsService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'] })
   @ApiOperation({ summary: 'Holds, OPEN by default, newest first' })
   @ApiCursorPage(HoldDto)
   async list(

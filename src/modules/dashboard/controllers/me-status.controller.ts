@@ -8,6 +8,7 @@ import { BuyerDebtService } from '@modules/payment/services/buyer-debt.service';
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import { MeStatusResponseDto } from '../dto/me-status.dto';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/me/status` — what the buyer shell polls every minute
@@ -32,6 +33,13 @@ export class MeStatusController {
   ) {}
 
   @Get()
+  @TenantCache({
+    ttl: 5,
+    vary: 'agent',
+    epochs: ['money', 'notifications'],
+    // A part that could not be read answers null: never kept for the next poll.
+    cacheIf: (body) => Object.values(body as object).every((part) => part !== null),
+  })
   @ApiOperation({ summary: 'Block status, unread alert count and buyer debts, in one read' })
   @ApiResponse({ status: 200, type: MeStatusResponseDto })
   async get(@CurrentSession() session: McpSession): Promise<MeStatusResponseDto> {
