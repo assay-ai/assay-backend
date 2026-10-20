@@ -753,6 +753,8 @@ export class FakeEscrowSeqs {
   async wasIssued(_organizationId: string, _account: AccountId, seq: bigint): Promise<boolean> {
     return seq >= 1n && seq < this.next;
   }
+
+  async recordUnfunded(): Promise<void> {}
 }
 
 /** What a voucher "signature" is in these specs: a statement of who signed. */

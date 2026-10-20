@@ -281,3 +281,46 @@ describe('regression: seq-gap lockout (review S2-2)', () => {
     });
   });
 });
+
+describe('EscrowSeqService.recordUnfunded', () => {
+  const EVM_ACCOUNT = toAccountId(
+    CHAIN_IDS.ROBINHOOD_TESTNET,
+    '0x18103e1D79257c695B2FBbd4b346CD2Ba7927296',
+  );
+  const row = (accountId: string) => ({
+    organizationId: ORGANIZATION_ID,
+    accountId,
+    assetId: 'asset',
+    escrowAccountId: ESCROW_ACCOUNT_ID,
+    escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+  });
+
+  function build(upserted: object | null) {
+    const escrows = { upsertOpened: jest.fn().mockResolvedValue(upserted) };
+    const cache = { get: jest.fn(), set: jest.fn() };
+    return { escrows, service: new EscrowSeqService(escrows as never, cache as never, noBlocks()) };
+  }
+
+  it('eip155: writes the mirror row with no transaction reference', async () => {
+    const { escrows, service } = build({ id: 'row-1' });
+    await service.recordUnfunded(row(EVM_ACCOUNT));
+    expect(escrows.upsertOpened).toHaveBeenCalledWith({ ...row(EVM_ACCOUNT), openedTxRef: null });
+  });
+
+  it('refuses an account another organization already holds', async () => {
+    const { service } = build(null);
+    await expectErrorCodeAsync(
+      () => service.recordUnfunded(row(EVM_ACCOUNT)),
+      PaymentErrorCode.PAYMENT_ESCROW_ACCOUNT_CLAIMED,
+    );
+  });
+
+  it('never on Solana, where opening is a transaction the platform pays for', async () => {
+    const { escrows, service } = build({ id: 'row-1' });
+    await expectErrorCodeAsync(
+      () => service.recordUnfunded(row(ACCOUNT)),
+      PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN,
+    );
+    expect(escrows.upsertOpened).not.toHaveBeenCalled();
+  });
+});
