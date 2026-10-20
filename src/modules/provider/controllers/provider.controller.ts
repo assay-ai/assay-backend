@@ -21,6 +21,7 @@ import {
 import { ProviderEarningsService } from '../services/provider-earnings.service';
 import { ProviderProfileService } from '../services/provider-profile.service';
 import { ProviderStakeService } from '../services/provider-stake.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/providers/me` and its report sub-resources.
@@ -43,6 +44,7 @@ export class ProviderController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: "The calling organization's provider record: id, status, tier, stats" })
   @ApiResponse({ status: 200, type: GetProviderMeResponseDto })
   @ApiResponse({ status: 404, description: 'This organization has no provider record' })
@@ -51,6 +53,7 @@ export class ProviderController {
   }
 
   @Get('earnings')
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({ summary: 'Earned vs platform fee vs withheld, grouped by day or by tool' })
   @ApiResponse({ status: 200, type: GetProviderEarningsResponseDto })
   async getEarnings(
@@ -61,6 +64,7 @@ export class ProviderController {
   }
 
   @Get('stake')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({
     summary:
       'Capital: stake, unbonding, on-chain exposure, the requirement itemised per ' +

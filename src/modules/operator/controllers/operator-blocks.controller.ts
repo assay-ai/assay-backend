@@ -30,6 +30,7 @@ import {
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorAccountBlockService } from '../services/operator-account-block.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The account blocklist. `A-9` blocks, `A-10` lifts.
@@ -49,6 +50,7 @@ export class OperatorBlocksController {
   constructor(private readonly blocks: OperatorAccountBlockService) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'] })
   @ApiOperation({ summary: 'Blocks, newest first' })
   @ApiCursorPage(AccountBlockDto)
   async list(@Query() query: ListAccountBlocksQueryDto): Promise<CursorPageDto<AccountBlockDto>> {

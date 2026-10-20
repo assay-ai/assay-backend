@@ -10,6 +10,7 @@ import {
 } from '../dto/get-provider-registration.dto';
 import { RegisterProviderBodyDto, RegisterProviderResponseDto } from '../dto/register-provider.dto';
 import { ProviderRegistrationService } from '../services/provider-registration.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `POST /providers`, `GET /providers/me/registration`,
@@ -50,6 +51,7 @@ export class ProviderRegistrationController {
   }
 
   @Get('me/registration')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'] })
   @ApiOperation({
     summary: 'The onboarding state frame pM65r renders: the row, the four steps, terms, egress IPs',
   })

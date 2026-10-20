@@ -36,6 +36,7 @@ import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorModerationService } from '../services/operator-moderation.service';
 import { answerOrQueued } from './approval-response';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * Toolset and public-name moderation (design spec §7.9 "Operator", FR-15,
@@ -177,6 +178,7 @@ export class OperatorModerationController {
   }
 
   @Get('cutoffs')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator', 'shared'] })
   @ApiOperation({
     summary:
       'Delists and takedowns, newest first, with each target’s name; `pending` = still to ' +
@@ -231,6 +233,7 @@ export class OperatorModerationController {
   }
 
   @Get('reports')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'] })
   @ApiOperation({ summary: 'Reports, newest first; `pending` = open only' })
   @ApiResponse({ status: 200, type: [OperatorReportDto] })
   async reports(@Query() query: ListModerationQueryDto): Promise<OperatorReportDto[]> {

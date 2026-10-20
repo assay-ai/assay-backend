@@ -33,6 +33,7 @@ import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorContractsService } from '../services/operator-contracts.service';
 import { answerOrQueued } from './approval-response';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 const DRAFT_EXEMPTION =
   'drafting a contract serves nothing: only publishing (P-10) reaches traffic, and it is two-person';
@@ -51,6 +52,7 @@ export class OperatorContractsController {
   constructor(private readonly contracts: OperatorContractsService) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator', 'shared'], singleFlight: true })
   @ApiOperation({ summary: 'Every tool, drafts included, with its current version' })
   @ApiResponse({ status: 200, type: OperatorToolListDto })
   async list(): Promise<OperatorToolListDto> {

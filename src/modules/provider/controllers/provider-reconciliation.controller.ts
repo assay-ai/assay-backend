@@ -9,6 +9,7 @@ import {
   GetProviderReconciliationResponseDto,
 } from '../dto/provider-reconciliation.dto';
 import { ProviderReconciliationService } from '../services/provider-reconciliation.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /providers/me/reconciliation`. Separate controller from
@@ -24,6 +25,7 @@ export class ProviderReconciliationController {
   constructor(private readonly reconciliation: ProviderReconciliationService) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({
     summary:
       'Why we credited you less than you served: class breakdown, gross/take/net and the ' +

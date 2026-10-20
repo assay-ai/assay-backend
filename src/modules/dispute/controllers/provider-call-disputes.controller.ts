@@ -13,6 +13,7 @@ import {
   RespondCallDisputeBodyDto,
 } from '../dto/call-dispute.dto';
 import { CallDisputeService } from '../services/call-dispute.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/providers/me/call-disputes`, `GET …/:id`, `POST …/:id/respond`.
@@ -30,6 +31,7 @@ export class ProviderCallDisputesController {
   constructor(private readonly disputes: CallDisputeService) {}
 
   @Get()
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'Disputes over calls this provider served, newest first' })
   @ApiCursorPage(CallDisputeDto)
   async list(
@@ -40,6 +42,7 @@ export class ProviderCallDisputesController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'One dispute, with the call’s captured evidence' })
   @ApiResponse({ status: 200, type: CallDisputeDetailDto })
   @ApiResponse({ status: 404, description: 'No such dispute over a call this provider served' })
