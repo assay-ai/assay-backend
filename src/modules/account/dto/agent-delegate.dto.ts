@@ -126,7 +126,15 @@ export class AgentDelegateStatusDto extends AgentDelegateBindingDto {
     nullable: true,
     description:
       "The bound delegate key's on-chain authorisation, read from the chain; null when no " +
-      'delegate is bound. The local proxy uses it for display only: its guards read the chain.',
+      'delegate is bound, or when the chain could not be read (then `paidCallsUnknown` is ' +
+      'true). The local proxy uses it for display only: its guards read the chain.',
   })
   paidCalls: PaidCallsDto | null;
+
+  @ApiProperty({
+    description:
+      'True when a delegate is bound but the chain read failed: `paidCalls` is null because ' +
+      'its standing is unknown, not because there is none. The stored binding is still returned.',
+  })
+  paidCallsUnknown: boolean;
 }

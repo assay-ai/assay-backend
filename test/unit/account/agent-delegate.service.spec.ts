@@ -72,8 +72,10 @@ class FakeCredentials {
 class FakeDelegations {
   standing: EscrowDelegationWithUnsettled[] = [];
   readonly reads: AccountId[] = [];
+  failure: Error | null = null;
   async list(payer: AccountId) {
     this.reads.push(payer);
+    if (this.failure) throw this.failure;
     return this.standing;
   }
 }
@@ -194,6 +196,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         delegate: null,
         boundAt: null,
         paidCalls: null,
+        paidCallsUnknown: false,
       });
       expect(delegations.reads).toEqual([]);
     });
@@ -213,8 +216,22 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
           spentInWindow: '1250',
           validUntil: new Date(1_900_000_000 * 1000).toISOString(),
         },
+        paidCallsUnknown: false,
       });
       expect(delegations.reads).toEqual([session().agentAccount]);
+    });
+
+    it('chain read fails → the stored binding still answers, paidCalls null and marked unknown', async () => {
+      bound();
+      delegations.failure = new Error('RPC timeout');
+      expect(await service.current(session({ label: 'research bot' }))).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: 'research bot',
+        delegate: DELEGATE,
+        boundAt: '2026-10-01T00:00:00.000Z',
+        paidCalls: null,
+        paidCallsUnknown: true,
+      });
     });
 
     it('matches the bound key in any spelling of its address', async () => {
