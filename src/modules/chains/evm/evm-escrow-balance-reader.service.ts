@@ -124,8 +124,8 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
   async readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
-    const found = new Map<AccountId, EscrowChainBalance>();
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     if (accounts.length === 0) {
       return found;
     }
@@ -159,11 +159,10 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
         });
       }
 
+      // A never-funded buyer maps to `null`: read, and nothing there. A failed
+      // read throws above, so absence from the map never means "no escrow".
       group.forEach((entry, index) => {
-        const reading = this.toBalance(results[index] as EvmEscrowStruct, asset);
-        if (reading) {
-          found.set(entry.account, reading);
-        }
+        found.set(entry.account, this.toBalance(results[index] as EvmEscrowStruct, asset));
       });
     }
 

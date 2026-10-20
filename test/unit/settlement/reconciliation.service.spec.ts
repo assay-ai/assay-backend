@@ -82,8 +82,10 @@ interface EscrowFixture {
   readonly pending?: bigint;
   readonly seqHigh?: bigint;
   readonly nextSeq?: bigint;
-  /** `true` when the chain read finds no escrow at all — unreadable, not zero. */
+  /** `true` when the chain read failed — unknown, not zero. */
   readonly unreadable?: boolean;
+  /** `true` when the chain read finds no escrow at all (never funded) — a zero. */
+  readonly absent?: boolean;
 }
 
 function fakeBalances(
@@ -149,9 +151,13 @@ function fakeEscrowRepository(escrows: readonly EscrowFixture[], asset: AssetId 
  */
 function fakeEscrowReader(escrows: readonly EscrowFixture[]) {
   const readMany = jest.fn((accounts: readonly AccountId[]) => {
-    const found = new Map<AccountId, EscrowChainBalance>();
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     for (const escrow of escrows) {
       if (escrow.unreadable || !accounts.includes(escrow.account)) {
+        continue;
+      }
+      if (escrow.absent) {
+        found.set(escrow.account, null);
         continue;
       }
       found.set(escrow.account, {
@@ -166,7 +172,7 @@ function fakeEscrowReader(escrows: readonly EscrowFixture[]) {
         observedAt: new Date(),
       });
     }
-    return Promise.resolve(found as ReadonlyMap<AccountId, EscrowChainBalance>);
+    return Promise.resolve(found as ReadonlyMap<AccountId, EscrowChainBalance | null>);
   });
 
   return {
@@ -720,6 +726,43 @@ describe('ReconciliationService — every buyer’s own escrow', () => {
     );
     expect(report.escrowAccounts).toBe(0);
     expect(report.findings[0].details).toMatchObject({ unreadableEscrows: 1 });
+  });
+
+  it('reads a never-funded mirror row (no escrow on chain) as a zero, not as unreadable', async () => {
+    // BUG-A-05 option a records a mirror row on the first rail-B offer for a
+    // buyer who never deposited. The chain has nothing there: a zero balance.
+    const { service } = build({
+      vaultBalance: 4_000_000n,
+      journal: { DEPOSIT: 4_000_000n },
+      snapshot: { available: 4_000_000n },
+      escrows: [
+        { account: BUYER_A, chain: 4_000_000n, mirror: 4_000_000n },
+        { account: BUYER_B, chain: 0n, mirror: 0n, absent: true },
+      ],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).not.toContain(
+      ReconciliationFindingCode.RECONCILIATION_FAILED,
+    );
+    expect(report.severity).toBe(ReconciliationSeverity.OK);
+    expect(report.escrowAccounts).toBe(2);
+    expect(report.escrowTotalAtomic).toBe(4_000_000n);
+  });
+
+  it('still flags a shortfall when the mirror holds money for a buyer with no escrow on chain', async () => {
+    const { service } = build({
+      vaultBalance: 0n,
+      escrows: [{ account: BUYER_A, chain: 0n, openHolds: 1_000_000n, absent: true }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.escrowShortfallAccounts).toBe(1);
+    expect(report.findings.map((finding) => finding.code)).not.toContain(
+      ReconciliationFindingCode.RECONCILIATION_FAILED,
+    );
   });
 
   it('reads escrows a page at a time, not one chain call per buyer', async () => {

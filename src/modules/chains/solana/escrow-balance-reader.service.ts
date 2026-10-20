@@ -194,15 +194,16 @@ export class SolanaEscrowBalanceReader implements EscrowBalanceReaderPort {
    * re-read them one at a time.
    *
    * A batch that fails is skipped rather than thrown, and its accounts are
-   * simply absent from the returned map — the port's contract, and what lets
+   * simply absent from the returned map (an escrow that does not exist maps to
+   * `null`) — the port's contract, and what lets
    * the reconciler report "I could not check these buyers" instead of dying on
    * one of them.
    */
   async readMany(
     accounts: readonly AccountId[],
     asset: AssetId,
-  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
-    const found = new Map<AccountId, EscrowChainBalance>();
+  ): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
+    const found = new Map<AccountId, EscrowChainBalance | null>();
     if (accounts.length === 0) {
       return found;
     }
@@ -251,9 +252,9 @@ export class SolanaEscrowBalanceReader implements EscrowBalanceReaderPort {
             reading,
             observedAt: this.config.now(),
           });
-          if (reading) {
-            found.set(account, reading);
-          }
+          // `null` = no escrow account: read, and a zero. Only a failure is
+          // left out of the map.
+          found.set(account, reading);
         } catch (error) {
           // One buyer's unreadable account must not blind the rest — the same
           // per-buyer isolation the cache gives `read`.

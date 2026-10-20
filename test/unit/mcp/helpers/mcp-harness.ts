@@ -713,7 +713,7 @@ export class FakeEscrowReader implements EscrowBalanceReaderPort {
     };
   }
 
-  async readMany(): Promise<ReadonlyMap<AccountId, EscrowChainBalance>> {
+  async readMany(): Promise<ReadonlyMap<AccountId, EscrowChainBalance | null>> {
     return new Map();
   }
 
