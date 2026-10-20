@@ -13,7 +13,10 @@ import {
 import { PaymentIntent } from '@modules/payment/ports/payment.types';
 import { PaymentKeyFirstSpendService } from '@modules/payment/services/payment-key-first-spend.service';
 
+import { DataSource } from 'typeorm';
+
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
+import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 
 /**
  * The payment-key notices (spec §7.10 item 6) against Postgres: "first" and
@@ -116,6 +119,56 @@ describe('payment-key notices — first spend and the daily summary', () => {
       const first = await spend('after-unfunded', delegate);
       expect(await firstSpend(port, notices).notifyIfFirst(first)).toBe(true);
       expect(sent).toHaveLength(1);
+    });
+  });
+
+  describe('NotificationRepository.existsWithPayload (the first-spend retry check)', () => {
+    // The payment context migrates only the money tables; this needs the full schema.
+    let full: DataSource;
+    beforeAll(async () => {
+      full = await freshMigratedDatabase('assay_notification_exists_test');
+    }, 300_000);
+    afterAll(async () => {
+      await full?.destroy();
+    });
+
+    it('matches on organization, event and payload containment only', async () => {
+      const repository = new NotificationRepository(full);
+      const organizationId = randomUUID();
+      await repository.insert({
+        id: randomUUID(),
+        organizationId,
+        event: NotificationEvent.PAYMENT_KEY_FIRST_SPEND,
+        severity: 'WARNING',
+        title: 'A payment key made its first paid call',
+        body: 'body',
+        subjectType: null,
+        subjectId: null,
+        payload: { chainId: 'eip155:46630', keyDigest: 'aaaaaaaaaaaaaaaa', keyEnding: 'EF1BEAED' },
+        readAt: null,
+        firstDeliveredAt: null,
+      } as never);
+      const event = NotificationEvent.PAYMENT_KEY_FIRST_SPEND;
+      const key = { chainId: 'eip155:46630', keyDigest: 'aaaaaaaaaaaaaaaa' };
+
+      await expect(repository.existsWithPayload(organizationId, event, key)).resolves.toBe(true);
+      await expect(
+        repository.existsWithPayload(organizationId, event, {
+          ...key,
+          keyDigest: 'bbbbbbbbbbbbbbbb',
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        repository.existsWithPayload(organizationId, event, { ...key, chainId: 'eip155:1' }),
+      ).resolves.toBe(false);
+      await expect(
+        repository.existsWithPayload(
+          organizationId,
+          NotificationEvent.PAYMENT_KEY_DAILY_SUMMARY,
+          key,
+        ),
+      ).resolves.toBe(false);
+      await expect(repository.existsWithPayload(randomUUID(), event, key)).resolves.toBe(false);
     });
   });
 
