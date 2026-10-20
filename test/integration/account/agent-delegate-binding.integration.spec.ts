@@ -208,6 +208,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       delegate: null,
       boundAt: null,
       paidCalls: null,
+      paidCallsUnknown: false,
     });
     // No key bound, no chain read.
     expect(chain.reads).toHaveLength(before);
