@@ -17,6 +17,7 @@ import { AppRoleModule } from '@shared/app-role/app-role.module';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { RedisAdapterModule } from '@shared/cache/redis-adapter/redis-adapter.module';
 import { HttpCacheModule } from '@shared/cache/http-cache/http-cache.module';
+import { UserRateLimitModule } from '@shared/rate-limit/user-rate-limit.module';
 import { BullBoardConfigModule } from '../../bull-board/bull-board.module';
 
 // Domain Modules
@@ -111,6 +112,9 @@ import { NetworkModule } from '@shared/network/network.module';
     RedisCacheModule,
     RedisAdapterModule,
     HttpCacheModule,
+    // The per-caller windows of every dashboard route, one global interceptor
+    // (`user-rate-limit.config.ts` says which route counts against which).
+    UserRateLimitModule,
     // `ALERT_PORT` — global, so a domain never has to remember to import it
     AlertingModule,
     // WebSocket Emitter (for publishing events from API)
