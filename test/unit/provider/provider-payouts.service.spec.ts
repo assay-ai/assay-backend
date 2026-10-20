@@ -75,6 +75,10 @@ describe('ProviderPayoutsService — rail-B redemptions are payments (D18)', () 
 
     expect(redemptionFake.havings[0].sql).toContain('MIN(entry.createdAt) >= :from');
     expect(redemptionFake.havings[0].sql).toContain('MIN(entry.createdAt) < :to');
+    // `from` is also a whole-transaction pre-filter on the rows; `to` is not.
+    const wheres = redemptionFake.wheres.map((w) => w.sql).join(' | ');
+    expect(wheres).toContain('entry.created_at >= :fromBound::timestamptz AND NOT EXISTS (');
+    expect(wheres).not.toContain(':to');
   });
 
   it('refuses an empty or inverted window', async () => {
