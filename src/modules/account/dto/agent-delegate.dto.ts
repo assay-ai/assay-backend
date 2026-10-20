@@ -66,6 +66,16 @@ export class AgentDelegateBindingDto {
   boundAt: string | null;
 }
 
+/**
+ * `GET /agents/me/delegate/status` — the binding alone, read from the
+ * credential's row: `GET /agents/me/delegate` without `paidCalls`, so a poll
+ * costs one row and no chain read.
+ */
+export class AgentDelegateBindingStatusDto extends AgentDelegateBindingDto {
+  @ApiProperty({ description: 'A delegate key is bound to this credential (`delegate` is set).' })
+  bound: boolean;
+}
+
 /** Where the bound delegate key stands on chain (spec §7.10 item 1, R-PAY-3). */
 export enum PaidCallsStatus {
   /** The key is bound here, but the payer has no standing authorisation of it on chain. */

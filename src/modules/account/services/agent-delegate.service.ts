@@ -20,6 +20,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import {
   AgentDelegateBindingDto,
+  AgentDelegateBindingStatusDto,
   AgentDelegateStatusDto,
   DelegateChallengeResponseDto,
   PaidCallsDto,
@@ -114,6 +115,27 @@ export class AgentDelegateService {
       boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
       paidCalls,
       paidCallsUnknown,
+    };
+  }
+
+  /**
+   * The binding as `current` reads it, without `paidCalls`: one row, no chain
+   * read, for a client that polls "is a key bound here yet". Whether the payer
+   * has authorised the key is chain state and stays on `current`.
+   */
+  async bindingStatus(session: McpSession): Promise<AgentDelegateBindingStatusDto> {
+    this.assertAgent(session);
+    const row = await this.credentials.findOneBy({
+      organizationId: session.organizationId,
+      id: session.credentialId,
+    });
+    const delegate = (row?.delegateAccount as AccountId | null | undefined) ?? null;
+    return {
+      credentialId: session.credentialId,
+      agentLabel: session.label ?? null,
+      bound: delegate !== null,
+      delegate,
+      boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
     };
   }
 

@@ -1,5 +1,5 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
@@ -33,5 +33,16 @@ export class DepositsController {
     @Query() query: ListDepositsQueryDto,
   ): Promise<CursorPageDto<DepositDto>> {
     return this.deposits.list(session.organizationId, query);
+  }
+
+  @Get(':depositId')
+  @ApiOperation({ summary: 'One deposit intent, in the same shape as the list row' })
+  @ApiResponse({ status: 200, description: 'The deposit', type: DepositDto })
+  @ApiResponse({ status: 404, description: 'PAYMENT_DEPOSIT_NOT_FOUND — not in this organization' })
+  async getOne(
+    @CurrentSession() session: McpSession,
+    @Param('depositId', new ParseUUIDPipe()) depositId: string,
+  ): Promise<DepositDto> {
+    return this.deposits.getOne(session.organizationId, depositId);
   }
 }

@@ -34,6 +34,7 @@ import {
 } from '../dto/create-agent-credential.dto';
 import {
   AgentCredentialDto,
+  AgentCredentialsPage,
   ListAgentCredentialsQueryDto,
 } from '../dto/list-agent-credentials.dto';
 import { AccountErrors } from '../errors/account.errors';
@@ -104,6 +105,77 @@ export class AgentCredentialsService {
     const page = await paginate(qb, query, CREDENTIALS_LIST);
     const clients = await this.clientsOf(page.items);
     return page.map((row) => this.toDto(row, clients));
+  }
+
+  /**
+   * The first page `list` answers for each of `agentIds` (no cursor, no time
+   * window, newest first, `limit` rows), in ONE query for all of them — what
+   * `GET /agents?include=credentials` nests, instead of one
+   * `GET /agents/:agentId/credentials` per agent.
+   *
+   * Ranked in SQL by the same key `paginate` orders by (`created_at DESC,
+   * id DESC`, compared at the column's own microsecond precision), and mapped
+   * through the same `toDto`, so each agent's `items` are that route's items.
+   * An agent with no credential gets an empty page.
+   */
+  async firstPagesFor(
+    organizationId: string,
+    agentIds: readonly string[],
+    limit: number,
+  ): Promise<Map<string, AgentCredentialsPage>> {
+    const pages = new Map<string, AgentCredentialsPage>(
+      agentIds.map((agentId) => [agentId, { items: [], hasMore: false }]),
+    );
+    if (agentIds.length === 0) return pages;
+
+    // `limit + 1` per agent, as `paginate` reads one extra row to know there is more.
+    const rows = await this.credentials
+      .createQueryBuilder('credential')
+      .where('credential.organizationId = :organizationId', { organizationId })
+      .andWhere('credential.agentId IN (:...agentIds)', { agentIds })
+      .andWhere(
+        `credential.id IN (SELECT ranked.id FROM (SELECT c.id, ROW_NUMBER() OVER (` +
+          `PARTITION BY c.agent_id ORDER BY c.created_at DESC, c.id DESC) AS rn ` +
+          `FROM agent_credentials c WHERE c.organization_id = :organizationId ` +
+          `AND c.agent_id IN (:...agentIds)) ranked WHERE ranked.rn <= :rankLimit)`,
+        { rankLimit: limit + 1 },
+      )
+      .orderBy('credential.agent_id', 'ASC')
+      .addOrderBy('credential.created_at', 'DESC')
+      .addOrderBy('credential.id', 'DESC')
+      .getMany();
+
+    const byAgent = new Map<string, AgentCredentialEntity[]>();
+    for (const row of await this.withBufferedLastUse(rows)) {
+      const list = byAgent.get(row.agentId) ?? [];
+      list.push(row);
+      byAgent.set(row.agentId, list);
+    }
+
+    const kept = [...byAgent.values()].flatMap((list) => list.slice(0, limit));
+    const clients = await this.clientsOf(kept);
+    for (const [agentId, list] of byAgent) {
+      pages.set(agentId, {
+        items: list.slice(0, limit).map((row) => this.toDto(row, clients)),
+        hasMore: list.length > limit,
+      });
+    }
+    return pages;
+  }
+
+  /**
+   * THE seam for a buffered `last_used_at`: the one place rows read for
+   * {@link firstPagesFor} get their `lastUsedAt`, so a write-behind buffer
+   * (Redis, flushed on an interval) can overlay its newer values here before
+   * anything reads them — the DTO and every `health` field derive from what
+   * this returns. Today the column is the whole truth, so it returns the rows
+   * as they are. `list` reads the column directly; an overlay must be applied
+   * there too, or the two routes would disagree.
+   */
+  private async withBufferedLastUse(
+    rows: AgentCredentialEntity[],
+  ): Promise<AgentCredentialEntity[]> {
+    return rows;
   }
 
   /**
