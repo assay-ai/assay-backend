@@ -33,13 +33,21 @@ interface Entry {
  * Redis pub/sub, in every other process (`SessionEvictions`); if that message
  * is lost, the TTL is the bound.
  *
- * `generation` moves on every eviction, so a resolve that started before one
- * cannot store what it read afterwards (it may have read the row before the
- * write that evicted).
+ * `generation` is a ticket a resolve takes before it reads: it cannot store
+ * its result if an eviction covering that session (its organization, its
+ * credential, or everything) ran after the ticket, since it may have read the
+ * row before the write that evicted. Tracked per organization and credential,
+ * so an eviction in one organization does not stop caching in the others.
  */
 export class SessionCache {
   private readonly entries = new Map<string, Entry>();
   private evictions = 0;
+  /** The ticket of the last eviction of everything. */
+  private evictedAll = 0;
+  /** `o:<organizationId>` / `c:<credentialId>` → ticket and time of its last eviction. */
+  private readonly evictedScopes = new Map<string, { ticket: number; at: number }>();
+  /** Tickets below this may have lost their scope record to pruning: they never store. */
+  private prunedThrough = 0;
 
   constructor(
     private readonly ttlMs: number = SESSION_CACHE_TTL_MS,
@@ -78,7 +86,7 @@ export class SessionCache {
    * it is already past `notAfter`.
    */
   set(key: string, session: McpSession, notAfter: Date | null, generation: number): void {
-    if (generation !== this.evictions) return;
+    if (this.evictedSince(session, generation)) return;
     const now = this.now();
     const expiresAt = Math.min(now + this.ttlMs, notAfter ? notAfter.getTime() : Infinity);
     if (expiresAt <= now) return;
@@ -93,10 +101,16 @@ export class SessionCache {
   evict(target: SessionEvictionTarget): number {
     this.evictions += 1;
     if ('all' in target) {
+      this.evictedAll = this.evictions;
+      this.evictedScopes.clear();
+      this.prunedThrough = 0;
       const count = this.entries.size;
       this.entries.clear();
       return count;
     }
+    this.recordScope(
+      'organizationId' in target ? `o:${target.organizationId}` : `c:${target.credentialId}`,
+    );
     let count = 0;
     for (const [key, { session }] of this.entries) {
       const matches =
@@ -110,4 +124,33 @@ export class SessionCache {
     }
     return count;
   }
+
+  private evictedSince(session: McpSession, ticket: number): boolean {
+    if (ticket < this.evictedAll || ticket < this.prunedThrough) return true;
+    for (const scope of [`o:${session.organizationId}`, `c:${session.credentialId}`]) {
+      const evicted = this.evictedScopes.get(scope);
+      if (evicted && evicted.ticket > ticket) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Remembers when a scope was last evicted. Bounded: past `maxEntries`
+   * scopes, records older than a minute (no resolve takes that long) are
+   * dropped, and any ticket they could have refused refuses outright.
+   */
+  private recordScope(scope: string): void {
+    const at = this.now();
+    this.evictedScopes.delete(scope);
+    this.evictedScopes.set(scope, { ticket: this.evictions, at });
+    if (this.evictedScopes.size <= this.maxEntries) return;
+    for (const [key, record] of this.evictedScopes) {
+      if (record.at > at - SCOPE_RECORD_MS && this.evictedScopes.size <= this.maxEntries) break;
+      this.evictedScopes.delete(key);
+      this.prunedThrough = Math.max(this.prunedThrough, record.ticket);
+    }
+  }
 }
+
+/** How long an eviction's scope record must outlive any resolve in flight. */
+const SCOPE_RECORD_MS = 60_000;
