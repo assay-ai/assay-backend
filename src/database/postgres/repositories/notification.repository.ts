@@ -22,4 +22,25 @@ export class NotificationRepository extends OrganizationScopedRepository<Notific
   async countUnread(organizationId: string): Promise<number> {
     return this.count({ where: { organizationId, readAt: IsNull() } });
   }
+
+  /**
+   * Whether this organization holds a notification of `event` whose payload
+   * contains `payload` (jsonb `@>`). Served by `idx_notifications_event`.
+   */
+  async existsWithPayload(
+    organizationId: string,
+    event: string,
+    payload: Record<string, string>,
+  ): Promise<boolean> {
+    const row = await this.createQueryBuilder('notification')
+      .select('1', 'one')
+      .where('notification.organizationId = :organizationId', { organizationId })
+      .andWhere('notification.event = :event', { event })
+      .andWhere('notification.payload @> CAST(:payload AS jsonb)', {
+        payload: JSON.stringify(payload),
+      })
+      .limit(1)
+      .getRawOne<{ one: number }>();
+    return row !== undefined && row !== null;
+  }
 }

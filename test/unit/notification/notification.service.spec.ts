@@ -91,6 +91,30 @@ describe('NotificationService — aggregation rules', () => {
     expect(second).toEqual({ deliveredNow: false });
   });
 
+  it('ONCE: a failed write releases the claim, so the next call sends it (not lost for the window)', async () => {
+    const req = request({ event: NotificationEvent.SESSION_EXPIRING, dedupeKey: 'cred-1:T-7' });
+    notifications.insert.mockRejectedValueOnce(new Error('db blip'));
+
+    const failed = await service.notify(req);
+    const retried = await service.notify(req);
+    const third = await service.notify(req);
+
+    expect(failed).toEqual({ deliveredNow: false, recorded: false });
+    expect(retried.recorded).toBe(true);
+    expect(notifications.insert).toHaveBeenCalledTimes(2);
+    expect(third).toEqual({ deliveredNow: false });
+  });
+
+  it('a failure after the row is written keeps the claim (no duplicate row)', async () => {
+    const req = request({ event: NotificationEvent.SESSION_EXPIRING, dedupeKey: 'cred-1:T-7' });
+    deliveries.insert.mockRejectedValueOnce(new Error('db blip'));
+
+    expect(await service.notify(req)).toEqual({ deliveredNow: false, recorded: true });
+    await service.notify(req);
+
+    expect(notifications.insert).toHaveBeenCalledTimes(1);
+  });
+
   it('ONCE treats a different dedupeKey as a different window', async () => {
     await service.notify(
       request({ event: NotificationEvent.SESSION_EXPIRING, dedupeKey: 'cred-1:T-7' }),
@@ -225,7 +249,10 @@ describe('NotificationService — never throws', () => {
   it('does not throw when the repository throws, and claims no delivery', async () => {
     notifications.insert.mockRejectedValue(new Error('db down'));
 
-    await expect(service.notify(request())).resolves.toEqual({ deliveredNow: false });
+    await expect(service.notify(request())).resolves.toEqual({
+      deliveredNow: false,
+      recorded: false,
+    });
   });
 
   it('does not throw when Redis throws, and still sends', async () => {
@@ -233,7 +260,7 @@ describe('NotificationService — never throws', () => {
 
     await expect(
       service.notify(request({ event: NotificationEvent.BALANCE_ZERO, dedupeKey: 'acct-1' })),
-    ).resolves.toEqual({ deliveredNow: true });
+    ).resolves.toEqual({ deliveredNow: true, recorded: true });
 
     expect(notifications.insert).toHaveBeenCalledTimes(1);
   });

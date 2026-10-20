@@ -5,6 +5,7 @@ import type { Redis } from 'ioredis';
 
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { parseAccountId } from '@modules/chains/ports/caip.types';
@@ -64,7 +65,9 @@ function paymentKeyDigest(delegate: string): string {
  * through). The table answers it (no earlier voucher of the
  * key held money), so a lost suppression key cannot turn this into a notice
  * per call; the catalogue's `ONCE` rule, keyed by chain and key, then keeps two
- * concurrent first vouchers to one notice.
+ * concurrent first vouchers to one notice. When an earlier voucher did spend
+ * but no notice of this key was ever written (its send failed), the next
+ * voucher sends it, so a failed send is retried rather than lost for good.
  *
  * Called from the paid path, so `afterAdmitted` never waits and never throws:
  * the call it reports on must not be slowed or failed by the report.
@@ -84,6 +87,8 @@ export class PaymentKeyFirstSpendService {
     private readonly credentials: AgentCredentialRepository,
     private readonly agents: AgentRepository,
     private readonly tools: ToolRepository,
+    // Whether the notice was ever written: "first" alone cannot retry a lost one.
+    private readonly notices: NotificationRepository,
     @Optional() @Inject(REDIS_CACHE_CLIENT) private readonly redis?: Redis | null,
   ) {}
 
@@ -106,16 +111,23 @@ export class PaymentKeyFirstSpendService {
     const delegate = intent.voucherDelegate ?? null;
     if (delegate === null || intent.rail !== PaymentRail.RAIL_B_VOUCHER) return false;
 
-    const marker =
-      `${PAYMENT_KEY_SPENT_MARKER_PREFIX}${intent.organizationId}:${intent.chainId}:` +
-      paymentKeyDigest(delegate);
+    const digest = paymentKeyDigest(delegate);
+    const marker = `${PAYMENT_KEY_SPENT_MARKER_PREFIX}${intent.organizationId}:${intent.chainId}:${digest}`;
     if (await this.hasMarker(marker)) return false;
 
+    // An earlier spend means this is not the first call — but if the notice for
+    // the first one was never written (the send failed), this one sends it.
+    const earlier = await this.intents.hasEarlierDelegateSpend(intent.organizationId, delegate, {
+      id: intent.id,
+      createdAt: intent.createdAt,
+    });
     if (
-      await this.intents.hasEarlierDelegateSpend(intent.organizationId, delegate, {
-        id: intent.id,
-        createdAt: intent.createdAt,
-      })
+      earlier &&
+      (await this.notices.existsWithPayload(
+        intent.organizationId,
+        NotificationEvent.PAYMENT_KEY_FIRST_SPEND,
+        { chainId: intent.chainId, keyDigest: digest },
+      ))
     ) {
       await this.setMarker(marker);
       return false;
@@ -132,13 +144,16 @@ export class PaymentKeyFirstSpendService {
       toolNameOf(this.tools, intent.toolId),
     ]);
 
-    await this.notifications.notify({
+    const outcome = await this.notifications.notify({
       organizationId: intent.organizationId,
       event: NotificationEvent.PAYMENT_KEY_FIRST_SPEND,
       title: 'A payment key made its first paid call',
       body:
         `The payment key ending ${ending}${holder} paid ${amount}` +
-        `${tool ? ` for "${tool}"` : ''}. This is its first paid call. ` +
+        `${tool ? ` for "${tool}"` : ''}. ` +
+        (earlier
+          ? 'It has made paid calls before; this is the first notice about them. '
+          : 'This is its first paid call. ') +
         `If you did not set up paid calls on this computer, revoke the key now.`,
       subjectType: 'credential',
       subjectId: intent.credentialId ?? null,
@@ -147,6 +162,7 @@ export class PaymentKeyFirstSpendService {
         agentId: intent.agentId,
         chainId: intent.chainId,
         keyEnding: ending,
+        keyDigest: digest,
         intentId: intent.id,
         toolId: intent.toolId,
         amount: intent.price.amount,
@@ -155,7 +171,9 @@ export class PaymentKeyFirstSpendService {
       },
       dedupeKey: paymentKeyFirstSpendDedupeKey(intent.chainId, delegate),
     });
-    await this.setMarker(marker);
+    // Not written (the send failed and released its claim): no marker, so the
+    // key's next voucher finds no notice and sends it then.
+    if (outcome.recorded !== false) await this.setMarker(marker);
     return true;
   }
 
