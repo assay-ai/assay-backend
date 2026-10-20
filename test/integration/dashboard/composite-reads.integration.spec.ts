@@ -355,7 +355,10 @@ describe('composite dashboard reads equal the routes they stand for', () => {
         { provide: HoldsService, useValue: holds },
         {
           provide: DepositsService,
-          useValue: new DepositsService(new DepositIntentRepository(dataSource)),
+          useValue: new DepositsService(
+            new DepositIntentRepository(dataSource),
+            new LedgerEntryRepository(dataSource),
+          ),
         },
         { provide: ReceiptSummaryService, useValue: summaries },
         { provide: ReceiptService, useValue: {} },
@@ -965,6 +968,61 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       expect(JSON.stringify(elsewhere.body)).toContain('PAYMENT_DEPOSIT_NOT_FOUND');
       expect((await get(`/deposits/${randomUUID()}`)).status).toBe(404);
       expect((await get('/deposits/not-a-uuid')).status).toBe(400);
+    });
+  });
+
+  describe('deposit finality', () => {
+    // After the composite reads on purpose: it moves money into this payer's
+    // pending and available buckets, which they compare.
+    it('says PENDING while the finality sweep is out, then CONFIRMED or REJECTED', async () => {
+      const settled = async (): Promise<string> => {
+        const txRef = `tx-${randomBytes(8).toString('hex')}`;
+        const [row] = (await dataSource.query(
+          `INSERT INTO deposit_intents (organization_id, status, agent_id, agent_account, asset_id,
+                                        decimals, requested_amount, settled_amount, chain_id,
+                                        chain_tx_ref, expires_at)
+           VALUES ($1, 'SETTLED', $2, $3, $4, 6, 1000000, 1000000, $5, $6,
+                   now() + interval '1 hour')
+           RETURNING id`,
+          [organizationId, agentId, payer, USDC_ASSET, CHAIN, txRef],
+        )) as { id: string }[];
+        await ledgerService.appendNow({
+          organizationId,
+          accountId: payer,
+          entryType: LedgerEntryType.DEPOSIT_PENDING,
+          money: MoneyUtil.of(1_000_000n, USDC_ASSET, USDC_DECIMALS),
+          intentId: row.id,
+          chainTxRef: txRef,
+        });
+        return row.id;
+      };
+      const resolve = (id: string, entryType: LedgerEntryType) =>
+        ledgerService.appendNow({
+          organizationId,
+          accountId: payer,
+          entryType,
+          money: MoneyUtil.of(1_000_000n, USDC_ASSET, USDC_DECIMALS),
+          intentId: id,
+          chainTxRef: `final-${id}`,
+        });
+
+      const confirmed = await settled();
+      const rejected = await settled();
+      expect((await data(`/deposits/${confirmed}`)).finality).toBe('PENDING');
+      expect((await data(`/deposits/${depositId}`)).finality).toBeNull();
+
+      await resolve(confirmed, LedgerEntryType.DEPOSIT_CONFIRM);
+      await resolve(rejected, LedgerEntryType.DEPOSIT_REJECT);
+
+      expect((await data(`/deposits/${confirmed}`)).finality).toBe('CONFIRMED');
+      expect((await data(`/deposits/${rejected}`)).finality).toBe('REJECTED');
+      const listed = await data('/deposits');
+      const byId = Object.fromEntries(listed.items.map((item: any) => [item.id, item.finality]));
+      expect(byId).toMatchObject({
+        [confirmed]: 'CONFIRMED',
+        [rejected]: 'REJECTED',
+        [depositId]: null,
+      });
     });
   });
 
