@@ -4,6 +4,7 @@ import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   ASSAY_APP_SENTENCE,
+  allocateOfferSeq,
   VoucherRequirement,
   checksummedRequirement,
   delegationHint,
@@ -195,6 +196,85 @@ describe('rail-B offer with no escrow — where to fund it', () => {
     expect(escrowNotOpenNotice(other, session(), WEB)).toBe(other);
     const withReason = PaymentErrors.escrowNotOpen({ account: PAYER, reason: 'chain unreachable' });
     expect(escrowNotOpenNotice(withReason, session(), WEB)).toBe(withReason);
+  });
+});
+
+/**
+ * BUG-A-05: a buyer who never deposited must still get PAYMENT_REQUIRED on
+ * eip155, so the agent reaches the one enable-paid link (F4) instead of a
+ * separate funding detour. The row is recorded only where opening costs nothing.
+ */
+describe('rail-B offer seq for a buyer who never deposited', () => {
+  const ASSET = `${EVM}/erc20:0x915e5d10c1b03b4f4c7e1f1d3b2a8c6f7e9d0a1b` as never;
+  const ESCROW = `${EVM}:0x9999999999999999999999999999999999999999` as AccountId;
+
+  function deps(opened: boolean) {
+    const state = { opened };
+    const seqs = {
+      allocate: jest.fn(async () => {
+        if (!state.opened) throw PaymentErrors.escrowNotOpen({ account: PAYER });
+        return { seq: '1', escrowPda: ESCROW, escrowTokenAccount: ESCROW };
+      }),
+      recordUnfunded: jest.fn(async () => {
+        state.opened = true;
+      }),
+    };
+    const escrow = {
+      escrowAddresses: jest.fn(async () => ({ escrowPda: ESCROW, escrowTokenAccount: ESCROW })),
+    };
+    return { seqs, escrow };
+  }
+
+  it('eip155: records the mirror row, then allocates', async () => {
+    const d = deps(false);
+    await expect(allocateOfferSeq(d, session(), ASSET, null)).resolves.toMatchObject({ seq: '1' });
+    expect(d.seqs.recordUnfunded).toHaveBeenCalledWith({
+      organizationId: 'org-1',
+      accountId: PAYER,
+      assetId: ASSET,
+      escrowAccountId: ESCROW,
+      escrowAssetAccountId: ESCROW,
+    });
+    expect(d.seqs.allocate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a buyer with an escrow row: allocates once and records nothing', async () => {
+    const d = deps(true);
+    await allocateOfferSeq(d, session(), ASSET, 4n);
+    expect(d.seqs.allocate).toHaveBeenCalledWith('org-1', PAYER, 4n);
+    expect(d.seqs.recordUnfunded).not.toHaveBeenCalled();
+  });
+
+  it('Solana: the refusal stands and nothing is recorded (opening is a paid transaction)', async () => {
+    const d = deps(false);
+    const solana = session({
+      chainId: CHAIN_IDS.SOLANA_DEVNET,
+      agentAccount:
+        `${CHAIN_IDS.SOLANA_DEVNET}:Agent1111111111111111111111111111111111111` as AccountId,
+    });
+    await expect(allocateOfferSeq(d, solana, ASSET, null)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN,
+    });
+    expect(d.seqs.recordUnfunded).not.toHaveBeenCalled();
+  });
+
+  it('any other refusal (blocked, chain unreadable) passes through and records nothing', async () => {
+    const d = deps(false);
+    const blocked = new Error('blocked');
+    d.seqs.allocate.mockRejectedValueOnce(blocked);
+    await expect(allocateOfferSeq(d, session(), ASSET, null)).rejects.toBe(blocked);
+    const unreadable = PaymentErrors.escrowNotOpen({ account: PAYER, reason: 'rpc down' });
+    d.seqs.allocate.mockRejectedValueOnce(unreadable);
+    await expect(allocateOfferSeq(d, session(), ASSET, null)).rejects.toBe(unreadable);
+    expect(d.seqs.recordUnfunded).not.toHaveBeenCalled();
+  });
+
+  it('an account another organization holds is refused, not adopted', async () => {
+    const d = deps(false);
+    const claimed = PaymentErrors.escrowAccountClaimed({ account: PAYER });
+    d.seqs.recordUnfunded.mockRejectedValueOnce(claimed);
+    await expect(allocateOfferSeq(d, session(), ASSET, null)).rejects.toBe(claimed);
+    expect(d.seqs.allocate).toHaveBeenCalledTimes(1);
   });
 });
 

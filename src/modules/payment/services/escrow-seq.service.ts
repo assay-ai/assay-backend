@@ -5,10 +5,13 @@ import {
 } from '@modules/chains/ports/chain-state-gate.port';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
-import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
+import {
+  BuyerEscrowRepository,
+  OpenedEscrow,
+} from '@database/postgres/repositories/buyer-escrow.repository';
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
-import { AccountId } from '@modules/chains/ports/caip.types';
+import { AccountId, namespaceOf } from '@modules/chains/ports/caip.types';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import {
@@ -151,6 +154,28 @@ export class EscrowSeqService {
       escrowPda: allocated.escrowAccountId,
       escrowTokenAccount: allocated.escrowAssetAccountId,
     };
+  }
+
+  /**
+   * Records the mirror row a first deposit would, for a buyer who has never
+   * deposited, so their first paid call can be offered like any other.
+   *
+   * eip155 only. There is no escrow account to open there: `escrows[buyer]`
+   * reads back as a zero struct until funded and `EvmEscrowOpener` sends no
+   * transaction, so the row is bookkeeping and costs the platform nothing. On
+   * Solana opening one is a transaction the platform pays for, so it stays on
+   * the deposit path. Nothing here makes a call affordable: a voucher is still
+   * redeemed against the chain balance, which is zero until the buyer funds it.
+   */
+  async recordUnfunded(row: Omit<OpenedEscrow, 'openedTxRef'>): Promise<void> {
+    const account = row.accountId as AccountId;
+    if (namespaceOf(account) !== 'eip155') {
+      throw PaymentErrors.escrowNotOpen({ account });
+    }
+    const opened = await this.escrows.upsertOpened({ ...row, openedTxRef: null });
+    if (!opened) {
+      throw PaymentErrors.escrowAccountClaimed({ account });
+    }
   }
 
   /**

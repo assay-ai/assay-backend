@@ -22,7 +22,7 @@ import {
   computeRoutedCallHash,
 } from '@modules/payment/domain/request-hash';
 import { SignedVoucher } from '@modules/payment/ports/voucher.types';
-import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
+import { EscrowSeqService, NextSeq } from '@modules/payment/services/escrow-seq.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import {
   PaymentIntent,
@@ -877,13 +877,16 @@ export class McpToolCallService {
     const { escrowPda } = await this.escrow.escrowAddresses(session.agentAccount, asset);
 
     if (!payment) {
-      const { seq } = await this.seqs
-        .allocate(session.organizationId, session.agentAccount, reading ? reading.seqHigh : null)
-        .catch((error: unknown) => {
-          // A buyer who never deposited has no escrow row to draw a seq from:
-          // say where to open one, or the agent is left at a dead end.
-          throw escrowNotOpenNotice(error, session, this.host?.webAppUrl);
-        });
+      const { seq } = await allocateOfferSeq(
+        { seqs: this.seqs, escrow: this.escrow },
+        session,
+        asset,
+        reading ? reading.seqHigh : null,
+      ).catch((error: unknown) => {
+        // Still no escrow (Solana opens an account on the first deposit): say
+        // where to open one, or the agent is left at a dead end.
+        throw escrowNotOpenNotice(error, session, this.host?.webAppUrl);
+      });
       const requirement: VoucherRequirement = checksummedRequirement({
         rail: 'B',
         scheme: 'voucher',
@@ -2453,6 +2456,52 @@ export const FUND_ESCROW_SENTENCE = ' Add funds to open it, then call again: ';
 /** `{WEB}/funding`, where a first deposit opens the escrow. */
 export function fundingUrl(webAppUrl: string): string {
   return `${webAppUrl}/funding`;
+}
+
+/**
+ * The seq for a rail-B offer. A buyer who never deposited has no escrow row to
+ * draw one from. On eip155 that row is bookkeeping (no account to open), so it
+ * is recorded here and the buyer gets the ordinary PAYMENT_REQUIRED: one link,
+ * where the enable-paid page adds funds and turns paid calls on (F4). Anywhere
+ * else the refusal stands.
+ */
+export async function allocateOfferSeq(
+  deps: {
+    readonly seqs: Pick<EscrowSeqService, 'allocate' | 'recordUnfunded'>;
+    readonly escrow: Pick<EscrowBalanceReaderPort, 'escrowAddresses'>;
+  },
+  session: McpSession,
+  asset: AssetId,
+  chainSeqHigh: bigint | null,
+): Promise<NextSeq> {
+  const allocate = () =>
+    deps.seqs.allocate(session.organizationId, session.agentAccount, chainSeqHigh);
+  try {
+    return await allocate();
+  } catch (error) {
+    if (!isEscrowNotOpen(error) || namespaceOf(session.chainId) !== 'eip155') throw error;
+  }
+  const { escrowPda, escrowTokenAccount } = await deps.escrow.escrowAddresses(
+    session.agentAccount,
+    asset,
+  );
+  await deps.seqs.recordUnfunded({
+    organizationId: session.organizationId,
+    accountId: session.agentAccount,
+    assetId: asset,
+    escrowAccountId: escrowPda,
+    escrowAssetAccountId: escrowTokenAccount,
+  });
+  return allocate();
+}
+
+/** `PAYMENT_ESCROW_NOT_OPEN` as `EscrowSeqService.allocate` throws it: no escrow row yet. */
+function isEscrowNotOpen(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    error.errorCode === PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN &&
+    !error.context?.reason
+  );
 }
 
 /**
