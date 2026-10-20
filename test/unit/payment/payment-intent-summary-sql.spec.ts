@@ -21,6 +21,7 @@ async function renderedSql(
 async function run(
   groupBy: ReceiptsSummaryGroupBy,
   raw: Record<string, string>[] = [],
+  options: { byUtcDay?: boolean } = {},
 ): Promise<{
   sql: string;
   rows: Awaited<ReturnType<PaymentIntentRepository['summarizeReceipts']>>;
@@ -45,14 +46,62 @@ async function run(
     .mockImplementation(((alias: string) =>
       dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
 
-  const rows = await repo.summarizeReceipts('org_1', groupBy, {
-    from: new Date('2026-10-01T00:00:00Z'),
-    to: new Date('2026-10-12T00:00:00Z'),
-  });
+  const rows = await repo.summarizeReceipts(
+    'org_1',
+    groupBy,
+    {
+      from: new Date('2026-10-01T00:00:00Z'),
+      to: new Date('2026-10-12T00:00:00Z'),
+    },
+    undefined,
+    options,
+  );
   return { sql: captured, rows };
 }
 
 describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
+  it('byUtcDay groups by the day bucket as well, and only when asked', async () => {
+    const day = `to_char(("intent"."created_at" AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+    const plain = await run(ReceiptsSummaryGroupBy.TOOL);
+    const daily = await run(ReceiptsSummaryGroupBy.TOOL, [], { byUtcDay: true });
+
+    expect(plain.sql).not.toContain(day);
+    expect(daily.sql).toContain(`${day} AS "day"`);
+    expect(daily.sql).toContain(
+      `GROUP BY "intent"."tool_id", "intent"."asset_id", "intent"."decimals", ${day} ORDER BY`,
+    );
+    // The ORDER BY is the single-day call's, so a day's rows keep its order.
+    expect(daily.sql.slice(daily.sql.indexOf('ORDER BY'))).toBe(
+      plain.sql.slice(plain.sql.indexOf('ORDER BY')),
+    );
+  });
+
+  it('byUtcDay carries each row’s day; without it no row has one', async () => {
+    const raw = [
+      {
+        key: 't',
+        asset: 'a',
+        decimals: '6',
+        calls: '1',
+        listedTotal: '0',
+        chargedTotal: '0',
+        chargedCalls: '1',
+        owedTotal: '0',
+        owedCalls: '0',
+        inProgressTotal: '0',
+        inProgressCalls: '0',
+        withheldTotal: '0',
+        refundedCalls: '0',
+        freeCalls: '1',
+        day: '2026-10-02',
+      },
+    ];
+    expect((await run(ReceiptsSummaryGroupBy.TOOL, raw, { byUtcDay: true })).rows[0].day).toBe(
+      '2026-10-02',
+    );
+    expect((await run(ReceiptsSummaryGroupBy.TOOL, raw)).rows[0]).not.toHaveProperty('day');
+  });
+
   it.each(Object.values(ReceiptsSummaryGroupBy))(
     'leaves no unmapped camelCase property for groupBy=%s',
     async (groupBy) => {

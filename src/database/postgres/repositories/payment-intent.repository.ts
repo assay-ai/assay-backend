@@ -117,6 +117,8 @@ export interface ReceiptsSummaryRow {
   readonly inProgressCalls: number;
   /** Calls listed at zero (free tier). Counted in `calls`, adding nothing to any amount. */
   readonly freeCalls: number;
+  /** The UTC day (`YYYY-MM-DD`), present only when asked for with `byUtcDay`. */
+  readonly day?: string;
 }
 
 /**
@@ -2348,12 +2350,18 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * Server-side on purpose: a browser cannot fetch 15,000 rows to sum them, and
    * neither should this process — the aggregation is the whole point of the
    * query.
+   *
+   * `byUtcDay` also splits every group by the UTC day of `created_at` (the
+   * `day` bucket's own expression), so a window of N days answers N per-day
+   * summaries in one query. Rows keep the ORDER BY of a single-day call, so the
+   * rows of one day, filtered out in order, are exactly that day's answer.
    */
   async summarizeReceipts(
     organizationId: string,
     groupBy: ReceiptsSummaryGroupBy,
     window: Required<PaymentIntentPeriod>,
     assetId?: string,
+    options: { readonly byUtcDay?: boolean } = {},
   ): Promise<ReceiptsSummaryRow[]> {
     const groupExpression = this.summaryGroupExpression(groupBy);
 
@@ -2401,10 +2409,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       qb.andWhere('intent.assetId = :assetId', { assetId });
     }
 
+    qb.groupBy(groupExpression).addGroupBy('intent.assetId').addGroupBy('intent.decimals');
+
+    if (options.byUtcDay) {
+      const dayExpression = this.summaryGroupExpression(ReceiptsSummaryGroupBy.DAY);
+      qb.addSelect(dayExpression, 'day').addGroupBy(dayExpression);
+    }
+
     const rows = await qb
-      .groupBy(groupExpression)
-      .addGroupBy('intent.assetId')
-      .addGroupBy('intent.decimals')
       // Without an ORDER BY, Postgres returns groups in hash order, so a daily
       // series came back shuffled. Every key is a string (an ISO date for
       // `day`), so ascending is chronological for `day` and stable for the rest.
@@ -2425,6 +2437,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         inProgressTotal: string;
         inProgressCalls: string;
         freeCalls: string;
+        day?: string;
       }>();
 
     return rows.map((row) => {
@@ -2451,6 +2464,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         inProgressTotal,
         inProgressCalls,
         freeCalls: Number(row.freeCalls ?? 0),
+        ...(options.byUtcDay ? { day: row.day } : {}),
       };
     });
   }

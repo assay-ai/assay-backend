@@ -347,6 +347,58 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
   });
 
   /** D1-S03: one key, one live credential — across agents and organizations. */
+  describe('GET /agents/me/delegate/status — the binding alone, no chain read', () => {
+    const DELEGATE = `${CHAIN}:${delegateKey.address}`;
+
+    it('is current() without paidCalls, and never reads the chain', async () => {
+      credentials.rows.set('cred-1', {
+        delegateAccount: DELEGATE,
+        delegateBoundAt: new Date('2026-10-01T00:00:00.000Z'),
+      });
+      delegations.standing = [standing(DELEGATE)];
+
+      const status = await service.bindingStatus(session({ label: 'research bot' }));
+      const reads = delegations.reads.length;
+      const binding: Record<string, unknown> = {
+        ...(await service.current(session({ label: 'research bot' }))),
+      };
+      delete binding.paidCalls;
+      delete binding.paidCallsUnknown;
+
+      expect(reads).toBe(0);
+      expect(status).toEqual({ ...binding, bound: true });
+      expect(status).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: 'research bot',
+        bound: true,
+        delegate: DELEGATE,
+        boundAt: '2026-10-01T00:00:00.000Z',
+      });
+    });
+
+    it('says bound: false when no key is bound', async () => {
+      expect(await service.bindingStatus(session())).toEqual({
+        credentialId: 'cred-1',
+        agentLabel: null,
+        bound: false,
+        delegate: null,
+        boundAt: null,
+      });
+    });
+
+    it('refuses a person and a config token, as current() does', async () => {
+      await expect(
+        service.bindingStatus(session({ callerKind: McpCallerKind.HUMAN })),
+      ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
+      await expect(
+        service.bindingStatus(session({ storedCredential: undefined })),
+      ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
+      await expect(
+        service.bindingStatus(session({ paymentsAllowed: false })),
+      ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED' });
+    });
+  });
+
   describe('a key already bound to another credential', () => {
     const delegate = `${CHAIN}:${delegateKey.address}`;
 
