@@ -2,7 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional } from 'class-validator';
 
 import { ListQueryDto } from '@shared/api';
-import { TransformToArray } from '@shared/decorators';
+import { Transform } from 'class-transformer';
 
 import { AgentCredentialsPage } from './list-agent-credentials.dto';
 
@@ -10,6 +10,20 @@ import { AgentCredentialsPage } from './list-agent-credentials.dto';
 export enum AgentListInclude {
   CREDENTIALS = 'credentials',
   HEALTH = 'health',
+}
+
+/**
+ * `include` as a list: repeated (`?include=a&include=b`), comma-separated
+ * (`?include=a,b`) or both at once, trimmed, with empty entries dropped — so
+ * `?include=a,` and `?include=` ask for `a` and for nothing.
+ */
+export function toIncludeList(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parts = (Array.isArray(value) ? value : [value])
+    .flatMap((entry) => String(entry).split(','))
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return parts.length > 0 ? parts : undefined;
 }
 
 /** How many credentials per agent `include` reads: the dashboard's own page size. */
@@ -38,7 +52,7 @@ export class ListAgentsQueryDto extends ListQueryDto {
   })
   @IsOptional()
   @IsEnum(AgentListInclude, { each: true })
-  @TransformToArray()
+  @Transform(({ value }) => toIncludeList(value))
   include?: AgentListInclude[];
 }
 

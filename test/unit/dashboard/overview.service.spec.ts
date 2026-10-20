@@ -156,6 +156,14 @@ describe('OverviewService — each part is its route’s own service call', () =
     }
   });
 
+  it('refuses an anchor Date cannot read with a 400, not a RangeError', async () => {
+    const parts = build();
+    await expect(
+      parts.service.get(ORG, Object.assign(new OverviewQueryDto(), { at: '2026-W43' })),
+    ).rejects.toMatchObject({ errorCode: 'API_INVALID_FILTER' });
+    expect(parts.balances.getBalances).not.toHaveBeenCalled();
+  });
+
   it('fails as a whole when a part fails, as the dashboard’s Promise.all does', async () => {
     const parts = build();
     const refusal = new Error('VERIFICATION_SUMMARY_MULTIPLE_ASSETS');

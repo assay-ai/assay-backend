@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Logger, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { AccountBlockStatusService } from '@modules/account/services/account-block-status.service';
@@ -13,7 +13,8 @@ import { MeStatusResponseDto } from '../dto/me-status.dto';
  * `GET /api/v1/me/status` — what the buyer shell polls every minute
  * (`/account/block-status`, `/notifications/unread-count`, `/escrow/debts`),
  * in one read. Each part is that route's own service call and shape; all three
- * are database or in-memory reads, no chain read.
+ * are database or in-memory reads, no chain read. A part that fails is `null`
+ * and the rest still answer, so the shell degrades as three polls did.
  *
  * `SessionAuthGuard` alone, like all three routes.
  */
@@ -22,6 +23,8 @@ import { MeStatusResponseDto } from '../dto/me-status.dto';
 @UseGuards(SessionAuthGuard)
 @Controller('me/status')
 export class MeStatusController {
+  private readonly logger = new Logger(MeStatusController.name);
+
   constructor(
     private readonly blockStatus: AccountBlockStatusService,
     private readonly notifications: NotificationsService,
@@ -32,15 +35,29 @@ export class MeStatusController {
   @ApiOperation({ summary: 'Block status, unread alert count and buyer debts, in one read' })
   @ApiResponse({ status: 200, type: MeStatusResponseDto })
   async get(@CurrentSession() session: McpSession): Promise<MeStatusResponseDto> {
-    const [unreadCount, debts] = await Promise.all([
-      this.notifications.unreadCount(session.organizationId),
-      this.debts.list(session),
-    ]);
-    return {
-      blockStatus: this.blockStatus.statusOf(session),
-      unreadCount,
+    // Each part on its own: one that fails is `null` and the others still
+    // answer, as three separate polls did — a failed debts read must not take
+    // the bell's count or the block banner down with it.
+    const [blockStatus, unreadCount, debts] = await Promise.all([
+      this.part('blockStatus', async () => this.blockStatus.statusOf(session)),
+      this.part('unreadCount', () => this.notifications.unreadCount(session.organizationId)),
       // `EscrowController.listDebts`' own shape.
-      debts: { account: session.agentAccount, debts },
-    };
+      this.part('debts', async () => ({
+        account: session.agentAccount,
+        debts: await this.debts.list(session),
+      })),
+    ]);
+    return { blockStatus, unreadCount, debts };
+  }
+
+  private async part<T>(name: string, read: () => Promise<T>): Promise<T | null> {
+    try {
+      return await read();
+    } catch (error) {
+      this.logger.warn(
+        `me/status: ${name} could not be read, answering null — ${(error as Error)?.message ?? error}`,
+      );
+      return null;
+    }
   }
 }

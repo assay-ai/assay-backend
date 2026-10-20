@@ -11,6 +11,7 @@ import { ListToolCallsQueryDto } from '@modules/payment/dto/list-tool-calls.dto'
 import { ToolCallsService } from '@modules/payment/services/tool-calls.service';
 import { ReceiptsSummaryGroupBy } from '@modules/verification/dto/get-receipts-summary.dto';
 import { ReceiptSummaryService } from '@modules/verification/services/receipt-summary.service';
+import { ApiErrors } from '@shared/api';
 
 import { OverviewWindow, overviewWindows } from '../domain/overview-windows';
 import { OverviewQueryDto, OverviewResponseDto } from '../dto/overview.dto';
@@ -40,6 +41,11 @@ export class OverviewService {
 
   async get(organizationId: string, query: OverviewQueryDto): Promise<OverviewResponseDto> {
     const at = query.at ? new Date(query.at) : new Date();
+    // Strict ISO 8601 still admits forms `Date` cannot read (`2026-W43`):
+    // refused here, as a 400, rather than as a RangeError from the windows.
+    if (!Number.isFinite(at.getTime())) {
+      throw ApiErrors.invalidFilter({ filter: 'at', value: query.at });
+    }
     const windows = overviewWindows(at);
     const asset = query.asset !== undefined ? { asset: query.asset } : {};
     const summary = (window: OverviewWindow, groupBy: ReceiptsSummaryGroupBy) =>
