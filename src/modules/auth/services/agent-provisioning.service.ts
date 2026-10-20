@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import {
   AgentRepository,
   AgentWithOrganization,
 } from '@database/postgres/repositories/agent.repository';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
+import { LastSeenKind, LastSeenRecorder } from '@shared/last-seen';
 
 import { PRIVY_AUTH_CONFIG, PrivyAuthConfig } from '../domain/privy-auth.config';
 import { PrivyClaims } from '../domain/privy-claims';
@@ -97,6 +98,7 @@ export class AgentProvisioningService {
     private readonly agents: AgentRepository,
     private readonly directory: PrivyUserDirectory,
     @Inject(PRIVY_AUTH_CONFIG) private readonly config: PrivyAuthConfig,
+    @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
   ) {}
 
   /**
@@ -261,9 +263,14 @@ export class AgentProvisioningService {
   /**
    * Fire-and-forget: the login stamp is a dashboard nicety and must never fail
    * a request or add latency to one. Same treatment
-   * `agent_credentials.last_used_at` gets.
+   * `agent_credentials.last_used_at` gets: buffered by `LastSeenRecorder`,
+   * or the direct write it replaces when there is none.
    */
   private stampLogin(agentId: string): void {
+    if (this.lastSeen) {
+      this.lastSeen.record(LastSeenKind.AGENT_LOGIN, agentId);
+      return;
+    }
     void this.agents.stampLogin(agentId, new Date()).catch((error: unknown) => {
       this.logger.debug(`Could not stamp last_login_at for ${agentId}: ${describe(error)}`);
     });

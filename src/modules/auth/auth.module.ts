@@ -2,6 +2,7 @@ import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { OAUTH_SESSION_CONFIG, loadOAuthSessionConfig } from '@modules/oauth/config/oauth.config';
+import { LastSeenModule } from '@shared/last-seen';
 
 import { PRIVY_AUTH_CONFIG, PrivyAuthConfig } from './domain/privy-auth.config';
 import { AgentProvisioningService } from './services/agent-provisioning.service';
@@ -31,7 +32,9 @@ import { PrivyUserDirectory } from './services/privy-user.directory';
  * socket, and therefore the only way the JWKS is fetched.
  */
 @Module({
-  imports: [ConfigModule],
+  // `LastSeenModule`: the login and credential-use stamps, buffered rather
+  // than written on every request.
+  imports: [ConfigModule, LastSeenModule],
   providers: [
     {
       provide: PRIVY_AUTH_CONFIG,

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { DataSource, In, IsNull } from 'typeorm';
@@ -37,6 +37,7 @@ import {
   ListAgentCredentialsQueryDto,
 } from '../dto/list-agent-credentials.dto';
 import { AccountErrors } from '../errors/account.errors';
+import { LastSeenKind, LastSeenRecorder, credentialKey } from '@shared/last-seen';
 
 const CREDENTIALS_LIST: ListSpec = {
   alias: 'credential',
@@ -87,6 +88,7 @@ export class AgentCredentialsService {
     private readonly accessEpoch: AccessEpochService,
     private readonly oauthClients: OAuthClientRepository,
     @Inject(OAUTH_CLIENT_TRUST) private readonly clientTrust: OAuthClientTrust,
+    @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
   ) {}
 
   async list(
@@ -102,8 +104,19 @@ export class AgentCredentialsService {
     applyTimeWindow(qb, query, CREDENTIALS_LIST);
 
     const page = await paginate(qb, query, CREDENTIALS_LIST);
-    const clients = await this.clientsOf(page.items);
-    return page.map((row) => this.toDto(row, clients));
+    // `last_used_at` is buffered (`LastSeenRecorder`): the list, and the
+    // "first call seen" step that polls it, read the latest of the row and
+    // the stamps not yet written.
+    const [clients, pending] = await Promise.all([
+      this.clientsOf(page.items),
+      this.lastSeen?.pending(
+        LastSeenKind.CREDENTIAL_USE,
+        page.items.map((row) => credentialKey(organizationId, row.id)),
+      ) ?? Promise.resolve(new Map<string, Date>()),
+    ]);
+    return page.map((row) =>
+      this.toDto(row, clients, pending.get(credentialKey(organizationId, row.id))),
+    );
   }
 
   /**
@@ -288,6 +301,7 @@ export class AgentCredentialsService {
   private toDto(
     entity: AgentCredentialEntity,
     clients: ReadonlyMap<string, OAuthClientEntity>,
+    used?: Date,
   ): AgentCredentialDto {
     const client =
       entity.issuedVia === CredentialIssuedVia.OAUTH && entity.oauthClientId
@@ -301,7 +315,7 @@ export class AgentCredentialsService {
       oauthClient: client ? credentialClientView(client, this.clientTrust) : null,
       prefix: entity.prefix,
       scopes: entity.scopes,
-      lastUsedAt: entity.lastUsedAt,
+      lastUsedAt: LastSeenRecorder.latest(entity.lastUsedAt, used),
       expiresAt: entity.expiresAt,
       revokedAt: entity.revokedAt,
       rotatedFromId: entity.rotatedFromId,

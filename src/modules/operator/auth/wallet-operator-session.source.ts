@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { LastSeenKind, LastSeenRecorder } from '@shared/last-seen';
 
 import { OperatorErrors } from '../errors/operator.errors';
 import { OperatorSession, OperatorSessionPort } from '../ports/operator-session.port';
@@ -24,6 +25,7 @@ export class WalletOperatorSessionSource implements OperatorSessionPort {
     private readonly store: OperatorSessionStore,
     private readonly directory: OperatorService,
     private readonly operators: OperatorRepository,
+    @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
   ) {}
 
   async resolve(bearerToken: string | null): Promise<OperatorSession> {
@@ -46,9 +48,14 @@ export class WalletOperatorSessionSource implements OperatorSessionPort {
 
   /**
    * Fire-and-forget: `last_seen_at` is observability, not authorization, so a
-   * failed stamp must never fail the request.
+   * failed stamp must never fail the request. Buffered by `LastSeenRecorder`
+   * (one batched write every 30 s), or the direct write when there is none.
    */
   private stampLastSeen(operatorId: string): void {
+    if (this.lastSeen) {
+      this.lastSeen.record(LastSeenKind.OPERATOR_SEEN, operatorId);
+      return;
+    }
     this.operators.update({ id: operatorId }, { lastSeenAt: new Date() }).catch((error) => {
       this.logger.warn(`failed to stamp last_seen_at for operator ${operatorId}: ${error}`);
     });
