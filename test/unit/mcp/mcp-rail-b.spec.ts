@@ -64,6 +64,7 @@ function harness(
     balance?: ReturnType<typeof usdc>;
     pending?: ReturnType<typeof usdc>;
     twoProviders?: boolean;
+    depositCreditsOnSoftConfirmation?: boolean;
   } = {},
 ) {
   const ids = options.twoProviders ? ['provider-a', 'provider-b'] : ['provider-a'];
@@ -76,6 +77,7 @@ function harness(
     invoker,
     balance: options.balance,
     pending: options.pending,
+    depositCreditsOnSoftConfirmation: options.depositCreditsOnSoftConfirmation,
   });
   return { ...built, invoker };
 }
@@ -508,6 +510,26 @@ describe('rail B over MCP', () => {
       expect(message).toMatch(/^Insufficient balance: this call costs \$\d/);
       expect(message).toContain('A deposit of $20.00 is still confirming on chain');
       expect(message).not.toContain(usdc('20').amount);
+    });
+
+    it('promises "within a minute" only on a chain that credits on its first confirmation', async () => {
+      const textFor = async (soft: boolean | undefined) => {
+        const h = harness({
+          balance: usdc('0.01'),
+          pending: usdc('20'),
+          depositCreditsOnSoftConfirmation: soft,
+        });
+        const requirement = await requirementOf(h);
+        const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+        return (outcome as { message: string }).message;
+      };
+
+      expect(await textFor(true)).toContain('usually within a minute');
+      for (const soft of [false, undefined]) {
+        const message = await textFor(soft);
+        expect(message).not.toContain('within a minute');
+        expect(message).toContain('once the chain finalizes it, which can take several minutes');
+      }
     });
   });
 

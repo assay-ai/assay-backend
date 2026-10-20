@@ -171,6 +171,11 @@ export class EvmChainAdapter implements ChainAdapter {
    */
   readonly requiresFeePayer = false;
 
+  /** `EVM_DEPOSIT_CONFIRMATIONS=0`: credited on the sequencer's receipt. */
+  get depositCreditsOnSoftConfirmation(): boolean {
+    return this.depositConfirmations === 0;
+  }
+
   /**
    * @param depositConfirmations What `observeTransfer` at `finalized` waits for
    *   on these chains: `null` is the chain's `finalized` head (on
