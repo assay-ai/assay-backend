@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { IsNull } from 'typeorm';
 
 import { NotificationEntity } from '@database/postgres/entities/notification.entity';
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
 import { ListNotificationsQueryDto, NotificationDto } from '../dto/list-notifications.dto';
@@ -24,7 +25,10 @@ const NOTIFICATIONS_LIST: ListSpec = {
 /** `GET /api/v1/notifications` and its siblings. */
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly notifications: NotificationRepository) {}
+  constructor(
+    private readonly notifications: NotificationRepository,
+    @Optional() private readonly epochs?: TenantEpochService,
+  ) {}
 
   async list(
     organizationId: string,
@@ -68,6 +72,7 @@ export class NotificationsService {
     if (!notification.readAt) {
       notification.readAt = new Date();
       await this.notifications.update({ organizationId, id }, { readAt: notification.readAt });
+      await this.epochs?.bump(organizationId, 'notifications');
     }
 
     return this.toDto(notification);
@@ -75,6 +80,8 @@ export class NotificationsService {
 
   async markAllRead(organizationId: string): Promise<void> {
     await this.notifications.update({ organizationId, readAt: IsNull() }, { readAt: new Date() });
+    // The feed, the badge and `/me/status` read the change at once.
+    await this.epochs?.bump(organizationId, 'notifications');
   }
 
   private toDto(entity: NotificationEntity): NotificationDto {

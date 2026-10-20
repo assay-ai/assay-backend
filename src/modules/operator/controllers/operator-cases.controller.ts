@@ -33,6 +33,7 @@ import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorCaseListService } from '../services/operator-case-list.service';
 import { OperatorCaseService } from '../services/operator-case.service';
 import { OperatorService } from '../services/operator.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The operator's case surface: the Penalties list, the case brief, and the
@@ -95,6 +96,7 @@ export class OperatorCasesController {
    * A static segment, so it never reaches `cases/:proposalId`'s UUID pipe.
    */
   @Get('cases')
+  @TenantCache({ ttl: 15, vary: 'operator', epochs: ['operator'], singleFlight: true })
   @ApiOperation({
     summary: 'Every penalty, next deadline first, filterable by status and provider',
   })

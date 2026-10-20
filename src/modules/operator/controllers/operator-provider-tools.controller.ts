@@ -27,6 +27,7 @@ import {
   OperatorProviderToolsService,
   ReviewDecisionResultDto,
 } from '../services/operator-provider-tools.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 const PROMOTION_EXEMPTION =
   'drafting a standard contract and inviting providers serve nothing: the contract reaches ' +
@@ -47,6 +48,7 @@ export class OperatorProviderToolsController {
   constructor(private readonly tools: OperatorProviderToolsService) {}
 
   @Get('reviews')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator', 'shared'], singleFlight: true })
   @ApiOperation({
     summary:
       'The provider tool review queue: pending first, oldest submission first; `pending=false` ' +
@@ -88,6 +90,7 @@ export class OperatorProviderToolsController {
   }
 
   @Get('promotions')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator', 'shared'], singleFlight: true })
   @ApiOperation({
     summary:
       'Groups of similar provider tools (same category, similar names and schemas): ' +

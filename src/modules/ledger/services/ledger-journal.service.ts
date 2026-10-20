@@ -21,6 +21,7 @@ import {
   NotificationEvent,
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { formatDollars } from '@shared/utils/money-display.util';
 
@@ -73,6 +74,7 @@ export class LedgerJournalService {
     @Optional()
     @Inject(NOTIFICATION_PORT)
     private readonly notifications?: NotificationPort,
+    @Optional() private readonly epochs?: TenantEpochService,
   ) {}
 
   /** Assigns identity and validates an input before it can be written. */
@@ -192,6 +194,11 @@ export class LedgerJournalService {
         detail: `applied ${updated} of ${deltas.length} balance rows`,
       });
     }
+
+    // Every cached money read of the organization (and its provider console,
+    // for a credit) misses once this transaction commits — never before, or a
+    // concurrent read could cache the old rows under the new epoch.
+    await this.epochs?.bumpAfterCommit(queryRunner, organizationId, 'money', 'provider');
 
     // Fire-and-forget, deliberately not `await`ed and deliberately placed
     // after every write has succeeded rather than inside the loop above.

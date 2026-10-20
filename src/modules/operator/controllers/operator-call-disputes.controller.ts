@@ -32,6 +32,7 @@ import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorCallDisputeService } from '../services/operator-call-dispute.service';
 import { answerOrQueued } from './approval-response';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /operator/call-disputes`, `GET /operator/call-disputes/:id`,
@@ -54,6 +55,7 @@ export class OperatorCallDisputesController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'operator', epochs: ['operator'], singleFlight: true })
   @ApiOperation({ summary: 'Buyer call disputes, newest first (filter state=OPEN for the queue)' })
   @ApiCursorPage(OperatorCallDisputeRowDto)
   async list(

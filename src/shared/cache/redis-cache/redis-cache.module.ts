@@ -2,11 +2,12 @@ import { Module, Global } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { RedisCacheProvider, REDIS_CACHE_CLIENT } from './redis-cache.provider';
 import { CacheService } from './cache.service';
+import { TenantEpochService } from './tenant-epoch.service';
 
 @Global()
 @Module({
   imports: [ConfigModule],
-  providers: [RedisCacheProvider, CacheService],
-  exports: [REDIS_CACHE_CLIENT, CacheService],
+  providers: [RedisCacheProvider, CacheService, TenantEpochService],
+  exports: [REDIS_CACHE_CLIENT, CacheService, TenantEpochService],
 })
 export class RedisCacheModule {}

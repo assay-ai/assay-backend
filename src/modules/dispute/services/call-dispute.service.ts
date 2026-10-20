@@ -1,6 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, QueryRunner, SelectQueryBuilder } from 'typeorm';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
@@ -166,7 +167,30 @@ export class CallDisputeService {
     // Whether the escrow hold is live on the call's chain (review P2-1).
     // Required: an absent port would quietly file every rail-B report unheld.
     @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort,
+    @Optional() private readonly epochs?: TenantEpochService,
   ) {}
+
+  /**
+   * A dispute is shown to the buyer, the provider and the operator console:
+   * the cached reads of all three miss once the write commits (`manager` in a
+   * transaction), or now.
+   */
+  private touched(
+    on: EntityManager | QueryRunner | null,
+    buyerOrganizationId: string | null | undefined,
+    providerOrganizationId: string | null | undefined,
+  ): Promise<void> {
+    return (
+      this.epochs?.bumpAfterCommit(
+        on,
+        [buyerOrganizationId, providerOrganizationId],
+        'disputes',
+        'money',
+        'provider',
+        'operator',
+      ) ?? Promise.resolve()
+    );
+  }
 
   // ── Buyer ───────────────────────────────────────────────────────────────
 
@@ -270,6 +294,7 @@ export class CallDisputeService {
             DISPUTE_FILING_GUARD_SECONDS,
           ));
         await manager.save(entity);
+        await this.touched(manager, organizationId, intent.providerId);
         await this.audit.record(manager, {
           organizationId,
           actor,
@@ -335,6 +360,7 @@ export class CallDisputeService {
         ),
       );
       if (rows.length === 0) throw DisputeErrors.notWithdrawable({ state: dispute.state });
+      await this.touched(manager, organizationId, dispute.respondentProviderId);
       // A voucher the dispute held goes back to the redemption queue.
       await this.paymentIntents.setDisputeOutcome(
         manager,
@@ -391,6 +417,7 @@ export class CallDisputeService {
         ),
       );
       if (rows.length === 0) throw DisputeErrors.alreadyResponded({ id });
+      await this.touched(manager, dispute.organizationId, providerId);
       await this.audit.record(manager, {
         organizationId: providerId,
         actor: { type: 'provider', id: providerId },
@@ -553,6 +580,8 @@ export class CallDisputeService {
     });
     if (!intent) throw DisputeErrors.disputeNotFound({ id: input.disputeId });
     const amount = intent.settledAmount ?? intent.priceAmount;
+    // Bumped when `OverrideLogService.perform` commits, not before.
+    await this.touched(queryRunner, locked.organization_id, intent.providerId);
 
     let state: DisputeState;
     let refund: { source: RefundSource; state: RefundState } | null = null;
@@ -701,6 +730,7 @@ export class CallDisputeService {
         columns.state === RefundState.REFUNDED ? amount : null,
       ],
     );
+    await this.touched(null, dispute.organizationId, dispute.respondentProviderId);
     return this.requireAny(disputeId);
   }
 

@@ -11,6 +11,7 @@ import { AgentDto, AgentWithIncludesDto, ListAgentsQueryDto } from '../dto/list-
 import { UpdateAgentBodyDto } from '../dto/update-agent.dto';
 import { AgentListService } from '../services/agent-list.service';
 import { AgentsService } from '../services/agents.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /** The agents in this organization. See `AgentsService`. */
 @ApiTags('Agents')
@@ -26,6 +27,7 @@ export class AgentsController {
   // `include` nests what `GET /agents/:agentId/credentials` returns, so it is
   // that route's person-only read; the plain list stays open to an agent.
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
   @ApiOperation({ summary: 'Agents in this organization' })
   @ApiCursorPage(AgentWithIncludesDto)
   @ApiResponse({

@@ -10,6 +10,8 @@ import {
 } from '../dto/get-provider-registration.dto';
 import { RegisterProviderBodyDto, RegisterProviderResponseDto } from '../dto/register-provider.dto';
 import { ProviderRegistrationService } from '../services/provider-registration.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * `POST /providers`, `GET /providers/me/registration`,
@@ -31,6 +33,8 @@ import { ProviderRegistrationService } from '../services/provider-registration.s
 // Person-only (review A-1): the legal identity and accepted terms of the
 // account are the owner's to state, never a machine credential's.
 @UseGuards(SessionAuthGuard, HumanSessionGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('providers')
 export class ProviderRegistrationController {
   constructor(private readonly registration: ProviderRegistrationService) {}
@@ -50,6 +54,7 @@ export class ProviderRegistrationController {
   }
 
   @Get('me/registration')
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'] })
   @ApiOperation({
     summary: 'The onboarding state frame pM65r renders: the row, the four steps, terms, egress IPs',
   })

@@ -38,6 +38,8 @@ import {
 } from '../dto/provider-tools.dto';
 import { ProviderToolTryService } from '../services/provider-tool-try.service';
 import { ProviderToolsService } from '../services/provider-tools.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * "Publish your own API" (design spec §7.6, §7.9 Provider, §7.10): a
@@ -51,6 +53,8 @@ import { ProviderToolsService } from '../services/provider-tools.service';
 @ApiTags('Provider')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard, HumanSessionGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('provider/tools')
 export class ProviderToolsController {
   constructor(
@@ -59,6 +63,7 @@ export class ProviderToolsController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider', 'shared'] })
   @ApiOperation({ summary: 'Your provider tools, newest first, with their review state' })
   @ApiCursorPage(ProviderToolSummaryDto)
   async list(
@@ -113,6 +118,7 @@ export class ProviderToolsController {
   }
 
   @Get('invitations')
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider', 'shared'] })
   @ApiOperation({
     summary:
       'Promotion invitations: standard contracts drafted from your tools, with a binding ' +

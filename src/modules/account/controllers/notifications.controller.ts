@@ -9,6 +9,7 @@ import { ListNotificationsQueryDto, NotificationDto } from '../dto/list-notifica
 import { NotificationIdParamDto } from '../dto/mark-notification-read.dto';
 import { UnreadCountResponseDto } from '../dto/unread-count.dto';
 import { NotificationsService } from '../services/notifications.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The notification feed.
@@ -25,6 +26,7 @@ export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['notifications'] })
   @ApiOperation({ summary: 'The notification feed, newest first' })
   @ApiCursorPage(NotificationDto)
   async list(
@@ -35,6 +37,7 @@ export class NotificationsController {
   }
 
   @Get('unread-count')
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['notifications'], singleFlight: true })
   @ApiOperation({ summary: 'Unread notification count — the badge every page shows' })
   @ApiResponse({ status: 200, description: 'The count', type: UnreadCountResponseDto })
   async unreadCount(@CurrentSession() session: McpSession): Promise<UnreadCountResponseDto> {

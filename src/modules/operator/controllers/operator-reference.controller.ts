@@ -12,6 +12,7 @@ import {
 } from '../dto/operator-reference.dto';
 import { PlatformHealthService } from '../services/platform-health.service';
 import { OperatorReferenceService } from '../services/operator-reference.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The read-only half of the operator console: the health
@@ -33,6 +34,7 @@ export class OperatorReferenceController {
   ) {}
 
   @Get('health')
+  @TenantCache({ ttl: 30, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({ summary: 'The six platform-health tiles across the top of the console' })
   @ApiResponse({ status: 200, type: PlatformHealthDto })
   async getHealth(): Promise<PlatformHealthDto> {
@@ -40,6 +42,7 @@ export class OperatorReferenceController {
   }
 
   @Get('policies')
+  @TenantCache({ ttl: 60, vary: 'operator', epochs: ['operator', 'shared'] })
   @ApiOperation({ summary: 'The verification policy lifecycle, one row per policy id' })
   @ApiResponse({ status: 200, type: [PolicyLifecycleRowDto] })
   async getPolicies(): Promise<PolicyLifecycleRowDto[]> {
@@ -47,6 +50,7 @@ export class OperatorReferenceController {
   }
 
   @Get('verifiers')
+  @TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({
     summary: 'The verifier signing keys this deployment knows, and their on-chain state',
   })
@@ -56,6 +60,7 @@ export class OperatorReferenceController {
   }
 
   @Get('economics')
+  @TenantCache({ ttl: 60, vary: 'operator', epochs: ['operator'] })
   @ApiOperation({ summary: 'The economic parameters — take rate, stake, penalty split' })
   @ApiResponse({ status: 200, type: [EconomicParameterRowDto] })
   async getEconomics(): Promise<EconomicParameterRowDto[]> {
