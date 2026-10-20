@@ -3,6 +3,7 @@ import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   CacheableSessionSource,
   CachingSessionSource,
+  RESUBSCRIBE_RETRY_MS,
   SESSION_EVICTIONS_CHANNEL,
   SessionCache,
   SessionEvictions,
@@ -116,6 +117,42 @@ describe('SessionCache', () => {
     expect(cache.get('k')).toBeUndefined();
   });
 
+  it("lets another organization's eviction pass: a ticket is refused only by its own scopes", () => {
+    const cache = new SessionCache();
+    const ticket = cache.generation;
+    cache.evict({ organizationId: OTHER_ORG });
+    cache.evict({ credentialId: 'cred-other' });
+    cache.set('k', session(), null, ticket);
+    expect(cache.get('k')).toBeDefined();
+
+    const second = cache.generation;
+    cache.evict({ credentialId: 'cred-1' });
+    cache.set('k2', session(), null, second);
+    expect(cache.get('k2')).toBeUndefined();
+
+    const third = cache.generation;
+    cache.evict({ all: true });
+    cache.set('k3', session(), null, third);
+    expect(cache.get('k3')).toBeUndefined();
+    cache.set('k4', session(), null, cache.generation);
+    expect(cache.get('k4')).toBeDefined();
+  });
+
+  it('stays bounded in eviction records, refusing what a pruned record could have refused', () => {
+    const clock = new Clock();
+    const cache = new SessionCache(15_000, 2, clock.now);
+    const old = cache.generation;
+    cache.evict({ organizationId: ORG });
+    clock.t += 61_000;
+    cache.evict({ organizationId: 'org-a' });
+    cache.evict({ organizationId: 'org-b' });
+    // ORG's record was pruned: the old ticket is refused anyway.
+    cache.set('k', session(), null, old);
+    expect(cache.get('k')).toBeUndefined();
+    cache.set('k', session(), null, cache.generation);
+    expect(cache.get('k')).toBeDefined();
+  });
+
   it('keys by source and sha256 of the token, never the token', () => {
     const key = SessionCache.keyOf('db', 'assay_sk_secret');
     expect(key).toMatch(/^db:[0-9a-f]{64}$/);
@@ -198,13 +235,14 @@ describe('CachingSessionSource', () => {
 });
 
 describe('SessionEvictions', () => {
-  function build() {
+  function build(status = 'ready') {
     const cache = new SessionCache();
-    const handlers: Array<(channel: string, message: string) => void> = [];
+    const handlers: Record<string, Array<(...args: string[]) => void>> = {};
     const subscriber = {
-      on: jest.fn((_event: string, handler: (channel: string, message: string) => void) =>
-        handlers.push(handler),
-      ),
+      status,
+      on: jest.fn((event: string, handler: (...args: string[]) => void) => {
+        (handlers[event] ??= []).push(handler);
+      }),
       subscribe: jest.fn().mockResolvedValue(1),
       unsubscribe: jest.fn().mockResolvedValue(1),
       disconnect: jest.fn(),
@@ -213,9 +251,46 @@ describe('SessionEvictions', () => {
     const evictions = new SessionEvictions(cache, publisher as never, subscriber as never);
     evictions.onModuleInit();
     const deliver = (message: string) =>
-      handlers.forEach((handler) => handler(SESSION_EVICTIONS_CHANNEL, message));
-    return { cache, publisher, subscriber, evictions, deliver };
+      (handlers.message ?? []).forEach((handler) => handler(SESSION_EVICTIONS_CHANNEL, message));
+    const ready = () => (handlers.ready ?? []).forEach((handler) => handler());
+    return { cache, publisher, subscriber, evictions, deliver, ready };
   }
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('subscribes on every (re)connection and drops what it cached while not listening', async () => {
+    const { cache, subscriber, ready } = build('connecting');
+    expect(subscriber.subscribe).not.toHaveBeenCalled();
+    cache.set('k', session(), null, cache.generation);
+
+    ready();
+    await flush();
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(1);
+    expect(cache.size).toBe(0);
+
+    cache.set('k', session(), null, cache.generation);
+    ready(); // a reconnect
+    await flush();
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(2);
+    expect(cache.size).toBe(0);
+  });
+
+  it('retries a failed subscribe until it succeeds', async () => {
+    jest.useFakeTimers();
+    try {
+      const { subscriber, evictions } = build('connecting');
+      subscriber.subscribe.mockRejectedValueOnce(new Error('connection lost'));
+      (evictions as unknown as { subscribe: () => Promise<void> }).subscribe();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(subscriber.subscribe).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(RESUBSCRIBE_RETRY_MS);
+      expect(subscriber.subscribe).toHaveBeenCalledTimes(2);
+      await evictions.onModuleDestroy();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it('evicts locally before it publishes, then tells the other processes', async () => {
     const { cache, publisher, evictions } = build();
@@ -230,8 +305,9 @@ describe('SessionEvictions', () => {
     );
   });
 
-  it("applies another process's eviction, and clears everything on an unreadable one", () => {
+  it("applies another process's eviction, and clears everything on an unreadable one", async () => {
     const { cache, subscriber, deliver } = build();
+    await flush();
     expect(subscriber.subscribe).toHaveBeenCalledWith(SESSION_EVICTIONS_CHANNEL);
     cache.set('a', session(), null, cache.generation);
     cache.set('b', session({ organizationId: OTHER_ORG }), null, cache.generation);
