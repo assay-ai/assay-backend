@@ -1,6 +1,10 @@
 name = "assay-egress-relay"
 main = "src/index.ts"
 compatibility_date = "2026-10-18"
+# Reachable only on its custom domain: the workers.dev and preview URLs would
+# name the account's subdomain.
+workers_dev = false
+preview_urls = false
 
 # Custom domain route (set after the zone is chosen):
 # routes = [{ pattern = "egress.example.com", custom_domain = true }]

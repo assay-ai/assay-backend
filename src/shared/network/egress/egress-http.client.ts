@@ -155,6 +155,13 @@ export class EgressHttpClient implements OnModuleDestroy {
    */
   private readonly relay: EgressRelayTransport | null;
 
+  /**
+   * In production a `relay: true` hop with no relay configured is refused
+   * rather than dialled: going direct would hand this server's IP to whoever
+   * chose the URL.
+   */
+  private readonly relayRequired = process.env.NODE_ENV === 'production';
+
   constructor(
     @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
     @Optional()
@@ -187,6 +194,16 @@ export class EgressHttpClient implements OnModuleDestroy {
     let body = request.body;
     let headers = normalizeHeaders(request.headers);
     let origin: string | null = null;
+
+    // Before any lookup: resolving the name already tells its nameserver
+    // about us.
+    if (policy.relay && !this.relay && this.relayRequired) {
+      throw new EgressError(
+        EgressFailureKind.RELAY_UNAVAILABLE,
+        'this call must go through the egress relay, and none is configured',
+        { url: request.url },
+      );
+    }
 
     for (let hop = 0; hop <= limits.maxRedirects; hop += 1) {
       const remaining = deadline - Date.now();
