@@ -47,6 +47,7 @@ import { McpModule } from '@modules/mcp/mcp.module';
 // (limits and their version history) and `dispute` are new here; the rest
 // extend a domain module that already existed.
 import { AccountApiModule } from '@modules/account/account-api.module';
+import { DashboardApiModule } from '@modules/dashboard/dashboard-api.module';
 import { AuthApiModule } from '@modules/auth/auth-api.module';
 import { SpendPolicyApiModule } from '@modules/spend-policy/spend-policy-api.module';
 import { ToolsetApiModule } from '@modules/toolset/toolset-api.module';
@@ -156,6 +157,8 @@ import { NetworkModule } from '@shared/network/network.module';
     ...(isPublicDemoConfigured() ? [McpApiModule] : []),
     // Dashboard REST surface
     AccountApiModule,
+    // `GET /overview`, `GET /me/status`: composite reads over the routes above.
+    DashboardApiModule,
     // `POST /auth/wallet/link`, the only route that verifies a Privy
     // token without building a session (it exists to clear the condition that
     // stops one being built).

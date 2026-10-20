@@ -374,3 +374,112 @@ describe('ReceiptSummaryService — invalid range', () => {
     });
   });
 });
+
+describe('ReceiptSummaryService — getDailySummaries', () => {
+  const DAILY = { from: '2026-08-01T00:00:00.000Z', to: '2026-08-04T00:00:00.000Z' };
+
+  /** The rows a per-day call would get, as the one grouped query returns them. */
+  const rows: ReceiptsSummaryRow[] = [
+    row({ day: '2026-08-01', key: 'tool-1', calls: 2, listedTotal: 200n, chargedTotal: 200n }),
+    row({ day: '2026-08-03', key: 'tool-1', calls: 1, listedTotal: 50n, withheldTotal: 50n }),
+    row({ day: '2026-08-01', key: 'tool-2', calls: 1, listedTotal: 70n, chargedTotal: 70n }),
+  ];
+
+  it('asks for the whole window once, split by UTC day', async () => {
+    const summarizeReceipts = jest.fn().mockResolvedValue(rows);
+    const service = new ReceiptSummaryService({
+      summarizeReceipts,
+    } as unknown as PaymentIntentRepository);
+
+    await service.getDailySummaries(ORG, { ...DAILY, groupBy: ReceiptsSummaryGroupBy.TOOL });
+
+    expect(summarizeReceipts).toHaveBeenCalledTimes(1);
+    expect(summarizeReceipts).toHaveBeenCalledWith(
+      ORG,
+      ReceiptsSummaryGroupBy.TOOL,
+      { from: new Date(DAILY.from), to: new Date(DAILY.to) },
+      undefined,
+      { byUtcDay: true },
+    );
+  });
+
+  it('answers each day exactly as getSummary answers that day’s rows, empty days included', async () => {
+    const summarizeReceipts = jest.fn().mockResolvedValue(rows);
+    const service = new ReceiptSummaryService({
+      summarizeReceipts,
+    } as unknown as PaymentIntentRepository);
+    const daily = await service.getDailySummaries(ORG, {
+      ...DAILY,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+
+    expect(daily.days.map((d) => [d.key, d.from, d.to])).toEqual([
+      ['2026-08-01', '2026-08-01T00:00:00.000Z', '2026-08-02T00:00:00.000Z'],
+      ['2026-08-02', '2026-08-02T00:00:00.000Z', '2026-08-03T00:00:00.000Z'],
+      ['2026-08-03', '2026-08-03T00:00:00.000Z', '2026-08-04T00:00:00.000Z'],
+    ]);
+    for (const day of daily.days) {
+      const own = rows
+        .filter((r) => r.day === day.key)
+        .map(({ day: _day, ...r }) => r as ReceiptsSummaryRow);
+      const { service: single } = build({ current: own });
+      expect(day.summary).toEqual(
+        await single.getSummary(ORG, {
+          from: day.from,
+          to: day.to,
+          groupBy: ReceiptsSummaryGroupBy.TOOL,
+        }),
+      );
+    }
+    expect(daily.days[1].summary).toMatchObject({ groups: [], asset: '' });
+  });
+
+  it('refuses a day spanning two assets the way a per-day call does', async () => {
+    const summarizeReceipts = jest
+      .fn()
+      .mockResolvedValue([
+        row({ day: '2026-08-01', asset: USDC }),
+        row({ day: '2026-08-01', asset: ASSET_IDS.USDC_SOLANA_DEVNET }),
+      ]);
+    const service = new ReceiptSummaryService({
+      summarizeReceipts,
+    } as unknown as PaymentIntentRepository);
+
+    await expect(
+      service.getDailySummaries(ORG, { ...DAILY, groupBy: ReceiptsSummaryGroupBy.TOOL }),
+    ).rejects.toMatchObject({
+      errorCode: VerificationErrorCode.VERIFICATION_SUMMARY_MULTIPLE_ASSETS,
+    });
+  });
+
+  it.each([
+    ['an edge off midnight', '2026-08-01T00:00:00.000Z', '2026-08-02T12:00:00.000Z'],
+    ['an empty window', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'],
+    ['a reversed window', '2026-08-02T00:00:00.000Z', '2026-08-01T00:00:00.000Z'],
+    ['32 days', '2026-08-01T00:00:00.000Z', '2026-09-02T00:00:00.000Z'],
+  ])('refuses %s without querying', async (_name, from, to) => {
+    const summarizeReceipts = jest.fn();
+    const service = new ReceiptSummaryService({
+      summarizeReceipts,
+    } as unknown as PaymentIntentRepository);
+
+    await expect(
+      service.getDailySummaries(ORG, { from, to, groupBy: ReceiptsSummaryGroupBy.TOOL }),
+    ).rejects.toMatchObject({
+      errorCode: VerificationErrorCode.VERIFICATION_SUMMARY_INVALID_RANGE,
+    });
+    expect(summarizeReceipts).not.toHaveBeenCalled();
+  });
+
+  it('accepts 31 days', async () => {
+    const service = new ReceiptSummaryService({
+      summarizeReceipts: jest.fn().mockResolvedValue([]),
+    } as unknown as PaymentIntentRepository);
+    const daily = await service.getDailySummaries(ORG, {
+      from: '2026-08-01T00:00:00.000Z',
+      to: '2026-09-01T00:00:00.000Z',
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+    expect(daily.days).toHaveLength(31);
+  });
+});

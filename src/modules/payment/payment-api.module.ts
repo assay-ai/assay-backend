@@ -87,6 +87,8 @@ import { NextSeqService } from './services/next-seq.service';
         ),
     },
   ],
-  exports: [PaymentModule],
+  // `BuyerDebtService`: `GET /me/status` (`DashboardApiModule`) answers with
+  // `GET /escrow/debts`' own list.
+  exports: [PaymentModule, BuyerDebtService],
 })
 export class PaymentApiModule {}

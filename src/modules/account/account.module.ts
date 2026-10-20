@@ -10,6 +10,7 @@ import { AuditLogModule } from '@shared/audit';
 
 import { AgentCredentialsService } from './services/agent-credentials.service';
 import { AgentDelegateService } from './services/agent-delegate.service';
+import { AgentListService } from './services/agent-list.service';
 import { AgentsService } from './services/agents.service';
 import { AuditLogService } from './services/audit-log.service';
 import { NotificationsService } from './services/notifications.service';
@@ -49,6 +50,7 @@ import { LastSeenModule } from '@shared/last-seen';
     NotificationsService,
     AuditLogService,
     AgentsService,
+    AgentListService,
     AgentCredentialsService,
     AgentDelegateService,
   ],
@@ -56,6 +58,7 @@ import { LastSeenModule } from '@shared/last-seen';
     NotificationsService,
     AuditLogService,
     AgentsService,
+    AgentListService,
     AgentCredentialsService,
     AgentDelegateService,
   ],

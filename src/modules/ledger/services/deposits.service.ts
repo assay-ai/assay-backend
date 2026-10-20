@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { DepositIntentEntity } from '@database/postgres/entities/deposit-intent.entity';
 import { AssetId } from '@modules/chains/ports/caip.types';
+import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
@@ -42,6 +43,19 @@ export class DepositsService {
 
     const page = await paginate(qb, query, DEPOSIT_LIST);
     return page.map(toDepositDto);
+  }
+
+  /**
+   * One deposit, in the row shape `list` returns — what a pending-deposit wait
+   * polls instead of `GET /balances`. Another organization's id is the same
+   * 404 as an unknown one.
+   */
+  async getOne(organizationId: string, depositId: string): Promise<DepositDto> {
+    const row = await this.deposits.findOneBy({ organizationId, id: depositId });
+    if (!row) {
+      throw PaymentErrors.depositIntentNotFound({ id: depositId });
+    }
+    return toDepositDto(row);
   }
 }
 

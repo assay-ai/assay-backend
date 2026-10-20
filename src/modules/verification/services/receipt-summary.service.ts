@@ -9,6 +9,7 @@ import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 
 import {
+  DailyReceiptsSummaryResponseDto,
   GetReceiptsSummaryResponseDto,
   ReceiptsSummaryComparison,
   ReceiptsSummaryFigures,
@@ -101,7 +102,6 @@ export class ReceiptSummaryService {
     );
 
     const asset = this.resolveAsset(currentRows, query.asset);
-    const decimals = asset ? getAssetMetadata(asset).decimals : 0;
 
     const compareRequested = query.compareTo === SummaryCompareTo.PREVIOUS_PERIOD;
     const previousRows = compareRequested
@@ -113,26 +113,61 @@ export class ReceiptSummaryService {
         )
       : [];
 
-    const previousByKey = new Map(previousRows.map((row) => [row.key, toFigures(row)]));
+    return toResponse(currentRows, compareRequested ? previousRows : null, asset, query.asset);
+  }
 
-    const groups: ReceiptsSummaryGroupDto[] = currentRows.map((row) => {
-      const figures = toFigures(row);
-      const comparison = compareRequested
-        ? toComparisonDto(figures, previousByKey.get(row.key) ?? ZERO_FIGURES, asset, decimals)
-        : null;
+  /**
+   * One `getSummary(groupBy)` answer per UTC day of `[from, to)`, from ONE
+   * query grouped by day as well (`summarizeReceipts`' `byUtcDay`).
+   *
+   * Each day is folded by the same `resolveAsset` and `toResponse` a
+   * `getSummary` call for that day runs, over the same rows in the same
+   * order, so `days[i].summary` is that call's response — a day spanning two
+   * assets with no `asset` throws the same error that call would. The window
+   * must be whole UTC days: a partial edge day would be a different window from
+   * the one a per-day call asks for.
+   */
+  async getDailySummaries(
+    organizationId: string,
+    query: {
+      readonly from: string;
+      readonly to: string;
+      readonly groupBy: ReceiptsSummaryGroupBy;
+      readonly asset?: string;
+    },
+  ): Promise<DailyReceiptsSummaryResponseDto> {
+    const window = parseSummaryWindow(query);
+    const days = utcDaysOf(window);
+    if (days === null) {
+      throw VerificationErrors.summaryInvalidRange({
+        from: query.from,
+        to: query.to,
+        reason: `a whole number of UTC days, 1 to ${MAX_DAILY_SUMMARY_DAYS}, is required`,
+      });
+    }
 
-      return { key: row.key, ...toFiguresDto(figures, asset, decimals), comparison };
-    });
+    if (query.asset !== undefined && !isAssetId(query.asset)) {
+      throw VerificationErrors.summaryInvalidRange({
+        from: query.from,
+        to: query.to,
+        reason: `not a CAIP-19 asset id: ${query.asset}`,
+      });
+    }
 
-    const totals = currentRows.reduce<Figures>(
-      (total, row) => addFigures(total, toFigures(row)),
-      ZERO_FIGURES,
+    const rows = await this.intents.summarizeReceipts(
+      organizationId,
+      query.groupBy,
+      window,
+      query.asset,
+      { byUtcDay: true },
     );
 
     return {
-      groups,
-      totals: toFiguresDto(totals, asset, decimals),
-      asset: asset ?? query.asset ?? '',
+      days: days.map((day) => {
+        const dayRows = rows.filter((row) => row.day === day.key);
+        const asset = this.resolveAsset(dayRows, query.asset);
+        return { ...day, summary: toResponse(dayRows, null, asset, query.asset) };
+      }),
     };
   }
 
@@ -156,6 +191,74 @@ export class ReceiptSummaryService {
     }
     return (distinct[0] as AssetId | undefined) ?? null;
   }
+}
+
+/** The longest window `getDailySummaries` answers: a month of days. */
+export const MAX_DAILY_SUMMARY_DAYS = 31;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The UTC days of a window that starts and ends on UTC midnights, oldest
+ * first, or `null` when it does not, is empty, or is longer than
+ * {@link MAX_DAILY_SUMMARY_DAYS}.
+ */
+function utcDaysOf(window: { readonly from: Date; readonly to: Date }): DailyWindow[] | null {
+  const from = window.from.getTime();
+  const to = window.to.getTime();
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  if (from % DAY_MS !== 0 || to % DAY_MS !== 0) return null;
+  const count = (to - from) / DAY_MS;
+  if (count < 1 || count > MAX_DAILY_SUMMARY_DAYS) return null;
+  return Array.from({ length: count }, (_, i) => {
+    const start = new Date(from + i * DAY_MS);
+    return {
+      key: start.toISOString().slice(0, 10),
+      from: start.toISOString(),
+      to: new Date(start.getTime() + DAY_MS).toISOString(),
+    };
+  });
+}
+
+interface DailyWindow {
+  readonly key: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+/**
+ * The response for one window's rows, and the previous window's when a
+ * comparison was asked for (`null` when not). `getSummary` and every day of
+ * `getDailySummaries` end here, so the two cannot fold a row differently.
+ */
+function toResponse(
+  currentRows: readonly ReceiptsSummaryRow[],
+  previousRows: readonly ReceiptsSummaryRow[] | null,
+  asset: AssetId | null,
+  requestedAsset: string | undefined,
+): GetReceiptsSummaryResponseDto {
+  const decimals = asset ? getAssetMetadata(asset).decimals : 0;
+  const previousByKey = new Map((previousRows ?? []).map((row) => [row.key, toFigures(row)]));
+
+  const groups: ReceiptsSummaryGroupDto[] = currentRows.map((row) => {
+    const figures = toFigures(row);
+    const comparison = previousRows
+      ? toComparisonDto(figures, previousByKey.get(row.key) ?? ZERO_FIGURES, asset, decimals)
+      : null;
+
+    return { key: row.key, ...toFiguresDto(figures, asset, decimals), comparison };
+  });
+
+  const totals = currentRows.reduce<Figures>(
+    (total, row) => addFigures(total, toFigures(row)),
+    ZERO_FIGURES,
+  );
+
+  return {
+    groups,
+    totals: toFiguresDto(totals, asset, decimals),
+    asset: asset ?? requestedAsset ?? '',
+  };
 }
 
 /** The immediately preceding window of the same length. */

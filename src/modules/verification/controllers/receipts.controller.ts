@@ -6,6 +6,8 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { GetReceiptParamsDto, GetReceiptResponseDto } from '../dto/get-receipt.dto';
 import {
+  DailyReceiptsSummaryResponseDto,
+  GetDailyReceiptsSummaryQueryDto,
   GetReceiptsSummaryQueryDto,
   GetReceiptsSummaryResponseDto,
 } from '../dto/get-receipts-summary.dto';
@@ -40,6 +42,23 @@ export class ReceiptsController {
     @Query() query: GetReceiptsSummaryQueryDto,
   ): Promise<GetReceiptsSummaryResponseDto> {
     return this.summary.getSummary(session.organizationId, query);
+  }
+
+  // Two segments, so `:intentId` could not capture it; kept beside `summary` anyway.
+  @Get('summary/daily')
+  @ApiOperation({
+    summary: 'The summary once per UTC day of a window — one query for a whole chart',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'One summary per day',
+    type: DailyReceiptsSummaryResponseDto,
+  })
+  async getDailySummary(
+    @CurrentSession() session: McpSession,
+    @Query() query: GetDailyReceiptsSummaryQueryDto,
+  ): Promise<DailyReceiptsSummaryResponseDto> {
+    return this.summary.getDailySummaries(session.organizationId, query);
   }
 
   @Get(':intentId')
