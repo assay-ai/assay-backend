@@ -19,7 +19,8 @@ describe('PublicReadRateLimitInterceptor', () => {
   }
 
   const windows = (interceptor: PublicReadRateLimitInterceptor) =>
-    (interceptor as unknown as { windows: Map<string, unknown> }).windows;
+    (interceptor as unknown as { counter: { localWindows: Map<string, unknown> } }).counter
+      .localWindows;
 
   it('allows the limit and refuses the next request from the same client', () => {
     const { interceptor } = limiter();

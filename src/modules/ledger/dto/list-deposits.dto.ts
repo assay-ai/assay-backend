@@ -16,6 +16,20 @@ export class ListDepositsQueryDto extends ListQueryDto {
   status?: DepositIntentStatus[];
 }
 
+/**
+ * Where a `SETTLED` deposit stands with chain finality. Settling credits the
+ * ledger's `pending` bucket; a separate finality sweep later moves it to
+ * `available` (`CONFIRMED`) or drops it after a reorg (`REJECTED`).
+ */
+export enum DepositFinality {
+  /** Settled, credited as pending; the finality sweep has not decided yet. */
+  PENDING = 'PENDING',
+  /** Final: the amount is in the available balance. */
+  CONFIRMED = 'CONFIRMED',
+  /** Dropped by a reorg: the pending credit was reversed and nothing is available. */
+  REJECTED = 'REJECTED',
+}
+
 export class DepositDto {
   @ApiProperty()
   id: string;
@@ -48,6 +62,16 @@ export class DepositDto {
 
   @ApiProperty({ nullable: true, description: 'The settlement transaction signature, once known' })
   chainTxRef: string | null;
+
+  @ApiProperty({
+    enum: DepositFinality,
+    nullable: true,
+    description:
+      'Only for `SETTLED`: `PENDING` until chain finality, then `CONFIRMED` (available to ' +
+      'spend) or `REJECTED` (reorged out). `null` for every other status. What a ' +
+      'pending-deposit wait polls for, instead of `GET /balances`.',
+  })
+  finality: DepositFinality | null;
 
   @ApiProperty({ description: 'ISO-8601' })
   expiresAt: string;
