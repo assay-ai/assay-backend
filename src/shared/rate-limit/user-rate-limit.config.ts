@@ -8,15 +8,19 @@
  * | Category | Applies to | Limit | Counted per |
  * |---|---|---|---|
  * | A1 read | every authenticated GET not listed below | 180 / min | caller |
- * | A2 heavy read | the GETs in {@link HEAVY_READS} | 30 / min, **each route its own window** | caller |
+ * | A2 heavy read | the GETs in {@link HEAVY_READS} | 30 / min (`/escrow/delegates` 60), **each concrete path its own window**, and within A1 | caller |
  * | A3 export | `GET /providers/me/calls/export` | 5 / min, 1 at a time | organization |
  * | W1 write | every authenticated POST/PUT/PATCH/DELETE not listed below | 20 / min | caller |
+ * | W1 per-item | `PATCH /notifications/:id/read`, `PUT /toolsets/:id/entries`, `POST …/validate-mapping` | 120 / min, each its own window | caller |
  * | W2 create | credential mint, tool request, provider registration, handle | per route | organization |
  * | M1 money | deposit create/settle/broadcast, debt voucher, withdraw intent | per route | account / credential |
  * | M2 chain | stake intents, slash dispute intent, arbiter ruling intent | per route | organization / operator |
- * | AU auth | `POST /auth/wallet/link` | 30 / min | client address |
+ * | AU auth | `POST /auth/wallet/link` | 60 / min | client address |
  *
- * A request counts against exactly one window: a route listed here is not
+ * A request counts against one window, with one exception: a heavy read
+ * also counts in the A1 read window. A heavy route's window is keyed by the
+ * concrete path (`/agents/<id>/servers`, one per agent card), and A1 is what
+ * bounds a caller who varies the id. Otherwise a route listed here is not
  * also counted in A1 or W1.
  *
  * **"Caller"** is the person or the key behind the request: a person's
@@ -30,7 +34,8 @@
  *   120 / min / address), `/health`, the well-known documents, the operator
  *   sign-in (its own throttle). A request whose guard refused it (401/403)
  *   never reaches the interceptor, so it is not counted either.
- * - OAuth (`/oauth/*`) and MCP, which keep their own limiters.
+ * - OAuth (`/oauth/*`), which keeps its own limiter. MCP is a separate app
+ *   with its own limiters; this one is not registered there.
  * - {@link OWN_LIMITER_ROUTES}: routes behind a limiter of their own that is
  *   stricter or shaped differently (the voucher sequence allocator's 120 / min
  *   per credential, the relayed escrow intents' hourly budget).
@@ -70,6 +75,10 @@ export interface RateRule {
   readonly subject: RateSubject;
   /** At most this many in flight at once per subject. */
   readonly concurrent?: number;
+  /** Keyed by the concrete path (`/agents/<id>/servers`), not the route pattern. */
+  readonly perPath?: boolean;
+  /** Also counted in the A1 read window. */
+  readonly withinRead?: boolean;
 }
 
 /** A1: every authenticated read not listed below; one window across all of them. */
@@ -90,10 +99,19 @@ export const WRITE_RULE: RateRule = Object.freeze({
 
 export const HEAVY_READ_LIMIT = 30;
 
+/** Heavy reads the console polls faster than {@link HEAVY_READ_LIMIT} allows. */
+export const HEAVY_READ_LIMIT_OVERRIDES: Readonly<Record<string, number>> = Object.freeze({
+  // Polled every 5 s by two timers on the agent page.
+  'GET /escrow/delegates': 60,
+});
+
+/** W1 routes a screen calls once per item (per alert, per toolset edit, per keystroke pause). */
+export const PER_ITEM_WRITE_LIMIT = 120;
+
 /**
- * A2: reads that aggregate, fan out to the chain, or loop per row. Each has
- * a window of its own, so polling one (a deposit wait on `/balances`) does not
- * starve the others.
+ * A2: reads that aggregate, fan out to the chain, or loop per row. Each
+ * concrete path has a window of its own, so polling one (an agent card's
+ * servers) does not starve the others; all of them also count in A1.
  */
 export const HEAVY_READS: readonly string[] = [
   'GET /balances',
@@ -126,10 +144,12 @@ export const ROUTE_RULES: Readonly<Record<string, RateRule>> = Object.freeze({
     HEAVY_READS.map((route) => [
       route,
       {
-        bucket: `heavy:${route.slice(route.indexOf(' ') + 1)}`,
-        limit: HEAVY_READ_LIMIT,
+        bucket: 'heavy',
+        limit: HEAVY_READ_LIMIT_OVERRIDES[route] ?? HEAVY_READ_LIMIT,
         windowMs: MINUTE_MS,
         subject: RateSubject.CALLER,
+        perPath: true,
+        withinRead: true,
       },
     ]),
   ),
@@ -231,16 +251,39 @@ export const ROUTE_RULES: Readonly<Record<string, RateRule>> = Object.freeze({
     subject: RateSubject.OPERATOR,
   },
 
-  // AU — the console retries every 3 s for 60 s while a sign-in settles.
+  // AU — the console retries every 3 s for 60 s while a sign-in settles; two
+  // tabs behind one office address are 40.
   'POST /auth/wallet/link': {
     bucket: 'wallet-link',
-    limit: 30,
+    limit: 60,
     windowMs: MINUTE_MS,
     subject: RateSubject.ADDRESS,
   },
 
-  // Reads sent as a POST for their body; the editors call them on a debounce.
-  'POST /providers/me/tool-bindings/validate-mapping': READ_RULE,
+  // W1 per item: the alerts page marks each alert read with its own call (up
+  // to 25 at once), and Overview's group dismiss one per copy.
+  'PATCH /notifications/:id/read': {
+    bucket: 'notification-read',
+    limit: PER_ITEM_WRITE_LIMIT,
+    windowMs: MINUTE_MS,
+    subject: RateSubject.CALLER,
+  },
+  // The toolset editor saves every add, remove and undo.
+  'PUT /toolsets/:id/entries': {
+    bucket: 'toolset-entries',
+    limit: PER_ITEM_WRITE_LIMIT,
+    windowMs: MINUTE_MS,
+    subject: RateSubject.CALLER,
+  },
+  // The mapping editor validates on a debounce while the provider types.
+  'POST /providers/me/tool-bindings/validate-mapping': {
+    bucket: 'validate-mapping',
+    limit: PER_ITEM_WRITE_LIMIT,
+    windowMs: MINUTE_MS,
+    subject: RateSubject.CALLER,
+  },
+
+  // Reads sent as a POST for their body.
   'POST /providers/me/slash-requests/lookup': READ_RULE,
   'POST /mcp-urls/preview': READ_RULE,
 });
@@ -265,15 +308,15 @@ export const OWN_LIMITER_ROUTES: readonly string[] = [
 
 /**
  * Path prefixes this limiter never counts: public reads (their own
- * per-address window), health, well-known documents, OAuth and MCP (their own
- * limiters), and the operator sign-in (its own throttle).
+ * per-address window), health, well-known documents, OAuth (its own
+ * limiter), and the operator sign-in (its own throttle). MCP is a separate
+ * app with limiters of its own; `/mcp-urls/*` here is the dashboard's.
  */
 export const EXEMPT_PATH_PREFIXES: readonly string[] = [
   '/public/',
   '/health',
   '/.well-known/',
   '/oauth/',
-  '/mcp',
   '/operator/auth/',
 ];
 

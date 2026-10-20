@@ -1,6 +1,7 @@
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
   DEFAULT_PROVIDER_EGRESS_LIMITS,
+  EGRESS_SLOT_TTL_MS,
   ProviderEgressLimiter,
 } from '@modules/provider/services/provider-egress-limiter.service';
 
@@ -210,7 +211,7 @@ describe('ProviderEgressLimiter with Redis', () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
 
   it('holds one organization to its concurrency across replicas', async () => {
-    const { redis, store } = fakeRateRedis();
+    const { redis, sets } = fakeRateRedis();
     const [a, b] = replicas(redis);
     const g = gate();
     const running = [a.run('org-a', () => g.promise), b.run('org-a', () => g.promise)];
@@ -225,7 +226,7 @@ describe('ProviderEgressLimiter with Redis', () => {
     g.open();
     await Promise.all(running);
     await settle();
-    expect(store.get('rate:egress:in-flight:org-a')).toBe(0);
+    expect(sets.get('rate:egress:in-flight:org-a')?.size).toBe(0);
     await expect(b.run('org-a', () => Promise.resolve('ok'))).resolves.toBe('ok');
   });
 
@@ -290,13 +291,37 @@ describe('ProviderEgressLimiter with Redis', () => {
   });
 
   it('frees the Redis slot when the work throws', async () => {
-    const { redis, store } = fakeRateRedis();
+    const { redis, sets } = fakeRateRedis();
     const limiter = new ProviderEgressLimiter(LIMITS, redis as never);
 
     await expect(limiter.run('org-a', () => Promise.reject(new Error('boom')))).rejects.toThrow(
       'boom',
     );
     await settle();
-    expect(store.get('rate:egress:in-flight:org-a')).toBe(0);
+    expect(sets.get('rate:egress:in-flight:org-a')?.size).toBe(0);
+  });
+
+  it('frees a slot whose release was lost once it expires, however often the org retries', async () => {
+    const { redis } = fakeRateRedis();
+    const limiter = new ProviderEgressLimiter(
+      { ...LIMITS, perOrganizationConcurrent: 1, perOrganizationPerWindow: 1_000 },
+      redis as never,
+    );
+    let now = 20_000_000;
+    limiter.now = () => now;
+    // A replica that died mid-run: its slot is taken and never given back.
+    const hung = limiter.run('org-a', () => new Promise<void>(() => undefined));
+    await settle();
+
+    for (let i = 0; i < 30; i += 1) {
+      now += 3_000;
+      await expectErrorCodeAsync(
+        () => limiter.run('org-a', () => Promise.resolve()),
+        ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+      );
+    }
+    now = 20_000_000 + EGRESS_SLOT_TTL_MS;
+    await expect(limiter.run('org-a', () => Promise.resolve('freed'))).resolves.toBe('freed');
+    void hung;
   });
 });

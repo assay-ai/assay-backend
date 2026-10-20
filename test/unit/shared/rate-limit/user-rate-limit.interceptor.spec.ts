@@ -1,11 +1,12 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, Logger } from '@nestjs/common';
 import { Subject, lastValueFrom, of } from 'rxjs';
 
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { REDIS_REQUEST_TIMEOUT_MS } from '@shared/cache/redis-cache/with-redis-timeout';
-import { SHARED_WINDOW_RETRY_MS } from '@shared/rate-limit/shared-rate-windows';
+import { SHARED_WINDOW_RETRY_MS, SharedRateWindows } from '@shared/rate-limit/shared-rate-windows';
 import {
   HEAVY_READ_LIMIT,
+  PER_ITEM_WRITE_LIMIT,
   READ_RULE,
   ROUTE_RULES,
   WRITE_RULE,
@@ -45,11 +46,11 @@ const operator = (operatorId = 'op-1') => ({ operator: { operatorId, roles: [] }
 type Caller = { session?: unknown; operator?: unknown; ip?: string };
 
 /** A request as Express hands it over once a route matched and the guard ran. */
-function request(method: string, path: string, caller: Caller = person()) {
+function request(method: string, path: string, caller: Caller = person(), concrete = path) {
   return {
     method,
     route: { path: `/api/v1${path}` },
-    path: `/api/v1${path}`,
+    path: `/api/v1${concrete}`,
     ip: caller.ip ?? '203.0.113.7',
     ...caller,
   } as never;
@@ -124,9 +125,20 @@ describe('UserRateLimitInterceptor: which window a request counts against', () =
 
   it('puts each category on its own bucket and subject', () => {
     const cases: Array<[string, string, Caller, string, string]> = [
-      ['GET', '/balances', person(), 'heavy:/balances', `person:${ORG}:agent-alice`],
-      ['GET', '/overview', person(), 'heavy:/overview', `person:${ORG}:agent-alice`],
-      ['GET', '/operator/health', operator(), 'heavy:/operator/health', 'op:op-1'],
+      ['GET', '/balances', person(), 'heavy', `person:${ORG}:agent-alice`],
+      ['GET', '/overview', person(), 'heavy', `person:${ORG}:agent-alice`],
+      ['GET', '/operator/health', operator(), 'heavy', 'op:op-1'],
+      ['GET', '/escrow/delegates', person(), 'heavy', `person:${ORG}:agent-alice`],
+      [
+        'PATCH',
+        '/notifications/:id/read',
+        person(),
+        'notification-read',
+        `person:${ORG}:agent-alice`,
+      ],
+      ['PUT', '/toolsets/:id/entries', person(), 'toolset-entries', `person:${ORG}:agent-alice`],
+      ['POST', '/mcp-urls/preview', person(), 'read', `person:${ORG}:agent-alice`],
+      ['POST', '/auth/wallet/link', { ip: '192.0.2.1' }, 'wallet-link', 'ip:192.0.2.1'],
       ['GET', '/providers/me/calls/export', person(), 'export', `org:${ORG}`],
       ['POST', '/toolsets', person(), 'write', `person:${ORG}:agent-alice`],
       ['PATCH', '/agents/:agentId', person(), 'write', `person:${ORG}:agent-alice`],
@@ -151,12 +163,12 @@ describe('UserRateLimitInterceptor: which window a request counts against', () =
         'arbiter-ruling-intent',
         'op:op-2',
       ],
-      // Reads sent as a POST share the read window.
+      // Debounced while the provider types: a window of its own.
       [
         'POST',
         '/providers/me/tool-bindings/validate-mapping',
         person(),
-        'read',
+        'validate-mapping',
         `person:${ORG}:agent-alice`,
       ],
     ];
@@ -204,7 +216,29 @@ describe('UserRateLimitInterceptor: which window a request counts against', () =
     expect(routePath({ route: { path: '/api/health' } } as never)).toBe('/health');
     expect(routePath({ path: '/api/v1/toolsets/' } as never)).toBe('/toolsets');
     // HEAD is the GET route's window.
-    expect(decide(request('HEAD', '/balances'))?.rule.bucket).toBe('heavy:/balances');
+    expect(decide(request('HEAD', '/balances'))?.key).toBe(
+      `heavy:/balances:person:${ORG}:agent-alice`,
+    );
+  });
+
+  it('keys a heavy read by its concrete path, and counts it in the read window too', () => {
+    expect(
+      decide(request('GET', '/agents/:agentId/servers', person(), '/agents/agent-7/servers')),
+    ).toMatchObject({
+      key: `heavy:/agents/agent-7/servers:person:${ORG}:agent-alice`,
+      readKey: `read:person:${ORG}:agent-alice`,
+    });
+    expect(decide(request('GET', '/tool-calls'))?.readKey).toBeUndefined();
+  });
+
+  it('counts the dashboard’s /mcp-urls routes: only /mcp itself would be another app', () => {
+    const preview = {
+      method: 'POST',
+      route: { path: '/api/v1/mcp-urls/preview' },
+      path: '/api/v1/mcp-urls/preview',
+      ...person(),
+    } as never;
+    expect(decide(preview)).toMatchObject({ rule: READ_RULE });
   });
 });
 
@@ -240,6 +274,59 @@ describe('UserRateLimitInterceptor: windows', () => {
     expect((await send(interceptor, request('GET', '/balances'))).status).toBe(429);
     expect((await send(interceptor, request('GET', '/overview'))).status).toBe(200);
     expect((await send(interceptor, request('GET', '/tool-calls'))).status).toBe(200);
+  });
+
+  it('gives each agent card its own servers window', async () => {
+    const { interceptor } = limiter();
+    const servers = (agent: string) =>
+      request('GET', '/agents/:agentId/servers', person(), `/agents/${agent}/servers`);
+
+    await sendMany(interceptor, HEAVY_READ_LIMIT, () => servers('a1'));
+    expect((await send(interceptor, servers('a1'))).status).toBe(429);
+    expect((await send(interceptor, servers('a2'))).status).toBe(200);
+  });
+
+  it('bounds heavy reads with varying ids by the read window', async () => {
+    const { interceptor } = limiter();
+    let n = 0;
+    const statuses = await sendMany(interceptor, READ_RULE.limit + 1, () =>
+      request('GET', '/agents/:agentId/servers', person(), `/agents/a${(n += 1)}/servers`),
+    );
+    expect(statuses.slice(0, -1).every((status) => status === 200)).toBe(true);
+    expect(statuses.at(-1)).toBe(429);
+  });
+
+  it('allows /escrow/delegates 60 a minute: two 5 s timers on one page', async () => {
+    const { interceptor } = limiter();
+    const statuses = await sendMany(interceptor, 61, () => request('GET', '/escrow/delegates'));
+    expect(statuses.filter((status) => status === 200)).toHaveLength(60);
+    expect(statuses.at(-1)).toBe(429);
+  });
+
+  it('gives the per-item writes 120 a minute each, apart from the write window', async () => {
+    const { interceptor } = limiter();
+    for (const [method, path] of [
+      ['PATCH', '/notifications/:id/read'],
+      ['PUT', '/toolsets/:id/entries'],
+      ['POST', '/providers/me/tool-bindings/validate-mapping'],
+    ]) {
+      const statuses = await sendMany(interceptor, PER_ITEM_WRITE_LIMIT + 1, () =>
+        request(method, path),
+      );
+      expect([path, statuses.filter((status) => status === 200).length]).toEqual([
+        path,
+        PER_ITEM_WRITE_LIMIT,
+      ]);
+    }
+    expect((await send(interceptor, request('POST', '/toolsets'))).status).toBe(200);
+  });
+
+  it('allows the wallet link 60 a minute from one address', async () => {
+    const { interceptor } = limiter();
+    const statuses = await sendMany(interceptor, 61, () =>
+      request('POST', '/auth/wallet/link', { ip: '192.0.2.9' }),
+    );
+    expect(statuses.filter((status) => status === 200)).toHaveLength(60);
   });
 
   it('gives two people of one organization a window each, but one organization window', async () => {
@@ -326,6 +413,21 @@ describe('UserRateLimitInterceptor: the export runs one at a time', () => {
     expect((await send(interceptor, exportReq())).status).toBe(200);
   });
 
+  it('does not count an attempt refused for the slot against the five a minute', async () => {
+    const { interceptor } = limiter();
+    const exportReq = () => request('GET', '/providers/me/calls/export');
+    const streaming = new Subject<string>();
+
+    const first = send(interceptor, exportReq(), () => streaming);
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 10; i += 1) expect((await send(interceptor, exportReq())).status).toBe(429);
+    streaming.next('csv');
+    streaming.complete();
+    await first;
+
+    expect(await sendMany(interceptor, 5, exportReq)).toEqual([200, 200, 200, 200, 429]);
+  });
+
   it('allows five exports a minute for the organization', async () => {
     const { interceptor } = limiter();
     const statuses = await sendMany(interceptor, 6, () =>
@@ -360,6 +462,7 @@ describe('UserRateLimitInterceptor with Redis', () => {
     expect([...store.keys()].sort()).toEqual(
       [
         `rate:user:heavy:/balances:person:${ORG}:agent-alice:${index}`,
+        `rate:user:read:person:${ORG}:agent-alice:${index}`,
         `rate:user:deposit:acct:${person().session.agentAccount}:${index}`,
         `rate:user:read:cred:cred-5:${index}`,
       ].sort(),
@@ -367,7 +470,7 @@ describe('UserRateLimitInterceptor with Redis', () => {
   });
 
   it('shares the export slot across instances', async () => {
-    const { redis, store } = fakeRateRedis();
+    const { redis, sets } = fakeRateRedis();
     const a = limiter(redis).interceptor;
     const b = limiter(redis).interceptor;
     const streaming = new Subject<string>();
@@ -380,7 +483,7 @@ describe('UserRateLimitInterceptor with Redis', () => {
     streaming.complete();
     await first;
     await new Promise((resolve) => setImmediate(resolve));
-    expect(store.get(`rate:user:export:inflight:org:${ORG}`)).toBe(0);
+    expect(sets.get(`rate:user:export:inflight:org:${ORG}`)?.size).toBe(0);
     expect((await send(b, request('GET', '/providers/me/calls/export'))).status).toBe(200);
   });
 
@@ -441,5 +544,47 @@ describe('UserRateLimitInterceptor with Redis', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('frees a slot whose release was lost once it expires, however often the caller retries', async () => {
+    const { redis } = fakeRateRedis();
+    let now = 10_000_000;
+    const windows = new SharedRateWindows({
+      redis: redis as never,
+      keyPrefix: 'rate:test:',
+      maxKeys: 10,
+      now: () => now,
+      logger: new Logger('test'),
+    });
+
+    // Taken and never given back: the replica died mid-run.
+    expect(await windows.acquireSlot('export', 1, 120_000)).not.toBeNull();
+    for (let i = 0; i < 20; i += 1) {
+      now += 5_000;
+      expect(await windows.acquireSlot('export', 1, 120_000)).toBeNull();
+    }
+    now = 10_000_000 + 120_000;
+    expect(await windows.acquireSlot('export', 1, 120_000)).not.toBeNull();
+  });
+
+  it('gives a slot back by run id, so a repeated or late release frees nobody else’s', async () => {
+    const { redis, sets } = fakeRateRedis();
+    const windows = new SharedRateWindows({
+      redis: redis as never,
+      keyPrefix: 'rate:test:',
+      maxKeys: 10,
+      now: () => 10_000_000,
+      logger: new Logger('test'),
+    });
+
+    const first = await windows.acquireSlot('export', 2, 120_000);
+    const second = await windows.acquireSlot('export', 2, 120_000);
+    first?.();
+    first?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sets.get('rate:test:export')?.size).toBe(1);
+    second?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sets.get('rate:test:export')?.size).toBe(0);
   });
 });
