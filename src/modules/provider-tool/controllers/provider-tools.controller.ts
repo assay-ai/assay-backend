@@ -39,6 +39,7 @@ import {
 import { ProviderToolTryService } from '../services/provider-tool-try.service';
 import { ProviderToolsService } from '../services/provider-tools.service';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * "Publish your own API" (design spec §7.6, §7.9 Provider, §7.10): a
@@ -52,6 +53,8 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Provider')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard, HumanSessionGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('provider/tools')
 export class ProviderToolsController {
   constructor(

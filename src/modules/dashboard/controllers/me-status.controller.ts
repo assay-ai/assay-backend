@@ -33,7 +33,13 @@ export class MeStatusController {
   ) {}
 
   @Get()
-  @TenantCache({ ttl: 5, vary: 'agent', epochs: ['money', 'notifications'] })
+  @TenantCache({
+    ttl: 5,
+    vary: 'agent',
+    epochs: ['money', 'notifications'],
+    // A part that could not be read answers null: never kept for the next poll.
+    cacheIf: (body) => Object.values(body as object).every((part) => part !== null),
+  })
   @ApiOperation({ summary: 'Block status, unread alert count and buyer debts, in one read' })
   @ApiResponse({ status: 200, type: MeStatusResponseDto })
   async get(@CurrentSession() session: McpSession): Promise<MeStatusResponseDto> {

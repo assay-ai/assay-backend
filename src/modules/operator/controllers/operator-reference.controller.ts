@@ -50,7 +50,7 @@ export class OperatorReferenceController {
   }
 
   @Get('verifiers')
-  @TenantCache({ ttl: 300, vary: 'operator', epochs: ['operator'], singleFlight: true })
+  @TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({
     summary: 'The verifier signing keys this deployment knows, and their on-chain state',
   })

@@ -6,11 +6,14 @@ import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/aut
 
 import { CreateReportBodyDto, ReportDto } from '../dto/toolset-report.dto';
 import { ToolsetReportsService } from '../services/toolset-reports.service';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /** `/reports` — report a tool set, a tool or a public name (design spec §7.9, FR-15). */
 @ApiTags('Toolsets')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard, HumanSessionGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly reports: ToolsetReportsService) {}

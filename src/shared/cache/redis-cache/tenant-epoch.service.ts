@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomInt } from 'node:crypto';
+
 import { Injectable, Logger } from '@nestjs/common';
 import type { DataSource, EntityManager, EntitySubscriberInterface, QueryRunner } from 'typeorm';
 
@@ -51,6 +54,28 @@ const GLOBAL_TENANT = 'global';
 
 const PENDING_BUMPS = '__tenantEpochBumps';
 
+/** After a Redis failure, epochs are neither read nor bumped for this long. */
+const REDIS_RETRY_MS = 5_000;
+
+/**
+ * One round trip for every key a write touched: a missing counter is created
+ * from the clock first (as `readEpoch` does), so an evicted one never
+ * restarts at a value an old entry may still be keyed on.
+ */
+const BUMP_SCRIPT = `
+for _, key in ipairs(KEYS) do
+  if redis.call('EXISTS', key) == 0 then redis.call('SET', key, ARGV[1]) end
+  redis.call('INCR', key)
+end
+return #KEYS`;
+
+/** Bumps started for the current request after a commit, awaited before it answers. */
+export interface RequestBumps {
+  readonly pending: Promise<unknown>[];
+}
+
+const requestBumps = new AsyncLocalStorage<RequestBumps>();
+
 interface PendingBump {
   organizationIds: string | null | undefined | ReadonlyArray<string | null | undefined>;
   scopes: TenantEpochScope[];
@@ -83,7 +108,35 @@ export function tenantEpochKey(scope: TenantEpochScope, organizationId: string |
 export class TenantEpochService {
   private readonly logger = new Logger(TenantEpochService.name);
 
+  private skipUntil = Number.NEGATIVE_INFINITY;
+
   constructor(private readonly cache: CacheService) {}
+
+  /**
+   * Run `work` (a request's handler) so that bumps fired after its commits are
+   * collected in `bumps`; {@link settleRequestBumps} then awaits them before
+   * the response leaves. A commit hook never awaits a bump itself, so the
+   * bump does not hold the transaction's connection.
+   */
+  trackRequestBumps<T>(bumps: RequestBumps, work: () => T): T {
+    return requestBumps.run(bumps, work);
+  }
+
+  /** Await every bump the request fired after a commit. */
+  async settleRequestBumps(bumps: RequestBumps): Promise<void> {
+    while (bumps.pending.length > 0) {
+      await Promise.all(bumps.pending.splice(0));
+    }
+  }
+
+  private unavailable(): boolean {
+    return Date.now() < this.skipUntil;
+  }
+
+  private failed(what: string, error: unknown): void {
+    this.skipUntil = Date.now() + REDIS_RETRY_MS;
+    this.logger.warn(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   /**
    * The current value of each scope, in order, or `null` when any cannot be
@@ -96,6 +149,7 @@ export class TenantEpochService {
     if (scopes.length === 0) return [];
     const keys = scopes.map((scope) => this.keyOrNull(scope, organizationId));
     if (keys.some((key) => key === null)) return null;
+    if (this.unavailable()) return null;
     try {
       const redis = this.cache.getRedisClient();
       const values = await withRedisTimeout(() => redis.mget(...(keys as string[])));
@@ -105,9 +159,7 @@ export class TenantEpochService {
         ),
       );
     } catch (error) {
-      this.logger.warn(
-        `tenant epochs unreadable, not caching: ${error instanceof Error ? error.message : error}`,
-      );
+      this.failed('tenant epochs unreadable, not caching', error);
       return null;
     }
   }
@@ -136,24 +188,18 @@ export class TenantEpochService {
       for (const org of orgs) keys.add(tenantEpochKey(scope, org));
     }
     if (keys.size === 0) return;
+    if (this.unavailable()) {
+      // Redis failed a moment ago: no deadline per write during an outage.
+      this.logger.debug(`${keys.size} epoch(s) not bumped: Redis unavailable`);
+      return;
+    }
     const redis = this.cache.getRedisClient();
-    await Promise.all(
-      [...keys].map(async (key) => {
-        try {
-          // Created from the clock first, so a counter that was evicted does
-          // not restart at 1, a value old entries may still be keyed on.
-          await withRedisTimeout(async () => {
-            await readEpoch(redis, key);
-            await redis.incr(key);
-          });
-        } catch (error) {
-          this.logger.warn(
-            `${key} not bumped; cached reads last until their TTL. ` +
-              (error instanceof Error ? error.message : String(error)),
-          );
-        }
-      }),
-    );
+    const start = (BigInt(Date.now()) * 1_000_000n + BigInt(randomInt(1_000_000))).toString();
+    try {
+      await withRedisTimeout(() => redis.eval(BUMP_SCRIPT, keys.size, ...keys, start));
+    } catch (error) {
+      this.failed(`${[...keys].join(', ')} not bumped; cached reads last until their TTL`, error);
+    }
   }
 
   /**
@@ -162,9 +208,10 @@ export class TenantEpochService {
    *
    * For a write made deep inside a caller's transaction — the ledger journal,
    * a payment-intent transition — where the code that writes does not own the
-   * commit. The bump runs from TypeORM's `AfterTransactionCommit` of the
-   * outermost transaction, which `commitTransaction` awaits, so the caller's
-   * own `await` still covers it; a rollback drops it.
+   * commit. The bump starts from TypeORM's `AfterTransactionCommit` of the
+   * outermost transaction, without holding the connection for it; inside a
+   * request, `TenantWriteEpochInterceptor` awaits it before the response
+   * leaves (`settleRequestBumps`). A rollback drops it.
    */
   async bumpAfterCommit(
     on: QueryRunner | EntityManager | null | undefined,
@@ -195,7 +242,12 @@ export class TenantEpochService {
       if (!pending?.length) return;
       delete data![PENDING_BUMPS];
       if (!commit) return;
-      await Promise.all(pending.map((p) => this.bump(p.organizationIds, ...p.scopes)));
+      // Not awaited here: `commitTransaction` awaits this hook, and the
+      // connection would stay checked out for a Redis round trip. The
+      // request awaits it instead (`settleRequestBumps`) before answering;
+      // a worker's bump simply completes on its own.
+      const bumps = Promise.all(pending.map((p) => this.bump(p.organizationIds, ...p.scopes)));
+      requestBumps.getStore()?.pending.push(bumps);
     };
     const subscriber: EntitySubscriberInterface = {
       afterTransactionCommit: (event) => flush(event.queryRunner, true),

@@ -16,6 +16,7 @@ import {
 import { DisputeSlashRequestsBodyDto, SlashContractCallDto } from '../dto/slash-dispute-intent.dto';
 import { SlashDisputeIntentService } from '../services/slash-dispute-intent.service';
 import { SlashRequestLookupService } from '../services/slash-request-lookup.service';
+import { NoEpochBump } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * On-chain slash request ids, matched to the provider's own cases.
@@ -38,6 +39,7 @@ export class ProviderSlashRequestsController {
   ) {}
 
   @Post('lookup')
+  @NoEpochBump()
   @BlockedSessionReadOnly()
   @HttpCode(200)
   @ApiOperation({ summary: 'Which of these on-chain slash request ids are your Assay cases' })

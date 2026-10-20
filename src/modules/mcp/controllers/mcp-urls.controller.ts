@@ -14,6 +14,7 @@ import {
 import { McpSession } from '../ports/mcp-session.port';
 import { McpUrlPreviewService } from '../services/mcp-url-preview.service';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { NoEpochBump } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * `POST /mcp-urls/preview` — what an MCP URL would serve an agent, for the
@@ -28,6 +29,7 @@ export class McpUrlsController {
   constructor(private readonly previews: McpUrlPreviewService) {}
 
   @Post('preview')
+  @NoEpochBump()
   @HttpCode(200)
   @ApiOperation({
     summary: 'View ∩ access for an agent, with prices, a token estimate and warnings',

@@ -17,7 +17,7 @@ export class ProviderPayoutsController {
   constructor(private readonly payouts: ProviderPayoutsService) {}
 
   @Get()
-  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'], singleFlight: true })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({ summary: 'Payout batches, newest first' })
   @ApiCursorPage(ProviderPayoutDto)
   async list(
