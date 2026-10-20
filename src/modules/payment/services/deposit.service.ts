@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
@@ -6,6 +6,11 @@ import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { FACILITATOR_PORT, FacilitatorPort } from '@modules/chains/ports/facilitator.port';
 import { Money } from '@modules/chains/ports/money.types';
 import { ChainAdapter } from '@modules/chains/ports/chain-adapter.port';
+import {
+  CHAIN_STATE_GATE,
+  ChainDoor,
+  ChainStateGatePort,
+} from '@modules/chains/ports/chain-state-gate.port';
 import {
   ObservedTransfer,
   PaymentIntent as ChainPaymentIntent,
@@ -98,6 +103,11 @@ export class DepositService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly escrows: BuyerEscrowRepository,
     private readonly ledger: LedgerService,
+    // The ON-CHAIN pause and blocklist (D-19), asked before the escrow mirror
+    // row and the intent row are written: a refused deposit leaves neither.
+    @Optional()
+    @Inject(CHAIN_STATE_GATE)
+    private readonly chainState: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -515,6 +525,10 @@ export class DepositService {
     // dispatches on the namespace alone, so opening the escrow first would
     // submit `open_escrow` to a disabled chain and only then refuse.
     const adapter = this.registry.resolve(chainId);
+    // The deposit door (paused, buyer blocked on chain) before anything is
+    // written: refusing after the intent row left a CREATED row counted in
+    // `pendingDeposits` until the expiry sweep.
+    await this.chainState?.assertActive(ChainDoor.DEPOSIT, [{ role: 'BUYER', account }]);
     const escrow = await this.ensureEscrow(organizationId, account, asset);
     // Asked of the adapter, never branched on the namespace here — the whole
     // point of `ChainAdapter` is that this service does not know what a chain
