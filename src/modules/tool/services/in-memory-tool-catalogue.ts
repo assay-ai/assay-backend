@@ -60,4 +60,14 @@ export class InMemoryToolCatalogue implements ToolCataloguePort {
   findBindings(toolId: string): Promise<readonly ToolBinding[]> {
     return Promise.resolve(this.bindingsByTool.get(toolId) ?? []);
   }
+
+  findBindingsOfProvider(providerId: string): Promise<readonly ToolBinding[]> {
+    return Promise.resolve(
+      [...this.tools.keys()].flatMap((toolId) =>
+        (this.bindingsByTool.get(toolId) ?? []).filter(
+          (binding) => binding.providerId === providerId,
+        ),
+      ),
+    );
+  }
 }

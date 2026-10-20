@@ -39,6 +39,15 @@ export interface ToolCataloguePort {
    */
   findBindings(toolId: string): Promise<readonly ToolBinding[]>;
 
+  /**
+   * One provider's bindings, in any state, across every tool in the
+   * catalogue: exactly the union of {@link findBindings} over
+   * {@link listTools}, filtered to `providerId`, but without reading every
+   * other provider's bindings to get there. Order is unspecified. Optional so
+   * a fake catalogue need not grow it; callers fall back to that union.
+   */
+  findBindingsOfProvider?(providerId: string): Promise<readonly ToolBinding[]>;
+
   /** A REMOVED tool by name, for `TOOL_REMOVED` (`ToolContractsPort.findRemovedByName`). */
   findRemovedByName?(name: string): Promise<RemovedTool | null>;
 }
