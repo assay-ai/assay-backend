@@ -7,7 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
-import { SHARED_WINDOW_RETRY_MS } from '@shared/interceptors/address-rate-limit.interceptor';
+import { SHARED_WINDOW_RETRY_MS } from '@shared/rate-limit/shared-rate-windows';
 import {
   HTTP_CACHE_TTL_KEY,
   HTTP_CACHE_KEY_KEY,
