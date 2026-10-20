@@ -503,9 +503,11 @@ describe('rail B over MCP', () => {
         code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
         detail: { pending: usdc('20').amount },
       });
-      expect((outcome as { message: string }).message).toContain(
-        `A deposit of ${usdc('20').amount} is still confirming on chain`,
-      );
+      const message = (outcome as { message: string }).message;
+      // Dollars, as the console shows them — never atomic units or the asset id (BUG-A-10).
+      expect(message).toMatch(/^Insufficient balance: this call costs \$\d/);
+      expect(message).toContain('A deposit of $20.00 is still confirming on chain');
+      expect(message).not.toContain(usdc('20').amount);
     });
   });
 
