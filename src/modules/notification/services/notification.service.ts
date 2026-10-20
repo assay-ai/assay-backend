@@ -144,6 +144,12 @@ export class NotificationService implements NotificationPort {
       firstDeliveredAt: deliveredNow ? new Date() : null,
     });
     // The row exists: the claim is kept whatever fails below.
+    //
+    // An insert that commits but whose promise rejects (a client timeout after
+    // the server wrote the row) is treated as a failure: the claim is released
+    // and a later call can write a second row for a ONCE notice. Accepted on
+    // purpose: a duplicate notice costs a little noise, a lost one (a payment
+    // key's first spend) costs the security signal this event exists for.
     pending.claim = null;
     pending.recorded = true;
 

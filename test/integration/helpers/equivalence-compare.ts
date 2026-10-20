@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Response } from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -129,6 +130,11 @@ export function normaliser(
     if (address) {
       addresses.set(address.toLowerCase(), placeholder);
       endings.set(address.slice(-8).toUpperCase(), placeholder.replace(/>$/, ':ending>'));
+      // ...and by `keyDigest` (sha256 of the lower-cased address, 16 hex).
+      endings.set(
+        createHash('sha256').update(address.toLowerCase()).digest('hex').slice(0, 16),
+        placeholder.replace(/>$/, ':digest>'),
+      );
     } else exact.set(value, placeholder);
   }
   const base: [string, string][] = [

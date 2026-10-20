@@ -610,6 +610,7 @@ describe('OAuth consent API — real database and Redis', () => {
         },
         ...body.agents.slice(1),
       ],
+      replacesAgent: null,
       suggestedName: `Claude Code · ${today()}`,
     });
     // Every agent of the organization, and none of another's.
