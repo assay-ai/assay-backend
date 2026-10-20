@@ -79,6 +79,7 @@ import {
 } from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
+import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
@@ -1198,9 +1199,9 @@ export class McpToolCallService {
       code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
       retryable: false,
       message:
-        `Insufficient balance: this call costs ${price.amount} of ${price.asset}` +
+        `Insufficient balance: this call costs ${formatDollars(price)}` +
         (pending
-          ? `. A deposit of ${pending} is still confirming on chain; it becomes spendable once ` +
+          ? `. A deposit of ${formatDollars({ ...price, amount: pending })} is still confirming on chain; it becomes spendable once ` +
             'the chain confirms it, usually within a minute'
           : fixUrl
             ? `. Add funds, then call again: ${fixUrl}`
