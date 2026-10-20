@@ -968,7 +968,7 @@ export class McpToolCallService {
           unaffordable: null,
         };
       } catch (error) {
-        if (!isInsufficientBalance(error)) throw error;
+        if (!unaffordableOnRedeem(error)) throw error;
         // The intent exists in `CREATED` with nothing reserved; the expiry sweep
         // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
         return { intent: null, unaffordable: await this.insufficientFunds(session, null, price) };
@@ -1191,6 +1191,8 @@ export class McpToolCallService {
     // say so, or a buyer who just funded the escrow is told it is empty.
     const pending =
       balance?.pending && BigInt(balance.pending.amount) > 0n ? balance.pending.amount : null;
+    // Nothing on the way: say where to add funds, as the offer does (BUG-A-05).
+    const fixUrl = pending ? null : fundingFixUrl(session, this.host?.webAppUrl);
     return {
       kind: 'ERROR',
       code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
@@ -1200,13 +1202,16 @@ export class McpToolCallService {
         (pending
           ? `. A deposit of ${pending} is still confirming on chain; it becomes spendable once ` +
             'the chain finalises it, usually within 30 minutes'
-          : ''),
+          : fixUrl
+            ? `. Add funds, then call again: ${fixUrl}`
+            : ''),
       intentId,
       detail: {
         price: price.amount,
         asset: price.asset,
         available: balance ? balance.available.amount : null,
         ...(pending ? { pending } : {}),
+        ...(fixUrl ? { fixUrl } : {}),
       },
     };
   }
@@ -2359,6 +2364,20 @@ function resultUnavailable(
     intentId,
     detail: { status },
   };
+}
+
+/**
+ * A voucher refused at redemption because the escrow cannot pay it: too little
+ * balance, or (eip155 since BUG-A-05) an escrow the payer never funded, which
+ * the chain reads as no escrow at all. Both are "add funds", not a failure.
+ */
+export function unaffordableOnRedeem(error: unknown): boolean {
+  return isInsufficientBalance(error) || isEscrowNotOpen(error);
+}
+
+/** `{WEB}/funding` for a payment client, where adding funds is one click; nothing for anyone else (H2). */
+export function fundingFixUrl(session: McpSession, webAppUrl: string | undefined): string | null {
+  return session.paymentsAllowed === true && webAppUrl ? fundingUrl(webAppUrl) : null;
 }
 
 function isInsufficientBalance(error: unknown): boolean {

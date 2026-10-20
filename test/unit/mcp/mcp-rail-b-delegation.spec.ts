@@ -5,6 +5,8 @@ import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   ASSAY_APP_SENTENCE,
   allocateOfferSeq,
+  fundingFixUrl,
+  unaffordableOnRedeem,
   VoucherRequirement,
   checksummedRequirement,
   delegationHint,
@@ -275,6 +277,29 @@ describe('rail-B offer seq for a buyer who never deposited', () => {
     d.seqs.recordUnfunded.mockRejectedValueOnce(claimed);
     await expect(allocateOfferSeq(d, session(), ASSET, null)).rejects.toBe(claimed);
     expect(d.seqs.allocate).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * BUG-A-05, after enabling: a payer who turned paid calls on before any deposit
+ * is told to add funds, with the link, rather than "no escrow is open".
+ */
+describe('rail-B redemption against an escrow with no funds', () => {
+  it('a never-funded escrow and a short balance are both "add funds"', () => {
+    expect(unaffordableOnRedeem(PaymentErrors.escrowNotOpen({ account: PAYER }))).toBe(true);
+  });
+
+  it('a chain that could not be read is not', () => {
+    expect(
+      unaffordableOnRedeem(PaymentErrors.escrowNotOpen({ account: PAYER, reason: 'rpc down' })),
+    ).toBe(false);
+    expect(unaffordableOnRedeem(new Error('boom'))).toBe(false);
+  });
+
+  it('the funding link goes to a payment client only', () => {
+    expect(fundingFixUrl(session(), WEB)).toBe(`${WEB}/funding`);
+    expect(fundingFixUrl(session({ paymentsAllowed: false }), WEB)).toBeNull();
+    expect(fundingFixUrl(session(), undefined)).toBeNull();
   });
 });
 
