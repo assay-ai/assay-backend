@@ -1,7 +1,7 @@
 import { Controller, Get, UseInterceptors } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CacheHeader } from '@shared/decorators/cache-header.decorator';
+import { CacheHeader, PUBLIC_EDGE_CACHE } from '@shared/decorators/cache-header.decorator';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { PublicNotChargedResponseDto } from '../dto/get-public-not-charged.dto';
@@ -40,7 +40,13 @@ export class PublicNotChargedController {
   constructor(private readonly notCharged: PublicNotChargedService) {}
 
   @Get()
-  @CacheHeader({ maxAge: 60, staleWhileRevalidate: 0, staleIfError: 0, mustRevalidate: true })
+  @CacheHeader({
+    maxAge: 60,
+    staleWhileRevalidate: 0,
+    staleIfError: 0,
+    mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
+  })
   @ApiOperation({
     summary: 'Recent paid calls that were not charged, and 30-day totals — no authentication',
     description:

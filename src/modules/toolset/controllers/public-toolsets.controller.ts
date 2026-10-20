@@ -10,7 +10,8 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CacheHeader } from '@shared/decorators/cache-header.decorator';
+import { CacheHeader, PUBLIC_EDGE_CACHE } from '@shared/decorators/cache-header.decorator';
+import { HttpCacheTTL } from '@shared/decorators/http-cache.decorator';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import {
@@ -32,11 +33,21 @@ import {
   PublicToolsetsService,
 } from '../services/public-toolsets.service';
 
+/**
+ * The routes below `toolsets` that are not served from the in-process list
+ * cache read Postgres on every call: a page is three queries, `categories` a
+ * `GROUP BY` over every tool. Each distinct URL is held in Redis for as long
+ * as the list is held in process, so a URL Cloudflare has not cached yet still
+ * costs the database one read per window, not one per request.
+ */
+const SERVER_CACHE_SECONDS = PUBLIC_TOOLSETS_CACHE_MS / 1000;
+
 const CACHE = {
   maxAge: PUBLIC_TOOLSETS_CACHE_MS / 1000,
   staleWhileRevalidate: 0,
   staleIfError: 0,
   mustRevalidate: true,
+  ...PUBLIC_EDGE_CACHE,
 };
 
 /**
@@ -82,6 +93,7 @@ export class PublicToolsetsController {
   }
 
   @Get('toolsets/@:handle/:slug/versions')
+  @HttpCacheTTL(SERVER_CACHE_SECONDS)
   @CacheHeader(CACHE)
   @ApiOperation({ summary: 'A listed tool set’s published versions, newest first' })
   @ApiResponse({ status: 200, type: PublicToolsetVersionListDto })
@@ -90,6 +102,7 @@ export class PublicToolsetsController {
   }
 
   @Get('toolsets/@:handle/:slug/versions/:v')
+  @HttpCacheTTL(SERVER_CACHE_SECONDS)
   @CacheHeader(CACHE)
   @ApiOperation({
     summary: 'One version a listed tool set serves on `/@…`: its tools and rules, and a diff',
@@ -111,6 +124,7 @@ export class PublicToolsetsController {
   }
 
   @Get('toolsets/@:handle/:slug')
+  @HttpCacheTTL(SERVER_CACHE_SECONDS)
   @CacheHeader(CACHE)
   @ApiOperation({ summary: 'A listed tool set’s page: tools, rules, weekly figures, MCP URLs' })
   @ApiResponse({ status: 200, type: PublicToolsetPageDto })
@@ -123,6 +137,7 @@ export class PublicToolsetsController {
   }
 
   @Get('handles/:handle')
+  @HttpCacheTTL(SERVER_CACHE_SECONDS)
   @CacheHeader(CACHE)
   @ApiOperation({ summary: 'A public name’s profile: its listed tool sets (and, later, tools)' })
   @ApiResponse({ status: 200, type: PublicHandleProfileDto })
@@ -131,6 +146,7 @@ export class PublicToolsetsController {
   }
 
   @Get('categories')
+  @HttpCacheTTL(SERVER_CACHE_SECONDS)
   @CacheHeader(CACHE)
   @ApiOperation({ summary: 'Categories with their listed tools and tool sets' })
   @ApiResponse({ status: 200, type: PublicCategoryListDto })

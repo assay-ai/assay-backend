@@ -355,8 +355,10 @@ export class CacheHeaderInterceptor implements NestInterceptor {
     directives.push(`max-age=${config.maxAge}`);
 
     // s-maxage (CDN/proxy cache) - Cloudflare respects this
-    // If cdnMaxAge is set, use it; otherwise CDN will use max-age
-    if (config.cdnMaxAge !== undefined) {
+    // If cdnMaxAge is set, use it; otherwise CDN will use max-age. Never on a
+    // private response: a shared-cache lifetime there is a contradiction, and
+    // a credentialed request to a public route is exactly that case.
+    if (config.cdnMaxAge !== undefined && config.visibility === 'public') {
       directives.push(`s-maxage=${config.cdnMaxAge}`);
     }
 

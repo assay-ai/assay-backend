@@ -1,7 +1,8 @@
 import { Controller, Get, Param, Query, UseInterceptors } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CacheHeader } from '@shared/decorators/cache-header.decorator';
+import { CacheHeader, PUBLIC_EDGE_CACHE } from '@shared/decorators/cache-header.decorator';
+import { HttpCacheTTL } from '@shared/decorators/http-cache.decorator';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { GetCatalogueProviderParamsDto } from '../dto/get-catalogue.dto';
@@ -58,6 +59,7 @@ export class PublicCatalogueController {
     staleWhileRevalidate: 0,
     staleIfError: 0,
     mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
   })
   @ApiOperation({
     summary: 'Every provider serving traffic — no authentication',
@@ -75,6 +77,7 @@ export class PublicCatalogueController {
     staleWhileRevalidate: 0,
     staleIfError: 0,
     mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
   })
   @ApiOperation({
     summary: 'Every tool at least one provider serves — no authentication',
@@ -91,11 +94,15 @@ export class PublicCatalogueController {
   }
 
   @Get('tools/:toolId/versions')
+  // The one route here not served from the in-process market window: it reads
+  // the tool from Postgres each call, so each tool id is held in Redis too.
+  @HttpCacheTTL(TTL_SECONDS)
   @CacheHeader({
     maxAge: TTL_SECONDS,
     staleWhileRevalidate: 0,
     staleIfError: 0,
     mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
   })
   @ApiOperation({
     summary:
@@ -119,6 +126,7 @@ export class PublicCatalogueController {
     staleWhileRevalidate: 0,
     staleIfError: 0,
     mustRevalidate: true,
+    ...PUBLIC_EDGE_CACHE,
   })
   @ApiOperation({
     summary: 'One listed provider, and what they serve — no authentication',

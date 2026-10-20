@@ -159,6 +159,25 @@ export function parseCorsAllowedOrigins(
   return origins;
 }
 
+/**
+ * Whether the API serves Swagger at `/api/docs` (and `/api/docs-json`).
+ *
+ * On by default everywhere except production. In production it is off unless
+ * `API_DOCS_ENABLED=true`: the document lists every route, guard and error
+ * code of the internal surface, which is a map for an attacker and no use to a
+ * visitor, and `yarn openapi:export` produces the same document without a
+ * running server. `API_DOCS_ENABLED=false` turns it off anywhere.
+ */
+export function parseApiDocsEnabled(
+  raw: string | undefined = process.env.API_DOCS_ENABLED,
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return nodeEnv !== 'production';
+}
+
 const appConfig = registerAs('app', () => {
   validateConfig(process.env, AppEnvVariables);
 
@@ -173,6 +192,7 @@ const appConfig = registerAs('app', () => {
       httpCacheEnabled: process.env.HTTP_CACHE_ENABLED !== 'false',
       browserCacheEnabled: process.env.BROWSER_CACHE_ENABLED !== 'false',
       cdnCacheEnabled: process.env.CDN_CACHE_ENABLED !== 'false',
+      docsEnabled: parseApiDocsEnabled(),
     },
     websocket: {
       port: parseInt(process.env.WEBSOCKET_PORT, 10),

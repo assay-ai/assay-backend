@@ -24,6 +24,7 @@ import {
   McpUnauthorizedRecorder,
   unauthorizedReasonOf,
 } from '../ports/mcp-unauthorized.port';
+import { McpAuthFailureThrottle } from '../services/mcp-auth-failure-throttle.service';
 import { McpHttpBridge } from '../services/mcp-http-bridge';
 import { McpServerFactory } from '../services/mcp-server.factory';
 
@@ -38,6 +39,7 @@ import { McpServerFactory } from '../services/mcp-server.factory';
  * ```text
  * request ─▶ parse the URL (canonical form)        unknown form        → 404
  *         ─▶ a browser? (before auth)              302 to the web app
+ *         ─▶ this address sent too many bad tokens  → 429, no lookup
  *         ─▶ authenticate                           no or bad token     → 401
  *                                                   + WWW-Authenticate
  *         ─▶ resolve the URL for this org           not here / not his  → 404
@@ -81,6 +83,8 @@ export class McpController {
     @Optional()
     @Inject(MCP_UNAUTHORIZED_RECORDER)
     private readonly unauthorized?: McpUnauthorizedRecorder,
+    // Refused-credential count per address (`McpHttpModule`); absent in unit tests.
+    @Optional() private readonly authFailures?: McpAuthFailureThrottle,
   ) {
     this.bridge = new McpHttpBridge((session, scope) => this.servers.create(session, scope));
   }
@@ -130,10 +134,18 @@ export class McpController {
    */
   private async authenticate(request: Request, response: Response): Promise<McpSession> {
     const token = bearerToken(request);
+    const retryAfter = (await this.authFailures?.blockedForSeconds(request.ip)) ?? 0;
+    if (retryAfter > 0) {
+      response.setHeader('Retry-After', String(retryAfter));
+      throw McpErrors.authRateLimited();
+    }
     try {
       return await this.sessions.resolve(token);
     } catch (error) {
       if (error instanceof BaseError && error.errorCode === McpErrorCode.MCP_CREDENTIAL_INVALID) {
+        // A missing token is the first step of an OAuth sign-in and costs no
+        // read; only a presented, refused one is counted.
+        if (token !== null) await this.authFailures?.recordFailure(request.ip);
         this.unauthorized?.record(
           token === null ? 'missing' : (unauthorizedReasonOf(error) ?? 'unknown'),
         );

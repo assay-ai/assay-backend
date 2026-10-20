@@ -209,3 +209,31 @@ export const CloudflareAggressiveCache = () =>
     visibility: 'public',
     cloudflareCache: true,
   });
+
+/**
+ * The Cloudflare window for the unauthenticated public reads, spread into
+ * their `@CacheHeader` options. Browser options stay each route's own; this
+ * sets only what the edge does, in `s-maxage` and `CDN-Cache-Control`.
+ *
+ * - **60 s fresh** at the edge, so one URL reaches the API about once a minute
+ *   however many people load it.
+ * - **60 s stale-while-revalidate**: the first request after expiry is answered
+ *   from the edge while Cloudflare refetches, so a busy page never waits on
+ *   the origin, and nothing is shown more than about two minutes old.
+ * - **1 h stale-if-error**: while the API is down or answering 5xx, the pages
+ *   keep their last good answer instead of an error.
+ *
+ * It deliberately does **not** set `visibility`. A request carrying
+ * `Authorization` is still downgraded to `private` with `CDN-Cache-Control:
+ * no-store` (`CacheHeaderInterceptor`), so a signed-in request can neither
+ * fill nor be told to fill the shared cache. The web app sends these reads
+ * without a token for exactly that reason.
+ *
+ * Not for anything whose staleness is itself the failure: proof of reserves
+ * and the demo verdict poll keep their own options.
+ */
+export const PUBLIC_EDGE_CACHE = {
+  cdnMaxAge: 60,
+  cdnStaleWhileRevalidate: 60,
+  cdnStaleIfError: 3600,
+} as const satisfies CacheHeaderOptions;

@@ -6,6 +6,7 @@ import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 import {
   HTTP_CACHE_TTL_KEY,
   HTTP_CACHE_KEY_KEY,
@@ -136,7 +137,9 @@ export class HttpCacheInterceptor implements NestInterceptor {
 
   private async tryGetFromCache(cacheKey: string): Promise<any | null> {
     try {
-      const cached = await this.cacheService.get(cacheKey);
+      // A Redis that stops answering must cost a public read the deadline, not
+      // the request: on a timeout this is a miss and the handler runs.
+      const cached = await withRedisTimeout(() => this.cacheService.get(cacheKey));
 
       if (cached) {
         this.logger.debug(`HTTP Cache HIT: ${cacheKey}`);
@@ -168,7 +171,7 @@ export class HttpCacheInterceptor implements NestInterceptor {
 
   private async setCache(cacheKey: string, data: any, ttl: number): Promise<void> {
     try {
-      await this.cacheService.set(cacheKey, data, ttl);
+      await withRedisTimeout(() => this.cacheService.set(cacheKey, data, ttl));
       this.logger.debug(`HTTP Cache SET: ${cacheKey} (TTL: ${ttl}s)`);
     } catch (error) {
       this.logger.error(`HTTP Cache SET error: ${cacheKey}`, error);

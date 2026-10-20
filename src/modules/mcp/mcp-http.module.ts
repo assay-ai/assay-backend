@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { McpController } from './controllers/mcp.controller';
 import { McpModule } from './mcp.module';
+import { McpAuthFailureThrottle } from './services/mcp-auth-failure-throttle.service';
 
 /**
  * The MCP transport, mounted.
@@ -17,5 +18,6 @@ import { McpModule } from './mcp.module';
 @Module({
   imports: [McpModule],
   controllers: [McpController],
+  providers: [McpAuthFailureThrottle],
 })
 export class McpHttpModule {}

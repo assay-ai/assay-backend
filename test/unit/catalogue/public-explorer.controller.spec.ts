@@ -9,6 +9,10 @@ import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read
 import { CatalogueController } from '@modules/catalogue/controllers/catalogue.controller';
 import { PublicCatalogueController } from '@modules/catalogue/controllers/public-catalogue.controller';
 import { PublicNotChargedController } from '@modules/catalogue/controllers/public-not-charged.controller';
+import { PublicFeaturesController } from '@bootstrap/api/public-features.controller';
+import { PublicDemoController } from '@modules/mcp/controllers/public-demo.controller';
+import { PublicReservesController } from '@modules/settlement/controllers/public-reserves.controller';
+import { PublicToolsetsController } from '@modules/toolset/controllers/public-toolsets.controller';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import { PublicNotChargedService } from '@modules/catalogue/services/public-not-charged.service';
 
@@ -115,12 +119,18 @@ describe('public Explorer routes need no authentication', () => {
  * routes, so it is throttled the same way (review 2026-10-17).
  */
 describe('the signed-in catalogue is rate limited', () => {
-  it.each([CatalogueController, PublicCatalogueController, PublicNotChargedController])(
-    '%p has PublicReadRateLimitInterceptor attached',
-    (controller) => {
-      const interceptors = (Reflect.getMetadata(INTERCEPTORS_METADATA, controller) ??
-        []) as unknown[];
-      expect(interceptors).toContain(PublicReadRateLimitInterceptor);
-    },
-  );
+  it.each([
+    CatalogueController,
+    PublicCatalogueController,
+    PublicNotChargedController,
+    // Every other unauthenticated route under `/public`, on the same window.
+    PublicToolsetsController,
+    PublicReservesController,
+    PublicFeaturesController,
+    PublicDemoController,
+  ])('%p has PublicReadRateLimitInterceptor attached', (controller) => {
+    const interceptors = (Reflect.getMetadata(INTERCEPTORS_METADATA, controller) ??
+      []) as unknown[];
+    expect(interceptors).toContain(PublicReadRateLimitInterceptor);
+  });
 });
