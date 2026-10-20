@@ -1,4 +1,4 @@
-import { ExecutionContext } from '@nestjs/common';
+import { BadRequestException, ExecutionContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { Observable, lastValueFrom, of, throwError } from 'rxjs';
@@ -16,9 +16,18 @@ import {
   TenantEpochService,
   tenantEpochKey,
 } from '@shared/cache/redis-cache/tenant-epoch.service';
-import { TENANT_CACHE_KEY, TenantCacheOptions } from '@shared/decorators/tenant-cache.decorator';
+import {
+  TENANT_CACHE_KEY,
+  TenantCache,
+  TenantCacheOptions,
+} from '@shared/decorators/tenant-cache.decorator';
 import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
 import { TenantWriteEpochInterceptor } from '@shared/interceptors/tenant-write-epoch.interceptor';
+import {
+  BUMPS_OPERATOR_CONSOLE_KEY,
+  NO_EPOCH_BUMP_KEY,
+} from '@shared/decorators/tenant-write.decorator';
+import { BLOCKED_SESSION_READ_ONLY_METADATA } from '@shared/auth/blocked-session-read-only.decorator';
 
 /** Just the commands the epoch service and the cache use. */
 class FakeRedis {
@@ -41,6 +50,23 @@ class FakeRedis {
   async mget(...keys: string[]) {
     this.check();
     return keys.map((key) => this.values.get(key) ?? null);
+  }
+  /** Only `TenantEpochService`'s bump script. */
+  evalDelayMs = 0;
+  async eval(_script: string, numKeys: number, ...args: string[]) {
+    this.check();
+    if (this.evalDelayMs) await new Promise((resolve) => setTimeout(resolve, this.evalDelayMs));
+    const keys = args.slice(0, numKeys);
+    const start = args[numKeys];
+    for (const key of keys) {
+      if (!this.values.has(key)) this.values.set(key, start);
+      this.values.set(key, (BigInt(this.values.get(key)!) + 1n).toString());
+    }
+    return keys.length;
+  }
+  async exists(key: string) {
+    this.check();
+    return this.values.has(key) ? 1 : 0;
   }
   async incr(key: string) {
     this.check();
@@ -386,6 +412,44 @@ describe('HttpCacheInterceptor with @TenantCache', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it('ttl 0 coalesces but stores nothing', async () => {
+    const { interceptor, cache, singleFlight } = build({
+      ttl: 0,
+      vary: 'operator',
+      epochs: [],
+      singleFlight: true,
+    });
+    const handler = jest.fn(() => of({ chain: 'live' }));
+    const op = req(null, {
+      [OPERATOR_REQUEST_KEY]: { operatorId: 'op-1' },
+      method: 'GET',
+      path: '/api/v1/operator/arbiter/disputes',
+      url: '/api/v1/operator/arbiter/disputes',
+      query: {},
+      headers: {},
+    });
+    const first = call(interceptor, op, handler);
+    await first.run();
+    await call(interceptor, op, handler).run();
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(singleFlight.execute).toHaveBeenCalledTimes(2);
+    expect(cache.set).not.toHaveBeenCalled();
+    expect(cache.get).not.toHaveBeenCalled();
+    expect(first.headers.ETag).toBeUndefined();
+  });
+
+  it('stores nothing when cacheIf refuses the body', async () => {
+    const { interceptor, cache } = build({
+      ...options,
+      cacheIf: (body) => (body as { part: unknown }).part !== null,
+    });
+    const handler = jest.fn(() => of({ part: null }));
+    await call(interceptor, get(session()), handler).run();
+    await call(interceptor, get(session()), handler).run();
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
   it('leaves a non-GET alone', async () => {
     const { interceptor, cache } = build(options);
     const handler = jest.fn(() => of({ ok: true }));
@@ -398,24 +462,42 @@ describe('TenantWriteEpochInterceptor', () => {
   function run(
     request: Record<string, unknown>,
     handle: () => Observable<unknown>,
-    readOnly = false,
+    metadata: Record<string, boolean> = {},
   ) {
-    const epochs = { bump: jest.fn(async () => undefined) };
-    const reflector = { get: jest.fn(() => readOnly) } as unknown as Reflector;
+    const real = epochService(new FakeRedis());
+    const epochs = {
+      bump: jest.fn(async () => undefined),
+      trackRequestBumps: real.trackRequestBumps.bind(real),
+      settleRequestBumps: real.settleRequestBumps.bind(real),
+    };
+    const reflector = {
+      getAllAndOverride: jest.fn((key: string) => metadata[key]),
+    } as unknown as Reflector;
     const interceptor = new TenantWriteEpochInterceptor(reflector, epochs as never);
     const context = {
       getType: () => 'http',
       switchToHttp: () => ({ getRequest: () => request }),
       getHandler: () => function handler() {},
+      getClass: () => class Controller {},
     } as unknown as ExecutionContext;
     return { epochs, result: lastValueFrom(interceptor.intercept(context, { handle })) };
   }
 
-  it("bumps every per-organization scope of the caller's org after a write, and the operator scope", async () => {
+  it("bumps every per-organization scope of the caller's org after a write, not the operator's", async () => {
     const { epochs, result } = run({ method: 'POST', [SESSION_REQUEST_KEY]: session() }, () =>
       of({ ok: true }),
     );
     expect(await result).toEqual({ ok: true });
+    expect(epochs.bump).toHaveBeenCalledWith(ORG_A, ...ORGANIZATION_EPOCH_SCOPES);
+  });
+
+  it('bumps the operator scope for a write the console lists', async () => {
+    const { epochs, result } = run(
+      { method: 'POST', [SESSION_REQUEST_KEY]: session() },
+      () => of({ ok: true }),
+      { [BUMPS_OPERATOR_CONSOLE_KEY]: true },
+    );
+    await result;
     expect(epochs.bump).toHaveBeenCalledWith(ORG_A, ...ORGANIZATION_EPOCH_SCOPES, 'operator');
   });
 
@@ -426,6 +508,15 @@ describe('TenantWriteEpochInterceptor', () => {
     );
     await expect(result).rejects.toBe(failure);
     expect(epochs.bump).toHaveBeenCalled();
+  });
+
+  it('bumps nothing after a refusal no handler ran for (a pipe or limiter HttpException)', async () => {
+    const refusal = new BadRequestException('invalid body');
+    const { epochs, result } = run({ method: 'POST', [SESSION_REQUEST_KEY]: session() }, () =>
+      throwError(() => refusal),
+    );
+    await expect(result).rejects.toBe(refusal);
+    expect(epochs.bump).not.toHaveBeenCalled();
   });
 
   it("bumps the operator and shared scopes after an operator's write", async () => {
@@ -441,9 +532,44 @@ describe('TenantWriteEpochInterceptor', () => {
     const read = run({ method: 'GET', [SESSION_REQUEST_KEY]: session() }, () => of(1));
     await read.result;
     expect(read.epochs.bump).not.toHaveBeenCalled();
-    const lookup = run({ method: 'POST', [SESSION_REQUEST_KEY]: session() }, () => of(1), true);
-    await lookup.result;
-    expect(lookup.epochs.bump).not.toHaveBeenCalled();
+    for (const key of [NO_EPOCH_BUMP_KEY, BLOCKED_SESSION_READ_ONLY_METADATA]) {
+      const lookup = run({ method: 'POST', [SESSION_REQUEST_KEY]: session() }, () => of(1), {
+        [key]: true,
+      });
+      await lookup.result;
+      expect(lookup.epochs.bump).not.toHaveBeenCalled();
+    }
+  });
+
+  it('awaits the bumps a commit hook fired during the request before it answers', async () => {
+    const redis = new FakeRedis();
+    redis.evalDelayMs = 50;
+    const real = epochService(redis);
+    const subscribers: Array<{ afterTransactionCommit?: (e: unknown) => Promise<void> }> = [];
+    const queryRunner = { isTransactionActive: true, data: {}, connection: { subscribers } };
+    const reflector = { getAllAndOverride: jest.fn(() => undefined) } as unknown as Reflector;
+    const interceptor = new TenantWriteEpochInterceptor(reflector, real);
+    const context = {
+      getType: () => 'http',
+      // No session: only the hook's bump is in play.
+      switchToHttp: () => ({ getRequest: () => ({ method: 'POST' }) }),
+      getHandler: () => function handler() {},
+      getClass: () => class Controller {},
+    } as unknown as ExecutionContext;
+    const before = await real.read(ORG_B, ['money']);
+    const handler = () =>
+      new Observable((subscriber) => {
+        void (async () => {
+          await real.bumpAfterCommit(queryRunner as never, ORG_B, 'money');
+          queryRunner.isTransactionActive = false;
+          // The commit hook returns at once: it does not await the bump.
+          await subscribers[0].afterTransactionCommit!({ queryRunner });
+          subscriber.next('ok');
+          subscriber.complete();
+        })();
+      });
+    await lastValueFrom(interceptor.intercept(context, { handle: handler }));
+    expect(await real.read(ORG_B, ['money'])).not.toEqual(before);
   });
 });
 
@@ -488,5 +614,20 @@ describe('TenantEpochService.bumpAfterCommit', () => {
     await subscribers[0].afterTransactionCommit!({ queryRunner });
     expect(await epochs.read(ORG_A, ['money'])).toEqual(mid);
     expect(subscribers).toHaveLength(1);
+  });
+});
+
+describe('@TenantCache validation', () => {
+  it('fails at definition for an unknown vary or scope, a bad TTL or an operator per-org scope', () => {
+    expect(() => TenantCache({ ttl: 5, vary: 'tenant' as never, epochs: [] })).toThrow(/vary/);
+    expect(() => TenantCache({ ttl: 5, vary: 'org', epochs: ['cash' as never] })).toThrow(/scope/);
+    expect(() => TenantCache({ ttl: -1, vary: 'org', epochs: [] })).toThrow(/ttl/);
+    expect(() => TenantCache({ ttl: 0, vary: 'org', epochs: [] })).toThrow(/singleFlight/);
+    expect(() => TenantCache({ ttl: 30, vary: 'operator', epochs: ['money'] })).toThrow(
+      /organization/,
+    );
+    expect(() =>
+      TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true }),
+    ).not.toThrow();
   });
 });

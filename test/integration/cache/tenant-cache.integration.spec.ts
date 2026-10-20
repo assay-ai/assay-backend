@@ -70,7 +70,8 @@ import { ReceiptService } from '@modules/verification/services/receipt.service';
 import { ReceiptSummaryService } from '@modules/verification/services/receipt-summary.service';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 import { AuditLogWriter } from '@shared/audit';
-import { OperatorAuthGuard } from '@shared/auth';
+import { OperatorAuthGuard, SessionAuthGuard } from '@shared/auth';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { TenantEpochService, tenantEpochKey } from '@shared/cache/redis-cache/tenant-epoch.service';
@@ -82,6 +83,7 @@ import { SingleFlightInterceptor } from '@shared/interceptors/single-flight.inte
 import { TenantWriteEpochInterceptor } from '@shared/interceptors/tenant-write-epoch.interceptor';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { SingleFlightService } from '@shared/services/single-flight.service';
+import { SingleFlightWaitTimeout } from '@shared/decorators/single-flight.decorator';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -96,6 +98,22 @@ import { toolsetTestContext } from '../helpers/toolset-test-context';
 class OperatorTestWriteController {
   @Post()
   write(): { ok: true } {
+    return { ok: true };
+  }
+}
+
+/** A write by an organization that the operator console lists, and one it does not. */
+@Controller('test-org-write')
+@UseGuards(SessionAuthGuard)
+class OrgTestWriteController {
+  @Post('listed')
+  @BumpsOperatorConsole()
+  listed(): { ok: true } {
+    return { ok: true };
+  }
+
+  @Post('unlisted')
+  unlisted(): { ok: true } {
     return { ok: true };
   }
 }
@@ -288,6 +306,7 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
         ProviderPayoutsController,
         OperatorReferenceController,
         OperatorTestWriteController,
+        OrgTestWriteController,
       ],
       providers: [
         { provide: MCP_SESSION_SOURCE, useValue: { resolve: async (t: string) => session(t) } },
@@ -475,10 +494,17 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
         .catch(() => undefined);
       expect(await read()).toBe(start);
       let inside: string | null = null;
-      await dataSource.transaction(async (manager) => {
-        await epochs.bumpAfterCommit(manager, orgA, 'money');
-        inside = await redis.get(key);
-      });
+      // As a request does it: the commit hook starts the bump, the request
+      // awaits it before answering.
+      const bumps = { pending: [] as Promise<unknown>[] };
+      await epochs.trackRequestBumps(bumps, () =>
+        dataSource.transaction(async (manager) => {
+          await epochs.bumpAfterCommit(manager, orgA, 'money');
+          inside = await redis.get(key);
+        }),
+      );
+      expect(bumps.pending).toHaveLength(1);
+      await epochs.settleRequestBumps(bumps);
       expect(inside).toBe(start);
       expect(await read()).not.toBe(start);
     });
@@ -756,10 +782,18 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
         .expect(201);
       await get('/operator/policies', 'op2').expect(200);
       expect(reference.listPolicies).toHaveBeenCalledTimes(2);
+      // An organization's write the console does not list leaves it cached …
       await request(app.getHttpServer())
-        .post('/api/v1/notifications/read-all')
+        .post('/api/v1/test-org-write/unlisted')
         .set({ Authorization: 'Bearer personB' })
-        .expect((res) => expect(res.status).toBeLessThan(300));
+        .expect(201);
+      await get('/operator/policies', 'op1').expect(200);
+      expect(reference.listPolicies).toHaveBeenCalledTimes(2);
+      // … one it lists does not.
+      await request(app.getHttpServer())
+        .post('/api/v1/test-org-write/listed')
+        .set({ Authorization: 'Bearer personB' })
+        .expect(201);
       await get('/operator/policies', 'op1').expect(200);
       expect(reference.listPolicies).toHaveBeenCalledTimes(3);
     });
@@ -768,6 +802,99 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
       const first = await get('/operator/policies', 'op1').expect(200);
       await get('/operator/policies', 'op2', { 'If-None-Match': first.headers.etag }).expect(304);
       expect(reference.listPolicies).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('single flight: a follower never waits out a leader that already finished', () => {
+    let followerRedis: Redis;
+    let followerPub: Redis;
+    let followerSub: Redis;
+    let service: SingleFlightService;
+
+    beforeAll(() => {
+      const options = {
+        host: process.env.REDIS_HOST || 'localhost',
+        port: Number(process.env.REDIS_PORT || 6379),
+        password: process.env.REDIS_PASSWORD || undefined,
+      };
+      followerRedis = new Redis(options);
+      followerPub = new Redis(options);
+      followerSub = new Redis(options);
+      service = new SingleFlightService(followerRedis, followerPub, followerSub);
+    });
+
+    afterAll(async () => {
+      await Promise.all([followerRedis, followerPub, followerSub].map((client) => client.quit()));
+    });
+
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    it('the leader published before the follower subscribed: answers from what it left', async () => {
+      const key = `race-${randomUUID()}`;
+      let left: unknown;
+      // Another instance holds the lock …
+      await followerRedis.set(`lock:${key}`, '1', 'PX', 8000);
+      const realSubscribe = followerSub.subscribe.bind(followerSub);
+      jest.spyOn(followerSub, 'subscribe').mockImplementation((async (...args: [string]) => {
+        // … and finishes while this follower is still subscribing.
+        left = { from: 'leader' };
+        await followerPub.publish(`sf:result:${key}`, JSON.stringify(left));
+        await followerRedis.del(`lock:${key}`);
+        await wait(100);
+        return realSubscribe(...args);
+      }) as never);
+      const fn = jest.fn(async () => ({ from: 'follower' }));
+      const started = Date.now();
+      const result = await service.execute({
+        key,
+        fn,
+        options: {
+          lock: { lockTTLms: 8000 },
+          wait: { maxWaitMs: 1500, recheck: async () => left },
+        },
+      });
+      expect(result).toEqual({ from: 'leader' });
+      expect(fn).not.toHaveBeenCalled();
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it('the leader finished and left nothing: the follower stands for election at once', async () => {
+      const key = `race-${randomUUID()}`;
+      await followerRedis.set(`lock:${key}`, '1', 'PX', 8000);
+      const realSubscribe = followerSub.subscribe.bind(followerSub);
+      jest.spyOn(followerSub, 'subscribe').mockImplementation((async (...args: [string]) => {
+        await followerRedis.del(`lock:${key}`);
+        return realSubscribe(...args);
+      }) as never);
+      const fn = jest.fn(async () => ({ from: 'follower' }));
+      const started = Date.now();
+      const result = await service.execute({
+        key,
+        fn,
+        options: { lock: { lockTTLms: 8000 }, wait: { maxWaitMs: 1500 } },
+      });
+      expect(result).toEqual({ from: 'follower' });
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it('a subscriber that never answers costs the wait cap, then the caller runs itself', async () => {
+      const key = `race-${randomUUID()}`;
+      await followerRedis.set(`lock:${key}`, '1', 'PX', 8000);
+      jest
+        .spyOn(followerSub, 'subscribe')
+        .mockImplementation((() => new Promise(() => undefined)) as never);
+      const started = Date.now();
+      await expect(
+        service.execute({
+          key,
+          fn: async () => 'never',
+          options: { lock: { lockTTLms: 8000 }, wait: { maxWaitMs: 1500 } },
+        }),
+      ).rejects.toBeInstanceOf(SingleFlightWaitTimeout);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(1400);
+      expect(elapsed).toBeLessThan(2500);
     });
   });
 });

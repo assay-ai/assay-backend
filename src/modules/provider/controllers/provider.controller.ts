@@ -44,7 +44,7 @@ export class ProviderController {
   ) {}
 
   @Get()
-  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'] })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: "The calling organization's provider record: id, status, tier, stats" })
   @ApiResponse({ status: 200, type: GetProviderMeResponseDto })
   @ApiResponse({ status: 404, description: 'This organization has no provider record' })
@@ -53,7 +53,7 @@ export class ProviderController {
   }
 
   @Get('earnings')
-  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'], singleFlight: true })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({ summary: 'Earned vs platform fee vs withheld, grouped by day or by tool' })
   @ApiResponse({ status: 200, type: GetProviderEarningsResponseDto })
   async getEarnings(
@@ -64,7 +64,7 @@ export class ProviderController {
   }
 
   @Get('stake')
-  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider'], singleFlight: true })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({
     summary:
       'Capital: stake, unbonding, on-chain exposure, the requirement itemised per ' +

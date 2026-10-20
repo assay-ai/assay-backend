@@ -14,6 +14,7 @@ import {
 } from '../dto/call-dispute.dto';
 import { CallDisputeService } from '../services/call-dispute.service';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * `GET /api/v1/providers/me/call-disputes`, `GET …/:id`, `POST …/:id/respond`.
@@ -26,6 +27,8 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Provider')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('providers/me/call-disputes')
 export class ProviderCallDisputesController {
   constructor(private readonly disputes: CallDisputeService) {}

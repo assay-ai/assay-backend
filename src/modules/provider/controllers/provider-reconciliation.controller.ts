@@ -25,7 +25,7 @@ export class ProviderReconciliationController {
   constructor(private readonly reconciliation: ProviderReconciliationService) {}
 
   @Get()
-  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'], singleFlight: true })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['provider'], singleFlight: true })
   @ApiOperation({
     summary:
       'Why we credited you less than you served: class breakdown, gross/take/net and the ' +

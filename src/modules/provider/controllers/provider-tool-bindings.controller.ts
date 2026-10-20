@@ -40,6 +40,7 @@ import { BindingPauseService } from '../services/binding-pause.service';
 import { BindingPublishService } from '../services/binding-publish.service';
 import { ProviderToolBindingsService } from '../services/provider-tool-bindings.service';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { NoEpochBump } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * The provider's own bindings — write, test, publish.
@@ -93,6 +94,7 @@ export class ProviderToolBindingsController {
   }
 
   @Post('validate-mapping')
+  @NoEpochBump()
   @ApiOperation({
     summary: 'Check a mapping without saving it — what the editor calls while you type',
   })

@@ -40,8 +40,10 @@ function isTenantEntry(value: unknown): value is TenantCacheEntry {
   );
 }
 
-/** How long a single-flight waiter waits for the leader before running itself. */
-const TENANT_SINGLE_FLIGHT_WAIT_MS = 8_000;
+/** How long the leader's lock lives if it dies without releasing it. */
+const TENANT_SINGLE_FLIGHT_LOCK_MS = 8_000;
+/** How long a single-flight follower waits for the leader before running itself. */
+export const TENANT_SINGLE_FLIGHT_WAIT_MS = 1_500;
 
 type HandlerFunction = (...args: any[]) => any;
 
@@ -180,27 +182,30 @@ export class HttpCacheInterceptor implements NestInterceptor {
       scopes: options.epochs,
     });
 
-    const hit = await this.tryGetFromCache(key);
-    if (isTenantEntry(hit)) {
-      response.setHeader('ETag', hit.e);
-      return of(hit.d);
+    // `ttl: 0` stores nothing: concurrent requests are only coalesced.
+    if (options.ttl > 0) {
+      const hit = await this.tryGetFromCache(key);
+      if (isTenantEntry(hit)) {
+        response.setHeader('ETag', hit.e);
+        return of(hit.d);
+      }
     }
 
     if (options.singleFlight && this.singleFlight) {
-      return from(this.runTenantSingleFlight(key, options.ttl, response, next));
+      return from(this.runTenantSingleFlight(key, options, response, next));
     }
-    return from(this.runTenant(key, options.ttl, response, next));
+    return from(this.runTenant(key, options, response, next));
   }
 
   /** Run the handler, store a cacheable body and set its `ETag`. */
   private async runTenant(
     key: string,
-    ttl: number,
+    options: TenantCacheOptions,
     response: Response,
     next: CallHandler,
   ): Promise<unknown> {
     const data = await lastValueFrom(next.handle(), { defaultValue: undefined });
-    const etag = await this.storeTenant(key, data, ttl, response);
+    const etag = await this.storeTenant(key, data, options, response);
     if (etag) response.setHeader('ETag', etag);
     return data;
   }
@@ -208,14 +213,16 @@ export class HttpCacheInterceptor implements NestInterceptor {
   private async storeTenant(
     key: string,
     data: unknown,
-    ttl: number,
+    options: TenantCacheOptions,
     response: Response,
   ): Promise<string | null> {
+    if (options.ttl <= 0) return null;
     if (!this.shouldCache(data, response.statusCode)) return null;
     if (response.statusCode !== 200) return null;
+    if (options.cacheIf && !options.cacheIf(data)) return null;
     const etag = tenantCacheEtag(key, data);
     const entry: TenantCacheEntry = { tc: 1, e: etag, d: data };
-    await this.setCache(key, entry, ttl);
+    await this.setCache(key, entry, options.ttl);
     return etag;
   }
 
@@ -230,7 +237,7 @@ export class HttpCacheInterceptor implements NestInterceptor {
    */
   private async runTenantSingleFlight(
     key: string,
-    ttl: number,
+    options: TenantCacheOptions,
     response: Response,
     next: CallHandler,
   ): Promise<unknown> {
@@ -241,14 +248,14 @@ export class HttpCacheInterceptor implements NestInterceptor {
 
     const fn = async (): Promise<Flight> => {
       ran = true;
-      const again = await this.tryGetFromCache(key);
+      const again = options.ttl > 0 ? await this.tryGetFromCache(key) : null;
       if (isTenantEntry(again)) {
         own = { data: again.d, etag: again.e };
         return { ok: true, e: again.e, d: again.d };
       }
       try {
         const data = await lastValueFrom(next.handle(), { defaultValue: undefined });
-        const etag = await this.storeTenant(key, data, ttl, response);
+        const etag = await this.storeTenant(key, data, options, response);
         own = { data, etag };
         return { ok: true, e: etag, d: data };
       } catch (error) {
@@ -262,7 +269,20 @@ export class HttpCacheInterceptor implements NestInterceptor {
       flight = await this.singleFlight!.execute<Flight>({
         key: `tenant-cache:${key}`,
         fn,
-        options: { lock: { lockTTLms: TENANT_SINGLE_FLIGHT_WAIT_MS } },
+        options: {
+          lock: { lockTTLms: TENANT_SINGLE_FLIGHT_LOCK_MS },
+          // A leader that finished before this follower subscribed left its
+          // entry behind: answer from it rather than wait for a publish
+          // that has already gone. Past the wait, run the handler here.
+          wait: {
+            maxWaitMs: TENANT_SINGLE_FLIGHT_WAIT_MS,
+            recheck: async () => {
+              if (options.ttl <= 0) return undefined;
+              const entry = await this.tryGetFromCache(key);
+              return isTenantEntry(entry) ? { ok: true, e: entry.e, d: entry.d } : undefined;
+            },
+          },
+        },
       });
     } catch (error) {
       if (!ran) this.logger.warn(`single flight unavailable for ${key}: ${String(error)}`);
@@ -279,7 +299,7 @@ export class HttpCacheInterceptor implements NestInterceptor {
       return flight.d;
     }
     // The leader failed or could not be reached: answer for ourselves.
-    return this.runTenant(key, ttl, response, next);
+    return this.runTenant(key, options, response, next);
   }
 
   // ==================== Cache Control Logic ====================

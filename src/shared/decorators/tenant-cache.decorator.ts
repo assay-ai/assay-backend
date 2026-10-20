@@ -1,6 +1,10 @@
 import { SetMetadata } from '@nestjs/common';
 
-import type { TenantEpochScope } from '@shared/cache/redis-cache/tenant-epoch.service';
+import {
+  GLOBAL_EPOCH_SCOPES,
+  TENANT_EPOCH_SCOPES,
+  type TenantEpochScope,
+} from '@shared/cache/redis-cache/tenant-epoch.service';
 
 export const TENANT_CACHE_KEY = 'tenant_cache';
 
@@ -18,14 +22,42 @@ export const TENANT_CACHE_KEY = 'tenant_cache';
  */
 export type TenantCacheVary = 'org' | 'agent' | 'credential' | 'operator';
 
+const VARIES: readonly TenantCacheVary[] = ['org', 'agent', 'credential', 'operator'];
+
 export interface TenantCacheOptions {
-  /** Seconds. Money display reads stay at 5 s or less. */
+  /**
+   * Seconds. Money display reads stay at 5 s or less. `0` stores nothing:
+   * with `singleFlight`, concurrent requests are only coalesced — for a read
+   * that must always be live (chain state an operator acts on).
+   */
   ttl: number;
   vary: TenantCacheVary;
   /** The epochs the body depends on; a bump of any of them is a miss. */
   epochs: readonly TenantEpochScope[];
   /** Coalesce concurrent misses for one key into one handler run. */
   singleFlight?: boolean;
+  /** Store a body only when this holds (e.g. no part of a composite failed). */
+  cacheIf?: (body: unknown) => boolean;
+}
+
+/**
+ * A misconfigured route fails at boot (decorators run when the controller
+ * module loads), never by quietly not caching — or by caching under a key
+ * that cannot see its invalidations.
+ */
+function assertValid(options: TenantCacheOptions): void {
+  const fail = (why: string) => {
+    throw new Error(`@TenantCache(${JSON.stringify(options)}): ${why}`);
+  };
+  if (!Number.isInteger(options.ttl) || options.ttl < 0) fail('ttl must be an integer >= 0');
+  if (options.ttl === 0 && !options.singleFlight) fail('ttl 0 only makes sense with singleFlight');
+  if (!VARIES.includes(options.vary)) fail(`unknown vary "${String(options.vary)}"`);
+  for (const scope of options.epochs) {
+    if (!TENANT_EPOCH_SCOPES.includes(scope)) fail(`unknown epoch scope "${String(scope)}"`);
+    if (options.vary === 'operator' && !GLOBAL_EPOCH_SCOPES.has(scope)) {
+      fail(`an operator entry has no organization to read "${scope}" for`);
+    }
+  }
 }
 
 /**
@@ -41,4 +73,7 @@ export interface TenantCacheOptions {
  * a voucher, a signature, an admission — may carry it, and neither may a
  * route that sets its own headers or status, streams, or returns a secret.
  */
-export const TenantCache = (options: TenantCacheOptions) => SetMetadata(TENANT_CACHE_KEY, options);
+export const TenantCache = (options: TenantCacheOptions) => {
+  assertValid(options);
+  return SetMetadata(TENANT_CACHE_KEY, options);
+};

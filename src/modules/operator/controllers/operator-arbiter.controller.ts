@@ -54,14 +54,14 @@ export class OperatorArbiterController {
   ) {}
 
   @Get('terms')
-  @TenantCache({ ttl: 300, vary: 'operator', epochs: ['operator'], singleFlight: true })
+  @TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({ summary: 'The Config’s arbiter, admin, pause flag and slash delay, read live' })
   async terms(@Query() query: ArbiterTermsQueryDto) {
     return this.disputes.chainTerms(query.chainId);
   }
 
   @Get('disputes')
-  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'], singleFlight: true })
+  @TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({ summary: 'Every slash record disputed on chain, oldest dispute first' })
   async disputed() {
     return { items: await this.disputes.disputedOnChain() };
@@ -73,7 +73,7 @@ export class OperatorArbiterController {
    * arbiter cancels it (`superseded/cancel-intent`).
    */
   @Get('superseded')
-  @TenantCache({ ttl: 30, vary: 'operator', epochs: ['operator'], singleFlight: true })
+  @TenantCache({ ttl: 0, vary: 'operator', epochs: [], singleFlight: true })
   @ApiOperation({ summary: 'Superseded earlier-epoch slash records still standing on chain' })
   async superseded() {
     return { items: await this.disputes.supersededOnChain() };
