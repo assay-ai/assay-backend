@@ -722,14 +722,18 @@ describe('OAuth consent API — real database and Redis', () => {
       expect((await store.take(rid))?.approval?.replaces).toBeNull();
     }
 
-    // Another agent's grant: shown with that agent (the page preselects it),
-    // dropped when approving as a different one.
+    // Another agent's live grant: shown with that agent (the page preselects
+    // it), and approving as a different one is refused — a re-login replaces
+    // the same agent's connection.
     const rid = await newRequest({ oauthClientId: builtin.id, replaces: ofOtherAgent });
-    expect((await read(rid)).body.data.replaces).toEqual(
+    const shown = (await read(rid)).body.data;
+    expect(shown.replaces).toEqual(
       expect.objectContaining({ id: ofOtherAgent, agentId: otherAgent }),
     );
-    await approve(rid, { agentId: PERSON_A, name: 'New' });
-    expect((await store.take(rid))?.approval?.replaces).toBeNull();
+    expect(shown.replacesAgent).toEqual(expect.objectContaining({ id: otherAgent }));
+    const refused = await approve(rid, { agentId: PERSON_A, name: 'New' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('OAUTH_REPLACE_AGENT_MISMATCH');
   });
 
   it('replaces naming a dead grant is shown as not live (spec F5), and approve carries it', async () => {
