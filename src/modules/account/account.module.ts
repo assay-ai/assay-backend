@@ -13,6 +13,7 @@ import { AgentDelegateService } from './services/agent-delegate.service';
 import { AgentsService } from './services/agents.service';
 import { AuditLogService } from './services/audit-log.service';
 import { NotificationsService } from './services/notifications.service';
+import { LastSeenModule } from '@shared/last-seen';
 
 /**
  * Account domain — notifications, the audit log, agents, and agent
@@ -35,7 +36,8 @@ import { NotificationsService } from './services/notifications.service';
  * loading `OAUTH_CONFIG`, which demands the OAuth secrets.
  */
 @Module({
-  imports: [ChainsModule, AuditLogModule, ToolsetModule, SettlementModule],
+  // `LastSeenModule`: credential lists overlay the buffered `last_used_at`.
+  imports: [ChainsModule, AuditLogModule, ToolsetModule, SettlementModule, LastSeenModule],
   providers: [
     {
       provide: OAUTH_CLIENT_TRUST,

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
@@ -6,6 +6,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { LastSeenKind, LastSeenRecorder, credentialKey } from '@shared/last-seen';
 
 import { AuthErrors } from '../errors/auth.errors';
 
@@ -60,6 +61,7 @@ export class CredentialSessionResolver {
   constructor(
     private readonly credentials: AgentCredentialRepository,
     private readonly agents: AgentRepository,
+    @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
   ) {}
 
   async sessionFor(
@@ -91,20 +93,7 @@ export class CredentialSessionResolver {
       throw AuthErrors.walletNotLinked();
     }
 
-    // Fire-and-forget, and scoped: `update({ id }, …)` alone throws
-    // `ORGANIZATION_SCOPE_MISSING`, and a bare `.catch(() => {})` would
-    // swallow that rejection silently — the column would never be written,
-    // behind a suite that stays green. `organizationId` has to be in the
-    // criteria for the write to ever land.
-    void this.credentials
-      .update(
-        { organizationId: credential.organizationId, id: credential.id },
-        { lastUsedAt: new Date() },
-      )
-      .catch(() => {
-        // Best-effort — see `AgentCredentialEntity.lastUsedAt`. A failed
-        // stamp must never turn a successful authentication into a refusal.
-      });
+    this.stampUse(credential);
 
     return {
       credentialId: credential.id,
@@ -118,6 +107,32 @@ export class CredentialSessionResolver {
       delegateAccount: (credential.delegateAccount as AccountId | null) ?? null,
       paymentsAllowed: opts.paymentsAllowed,
     };
+  }
+
+  /**
+   * `last_used_at`, fire-and-forget. Buffered by `LastSeenRecorder` (one
+   * batched write every 30 s instead of one per request); without it, the
+   * direct write it replaces. Scoped either way: `update({ id }, …)` alone
+   * throws `ORGANIZATION_SCOPE_MISSING`, and a bare `.catch(() => {})` would
+   * swallow that rejection silently, so `organizationId` is in the criteria.
+   */
+  stampUse(credential: Pick<AgentCredentialEntity, 'organizationId' | 'id'>): void {
+    if (this.lastSeen) {
+      this.lastSeen.record(
+        LastSeenKind.CREDENTIAL_USE,
+        credentialKey(credential.organizationId, credential.id),
+      );
+      return;
+    }
+    void this.credentials
+      .update(
+        { organizationId: credential.organizationId, id: credential.id },
+        { lastUsedAt: new Date() },
+      )
+      .catch(() => {
+        // Best-effort — see `AgentCredentialEntity.lastUsedAt`. A failed
+        // stamp must never turn a successful authentication into a refusal.
+      });
   }
 }
 

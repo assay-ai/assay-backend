@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 
+import { LastSeenModule } from '@shared/last-seen';
+
 import { OperatorSessionStore } from './auth/operator-session.store';
 import { OPERATOR_SIGN_IN_CONFIG, loadOperatorSignInConfig } from './auth/operator-sign-in.config';
 import { OperatorSignInService } from './auth/operator-sign-in.service';
@@ -18,6 +20,8 @@ import { OperatorService } from './services/operator.service';
  * imported. Redis comes from the global `RedisCacheModule`.
  */
 @Module({
+  // `last_seen_at` on every operator request, buffered.
+  imports: [LastSeenModule],
   providers: [
     { provide: OPERATOR_SIGN_IN_CONFIG, useFactory: () => loadOperatorSignInConfig() },
     OperatorSessionStore,

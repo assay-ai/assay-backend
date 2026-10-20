@@ -7,6 +7,8 @@ import { AccountBlocklistService } from '@modules/blocklist/services/account-blo
 import { MCP_SESSION_SOURCE, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { SpendPolicyService } from '@modules/spend-policy/services/spend-policy.service';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { LastSeenFlusher } from '@shared/last-seen/last-seen.flusher';
 
 import {
   RunContext,
@@ -1066,7 +1068,12 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   // ── last_used_at ───────────────────────────────────────────────────────────
 
   describe('last_used_at', () => {
+    // Stamps are buffered in Redis (`LastSeenRecorder`); the scheduler's
+    // flush is what writes them, so the row is read after one.
     const stamp = async (id: string): Promise<Date | null> => {
+      await new LastSeenFlusher(apps.dataSource, {
+        getRedisClient: () => apps.redis,
+      } as unknown as CacheService).flush();
       const [row] = (await apps.dataSource.query(
         `SELECT "last_used_at" FROM "agent_credentials" WHERE "id" = $1`,
         [id],
