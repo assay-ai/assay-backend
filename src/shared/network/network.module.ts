@@ -9,14 +9,15 @@ import {
 } from './egress';
 
 /**
- * Read once at boot: the token is taken out of `process.env` here. Unset means
- * provider calls go direct, which in production reveals this server's IP.
+ * Read once at boot: the token is taken out of `process.env` here. Unset in
+ * production means every call that must be relayed is refused (see
+ * `EgressHttpClient`); elsewhere those calls go direct.
  */
 function egressRelayConfigFactory(): EgressRelayConfig | null {
   const config = takeEgressRelayConfig(process.env);
   if (!config && process.env.NODE_ENV === 'production') {
     new Logger('NetworkModule').warn(
-      "EGRESS_RELAY_URL is not set: provider calls reveal this server's IP",
+      'EGRESS_RELAY_URL is not set: calls that must go through the relay will be refused',
     );
   }
   return config;
