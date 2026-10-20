@@ -162,18 +162,35 @@ export class OperatorApprovalService {
     return queuedDto(row);
   }
 
+  /**
+   * The queue as an operator sees it. A read writes nothing: a `PENDING` row
+   * past its `expires_at` is answered as `EXPIRED` (and filtered as one), the
+   * state `OperatorApprovalRepository.expireStale` stores on the scheduler's
+   * next pass (`OperatorApprovalExpiryJob`) and every write path stores before
+   * deciding. So what is listed, and what can be
+   * acted on, is what it was when each read ran the sweep itself.
+   */
   async list(query: ListOperatorApprovalsQueryDto): Promise<CursorPageDto<OperatorApprovalDto>> {
-    await this.approvals.expireStale();
+    const now = new Date();
     const qb = this.approvals.createQueryBuilder('approval');
-    if (query.status) qb.andWhere('approval.status = :status', { status: query.status });
+    if (query.status === 'PENDING') {
+      qb.andWhere(`approval.status = 'PENDING' AND approval.expires_at > :now`, { now });
+    } else if (query.status === 'EXPIRED') {
+      qb.andWhere(
+        `(approval.status = 'EXPIRED' OR (approval.status = 'PENDING' AND approval.expires_at <= :now))`,
+        { now },
+      );
+    } else if (query.status) {
+      qb.andWhere('approval.status = :status', { status: query.status });
+    }
     if (query.action) qb.andWhere('approval.action = :action', { action: query.action });
     const page = await paginate(qb, query, APPROVAL_LIST);
-    return new CursorPageDto(await this.toDtos(page.items), page.pageInfo.nextCursor);
+    return new CursorPageDto(await this.toDtos(page.items, now), page.pageInfo.nextCursor);
   }
 
   async get(id: string): Promise<OperatorApprovalDto> {
-    await this.approvals.expireStale();
-    return (await this.toDtos([await this.require(id)]))[0];
+    const now = new Date();
+    return (await this.toDtos([await this.require(id)], now))[0];
   }
 
   /**
@@ -272,7 +289,15 @@ export class OperatorApprovalService {
     return row;
   }
 
-  private async toDtos(rows: readonly OperatorApprovalEntity[]): Promise<OperatorApprovalDto[]> {
+  /**
+   * `now` given: a stored `PENDING` row already past `expires_at` is shown as
+   * the `EXPIRED` row `expireStale(now)` would have made of it, `decidedAt`
+   * included.
+   */
+  private async toDtos(
+    rows: readonly OperatorApprovalEntity[],
+    now?: Date,
+  ): Promise<OperatorApprovalDto[]> {
     const subjects = new Map<string, string>();
     const subjectOf = async (operatorId: string | null): Promise<string | null> => {
       if (!operatorId) return null;
@@ -285,19 +310,20 @@ export class OperatorApprovalService {
 
     const out: OperatorApprovalDto[] = [];
     for (const row of rows) {
+      const lapsed = now !== undefined && row.status === 'PENDING' && row.expiresAt <= now;
       out.push({
         id: row.id,
         action: row.action,
         code: this.handlers.get(row.action)?.code ?? '',
         target: row.target,
         payload: row.payload,
-        status: row.status,
+        status: lapsed ? 'EXPIRED' : row.status,
         requestedBy: (await subjectOf(row.requestedBy)) as string,
         requestedById: row.requestedBy,
         approvedBy: await subjectOf(row.approvedBy),
         rejectedBy: await subjectOf(row.rejectedBy),
         createdAt: row.createdAt,
-        decidedAt: row.decidedAt,
+        decidedAt: lapsed ? (now as Date) : row.decidedAt,
         expiresAt: row.expiresAt,
       });
     }

@@ -34,6 +34,7 @@ import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
 import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
 import { OAuthSchedulerModule } from '@modules/oauth/oauth-scheduler.module';
+import { OperatorSchedulerModule } from '@modules/operator/operator-scheduler.module';
 
 // Controllers
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
@@ -99,6 +100,8 @@ import { NetworkModule } from '@shared/network/network.module';
     ToolsetSchedulerModule,
     // OAuth: dead tokens, codes and unreferenced clients, daily. Never credentials.
     OAuthSchedulerModule,
+    // Operator approvals past their 24h window, stored as EXPIRED every 30 s.
+    OperatorSchedulerModule,
     // Starter reference modules — off by default in production
   ],
   controllers: [HealthcheckController],
