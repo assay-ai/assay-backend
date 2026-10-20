@@ -31,7 +31,7 @@ export class OverviewQueryDto {
     example: '2026-08-19T10:00:00.000Z',
   })
   @IsOptional()
-  @IsISO8601()
+  @IsISO8601({ strict: true })
   at?: string;
 
   @ApiPropertyOptional({

@@ -137,6 +137,7 @@ export class AgentCredentialsService {
         `credential.id IN (SELECT ranked.id FROM (SELECT c.id, ROW_NUMBER() OVER (` +
           `PARTITION BY c.agent_id ORDER BY c.created_at DESC, c.id DESC) AS rn ` +
           `FROM agent_credentials c WHERE c.organization_id = :organizationId ` +
+          `AND c.deleted_at IS NULL ` +
           `AND c.agent_id IN (:...agentIds)) ranked WHERE ranked.rn <= :rankLimit)`,
         { rankLimit: limit + 1 },
       )

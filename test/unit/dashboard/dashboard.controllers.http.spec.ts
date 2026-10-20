@@ -128,5 +128,27 @@ describe('dashboard composite routes over HTTP', () => {
     it('refuses no credential with 401', async () => {
       expect((await call('/me/status')).status).toBe(401);
     });
+
+    it.each([
+      ['debts', () => listDebts.mockRejectedValue(new Error('db down'))],
+      ['unreadCount', () => unreadCount.mockRejectedValue(new Error('db down'))],
+      [
+        'blockStatus',
+        () =>
+          statusOf.mockImplementation(() => {
+            throw new Error('blocklist not loaded');
+          }),
+      ],
+    ])('answers %s as null when it fails, and the other two intact', async (part, fail) => {
+      fail();
+      const res = await call('/me/status', 'person');
+      expect(res.status).toBe(200);
+      const whole = {
+        blockStatus: { blocked: false, blocks: [] },
+        unreadCount: { count: 3 },
+        debts: { account: PAYER, debts: [{ intentId: 'debt-1' }] },
+      };
+      expect(res.body).toEqual({ ...whole, [part]: null });
+    });
   });
 });

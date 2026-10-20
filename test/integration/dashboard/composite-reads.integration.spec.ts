@@ -641,6 +641,11 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       expiresAt: '2026-10-15 00:00:00+00',
     });
     await credential(agentId, { createdAt: '2026-10-12 09:00:00+00', oauthClientId: client.id });
+    // Soft-deleted, and the newest: it must not take a place in the ranked page.
+    const deleted = await credential(agentId, { createdAt: '2026-10-19 09:00:00+00' });
+    await dataSource.query(`UPDATE agent_credentials SET deleted_at = now() WHERE id = $1`, [
+      deleted,
+    ]);
 
     const [{ id: many }] = (await dataSource.query(
       `INSERT INTO agents (organization_id, privy_user_id, label) VALUES ($1, $2, 'Many keys')
@@ -759,6 +764,9 @@ describe('composite dashboard reads equal the routes they stand for', () => {
 
     it('refuses a malformed anchor or limit through the global pipe', async () => {
       expect((await get('/overview', { at: 'yesterday' })).status).toBe(400);
+      // ISO 8601 that `Date` cannot read: a 400 too, never a RangeError 500.
+      expect((await get('/overview', { at: '2026-W43' })).status).toBe(400);
+      expect((await get('/overview', { at: '2026-293' })).status).toBe(400);
       expect((await get('/overview', { callsLimit: '0' })).status).toBe(400);
       expect((await get('/overview', { callsLimit: '101' })).status).toBe(400);
       expect((await get('/overview', { extra: '1' })).status).toBe(400);

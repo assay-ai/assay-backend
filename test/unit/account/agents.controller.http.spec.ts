@@ -288,6 +288,25 @@ describe('GET /agents?include= over HTTP', () => {
     expect(firstPagesFor).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['repeated', '?include=credentials&include=health'],
+    ['repeated and comma-separated', '?include=credentials,&include=,health'],
+    ['with spaces and empty entries', '?include=%20credentials%20,,health'],
+  ])('reads include %s as both parts', async (_name, search) => {
+    const res = await request(app.getHttpServer())
+      .get(`/agents${search}`)
+      .set('Authorization', 'Bearer person');
+    expect(res.status).toBe(200);
+    expect(res.body.items[0]).toHaveProperty('credentials');
+    expect(res.body.items[0]).toHaveProperty('health');
+  });
+
+  it('reads an empty include as none: the plain list, open to an agent', async () => {
+    const res = await get('machine', { include: ',' });
+    expect(res.status).toBe(200);
+    expect(firstPagesFor).not.toHaveBeenCalled();
+  });
+
   it('refuses an unknown include with 400', async () => {
     expect((await get('person', { include: 'secrets' })).status).toBe(400);
   });
