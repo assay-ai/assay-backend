@@ -179,6 +179,7 @@ function build(key?: OnChainKey) {
   const client: EvmReadClient = {
     getTransactionReceipt: async () => null,
     getBlock: async () => ({ number: 1n }),
+    getBlockNumber: async () => 1n,
     readContract: async (args) => {
       reads.push({ address: args.address, functionName: args.functionName, args: args.args });
       return key;

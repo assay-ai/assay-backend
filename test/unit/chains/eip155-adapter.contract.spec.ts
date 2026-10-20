@@ -168,6 +168,7 @@ const stubClient = (): EvmReadClient => ({
       ? SETTLED_RECEIPT
       : Promise.reject(new Error('TransactionReceiptNotFoundError')),
   getBlock: async () => ({ number: 100n }),
+  getBlockNumber: async () => 100n,
   readContract: async () => ({
     balance: 10_000n,
     seqHigh: 7n,

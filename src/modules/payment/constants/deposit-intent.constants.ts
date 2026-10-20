@@ -24,11 +24,11 @@ export const DEPOSIT_INTENT_EXPIRY_REASON =
 
 /**
  * The finality sweep (`DEPOSIT_PENDING` -> `DEPOSIT_CONFIRM` /
- * `DEPOSIT_REJECT`) runs less often than the expiry sweep: Solana finality is
- * ~13-19 slots (well under a minute) past confirmation, so checking every
- * minute would mostly re-check transactions that were never going to change.
+ * `DEPOSIT_REJECT`). Every 5 seconds: on eip155 a deposit is credited at the
+ * sequencer's soft confirmation (`EVM_DEPOSIT_CONFIRMATIONS`), so this cadence
+ * is the whole wait a buyer sees; a pass with nothing pending is one query.
  */
-export const DEPOSIT_FINALITY_SWEEP_CRON = CronExpression.EVERY_5_MINUTES;
+export const DEPOSIT_FINALITY_SWEEP_CRON = '*/5 * * * * *';
 
 /** Settled deposits re-checked per pass — same bounding reasoning as the expiry sweep. */
 export const DEPOSIT_FINALITY_SWEEP_BATCH = 200;
