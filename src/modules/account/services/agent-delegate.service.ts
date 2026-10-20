@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -26,6 +26,7 @@ import {
   PaidCallsStatus,
 } from '../dto/agent-delegate.dto';
 import { AccountErrors } from '../errors/account.errors';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 
 /** How long an agent has to sign the challenge it asked for. */
 export const DELEGATE_CHALLENGE_TTL_SECONDS = 300;
@@ -76,6 +77,7 @@ export class AgentDelegateService {
     private readonly chains: ChainAdapterRegistry,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
     private readonly delegations: EscrowDelegationService,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   /**
@@ -239,6 +241,8 @@ export class AgentDelegateService {
       }
       throw error;
     }
+    // The session carries `delegateAccount`: a cached one would still name none.
+    await this.sessions?.evictOrganization(session.organizationId);
     return {
       credentialId: session.credentialId,
       agentLabel: session.label ?? null,

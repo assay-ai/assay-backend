@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -11,6 +11,7 @@ import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import { AgentDto, ListAgentsQueryDto } from '../dto/list-agents.dto';
 import { AccountErrors } from '../errors/account.errors';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 
 /**
  * `GET /api/v1/agents` — the agents in this organization, and
@@ -27,6 +28,7 @@ export class AgentsService {
     private readonly config: ConfigService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     private readonly audit: AuditLogWriter,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   async list(organizationId: string, query: ListAgentsQueryDto): Promise<CursorPageDto<AgentDto>> {
@@ -94,6 +96,8 @@ export class AgentsService {
         after: { label },
       });
     });
+    // `McpSession.label`: a cached session would keep the old one.
+    await this.sessions?.evictOrganization(organizationId);
 
     return this.toDto({ ...agent, label } as AgentEntity, credentialCount, defaultChainId);
   }

@@ -815,6 +815,28 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       });
     });
 
+    it('a session cached on both hosts is refused on both at once after a revoke (B2)', async () => {
+      const world = await apps.world();
+      for (const via of BOTH) {
+        const { id, bearer } = credentialOf(world, via);
+        // Twice on each host: the second answer comes from its session cache.
+        for (let i = 0; i < 2; i += 1) {
+          expect((await rpc(bearer, '/', 'tools/list')).status).toBe(200);
+          expect((await onApi(bearer, 'get', '/agents/me/delegate')).status).toBe(200);
+        }
+        const revoked = await apps.asPerson(
+          world,
+          'delete',
+          `/agents/${world.agentId}/credentials/${id}`,
+        );
+        expect(revoked.status).toBe(204);
+        // The API host evicts its own cache; the MCP host hears it over Redis.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect((await rpc(bearer, '/', 'tools/list')).status).toBe(401);
+        expect((await onApi(bearer, 'get', '/agents/me/delegate')).status).toBe(401);
+      }
+    });
+
     it('the revoke audit entry: one shape, differing only in how the credential was issued (R-OA-26)', async () => {
       const world = await apps.world();
       for (const via of BOTH) {
