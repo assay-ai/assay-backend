@@ -178,18 +178,26 @@ export class AgentCredentialsService {
   }
 
   /**
-   * THE seam for a buffered `last_used_at`: the one place rows read for
-   * {@link firstPagesFor} get their `lastUsedAt`, so a write-behind buffer
-   * (Redis, flushed on an interval) can overlay its newer values here before
-   * anything reads them — the DTO and every `health` field derive from what
-   * this returns. Today the column is the whole truth, so it returns the rows
-   * as they are. `list` reads the column directly; an overlay must be applied
-   * there too, or the two routes would disagree.
+   * The one place rows read for {@link firstPagesFor} get their `lastUsedAt`:
+   * the latest of the column and the stamp `LastSeenRecorder` has not written
+   * yet, as `list` reads it — the DTO and every `health` field derive from
+   * what this returns, so the two routes never disagree.
    */
   private async withBufferedLastUse(
     rows: AgentCredentialEntity[],
   ): Promise<AgentCredentialEntity[]> {
-    return rows;
+    if (!this.lastSeen || rows.length === 0) return rows;
+    const pending = await this.lastSeen.pending(
+      LastSeenKind.CREDENTIAL_USE,
+      rows.map((row) => credentialKey(row.organizationId, row.id)),
+    );
+    return rows.map((row) => {
+      const used = pending.get(credentialKey(row.organizationId, row.id));
+      if (!used) return row;
+      return Object.assign(Object.create(Object.getPrototypeOf(row)), row, {
+        lastUsedAt: LastSeenRecorder.latest(row.lastUsedAt, used),
+      });
+    });
   }
 
   /**

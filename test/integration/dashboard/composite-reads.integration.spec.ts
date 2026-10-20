@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { LastSeenRecorder } from '@shared/last-seen';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -188,6 +189,18 @@ function browserHealth(keys: KeyRow[], nowMs: number) {
  * figure on `/balances`, the delegate list on `/agents/me/delegate`), and the
  * same fake serves both sides.
  */
+// Stamps `LastSeenRecorder` holds and has not written yet; empty unless a test sets one.
+const bufferedStamps = new Map<string, Date>();
+const bufferedLastUse = {
+  pending: async (_kind: unknown, keys: readonly string[]) =>
+    new Map(
+      keys.flatMap((key) => {
+        const at = bufferedStamps.get('*');
+        return at ? [[key, at] as const] : [];
+      }),
+    ),
+};
+
 describe('composite dashboard reads equal the routes they stand for', () => {
   const DATABASE = 'assay_dashboard_test';
   const AT = new Date('2026-10-20T10:30:00.000Z');
@@ -301,6 +314,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       {} as AccessEpochService,
       new OAuthClientRepository(dataSource),
       { paymentClients: [], verifiedClients: [] },
+      bufferedLastUse as unknown as LastSeenRecorder,
     );
     const delegate = new AgentDelegateService(
       credentials,
@@ -898,6 +912,27 @@ describe('composite dashboard reads equal the routes they stand for', () => {
         credentials: { items: [], hasMore: false },
         health: { liveKeyCount: 0, keyBound: false, lastUsedAt: null },
       });
+    });
+
+    it('overlays a last use not yet written exactly as the credentials route does', async () => {
+      bufferedStamps.set('*', new Date('2026-10-21T00:00:00.000Z'));
+      try {
+        const rich = await data('/agents', { limit: '50', include: 'credentials,health' });
+        for (const agent of rich.items) {
+          const old = await data(`/agents/${agent.agentId}/credentials`, {
+            limit: '50',
+            from: new Date(1).toISOString(),
+          });
+          expect(agent.credentials).toEqual({ items: old.items, hasMore: old.pageInfo.hasMore });
+          if (old.items.length > 0) {
+            expect(old.items.every((k: any) => k.lastUsedAt === '2026-10-21T00:00:00.000Z')).toBe(
+              true,
+            );
+          }
+        }
+      } finally {
+        bufferedStamps.clear();
+      }
     });
 
     it('adds only what was asked for', async () => {
