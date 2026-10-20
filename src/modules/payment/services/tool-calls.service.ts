@@ -32,6 +32,7 @@ import {
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
 import { PaymentErrors } from '../errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
+import { containsLikePattern } from '@shared/utils/like-pattern.util';
 
 /**
  * For a page of calls: whether a report filed now on each would be refunded
@@ -143,7 +144,7 @@ export class ToolCallsService {
       // which is a separate, cross-resource feature this endpoint does not
       // implement.
       qb.andWhere('(intent.id::text ILIKE :search OR intent.requestHash ILIKE :search)', {
-        search: `%${query.search}%`,
+        search: containsLikePattern(query.search),
       });
     }
 
