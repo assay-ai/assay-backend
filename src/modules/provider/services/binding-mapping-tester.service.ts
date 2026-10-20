@@ -18,12 +18,26 @@ import {
   MappingFault,
   UpstreamRequest,
   mapRequest,
-  mapResponse,
   mappingFaultOf,
 } from '@modules/tool/domain/mapping';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
+import {
+  BindingAuthMode,
+  Tool,
+  ToolBinding,
+  ToolContractVersion,
+} from '@modules/tool/ports/tool.types';
+import {
+  contractVersionsOf,
+  effectiveOutputSchema,
+  isServable,
+  toolAtVersion,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import { mapServedResponse } from '@modules/tool/domain/contract/served-response';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { PolicyMode, VerificationPolicy } from '@modules/verification/domain/policy.types';
 import { RuleOutcome } from '@modules/verification/domain/rules/rule.types';
@@ -33,6 +47,7 @@ import { verify } from '@modules/verification/domain/engine';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { AppError } from '@shared/errors/app-errors';
 
+import { isAssayHeaderName } from '../credentials/credential-rules';
 import { BindingTestReportDto } from '../dto/test-tool-binding.dto';
 import {
   BINDING_TEST_LAYERS,
@@ -44,6 +59,8 @@ import {
   BindingTestReport,
   BindingTestUpstreamView,
   BindingTestVerificationView,
+  BindingTestWarning,
+  BindingTestWarningCode,
 } from '../ports/binding-test.types';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingEditorService } from './binding-editor.service';
@@ -110,6 +127,8 @@ export class BindingMappingTesterService {
     @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
     private readonly policies: DecisionPolicyService,
     private readonly limiter: ProviderEgressLimiter,
+    /** Read only to say whether the request went out signed; never asked to sign. */
+    private readonly signer: RequestSignerService,
   ) {}
 
   /**
@@ -122,9 +141,10 @@ export class BindingMappingTesterService {
     subject: string,
     bindingId: string,
     input: JsonObject,
+    toolVersion?: number,
   ): Promise<BindingTestReportDto> {
     return this.limiter.run(organizationId, () =>
-      this.runUnlimited(organizationId, subject, bindingId, input),
+      this.runUnlimited(organizationId, subject, bindingId, input, toolVersion),
     );
   }
 
@@ -133,29 +153,120 @@ export class BindingMappingTesterService {
     subject: string,
     bindingId: string,
     input: JsonObject,
+    toolVersion?: number,
   ): Promise<BindingTestReportDto> {
     const row = await this.editor.loadEditable(organizationId, bindingId);
-    const tool = await this.catalogue.findTool(row.toolId);
-    if (!tool) {
+    const catalogued = await this.catalogue.findTool(row.toolId);
+    if (!catalogued) {
       throw ProviderErrors.bindingToolUnknown({ toolId: row.toolId });
     }
 
+    // The contract version this run checks the draft against (T3): the one
+    // asked for, inside the binding's range, or the newest of its highest
+    // major. Publishing needs a green run per major in the range.
+    const version = testedVersion(catalogued, row.toolVersionRange ?? '^1', toolVersion);
+    const tool = toolAtVersion(catalogued, version);
+
     const binding = toToolBinding(row);
     const callId = randomUUID();
-    const report = await this.execute(tool, binding, input, callId);
+    const executed = await this.execute(tool, binding, input, callId);
+    const report: BindingTestReport = {
+      ...executed,
+      warnings: await this.authWarnings(tool, binding, row.authMode, input, executed),
+    };
 
-    await this.record(organizationId, subject, row, input, report);
+    await this.record(organizationId, subject, row, input, report, version.version);
 
     return {
       ...report,
       mappingVersion: row.mappingVersion,
+      toolVersion: version.version,
+      toolVersionSemver: version.semver,
       request: report.request && {
         ...report.request,
         headerNames: [...report.request.headerNames],
       },
       layers: report.layers.map((layer) => ({ ...layer })),
+      warnings: report.warnings.map((warning) => ({ ...warning })),
       ranAt: new Date(),
     };
+  }
+
+  /** Whether this deployment signs provider requests: it has a signing key. */
+  private signs(): boolean {
+    return this.signer.jwks().keys.length > 0;
+  }
+
+  /**
+   * Unauthenticated probes, and the warnings they earn. Warnings never change
+   * the outcome.
+   *
+   * "The main run succeeded" is read from `report.upstream.status`: the main
+   * upstream answered 2xx (independent of later mapping/verification layers,
+   * which judge the body, not the endpoint's authentication). Each probe is
+   * sent once, inside the caller's {@link ProviderEgressLimiter} slot, with a
+   * fresh call id, omitting what the binding's `auth_mode` says the endpoint
+   * should be demanding.
+   */
+  private async authWarnings(
+    tool: Tool,
+    binding: ToolBinding,
+    authMode: string,
+    input: JsonObject,
+    report: BindingTestReport,
+  ): Promise<BindingTestWarning[]> {
+    const status = report.upstream?.status ?? 0;
+    if (report.upstream?.transportError || status < 200 || status > 299) return [];
+
+    const warnings: BindingTestWarning[] = [];
+    if (authMode === BindingAuthMode.NONE) {
+      warnings.push({
+        code: BindingTestWarningCode.NO_AUTHENTICATION,
+        message: 'Anyone who learns your endpoint URL can call it directly, without paying.',
+      });
+      return warnings;
+    }
+    if (authMode === BindingAuthMode.SIGNATURE || authMode === BindingAuthMode.BOTH) {
+      if (await this.probeAccepted(tool, binding, input, { signature: true })) {
+        warnings.push({
+          code: BindingTestWarningCode.ACCEPTS_UNSIGNED,
+          message: 'Your endpoint accepted a request without an Assay signature.',
+        });
+      }
+    }
+    if (authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH) {
+      if (await this.probeAccepted(tool, binding, input, { credentials: true })) {
+        warnings.push({
+          code: BindingTestWarningCode.ACCEPTS_WITHOUT_CREDENTIALS,
+          message: 'Your endpoint accepted a request without your API key.',
+        });
+      }
+    }
+    return warnings;
+  }
+
+  private async probeAccepted(
+    tool: Tool,
+    binding: ToolBinding,
+    input: JsonObject,
+    omit: { credentials?: boolean; signature?: boolean },
+  ): Promise<boolean> {
+    try {
+      const response = await this.invoker.invoke({
+        tool,
+        binding,
+        input,
+        callId: randomUUID(),
+        timeoutMs: Math.min(binding.timeoutMs, TESTER_MAX_TIMEOUT_MS),
+        omit,
+      });
+      return !response.transportError && response.status >= 200 && response.status <= 299;
+    } catch {
+      // A probe that could not be made proves nothing; never fail the run.
+      // Fixed message only: the error can carry request details.
+      this.logger.debug('Unauthenticated probe could not be made');
+      return false;
+    }
   }
 
   /**
@@ -197,8 +308,10 @@ export class BindingMappingTesterService {
       method: upstreamRequest.method,
       url: buildUrl(binding.endpoint, upstreamRequest),
       // Names only — a mapping must never carry a secret, and this report is
-      // stored. See `BindingTestRequestView`.
-      headerNames: Object.keys(upstreamRequest.headers),
+      // stored. See `BindingTestRequestView`. The headers Assay adds (call id,
+      // signature) are named too, so a provider sees what to verify; stored
+      // credential headers are not.
+      headerNames: wireHeaderNames(upstreamRequest, this.signs()),
       body: upstreamRequest.body ?? null,
     };
 
@@ -262,10 +375,15 @@ export class BindingMappingTesterService {
 
     let mapped: JsonValue;
     try {
-      mapped = mapResponse(binding.responseMapping, response.body.value, {
-        outputSchema: tool.outputSchema,
+      // As a live call maps it: the tested version's core fields, and every
+      // optional output this binding declares, which must be there.
+      mapped = mapServedResponse(
+        binding.responseMapping,
+        response.body.value,
+        versionOf(tool),
+        binding,
         context,
-      });
+      );
       layers.passed(BindingTestLayer.RESPONSE_MAPPING);
     } catch (error) {
       layers.failed(BindingTestLayer.RESPONSE_MAPPING, error);
@@ -273,7 +391,7 @@ export class BindingMappingTesterService {
     }
 
     // ---- 5. VERIFICATION ----------------------------------------------------
-    const verification = await this.verifyMapped(tool, mapped, input);
+    const verification = await this.verifyMapped(tool, binding, mapped, input);
     const verdict = verification.verdict;
 
     if (verdict !== null && isProviderAtFault(verdict)) {
@@ -323,6 +441,7 @@ export class BindingMappingTesterService {
    */
   private async verifyMapped(
     tool: Tool,
+    binding: ToolBinding,
     mapped: JsonValue,
     input: JsonObject,
   ): Promise<BindingTestVerificationView> {
@@ -335,7 +454,7 @@ export class BindingMappingTesterService {
       // for. The engine only carries this through onto the verdict.
       intentId: `test:${tool.id}`,
       policy,
-      outputSchema: tool.outputSchema,
+      outputSchema: effectiveOutputSchema(versionOf(tool), binding),
       response: mapped,
       request: input,
       evaluatedAt: new Date(),
@@ -358,11 +477,13 @@ export class BindingMappingTesterService {
     row: ToolBindingEntity,
     input: JsonObject,
     report: BindingTestReport,
+    toolVersion: number,
   ): Promise<void> {
     const entity = new BindingTestRunEntity();
     entity.organizationId = organizationId;
     entity.bindingId = row.id;
     entity.mappingVersion = row.mappingVersion;
+    entity.toolVersion = toolVersion;
     entity.callId = report.callId;
     entity.outcome = report.outcome;
     entity.failedLayer = report.failedLayer;
@@ -375,6 +496,33 @@ export class BindingMappingTesterService {
       `Tester run ${report.outcome} for binding ${row.id} revision ${row.mappingVersion}`,
     );
   }
+}
+
+/**
+ * The contract version a tester run checks against: `requested` when it is a
+ * servable version inside the binding's range, else the newest servable
+ * version of the range's highest major that has one.
+ */
+export function testedVersion(tool: Tool, range: string, requested?: number): ToolContractVersion {
+  const majors = bindingRange(range);
+  const servable = contractVersionsOf(tool).filter(
+    (version) => isServable(version) && majors.includes(version.major),
+  );
+  if (requested !== undefined) {
+    const chosen = servable.find((version) => version.version === requested);
+    if (!chosen) {
+      throw ProviderErrors.bindingContractMismatch({
+        problems: [`contract version ${requested} is not a published version in ${range}`],
+      });
+    }
+    return chosen;
+  }
+  if (servable.length === 0) {
+    throw ProviderErrors.bindingContractMismatch({
+      problems: [`no published contract version in ${range} to test against`],
+    });
+  }
+  return servable[0];
 }
 
 /**
@@ -460,6 +608,7 @@ class LayerLog {
       classification: parts.classification ?? null,
       mapped: parts.mapped ?? null,
       verification: parts.verification ?? null,
+      warnings: [],
     };
   }
 }
@@ -541,6 +690,34 @@ function firstFailingStageCode(stages: readonly StageResult[]): string | null {
 
 function firstFailingStageDetail(stages: readonly StageResult[]): string | null {
   return stages.find((stage) => stage.detail !== null && stage.code !== null)?.detail ?? null;
+}
+
+/**
+ * The header names of the request as it goes on the wire, lower-cased, in
+ * `EgressBindingInvoker`'s order: defaults → mapping → `x-assay-call-id` →
+ * signature. Stored credential headers are left out on purpose: the view
+ * shows what the mapping and Assay add, never what the vault holds (a mapping
+ * header that shares a stored header's name is still listed, as the mapping's).
+ *
+ * Mirrors the invoker's `outboundHeaders` and the signer's output names
+ * (`content-digest` only with a body). The tester's own test reads the request
+ * the fixture server received and checks every name listed here was sent.
+ */
+function wireHeaderNames(upstream: UpstreamRequest, signed: boolean): string[] {
+  const hasBody = upstream.body !== undefined;
+  const signature = signed
+    ? [...(hasBody ? ['content-digest'] : []), 'signature-input', 'signature']
+    : [];
+  const names = ['accept', ...(hasBody ? ['content-type'] : [])];
+  for (const name of Object.keys(upstream.headers)) {
+    const lower = name.toLowerCase();
+    // The invoker drops a mapping header in the platform's namespace, and the
+    // signer overwrites one of its own names: each is listed once, in its place.
+    if (isAssayHeaderName(lower) || signature.includes(lower) || names.includes(lower)) continue;
+    names.push(lower);
+  }
+  names.push('x-assay-call-id', ...signature);
+  return names;
 }
 
 /**

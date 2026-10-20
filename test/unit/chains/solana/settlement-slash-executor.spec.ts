@@ -21,7 +21,7 @@ import {
   SLASH_MESSAGE_LENGTH,
   slashAttestationMessage,
   SlashStatus,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
@@ -450,7 +450,7 @@ describe('SolanaSlashExecutor', () => {
       // The policy field is a sha256 of the port's `policy: string` — checked
       // independently, since it is the one field this service computes rather
       // than passes through.
-      const policyDigest = attestationCall.payload.slice(162, 194);
+      const policyDigest = attestationCall.payload.slice(163, 195);
       expect(Buffer.from(policyDigest)).toEqual(
         createHash('sha256').update(PROPOSE_REQUEST.policy, 'utf8').digest(),
       );
@@ -465,8 +465,8 @@ describe('SolanaSlashExecutor', () => {
         status: SIGNED_RESPONSE_CLASS.dataFail,
         penalty: 1_000n,
         policy: policyDigest,
-        issuedAt: readI64(attestationCall.payload, 194),
-        expiresAt: readI64(attestationCall.payload, 202),
+        issuedAt: readI64(attestationCall.payload, 195),
+        expiresAt: readI64(attestationCall.payload, 203),
         programAddress: PROGRAM_ADDRESS,
       });
       expect(Buffer.from(attestationCall.payload)).toEqual(Buffer.from(expected));
@@ -965,7 +965,7 @@ describe('SolanaSlashExecutor', () => {
     it('carries the numeric custom-program-error code in a field, not only in the message', async () => {
       // The classifier that decides whether a judgement is void, retryable or
       // still waiting keys on the error's NAME, resolved from this number. A
-      // message alone is not parseable: `getX402PaymentErrorMessage` renders
+      // message alone is not parseable: `getAssayPaymentErrorMessage` renders
       // the human sentence, and returns a fixed placeholder in production.
       const rpc = new FakeRpc();
       // No record on chain: a confirmation failure with one present is an

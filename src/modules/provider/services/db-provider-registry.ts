@@ -1,11 +1,22 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { In } from 'typeorm';
 
+import { BindingStatsRepository } from '@database/postgres/repositories/binding-stats.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 
+import {
+  BINDING_STATS_CONFIG,
+  BindingStatsConfig,
+  DEFAULT_BINDING_STATS_CONFIG,
+} from '../constants/binding-stats.constants';
+import {
+  BindingWindow,
+  deriveBindingStats,
+  poolProviderStats,
+} from '../domain/stats/binding-stats';
 import {
   CHAIN_ENROLMENT_SOURCE,
   ChainEnrolmentPort,
@@ -38,22 +49,27 @@ import {
  * available outcome: a green console, a live binding, and no traffic ever,
  * with nothing anywhere saying why.
  *
- * ## What it does *not* fix
+ * ## Observed stats
  *
- * `stats` is returned empty, always. Nothing in this codebase computes
- * `availabilityRate`, `paidQualityRate` or a latency percentile from observed
- * calls — the router reads reputation and nothing writes it yet; that belongs
- * to whatever builds the observation pipeline. Empty is the honest answer and
- * the safe one: every field on `ProviderStats` is optional precisely so that
- * "not measured" is expressible, and `NEUTRAL_PRIOR` in
- * `domain/routing/score.ts` gives an unmeasured provider the benefit of the
- * doubt rather than a zero that reads as "measured, and terrible".
+ * `stats` and `bindingStats` come from `binding_stats`, the snapshot the
+ * scheduler's `BindingStatsService` rebuilds every five minutes from the
+ * router's `binding_attempts` and the verdicts in `verification_records`.
+ * The snapshot holds counts; this class turns them into rates with
+ * `deriveBindingStats` (per binding) and `poolProviderStats` (per provider),
+ * which is where `BINDING_STATS_MIN_SAMPLE` applies. Below it a field stays
+ * absent — every field on `ProviderStats` is optional precisely so that "not
+ * measured" is expressible — and `NEUTRAL_PRIOR` in `domain/routing/score.ts`
+ * gives an unmeasured provider the benefit of the doubt rather than a zero
+ * that reads as "measured, and terrible".
  *
- * `minimumStakeOverride` is likewise absent: the per-provider negotiated
+ * Still not measured: `freeQualityRate` (free calls are not verified),
+ * `callsServed` and `upheldSlashes`.
+ *
+ * `minimumStakeOverride` is absent: the per-provider negotiated
  * floor has no column on `providers`, and inventing one here would put an
  * economic parameter in a place no parameter change goes through.
  *
- * ## Two reads, one round trip
+ * ## Four reads, one round trip
  *
  * Since multichain support the payout address is not a column on `providers` any more —
  * it belongs to the per-chain enrolment, because one provider has one answer
@@ -62,7 +78,8 @@ import {
  * both are keyed on `organizationId` over the same candidate set, which is the
  * shape `gatherCandidates` already uses for its own four reads: one extra
  * statement per routing decision, batched over every candidate, not one per
- * provider.
+ * provider. The slash holds and the binding stats join the same
+ * `Promise.all` on the same key, so they add statements, not round trips.
  */
 @Injectable()
 export class DbProviderRegistry implements ProviderRegistryPort {
@@ -73,6 +90,13 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     // The per-chain slash holds (`EvmSlashHoldMonitor`). Optional: a
     // composition without them routes exactly as before.
     @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
+    // The observed stats (`binding_stats`). Optional for the same reason:
+    // without it every provider reads as unmeasured, which is how routing
+    // behaved before the stats pipeline existed.
+    @Optional() private readonly bindingStats: BindingStatsRepository | null = null,
+    @Optional()
+    @Inject(BINDING_STATS_CONFIG)
+    private readonly statsConfig: BindingStatsConfig | null = null,
   ) {}
 
   async findRoutingStates(
@@ -85,11 +109,13 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     // surface rests on — so this is an ordinary scoped read over a set of
     // organizations rather than a cross-tenant one, and it stays inside the
     // scope guard.
-    const [rows, enrolments, holds] = await Promise.all([
+    const [rows, enrolments, holds, windows] = await Promise.all([
       this.providers.find({ where: { organizationId: In([...providerIds]) } }),
       this.enrolments.enrolmentsOf(providerIds),
       this.slashHolds?.findHeld(providerIds) ?? Promise.resolve([]),
+      this.bindingStats?.findByProviders(providerIds) ?? Promise.resolve([]),
     ]);
+    const statsByProvider = this.statsByProvider(windows);
     const holdsByProvider = new Map<string, ProviderSlashHoldView[]>();
     for (const hold of holds) {
       holdsByProvider.set(hold.providerId, [
@@ -132,15 +158,16 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     for (const row of rows) {
       found.set(row.organizationId, {
         providerId: row.organizationId,
-        // A blocked provider reads as `SUSPENDED` to routing, so every path
-        // that routes — `tools/call`, `tools/list` and the catalogue's quotes —
-        // refuses it with the reason it already gives a suspended one, and no
-        // router code has to know the blocklist exists.
+        // A blocked provider reads as `SUSPENDED` to routing. Defence in
+        // depth only: the router drops blocked organizations from the pool
+        // itself (`ProviderRouterService.unblocked`), against the live
+        // blocklist, so they are never rejected, reported or priced.
         status: this.blocklist.organizationBlock(row.organizationId)
           ? ProviderStatus.SUSPENDED
           : (row.status as ProviderStatus),
         tier: row.tier as ProviderTier,
-        stats: NO_OBSERVATIONS,
+        stats: statsByProvider.get(row.organizationId)?.stats ?? NO_OBSERVATIONS,
+        bindingStats: statsByProvider.get(row.organizationId)?.bindingStats ?? NO_BINDING_STATS,
         // Empty when this provider has enrolled nowhere, which
         // `evaluatePayoutGate` turns into a refusal on every chain rather than
         // a default.
@@ -151,6 +178,36 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     }
 
     return found;
+  }
+
+  /**
+   * Rates from counts: per binding, and pooled per provider, both against
+   * the minimum sample size. A binding with no measured field is left out of
+   * the map rather than carried as `{}`, so `statsOf` falls straight through
+   * to the provider's figure.
+   */
+  private statsByProvider(
+    windows: readonly BindingWindow[],
+  ): Map<string, { stats: ProviderStats; bindingStats: ReadonlyMap<string, ProviderStats> }> {
+    const minSampleSize = (this.statsConfig ?? DEFAULT_BINDING_STATS_CONFIG).minSampleSize;
+    const grouped = new Map<string, BindingWindow[]>();
+    for (const window of windows) {
+      grouped.set(window.providerId, [...(grouped.get(window.providerId) ?? []), window]);
+    }
+
+    const result = new Map<
+      string,
+      { stats: ProviderStats; bindingStats: ReadonlyMap<string, ProviderStats> }
+    >();
+    for (const [providerId, own] of grouped) {
+      const bindingStats = new Map<string, ProviderStats>();
+      for (const window of own) {
+        const derived = deriveBindingStats(window, minSampleSize);
+        if (Object.keys(derived).length > 0) bindingStats.set(window.bindingId, derived);
+      }
+      result.set(providerId, { stats: poolProviderStats(own, minSampleSize), bindingStats });
+    }
+    return result;
   }
 }
 
@@ -169,3 +226,6 @@ const NO_CHAINS: ReadonlySet<ChainId> = new Set<ChainId>();
  * cold-start inversion `score.ts` exists to avoid.
  */
 const NO_OBSERVATIONS: ProviderStats = Object.freeze({});
+
+/** Shared and empty — a provider none of whose bindings has a measured field. */
+const NO_BINDING_STATS: ReadonlyMap<string, ProviderStats> = new Map<string, ProviderStats>();

@@ -70,20 +70,38 @@ export class NotificationService implements NotificationPort {
   ) {}
 
   async notify(request: NotificationRequest): Promise<NotificationOutcome> {
+    // Set once this call holds the aggregation claim; cleared once the row is
+    // written. A failure in between releases the claim, or a ONCE notice (the
+    // payment key's first spend) would be lost for the whole claim period.
+    const pending: { claim: string | null; recorded?: boolean } = { claim: null };
     try {
-      return await this.doNotify(request);
+      return await this.doNotify(request, pending);
     } catch (error) {
       this.logger.error(
         `notify(${request.event}) for org ${request.organizationId} failed: ${describe(error)}`,
       );
+      if (pending.claim !== null) await this.releaseClaim(pending.claim, request);
       // The "never throws" contract is unchanged. A caller that starts a clock
       // on delivery must not start one when the notification did not happen,
       // so a swallowed failure reports nothing delivered.
-      return { deliveredNow: false };
+      return { deliveredNow: false, recorded: pending.recorded === true };
     }
   }
 
-  private async doNotify(request: NotificationRequest): Promise<NotificationOutcome> {
+  private async releaseClaim(key: string, request: NotificationRequest): Promise<void> {
+    try {
+      await this.redis.del(key);
+    } catch (error) {
+      this.logger.warn(
+        `Could not release the suppression claim for ${request.event} (org ${request.organizationId}): ${describe(error)}`,
+      );
+    }
+  }
+
+  private async doNotify(
+    request: NotificationRequest,
+    pending: { claim: string | null; recorded?: boolean },
+  ): Promise<NotificationOutcome> {
     const definition = NOTIFICATION_CATALOGUE[request.event];
 
     // Step 1 — `DIGEST_ONLY` writes nothing and is not an error.
@@ -93,11 +111,12 @@ export class NotificationService implements NotificationPort {
     }
 
     // Step 2 — the aggregation rule, as a suppression check.
-    const suppressed = await this.isSuppressed(request, definition);
-    if (suppressed) {
-      this.logger.debug(
-        `${request.event} suppressed for org ${request.organizationId} (dedupeKey=${request.dedupeKey ?? '(none)'})`,
-      );
+    const claim = await this.claim(request, definition);
+    pending.claim = claim.key;
+    if (claim.suppressed) {
+      // The dedupe key is not logged: a producer's grain may name an account
+      // (a payment key's address), and the event and organization say enough.
+      this.logger.debug(`${request.event} suppressed for org ${request.organizationId}`);
       // An outcome, never `undefined`: callers read `deliveredNow` off it, and
       // `SlashProposalService` does so on the path that starts the response clock.
       return { deliveredNow: false };
@@ -124,6 +143,15 @@ export class NotificationService implements NotificationPort {
       readAt: null,
       firstDeliveredAt: deliveredNow ? new Date() : null,
     });
+    // The row exists: the claim is kept whatever fails below.
+    //
+    // An insert that commits but whose promise rejects (a client timeout after
+    // the server wrote the row) is treated as a failure: the claim is released
+    // and a later call can write a second row for a ONCE notice. Accepted on
+    // purpose: a duplicate notice costs a little noise, a lost one (a payment
+    // key's first spend) costs the security signal this event exists for.
+    pending.claim = null;
+    pending.recorded = true;
 
     // Step 5 — one delivery row per catalogue channel. Ids are assigned here,
     // before the insert, so step 6 can enqueue against them without a second
@@ -155,17 +183,21 @@ export class NotificationService implements NotificationPort {
         ),
     );
 
-    return { deliveredNow };
+    return { deliveredNow, recorded: true };
   }
 
   // ── suppression (step 2) ────────────────────────────────────────────────
 
-  private async isSuppressed(
+  /**
+   * `suppressed` when an earlier call holds the window; `key` is the claim
+   * this call took (to release if it fails before writing), else null.
+   */
+  private async claim(
     request: NotificationRequest,
     definition: NotificationDefinition,
-  ): Promise<boolean> {
+  ): Promise<{ suppressed: boolean; key: string | null }> {
     if (definition.aggregation === NotificationAggregation.PER_EVENT) {
-      return false;
+      return { suppressed: false, key: null };
     }
 
     const key = this.suppressionKey(request, definition.aggregation);
@@ -177,12 +209,12 @@ export class NotificationService implements NotificationPort {
       // `null` means a previous call already claimed it and this one is
       // suppressed.
       const claimed = await this.redis.set(key, '1', 'EX', ttlSeconds, 'NX');
-      return claimed === null;
+      return claimed === null ? { suppressed: true, key: null } : { suppressed: false, key };
     } catch (error) {
       this.logger.warn(
         `Suppression check unreadable for ${request.event} (org ${request.organizationId}); sending. ${describe(error)}`,
       );
-      return false;
+      return { suppressed: false, key: null };
     }
   }
 

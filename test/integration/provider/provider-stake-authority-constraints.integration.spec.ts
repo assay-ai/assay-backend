@@ -47,14 +47,13 @@ describe('provider stake-authority constraints', () => {
 
   const CHAIN = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
   const ACCOUNT = `${CHAIN}:7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU`;
-  const PAYOUT = `${CHAIN}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`;
 
   /** A stored proof envelope — `PayoutProof`'s four fields, as `stake_proof` holds them. */
   function proof(): string {
     return JSON.stringify({
       challengeId: randomUUID(),
       signature: 'test-signature',
-      messageVersion: 'x402-stake-authority/v1',
+      messageVersion: 'assay-stake-authority/v1',
       provedAt: new Date().toISOString(),
     });
   }
@@ -247,77 +246,6 @@ describe('provider stake-authority constraints', () => {
           'eip155:1',
         ),
       ).resolves.toBeUndefined();
-    });
-  });
-
-  /**
-   * The cutover gate, re-aimed at the enrolment.
-   *
-   * `PROVIDER_STAKE_SOURCE_MODE` may go from `chain_with_config_fallback` to
-   * `chain` only once this report is empty. Every row it returns is a provider
-   * the chain cannot be asked about **on any chain** — no stake authority
-   * anywhere, so no PDA — who would therefore drop to `STAKE_UNKNOWN` and out
-   * of paid routing the moment the config fallback is removed. A promotion
-   * criterion nobody can evaluate is not a criterion, and this is the query
-   * that evaluates it.
-   *
-   * It is tested here rather than in `test/unit` for the same reason the
-   * constraints above are: the subject is SQL against a real schema. A stubbed
-   * query builder would assert that the method calls `andWhere`, which is a
-   * restatement of the implementation and would not have caught the one bug
-   * that matters — a predicate on the wrong column, or a `NOT EXISTS` whose
-   * correlation is missing.
-   */
-  describe('findProvidersWithoutStakeAuthority', () => {
-    it('returns exactly the providers with no proved stake authority, oldest first', async () => {
-      const unproved = await provider();
-      const proved = await provider();
-      const alsoUnproved = await provider();
-
-      await setStake(proved, { authority: ACCOUNT, proof: proof(), provedAt: new Date() });
-
-      const gap = await context.providers.findProvidersWithoutStakeAuthority();
-
-      // Cross-organization by design — the caller is an operator deciding one
-      // thing about the whole deployment, not a tenant asking about itself.
-      expect(gap.map((row) => row.organizationId)).toEqual([unproved, alsoUnproved]);
-    });
-
-    it('excludes a provider proved on ONE chain of two — they are answerable somewhere', async () => {
-      // The list is about a provider the chain source cannot answer for at
-      // all. Per-chain readiness is a different question, and reporting a
-      // half-enrolled provider here would make the promotion criterion
-      // unreachable the moment a second chain is offered.
-      const organizationId = await provider();
-      await context.dataSource.query(
-        `INSERT INTO provider_chain_enrolments
-           (organization_id, chain_id, payout_account_id, payout_proof, payout_proved_at,
-            status, enrolled_at)
-         VALUES ($1, 'eip155:1', 'eip155:1:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd', $2,
-                 now(), 'ACTIVE', now())`,
-        [organizationId, proof()],
-      );
-
-      await setStake(organizationId, { authority: ACCOUNT, proof: proof(), provedAt: new Date() });
-
-      await expect(context.providers.findProvidersWithoutStakeAuthority()).resolves.toEqual([]);
-    });
-
-    it('is empty once every provider has proved one — which is what unblocks mode=chain', async () => {
-      const first = await provider();
-      const second = await provider();
-
-      await setStake(first, { authority: ACCOUNT, proof: proof(), provedAt: new Date() });
-      await setStake(second, {
-        // A different authority: `uq_provider_chain_enrolments_stake_authority`
-        // refuses two providers on one stake account, and an empty report built
-        // by violating that constraint would be a lie.
-        authority: PAYOUT,
-        proof: proof(),
-        provedAt: new Date(),
-      });
-
-      await expect(context.providers.findProvidersWithoutStakeAuthority()).resolves.toEqual([]);
     });
   });
 });

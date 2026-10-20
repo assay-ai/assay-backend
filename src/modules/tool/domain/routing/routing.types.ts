@@ -4,6 +4,8 @@ import { ProviderRoutingState } from '@modules/provider/ports/provider.types';
 import { ProviderStake } from '@modules/provider/ports/provider-stake.port';
 
 import { ToolBinding } from '../../ports/tool.types';
+import type { RoutingRules } from './rules';
+import type { ContractRequest } from '../contract/contract-versions';
 
 /**
  * Routing — the types the decision is made over.
@@ -397,6 +399,16 @@ export interface RoutingContext {
    */
   readonly callClass?: RoutingCallClass;
   /**
+   * The buying organization, for the observed stats only.
+   *
+   * Read by `attributeAttempt` and by nothing that decides routing: an attempt
+   * whose buyer IS the provider is a self-call and is left out, and the
+   * refresh caps how many attempts any one buyer adds to a binding's window.
+   * Absent on a quote, which dials nobody; an attempt with no buyer named is
+   * not counted at all, because the cap cannot be applied to it.
+   */
+  readonly buyerOrganizationId?: string;
+  /**
    * A free call's per-binding quota, reserved by the caller on the binding
    * about to be dialled — beside the ceiling token, in `selectAndReserve`.
    * `null` means the binding has no room: it is shed and the draw runs again
@@ -439,6 +451,20 @@ export interface RoutingContext {
    * management.
    */
   readonly withdrawingChains: readonly ChainId[];
+  /**
+   * The buyer's provider rules for this call: the agent's, and the toolset
+   * entry's when the call came through a toolset URL (`rules.ts`). Kept apart
+   * from {@link excludeProviderIds}, which stays the failover exclusion, so a
+   * refusal can name whose rule dropped a provider. Absent means no rules.
+   */
+  readonly rules?: RoutingRules;
+  /**
+   * What the call asks of the contract (T3): the majors it may use, the
+   * outputs the toolset entry requires and the call's argument names. Hard
+   * constraints, applied before the rules and kept by FALLBACK_BEST. Absent
+   * means the default major, nothing required, no arguments.
+   */
+  readonly contract?: ContractRequest;
   /** `ENABLED_CHAINS`, by name — `filterEligible` is pure and injects nothing. */
   readonly enabledChains: readonly ChainId[];
   /**

@@ -383,7 +383,13 @@ describe('PaymentIntentRepository — the debt SQL', () => {
     });
     const flat = captured.replace(/\s+/g, ' ');
     expect(flat).toMatch(/"intent"\."redemption_replaced_at" IS NULL/);
-    expect(flat).toMatch(/NOT \(intent\.organization_id::text = ANY\(/);
+    expect(flat).toMatch(
+      /NOT \(COALESCE\(intent\.organization_id::text = ANY\(:blockedOrgs\), false\)/,
+    );
+    // Never NULL for a row without a delegate (NULL poisoning).
+    expect(flat).toMatch(
+      /COALESCE\(lower\("intent"\."voucher_delegate"\) = ANY\(:blockedChainAccounts\), false\)/,
+    );
     expect(flat).toMatch(/lower\("intent"\."agent_account"\) = ANY\(:blockedChainAccounts\)/);
     expect(flat).toMatch(/lower\("intent"\."voucher_delegate"\) = ANY\(:blockedChainAccounts\)/);
   });

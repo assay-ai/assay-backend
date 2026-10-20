@@ -143,6 +143,14 @@ export class ReceiptsSummaryFigures {
   inProgressCalls: number;
 
   /**
+   * Calls listed at zero (free tier), counted in `calls`. A count of calls,
+   * not of groups: a tool that served both free and paid calls counts its
+   * free ones here whatever the grouping.
+   */
+  @ApiProperty({ description: 'Calls listed at zero (free tier), counted in calls' })
+  freeCalls: number;
+
+  /**
    * Calls this group refunded — the numerator of {@link failRate}, published
    * beside it so the rate is checkable rather than asserted.
    */

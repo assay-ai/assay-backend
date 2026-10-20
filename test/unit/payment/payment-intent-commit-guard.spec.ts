@@ -4,7 +4,7 @@ import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
-import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
@@ -112,6 +112,22 @@ class FakeIntentRepository {
     throw new Error('not reachable from resolve()');
   }
 
+  /** `bookHeldCollected`'s transaction and mark (G3.B1). */
+  readonly manager = {
+    transaction: <T>(work: (manager: unknown) => Promise<T>): Promise<T> => work({}),
+  };
+  markHeldCollected(_runner: unknown, target: { id: string }): Promise<boolean> {
+    const row = this.rows.get(target.id);
+    if (row) {
+      this.rows.set(target.id, {
+        ...row,
+        heldStatus: 'COLLECTED',
+        holdReleasedAt: new Date(),
+      } as PaymentIntentEntity);
+    }
+    return Promise.resolve(true);
+  }
+
   /** `lapseRedemption`: must NOT be how a late verdict lapses (L3) — see the spec below. */
   readonly lapsed = new Map<string, string>();
   lapseRedemption(_organizationId: string, id: string, cause: string): Promise<void> {
@@ -179,7 +195,6 @@ function harness() {
       chainId: CHAIN_IDS.SOLANA_DEVNET,
       expiresAt: new Date(Date.now() + 300_000),
       idempotencyKey: null,
-      voucherNonce: null,
       holdId: randomUUID(),
       holdReleasedAt: null,
       classification: null,
@@ -275,6 +290,9 @@ describe('PaymentIntentService.resolve() — the COMMIT branch needs a payee', (
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
     );
+    // Rail A is held for the dispute window (G3.B1): credited when it is collected.
+    expect(ledger.credited).toEqual([]);
+    await service.bookHeldCollected(organizationId, intent.id, null);
 
     expect(ledger.credited).toHaveLength(1);
     // The provider is credited AT THE ACCOUNT ON THE ROW — not at a lookup, not
@@ -304,8 +322,11 @@ describe('PaymentIntentService.resolve() — the COMMIT branch needs a payee', (
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
     );
+    // Rail A is held for the dispute window (G3.B1): credited when it is collected.
+    expect(ledger.credited).toEqual([]);
+    await service.bookHeldCollected(organizationId, intent.id, null);
 
-    expect(ledger.credited[0]).toMatchObject({ chainTxRef: LEGACY_POOLED_VAULT_TX_REF });
+    expect(ledger.credited[0]).toMatchObject({ chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF });
   });
 
   it('releases without a payee on the REFUND edge, because a release pays nobody', async () => {
@@ -429,6 +450,9 @@ describe('PaymentIntentService — a rail-B hold is retired by the redemption', 
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
     );
+    // Rail A is held for the dispute window (G3.B1): credited when it is collected.
+    expect(ledger.credited).toEqual([]);
+    await service.bookHeldCollected(organizationId, intent.id, null);
 
     expect(ledger.credited).toHaveLength(1);
   });
@@ -539,6 +563,9 @@ describe('PaymentIntentService — re-priced to the binding that served', () => 
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
     );
+    // Rail A is held for the dispute window (G3.B1): credited when it is collected.
+    expect(ledger.credited).toEqual([]);
+    await service.bookHeldCollected(organizationId, intent.id, null);
 
     // The credit is the charge; the ledger releases the rest of the hold.
     expect(ledger.credited).toHaveLength(1);

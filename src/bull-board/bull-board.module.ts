@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullBoardModule } from '@bull-board/nestjs';
 import { ExpressAdapter } from '@bull-board/express';
-import * as basicAuth from 'express-basic-auth';
+// `export =` module: this form is callable with and without esModuleInterop (test/tsconfig.json enables it).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import basicAuth = require('express-basic-auth');
 
 /**
  * Mounts the Bull Board dashboard at `${global-prefix}${BULLBOARD_PATH}`

@@ -40,12 +40,11 @@ import { PayoutProof, PayoutProofChannel } from '../ports/provider-registration.
  * unproved address, and a challenge cannot be spent twice under concurrent
  * submission.
  *
- * ## Since multichain support the address lands on the ENROLMENT
+ * ## The address lands on the ENROLMENT
  *
- * `providers.payout_account_id` is gone. A proof now upserts the provider's
- * enrolment on the chain the address is *on*, because one provider has one
- * answer per chain to "where do I get paid" and a single column could only
- * ever hold one of them. Re-proving on a chain already enrolled updates that
+ * A proof upserts the provider's enrolment on the chain the address is *on*,
+ * because one provider has one answer per chain to "where do I get paid" and a
+ * single column could only ever hold one of them. Re-proving on a chain already enrolled updates that
  * row; it never inserts a second one.
  *
  * ## Order of operations in `prove`, and why it is this order

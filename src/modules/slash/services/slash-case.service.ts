@@ -27,17 +27,11 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { Tool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import {
-  ArbitrationOutcome,
-  DisputeClaimType,
-  OUTCOME_CONSEQUENCE,
-  ResolutionKind,
-} from '../domain/arbitration';
+import { ResolutionKind } from '../domain/arbitration';
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
   disputeByOf,
-  disputesOnChain,
   OnChainDisputeState,
   onChainDisputeState,
   OnChainRecordMirror,
@@ -59,11 +53,10 @@ import {
 import { SlashProposalService } from './slash-proposal.service';
 
 /**
- * The read side of one slash case — the case screen for the provider, the
- * case brief for an adjudicator, and the queue's one-line `caseLabel` /
- * `coFailureCount`. One object, three renderings, because serving different
- * shapes to the two audiences is how they come to disagree about what the
- * penalty was.
+ * The read side of one slash case — the case screen for the provider and the
+ * case brief for an operator. One object, two renderings, because serving
+ * different shapes to the two audiences is how they come to disagree about
+ * what the penalty was.
  *
  * `sla_strikes.computation` already froze the arithmetic at the moment the
  * window closed. This class renders that freeze — and the strike's own
@@ -146,22 +139,20 @@ export class SlashCaseService {
 
     // Review N-4: an EVM case reads its state per record, not from one
     // case-level timestamp.
-    const records =
-      this.parts && disputesOnChain(proposal.assetId)
-        ? (
-            await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)
-          ).map((part) => ({
+    const records = this.parts
+      ? (await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)).map(
+          (part) => ({
             chainStatus: part.chainStatus,
             chainDisputedAt: part.chainDisputedAt,
             chainExecutableAt: part.chainExecutableAt,
             cancelReason: part.cancelReason ?? null,
-          }))
-        : undefined;
+          }),
+        )
+      : undefined;
     const clocks = computeClocks(proposal, new Date(), records);
     const proposalDto = buildProposalDto(proposal, binding, tool, window, clocks);
     const arithmetic = buildArithmeticRows(strike, proposal, calls);
     const inaction = await this.buildInaction(proposal);
-    const suggestedClaim = deriveSuggestedClaim(changeOverlay, agentGroups, strike);
 
     return {
       proposal: proposalDto,
@@ -172,7 +163,6 @@ export class SlashCaseService {
       failuresByRule: toAttributionRows(reasonGroups),
       failuresByAgent: toAttributionRows(agentGroups),
       evidenceVerdictCount,
-      suggestedClaim,
     };
   }
 
@@ -186,79 +176,10 @@ export class SlashCaseService {
   /** The dispute case restoration record. */
   async restoration(organizationId: string, proposalId: string): Promise<RestorationRowDto[]> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const windowLabel = proposal.windowId
-      ? await this.windowLabelFor(organizationId, proposal.windowId)
-      : null;
-    return buildRestorationRows(proposal, windowLabel);
-  }
-
-  /**
-   * The adjudication queue's `Case` column — `w_<sequence> · bnd_<label>`, or
-   * the binding label alone when there is no window to name.
-   *
-   * Added for `adjudication-queue.service.ts`, which calls this
-   * once per queue row. It costs one indexed primary-key lookup on
-   * `sla_windows` when `windowId` is set, on top of the proposal read every
-   * method here does — an N+1 across a 25-row queue page in the strict sense,
-   * but each lookup is a point read on the table's primary key, not a scan.
-   * If that turns out to matter at the queue's actual page size, the fix is a
-   * batch method here keyed on a list of window ids, not a change to what
-   * this one returns.
-   */
-  async caseLabel(organizationId: string, proposalId: string): Promise<string> {
-    const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const bindingLabel = renderBindingLabel(proposal.bindingId);
-
-    if (!proposal.windowId) {
-      // `DATA_FAIL` proposals carry a window only when the operator who opened
-      // them supplied one. Falling back to the binding label alone is honest;
-      // a fabricated `w_0` would not be.
-      return bindingLabel;
-    }
-
-    const window = await this.windows.findOneBy({ organizationId, id: proposal.windowId });
-    return window ? `${renderWindowLabel(window.sequence)} · ${bindingLabel}` : bindingLabel;
-  }
-
-  /**
-   * How many OTHER bindings on the same tool had their own observed rate move
-   * materially away from their own declared rate, in a window overlapping the
-   * subject window's time range. The co-failure signal.
-   *
-   * Returns `0`, honestly, whenever there is no window to align peers
-   * against — a `DATA_FAIL` proposal the operator opened without one. That is
-   * the one case the caller explicitly asked to be told about rather than
-   * guessed at: a non-zero count here can push an adjudicator toward
-   * `OVERTURNED_PLATFORM_DEFECT`, which opens a fleet sweep, so an invented
-   * number would be the single most expensive wrong answer in the taxonomy.
-   *
-   * One query beyond the proposal + window reads every other method here
-   * pays (`SlashCaseReadRepository.countPeerBindingsWithMaterialDeviation`) —
-   * not an N+1, since the peer comparison itself is a single aggregate over
-   * every sibling binding at once.
-   */
-  async coFailureCount(organizationId: string, proposalId: string): Promise<number> {
-    const proposal = await this.lifecycle.require(organizationId, proposalId);
-    if (!proposal.windowId) return 0;
-
-    const window = await this.windows.findOneBy({ organizationId, id: proposal.windowId });
-    if (!window) return 0;
-
-    return this.caseRead.countPeerBindingsWithMaterialDeviation(
-      window.toolId,
-      proposal.bindingId,
-      window.openedAt,
-      window.closedAt ?? new Date(),
-      MATERIAL_FAILURE_RATE_DELTA,
-    );
+    return buildRestorationRows(proposal);
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
-
-  private async windowLabelFor(organizationId: string, windowId: string): Promise<string | null> {
-    const window = await this.windows.findOneBy({ organizationId, id: windowId });
-    return window ? renderWindowLabel(window.sequence) : null;
-  }
 
   /** This window and the previous five for the same binding, `CLOSED` only. */
   private async loadPriorWindows(
@@ -411,38 +332,6 @@ const PRIOR_WINDOWS_LIMIT = 6;
 const TOP_ATTRIBUTION_ROWS = 3;
 
 /**
- * Share of a window's failures a single agent must account for before this
- * service suggests `AGENT_GRIEFING`. A heuristic, not a documented rule —
- * agent concentration is a signal with no agreed threshold.
- */
-const GRIEFING_AGENT_SHARE_THRESHOLD = 0.5;
-/**
- * How close to the sample gate counts as "barely enough" for
- * `INSUFFICIENT_SAMPLE` — `verifiedCalls < gate × this`. A heuristic, not a
- * documented rule.
- */
-const INSUFFICIENT_SAMPLE_GATE_MULTIPLE = 1.1;
-/**
- * Share of a window's failures that must fall after a published edit before
- * this service suggests `PLATFORM_MAPPING_CHANGE`. A heuristic, not a
- * documented rule.
- */
-const CHANGE_OVERLAY_MAJORITY_SHARE = 0.5;
-/**
- * How far a peer binding's observed rate must sit from its OWN declared rate,
- * in the subject window's time range, to count as a co-failure. A heuristic,
- * not a documented rule — the co-failure panel is the highest-value query on
- * the operator surface, but no threshold for it is agreed.
- */
-const MATERIAL_FAILURE_RATE_DELTA = 0.03;
-
-const PLATFORM_CLOCK_STATUSES: ReadonlySet<SlashProposalStatus> = new Set([
-  SlashProposalStatus.DISPUTED,
-  SlashProposalStatus.UNDER_REVIEW,
-  SlashProposalStatus.AWAITING_SECOND,
-]);
-
-/**
  * `bnd_<label>` — the provider-facing rendering the case screen and case
  * brief show for a binding, the same way `w_<sequence>` renders a window.
  *
@@ -492,15 +381,13 @@ function computeClocks(
   now: Date,
   records?: readonly OnChainRecordMirror[],
 ): SlashProposalClocksDto {
-  let runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE' = 'NONE';
+  let runningClock: 'PROVIDER' | 'NONE' = 'NONE';
   let deadline: Date | null = null;
 
-  // EVM: the record's executableAt is the provider's only deadline, and no
+  // The record's executableAt is the provider's only deadline, and no
   // platform clock runs (the arbiter rules on chain).
-  const onChain = disputesOnChain(proposal.assetId);
   const chainState = onChainDisputeState(
     {
-      assetId: proposal.assetId,
       chainStatus: proposal.chainStatus ?? ChainProposalStatus.NONE,
       chainDisputedAt: proposal.chainDisputedAt ?? null,
       chainDisputeWonAt: proposal.chainDisputeWonAt ?? null,
@@ -511,33 +398,17 @@ function computeClocks(
   );
   // Per record when the records are at hand (review N-4): a part disputed, or
   // a case moved on, does not close the window of a sibling still pending.
-  const disputeBy = !onChain
-    ? null
-    : records && records.length > 0
+  const disputeBy =
+    records && records.length > 0
       ? disputeByOf(records)
       : proposal.status === SlashProposalStatus.PROPOSED &&
           chainState === OnChainDisputeState.PENDING
         ? (proposal.chainExecutableAt ?? null)
         : null;
 
-  if (onChain) {
-    if (disputeBy && disputeBy.getTime() > now.getTime()) {
-      runningClock = 'PROVIDER';
-      deadline = disputeBy;
-    }
-  } else if (
-    proposal.status === SlashProposalStatus.PROPOSED &&
-    proposal.respondByAt &&
-    proposal.respondByAt.getTime() > now.getTime()
-  ) {
+  if (disputeBy && disputeBy.getTime() > now.getTime()) {
     runningClock = 'PROVIDER';
-    deadline = proposal.respondByAt;
-  } else if (
-    PLATFORM_CLOCK_STATUSES.has(proposal.status as SlashProposalStatus) &&
-    proposal.platformDecisionDueAt
-  ) {
-    runningClock = 'PLATFORM';
-    deadline = proposal.platformDecisionDueAt;
+    deadline = disputeBy;
   }
 
   const secondsRemaining =
@@ -547,8 +418,6 @@ function computeClocks(
     proposedAt: proposal.proposedAt,
     notifiedAt: proposal.notifiedAt,
     acknowledgedAt: proposal.acknowledgedAt,
-    respondByAt: onChain ? null : proposal.respondByAt,
-    platformDecisionDueAt: onChain ? null : proposal.platformDecisionDueAt,
     earliestExecutionAt: proposal.earliestExecutionAt,
     secondsRemaining,
     runningClock,
@@ -558,7 +427,6 @@ function computeClocks(
     chainExecutableAt: proposal.chainExecutableAt ?? null,
     chainDisputedAt: proposal.chainDisputedAt ?? null,
     chainDisputedParts: proposal.chainDisputedParts ?? 0,
-    disputeOnChain: onChain,
     chainState,
     disputeBy,
     chainRecords: records?.length ?? 0,
@@ -589,7 +457,9 @@ function buildProposalDto(
     // the column on this row. The column type mismatch is a known schema
     // limitation that this rendering works around.
     toolId: binding?.toolId ?? proposal.toolId,
-    toolName: tool?.name ?? binding?.toolId ?? proposal.toolId,
+    // Null rather than an id when the catalogue cannot name the tool: a
+    // penalty titled with a UUID tells the provider nothing.
+    toolName: tool?.name ?? null,
     windowId: proposal.windowId,
     windowLabel: window ? renderWindowLabel(window.sequence) : null,
     penaltyAmount: toMoneyDto(MoneyUtil.of(proposal.penaltyAmount, asset, proposal.decimals)),
@@ -599,13 +469,11 @@ function buildProposalDto(
     clocks,
     disputeId: proposal.disputeId,
     resolutionKind: proposal.resolutionKind as ResolutionKind | null,
-    outcome: proposal.outcome as ArbitrationOutcome | null,
     resolvedAt: proposal.resolvedAt,
     executedAt: proposal.executedAt,
     executionSignature: proposal.executionSignature,
     reversedAt: proposal.reversedAt,
     reversalSignature: proposal.reversalSignature,
-    sweepId: proposal.sweepId,
     createdAt: proposal.createdAt,
     updatedAt: proposal.updatedAt,
   };
@@ -751,127 +619,26 @@ function toAttributionRows(groups: readonly SlaWindowFailureGroup[]): SlashAttri
 }
 
 /**
- * The claim the dispute form should pre-select, derived from the evidence
- * rather than from the provider. Checked in this order: a change overlay
- * that explains most failures, then agent concentration, then a thin sample —
- * the first that fits wins, and `null` when none does.
+ * Whether the case is still waiting on a decision. `S-1` closes a case
+ * without a resolution (no kind, no `resolvedAt`); it is settled, not pending.
  */
-function deriveSuggestedClaim(
-  changeOverlay: ChangeOverlayDto | null,
-  agentGroups: readonly SlaWindowFailureGroup[],
-  strike: SlaStrikeEntity | null,
-): DisputeClaimType | null {
-  if (changeOverlay) {
-    const total = changeOverlay.failuresBefore + changeOverlay.failuresAfter;
-    if (total > 0 && changeOverlay.failuresAfter / total > CHANGE_OVERLAY_MAJORITY_SHARE) {
-      return DisputeClaimType.PLATFORM_MAPPING_CHANGE;
-    }
-  }
-
-  const totalFailures = agentGroups.reduce((sum, group) => sum + Number(group.count), 0);
-  const topAgent = agentGroups[0];
-  if (
-    topAgent &&
-    totalFailures > 0 &&
-    Number(topAgent.count) / totalFailures >= GRIEFING_AGENT_SHARE_THRESHOLD
-  ) {
-    return DisputeClaimType.AGENT_GRIEFING;
-  }
-
-  if (
-    strike &&
-    strike.verifiedCalls < strike.minVerifiedCalls * INSUFFICIENT_SAMPLE_GATE_MULTIPLE
-  ) {
-    return DisputeClaimType.INSUFFICIENT_SAMPLE;
-  }
-
-  return null;
-}
-
-interface RestorationBasis {
-  readonly penaltyStands: boolean;
-  readonly strikesStand: boolean;
-  readonly routingWeightStands: boolean;
+function restorationPending(proposal: SlashProposalEntity): boolean {
+  return !proposal.resolvedAt && proposal.status !== 'CANCELLED';
 }
 
 /**
- * What an eventual (or already-reached) resolution promises to restore.
- * `null` while the case is still open — nothing has been decided yet, so
- * every row reads `ON_DECISION`.
- */
-function restorationBasisFor(proposal: SlashProposalEntity): RestorationBasis | null {
-  // `S-1` closes a case without a resolution (no kind, no `resolvedAt`); it is
-  // settled, not pending.
-  if (!proposal.resolvedAt && proposal.status !== 'CANCELLED') return null;
-
-  if (proposal.outcome) {
-    const consequence = OUTCOME_CONSEQUENCE[proposal.outcome as ArbitrationOutcome];
-    return {
-      penaltyStands: consequence.penaltyStands,
-      strikesStand: consequence.strikesStand,
-      routingWeightStands: consequence.routingWeightStands,
-    };
-  }
-
-  // Automatic resolutions carry no `ArbitrationOutcome` —
-  // `chk_slash_proposals_outcome_needs_adjudicator` refuses one. Only
-  // `AUTO_PLATFORM_MISS` is a genuine overturn among the three: it is our own
-  // control failing, not a judgement about the provider, and unlike
-  // `OVERTURNED_INSUFFICIENT_EVIDENCE` there is no "we could not tell"
-  // carve-out, so it is read here as a full reversal. This mapping names no
-  // `ArbitrationOutcome` and is therefore not in `OUTCOME_CONSEQUENCE` — it is
-  // a judgement of this service, not a documented rule.
-  if (proposal.resolutionKind === ResolutionKind.AUTO_PLATFORM_MISS) {
-    return { penaltyStands: false, strikesStand: false, routingWeightStands: false };
-  }
-
-  // `AUTO_UNDISPUTED` (penalty stands), `AUTO_DE_MINIMIS` (nothing was ever
-  // levied) and a pre-attestation `CANCELLED` (`S-1`, never adjudicated) all
-  // land here: none of them promises to undo anything, so every row below
-  // reads `NOT_APPLICABLE`.
-  return { penaltyStands: true, strikesStand: true, routingWeightStands: true };
-}
-
-function restorationStatus(
-  pending: boolean,
-  restores: boolean,
-): 'ON_DECISION' | 'RESTORED' | 'NOT_APPLICABLE' {
-  if (pending) return 'ON_DECISION';
-  return restores ? 'RESTORED' : 'NOT_APPLICABLE';
-}
-
-/**
- * The dispute case restoration record — six rows. Two of them
- * (`strikesStand`/`routingWeightStands`) are read off `OUTCOME_CONSEQUENCE`
- * or the automatic-resolution mapping above; two (`penalty cancelled`,
+ * The dispute case restoration record — four rows. Two (`penalty cancelled`,
  * `false-positive metric`) are read off real columns on the proposal itself;
- * and two ("tier progress", "policy recalibration ticket") have no backing
- * data anywhere in this codebase and say so rather than guessing.
+ * two ("tier progress", "policy recalibration ticket") have no backing data
+ * anywhere in this codebase and say so rather than guessing.
+ *
+ * No resolution the system writes promises to undo anything, so a closed case
+ * reads `NOT_APPLICABLE` throughout.
  */
-function buildRestorationRows(
-  proposal: SlashProposalEntity,
-  windowLabel: string | null,
-): RestorationRowDto[] {
-  const basis = restorationBasisFor(proposal);
-  const pending = basis === null;
-
-  const strikeRestores = basis !== null && !basis.strikesStand;
-  const routingRestores = basis !== null && !basis.routingWeightStands;
-  const penaltyStands = basis !== null && basis.penaltyStands;
+function buildRestorationRows(proposal: SlashProposalEntity): RestorationRowDto[] {
+  const pending = restorationPending(proposal);
 
   const rows: RestorationRowDto[] = [];
-
-  rows.push({
-    label: windowLabel ? `Strikes removed from ${windowLabel}` : 'Strikes removed',
-    value: proposal.strikeId ? '1 strike' : 'no SLA strike on this proposal',
-    status: proposal.strikeId ? restorationStatus(pending, strikeRestores) : 'NOT_APPLICABLE',
-  });
-
-  rows.push({
-    label: 'Routing weight restored',
-    value: pending ? 'pending decision' : routingRestores ? 'restored' : 'stands',
-    status: restorationStatus(pending, routingRestores),
-  });
 
   rows.push({
     label: 'Tier progress restored',
@@ -882,20 +649,10 @@ function buildRestorationRows(
     status: 'NOT_APPLICABLE',
   });
 
-  const penaltyStatus = pending
-    ? 'ON_DECISION'
-    : penaltyStands
-      ? 'NOT_APPLICABLE'
-      : // Overturned. Money that already moved needs an on-chain reversal
-        // before it is actually undone; overturned before execution, there
-        // was never anything to undo and the promise is fulfilled at once.
-        proposal.status === 'EXECUTED'
-        ? 'ON_DECISION'
-        : 'RESTORED';
   rows.push({
     label: 'Penalty cancelled',
     value: formatMoney(proposal.penaltyAmount, proposal.assetId, proposal.decimals),
-    status: penaltyStatus,
+    status: pending ? 'ON_DECISION' : 'NOT_APPLICABLE',
   });
 
   rows.push({

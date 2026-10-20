@@ -38,7 +38,6 @@ import { ProviderEgressLimiter } from '@modules/provider/services/provider-egres
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
-const EGRESS_IPS = ['203.0.113.10', '203.0.113.11', '203.0.113.12'];
 
 // A public-looking literal IP (example.com's, reused from
 // `egress-http.client.spec.ts` — real, public, and it will never route
@@ -124,7 +123,7 @@ interface FakeHttpClient {
   request: jest.Mock;
 }
 
-function buildHarness() {
+function buildHarness(options: { relayConfigured?: boolean } = {}) {
   const providers = new FakeProviderRepository();
   const checks = new FakeConnectivityCheckRepository();
   const http: FakeHttpClient = { request: jest.fn() };
@@ -133,9 +132,9 @@ function buildHarness() {
     providers.asRepository(),
     checks.asRepository(),
     http as unknown as EgressHttpClient,
-    EGRESS_IPS,
     new ProviderEgressLimiter(),
     fakeLookup,
+    options.relayConfigured ? { url: new URL('https://egress.test'), token: 'a'.repeat(64) } : null,
   );
 
   return { providers, checks, http, service };
@@ -171,6 +170,46 @@ describe('a live endpoint that answers', () => {
     expect(checks.rows).toHaveLength(1);
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.REACHABLE);
   });
+
+  it('asks for the egress relay', async () => {
+    const { service, providers, http } = buildHarness();
+    providers.seed(ORG, null);
+    http.request.mockResolvedValue({
+      status: 200,
+      headers: {},
+      body: '{}',
+      bytes: 2,
+      url: PUBLIC_ENDPOINT,
+      redirects: 0,
+    });
+    await service.declareEndpoint(ORG, PUBLIC_ENDPOINT);
+    expect(http.request.mock.calls[0][0].policy.relay).toBe(true);
+  });
+
+  it('refuses a port the relay cannot reach when the relay is configured', async () => {
+    const { service, providers, http } = buildHarness({ relayConfigured: true });
+    providers.seed(ORG, null);
+    await expectErrorCodeAsync(
+      () => service.declareEndpoint(ORG, 'https://p.test:3000/x'),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    );
+    expect(http.request).not.toHaveBeenCalled();
+    expect(providers.rows.get(ORG)?.endpoint).toBeNull();
+  });
+
+  it.each(['http://p.test/x', 'https://203.0.113.9/x'])(
+    'refuses %s at declaration when the relay is configured',
+    async (endpoint) => {
+      const { service, providers, http } = buildHarness({ relayConfigured: true });
+      providers.seed(ORG, null);
+      await expectErrorCodeAsync(
+        () => service.declareEndpoint(ORG, endpoint),
+        ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+      );
+      expect(http.request).not.toHaveBeenCalled();
+      expect(providers.rows.get(ORG)?.endpoint).toBeNull();
+    },
+  );
 
   it('takes its slot from the connectivity pool, not the tester pool (N-3)', async () => {
     const { service, providers, http } = buildHarness();
@@ -304,37 +343,6 @@ describe('an endpoint resolving to a blocked address — proving the egress guar
     );
 
     expect(providers.rows.get(ORG)?.endpoint).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// egressIps — published and stored
-// ---------------------------------------------------------------------------
-
-describe('the published egress IPs', () => {
-  it('are stamped onto every check row, whatever the outcome', async () => {
-    const { service, checks, http } = buildHarness();
-
-    await service.check(ORG, 'http://api.vesseldata.example/v2/ais'); // BLOCKED
-    http.request.mockResolvedValue({
-      status: 200,
-      headers: {},
-      body: '{}',
-      bytes: 2,
-      url: PUBLIC_ENDPOINT,
-      redirects: 0,
-    });
-    await service.check(ORG, PUBLIC_ENDPOINT); // REACHABLE
-
-    expect(checks.rows).toHaveLength(2);
-    for (const row of checks.rows) {
-      expect(row.egressIps).toEqual(EGRESS_IPS);
-    }
-  });
-
-  it('is returned by egressIps() for the console to render', () => {
-    const { service } = buildHarness();
-    expect(service.egressIps()).toEqual(EGRESS_IPS);
   });
 });
 

@@ -27,8 +27,11 @@ import { AddressInfo } from 'node:net';
 import { runInThisContext } from 'node:vm';
 
 import {
+  DEFAULT_EGRESS_LIMITS,
   EgressHttpClient,
   EgressLockdownError,
+  EgressRelayTransport,
+  UNTRUSTED_EGRESS_POLICY,
   installEgressLockdown,
   isEgressLockdownEnabled,
   installEgressLockdown as install,
@@ -237,6 +240,59 @@ describe('the sanctioned path still works', () => {
     const rpc = createSanctionedSolanaRpc(`http://127.0.0.1:${port}/`);
 
     await expect(rpc.getSlot().send()).resolves.toBe(123456n);
+  });
+
+  it('lets relayed calls through, including a request queued for a pooled socket', async () => {
+    // The relay path pools sockets. A request queued behind a busy socket is
+    // dispatched later, on the agent's 'free' event, outside the sanctioned
+    // scope; it must still go out (the guard sits on `request`/`ClientRequest`,
+    // which ran sanctioned when the request was created).
+    const token = 'ab'.repeat(32);
+    let connections = 0;
+    const relay = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        setTimeout(() => {
+          res.writeHead(200, { 'x-assay-relay': 'upstream' });
+          res.end('relayed');
+        }, 20);
+      });
+    });
+    relay.on('connection', () => (connections += 1));
+    await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+    const relayUrl = new URL(`http://127.0.0.1:${(relay.address() as AddressInfo).port}`);
+
+    const transport = new EgressRelayTransport({ url: relayUrl, token }, { maxSockets: 1 });
+    const client = new EgressHttpClient(
+      async () => [{ address: '93.184.216.34', family: 4 }],
+      undefined,
+      { url: relayUrl, token },
+    );
+
+    try {
+      const hop = { url: 'https://edge.provider.test/', method: 'GET', headers: {} };
+      const [a, b] = await Promise.all([
+        transport.send(hop, DEFAULT_EGRESS_LIMITS),
+        transport.send(hop, DEFAULT_EGRESS_LIMITS),
+      ]);
+      expect(a.body.toString()).toBe('relayed');
+      expect(b.body.toString()).toBe('relayed');
+      expect(connections).toBe(1);
+
+      const response = await client.request({
+        url: 'https://edge.provider.test/',
+        policy: { ...UNTRUSTED_EGRESS_POLICY, relay: true },
+      });
+      expect(response.body).toBe('relayed');
+
+      // And the sanction did not leak out of the relayed call.
+      expect(() => http.request(`http://127.0.0.1:${port}/`)).toThrow(EgressLockdownError);
+    } finally {
+      transport.close();
+      client.onModuleDestroy();
+      relay.closeAllConnections();
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
   });
 
   it('does not leave the sanction set after the call returns', async () => {

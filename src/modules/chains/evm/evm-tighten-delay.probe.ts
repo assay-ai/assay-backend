@@ -4,7 +4,7 @@ import { getAddress, zeroAddress } from 'viem';
 import { TightenDelayPort } from '@modules/settlement/ports/tighten-delay.port';
 
 import { AccountId, ChainId, parseAccountId } from '../ports/caip.types';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import { isRevert } from './evm-voucher-authority';
@@ -18,7 +18,7 @@ export interface EvmTightenDelayProbeConfig {
 }
 
 /**
- * Whether each chain's `X402Escrow` is the D-21 upgrade (assay-evm f814629),
+ * Whether each chain's `AssayEscrow` is the D-21 upgrade (assay-evm f814629),
  * found by asking it rather than by a flag somebody must flip.
  *
  * ## The probe
@@ -72,7 +72,7 @@ export class EvmTightenDelayProbe implements TightenDelayPort {
     try {
       await client.readContract({
         address: getAddress(deployment.escrow),
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'effectiveCapsOf',
         args: [zeroAddress, zeroAddress],
       });
@@ -87,7 +87,7 @@ export class EvmTightenDelayProbe implements TightenDelayPort {
     this.live.add(chainId);
     this.absentUntil.delete(chainId);
     this.logger.log(
-      `X402Escrow on ${chainId} has the tighten delay (effectiveCapsOf answered): redemption ` +
+      `AssayEscrow on ${chainId} has the tighten delay (effectiveCapsOf answered): redemption ` +
         'reads the effective caps and the strand guard stands down',
     );
     return true;

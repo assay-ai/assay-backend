@@ -7,9 +7,8 @@
  * amount", and the CLI is already configured (devnet RPC, a funded default
  * keypair) in this environment — duplicating that configuration logic in
  * TypeScript would be the less reliable path, not the more principled one.
- * The Squads multisig and the deposit payload itself are still built
- * programmatically (`squads-setup.ts`, `build-deposit-payload.ts`) because
- * no CLI exists for either.
+ * The deposit payload itself is still built programmatically
+ * (`build-deposit-payload.ts`) because no CLI exists for it.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';

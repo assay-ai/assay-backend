@@ -9,12 +9,8 @@ import { SlashProposalService } from './slash-proposal.service';
  * The slash side of `DeliveryObserverPort` — the caller
  * `SlashProposalService.markDelivered` never had.
  *
- * Until this existed, `respond_by_at` stayed null on every proposal, so
- * `SlashProposalRepository.findUndisputedPast` (which requires
- * `respond_by_at IS NOT NULL`) matched nothing and `sweepUndisputed` — running
- * every minute since it shipped — could never promote a proposal to `UPHELD`.
- * The demo seed called `markDelivered` by hand and said so in a comment; that
- * was a production gap, not a script convenience.
+ * It records a queued channel's delivery (`notified_at`), which the propose
+ * sweep waits for before it reserves any stake on chain.
  *
  * Registered against the port by `NotificationWorkerModule`, so it exists only
  * in the worker process, which is the only process that learns whether a

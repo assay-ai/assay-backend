@@ -240,11 +240,11 @@ export interface SlashCancelIntent {
    * calldata, `0x`-hex, for the admin's wallet to send to {@link to}.
    */
   readonly transaction: string;
-  /** EVM only: the contract the calldata is addressed to (the `X402Stake` proxy). */
+  /** EVM only: the contract the calldata is addressed to (the `AssayStake` proxy). */
   readonly to?: string;
   /**
    * The only account that may sign it, and its fee payer: `Config.admin`, or
-   * — on EVM once the dispute upgrade has appointed one — `X402Config.arbiter()`.
+   * — on EVM once the dispute upgrade has appointed one — `AssayConfig.arbiter()`.
    * The field keeps its name for the clients that read it; {@link signerRole}
    * says which of the two it is.
    */
@@ -268,6 +268,16 @@ export interface SlashCancelIntent {
  * record is the authority in both directions, so the recovery paths read it
  * rather than reasoning from local state.
  */
+/** How {@link SlashExecutorPort.readRecord} reads. */
+export interface SlashRecordReadOptions {
+  /**
+   * Read the record as of the chain's finalized block, not `latest` (B18's
+   * operator actions on a stuck case: a reorg must not undo the state they
+   * act on). EVM only; an adapter whose reads are already final ignores it.
+   */
+  readonly finalized?: boolean;
+}
+
 export interface SlashRecordSnapshot {
   readonly status: SlashRecordStatus;
   readonly penaltyMinor: string;
@@ -469,17 +479,15 @@ export interface SlashExecutorPort {
     requestId: string,
     provider: string,
     chainId: ChainId,
+    options?: SlashRecordReadOptions,
   ): Promise<SlashRecordSnapshot | null>;
 
   /**
    * `Config.treasury`, as CAIP-10 — the address the program pays the
    * platform's share of every penalty into.
    *
-   * Exposed because one caller must know it in order to **refuse**: a judgement
-   * whose `beneficiary` equals the treasury cannot execute, and it fails
-   * without a named error because Anchor rejects the duplicate mutable account
-   * before the handler runs. `SlashBeneficiaryService` compares against this
-   * so the refusal happens off-chain, where it can say why.
+   * Read by the compensation path, which builds the treasury's deposit back
+   * into a provider's stake.
    *
    * A read, not a second copy: the implementation returns the same value it
    * already caches for building the instruction, so the check and the
@@ -493,7 +501,7 @@ export interface SlashExecutorPort {
 
   /**
    * The delay a record proposed NOW would freeze into its `executableAt`, in
-   * seconds, read from the chain (EVM: `X402Config.slashDelaySeconds()` since
+   * seconds, read from the chain (EVM: `AssayConfig.slashDelaySeconds()` since
    * the dispute upgrade, the old contract's constant before it). Optional, and
    * `null` when the namespace cannot say: the caller then falls back to the
    * Solana program's floor, `MIN_SLASH_DELAY_SECONDS` (72 h).

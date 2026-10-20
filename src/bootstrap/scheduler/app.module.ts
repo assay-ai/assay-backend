@@ -18,8 +18,10 @@ import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
 
 // Domain Modules
+import { DisputeSchedulerModule } from '@modules/dispute/dispute-scheduler.module';
 import { PaymentSchedulerModule } from '@modules/payment/payment-scheduler.module';
 import {
+  ProviderBindingStatsSchedulerModule,
   ProviderSlaWindowSweepSchedulerModule,
   ProviderStakeMonitorSchedulerModule,
 } from '@modules/provider/provider-scheduler.module';
@@ -30,10 +32,8 @@ import { VerificationSchedulerModule } from '@modules/verification/verification-
 import { AccountSchedulerModule } from '@modules/account/account-scheduler.module';
 import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.module';
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
-
-// Starter reference modules — see src/modules/_examples/README.md
-import { ExamplesSchedulerModule } from '@modules/_examples/examples-scheduler.module';
-import { areExamplesEnabled } from '@modules/_examples/examples.flag';
+import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
+import { OAuthSchedulerModule } from '@modules/oauth/oauth-scheduler.module';
 
 // Controllers
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
@@ -63,6 +63,8 @@ import { NetworkModule } from '@shared/network/network.module';
     WebSocketEmitterModule,
     // Domain Modules — payment intent expiry sweep
     PaymentSchedulerModule,
+    // Call dispute snapshot retention (G3.B1).
+    DisputeSchedulerModule,
     // Reconciliation / proof of reserves every five minutes
     SettlementSchedulerModule,
     // The evidence retention sweep, hourly, once per deployment.
@@ -71,6 +73,8 @@ import { NetworkModule } from '@shared/network/network.module';
     ProviderStakeMonitorSchedulerModule,
     // Closes SLA windows past their 7-day deadline, every five minutes
     ProviderSlaWindowSweepSchedulerModule,
+    // Rebuilds `binding_stats` (the router's observed stats), every five minutes
+    ProviderBindingStatsSchedulerModule,
 
     // Slash disputes: the two due-process sweepers and the execution pass.
     // In the scheduler only, so no API replica holds a key that can take a
@@ -91,8 +95,11 @@ import { NetworkModule } from '@shared/network/network.module';
     // the float is one account per chain, and one reading of it per API replica
     // would page five times for one dry relayer.
     EvmSchedulerModule,
+    // Toolsets: grace and moderation-cutoff sweeps, daily and weekly usage stats.
+    ToolsetSchedulerModule,
+    // OAuth: dead tokens, codes and unreferenced clients, daily. Never credentials.
+    OAuthSchedulerModule,
     // Starter reference modules — off by default in production
-    ...(areExamplesEnabled() ? [ExamplesSchedulerModule] : []),
   ],
   controllers: [HealthcheckController],
 })

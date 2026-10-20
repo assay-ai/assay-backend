@@ -42,7 +42,7 @@ describe('column widths, against a database built from the migrations', () => {
    * database a developer has been hand-editing would answer a different
    * question — the one that lets a schema drift and still pass.
    */
-  const DATABASE = 'x402_schema_guard_test';
+  const DATABASE = 'assay_schema_guard_test';
 
   /** Every entity the widening touches. Their columns are enumerated, not listed. */
   const TARGETS = [
@@ -78,7 +78,7 @@ describe('column widths, against a database built from the migrations', () => {
     });
 
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
   }, 300_000);
 
   afterAll(async () => {

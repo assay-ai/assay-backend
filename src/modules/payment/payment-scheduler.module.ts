@@ -9,6 +9,7 @@ import { DepositFinalityJob } from './jobs/deposit-finality.job';
 import { DepositFinalityWatcher } from './services/deposit-finality-watcher.service';
 import { DepositIntentExpiryJob } from './jobs/deposit-intent-expiry.job';
 import { PaymentIntentExpiryJob } from './jobs/payment-intent-expiry.job';
+import { HeldCollectionJob } from './jobs/held-collection.job';
 import { VoucherRedemptionJob } from './jobs/voucher-redemption.job';
 import { PaymentModule } from './payment.module';
 import { VoucherRedemptionService } from './services/voucher-redemption.service';
@@ -31,10 +32,7 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
   // injects `VOUCHER_REDEEMER` directly. `PaymentModule` imports `ChainsModule`
   // but does not re-export its tokens, and a Nest provider resolves only
   // against its own module's context — so without this the scheduler dies at
-  // boot on `VOUCHER_REDEEMER`. (`DepositFinalityWatcher` used to be the
-  // reason this import existed — it injected `VAULT_PORT` and
-  // `ACCOUNT_WATCH_PORT` to watch the pooled vault — but per-buyer escrows
-  // disabled it unconditionally; see its own class comment.)
+  // boot on `VOUCHER_REDEEMER`.
   // `FeePayerSignerModule` is what puts a fee-payer key in this
   // process, and it is imported here, in the facilitator's bootstrap, and in
   // `PaymentApiModule` (for opening a buyer's escrow at deposit time) — and in
@@ -61,6 +59,8 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
     // `ReconciliationJob` has none.
     VoucherRedemptionService,
     VoucherRedemptionJob,
+    // Collects held payments past their dispute window (G3.B1).
+    HeldCollectionJob,
   ],
 })
 export class PaymentSchedulerModule {}

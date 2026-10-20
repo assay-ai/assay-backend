@@ -16,7 +16,7 @@
  * Filling the slash-record gap by hand reintroduces exactly the thing the
  * generated client abolishes: a copy of the program's interface that nothing
  * checks. This test is the check. It reads the seed bytes out of
- * `idl/x402_payment.json` — the same file the rest of the client is generated
+ * `idl/assay_payment.json` — the same file the rest of the client is generated
  * from — and compares them with the constants that file declares.
  *
  * If this fails, the program renamed a seed and `record-pdas.ts` did not
@@ -32,7 +32,7 @@ import {
   findSlashRecordPda,
   RECORD_PDA_SEEDS,
   SETTLEMENT_PROGRAM_ADDRESS,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 const IDL_PATH = join(
   __dirname,
@@ -43,7 +43,7 @@ const IDL_PATH = join(
   'packages',
   'settlement-client',
   'idl',
-  'x402_payment.json',
+  'assay_payment.json',
 );
 
 interface IdlSeed {

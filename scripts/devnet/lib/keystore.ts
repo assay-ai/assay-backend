@@ -1,8 +1,7 @@
 /**
- * Persists devnet keypairs to disk so `yarn devnet:deposit` is idempotent and
- * re-runnable: the second run reuses the same multisig `create_key`, the same
- * mint authority, and the same "user" wallet instead of minting a fresh set
- * of on-chain state every time.
+ * Persists devnet keypairs to disk so the devnet scripts are idempotent and
+ * re-runnable: the second run reuses the same mint authority and the same
+ * "user" wallet instead of minting a fresh set of on-chain state every time.
  *
  * Secrets never leave `scripts/devnet/.keys/` (gitignored — see the
  * `.gitignore` in that directory) and never get logged.

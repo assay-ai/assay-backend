@@ -18,6 +18,7 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_CHALLENGE_INVALID = 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
   ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
   ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+  ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED = 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
   // ── The account blocklist ──
   ACCOUNT_BLOCKED = 'ACCOUNT_BLOCKED',
 }
@@ -99,6 +100,17 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
       `The delegate key${
         context?.delegate ? ` ${context.delegate}` : ''
       } is already bound to another agent credential; nothing was bound. Revoke that credential, or bind a key of this agent's own`,
+  },
+  /**
+   * An OAuth grant of a client outside `OAUTH_PAYMENT_CLIENTS` asked for a
+   * delegate challenge or a bind (R-OA-22). Only API keys and `assay-mcp`
+   * grants may bind a payment key (spec §6.3.13, owner decision H2).
+   */
+  delegateClientNotAllowed: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED,
+    statusCode: 403,
+    message: () =>
+      'This app cannot bind a payment key; use an API key or the Assay app (assay-mcp)',
   },
   /**
    * A party to this request is on the account blocklist: a wallet that is the

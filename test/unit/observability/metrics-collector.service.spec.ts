@@ -3,13 +3,17 @@ import {
   fakeSlashProposalRepository,
 } from '../operator/helpers/fake-metrics';
 import {
+  fakeOAuthSignalsReader,
   fakeObservabilityMetricsRepository,
   fakeReconciliationRunRepository,
+  FakeOAuthSignals,
   FakeObservabilityOverrides,
 } from './helpers/fake-observability-repositories';
 
 import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
+import { OAuthSignalsReader } from '@modules/observability/services/oauth-signals.reader';
+import { DataSource } from 'typeorm';
+import { hungCache } from '../oauth/helpers/oauth-fakes';
 import { SignalAvailability } from '@modules/observability/domain/signal-catalog';
 import { ReconciliationSeverity } from '@modules/settlement/ports/reconciliation.types';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -22,9 +26,9 @@ function build(
     falsePositive?: { resolved: number; falsePositives: number };
     intentRateCounts?: { lastMinute: number; hourAgoMinute: number };
     verificationBacklog?: { count: number; p95AgeSeconds: number | null };
+    oauth?: FakeOAuthSignals;
   } = {},
 ) {
-  const registry = new MetricsRegistryService();
   const collector = new MetricsCollectorService(
     fakeReconciliationRunRepository(options.runs ?? []),
     fakeMetricsRepository({
@@ -33,9 +37,9 @@ function build(
     }),
     fakeSlashProposalRepository(options.falsePositive),
     fakeObservabilityMetricsRepository(options.observability),
-    registry,
+    fakeOAuthSignalsReader(options.oauth),
   );
-  return { collector, registry };
+  return { collector };
 }
 
 function findSignal(snapshotSignals: SignalReadingDto[], signal: string): SignalReadingDto {
@@ -56,9 +60,6 @@ describe('MetricsCollectorService', () => {
     const toolCallSuccess = findSignal(snapshot.signals, 'TOOL_CALL_SUCCESS_RATE');
     expect(toolCallSuccess.value).toBeNull();
     expect(toolCallSuccess.gate).toBeNull();
-
-    const disputeOverturn = findSignal(snapshot.signals, 'DISPUTE_OVERTURN_RATE');
-    expect(disputeOverturn.value).toBeNull();
 
     const openHoldAge = findSignal(snapshot.signals, 'OPEN_HOLD_AGE');
     expect(openHoldAge.value).toBeNull();
@@ -82,17 +83,17 @@ describe('MetricsCollectorService', () => {
     expect(payoutLag.value).toBeNull();
   });
 
-  it('marks the two in-process signals AWAITING_INSTRUMENTATION with a null value', async () => {
+  it('marks the two uninstrumented signals NONE with a null value', async () => {
     const { collector } = build();
 
     const snapshot = await collector.snapshot();
 
     const latency = findSignal(snapshot.signals, 'PLATFORM_LATENCY_P95_BY_BINDING');
-    expect(latency.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(latency.availability).toBe(SignalAvailability.NONE);
     expect(latency.value).toBeNull();
 
     const egress = findSignal(snapshot.signals, 'EGRESS_BLOCKS');
-    expect(egress.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(egress.availability).toBe(SignalAvailability.NONE);
     expect(egress.value).toBeNull();
   });
 
@@ -181,17 +182,6 @@ describe('MetricsCollectorService', () => {
     expect(reading.gate?.status).toBe('WARN');
   });
 
-  it('computes dispute overturn rate from raised/overturned counts, 0 raised as null not NaN', async () => {
-    const { collector } = build({
-      observability: { disputeOverturnCounts: { raised: 10, overturned: 3 } },
-    });
-
-    const snapshot = await collector.snapshot();
-
-    const reading = findSignal(snapshot.signals, 'DISPUTE_OVERTURN_RATE');
-    expect(reading.value).toBeCloseTo(0.3);
-  });
-
   it('caches the snapshot within the TTL — one round of repository calls serves many requests', async () => {
     const { collector } = build({ observability: { attestationsSigned: 7 } });
 
@@ -216,15 +206,258 @@ describe('MetricsCollectorService', () => {
     }
   });
 
-  it('sets the Prometheus gauges the JSON snapshot agrees with', async () => {
-    const { collector, registry } = build({
-      observability: { attestationsSigned: 12, slashesExecuted: 2 },
+  describe('OAuth signals (spec §6.7)', () => {
+    const OAUTH_SIGNALS = [
+      'OAUTH_LIVE_GRANTS',
+      'OAUTH_LIVE_GRANTS_PER_AGENT_MAX',
+      'OAUTH_GRANTS_STOPPED_FOR_REUSE',
+      'OAUTH_REFRESH_STALE_REUSE',
+      'OAUTH_REFRESH_GRACE_USES',
+      'OAUTH_DCR_REGISTRATIONS',
+      'OAUTH_CIMD_CLIENTS',
+      'OAUTH_TOKEN_RESULTS',
+      'OAUTH_CONSENT_STEPS',
+      'OAUTH_CONTINUE_COOKIE_MISSING',
+      'OAUTH_AUTHORIZE_OUTCOMES',
+      'OAUTH_CIMD_FETCHES',
+      'MCP_UNAUTHORIZED',
+    ];
+
+    async function oauthSnapshot(oauth: FakeOAuthSignals) {
+      const { collector } = build({ oauth });
+      const snapshot = await collector.snapshot();
+      return (name: string) => findSignal(snapshot.signals, name);
+    }
+
+    it('reports every OAuth signal in the oauth section, sourced, zero against empty sources', async () => {
+      const signal = await oauthSnapshot({});
+      for (const name of OAUTH_SIGNALS) {
+        const row = signal(name);
+        expect(row.section).toBe('oauth');
+        expect(row.availability).toBe(SignalAvailability.SOURCED);
+        expect(row.value).toBe(0);
+        expect(row.gate?.status ?? 'OK').toBe('OK');
+      }
     });
 
-    await collector.snapshot();
-    const text = await registry.metricsText();
+    it('OAUTH_LIVE_GRANTS: the live grant count, no gate', async () => {
+      const signal = await oauthSnapshot({ database: { liveGrants: 312 } });
+      expect(signal('OAUTH_LIVE_GRANTS')).toMatchObject({ value: 312, unit: 'grants', gate: null });
+    });
 
-    expect(text).toContain('assay_attestations_signed{window="24h"} 12');
-    expect(text).toContain('assay_slashes_executed{window="30d"} 2');
+    it('OAUTH_LIVE_GRANTS_PER_AGENT_MAX: warns at 45, OK at 44', async () => {
+      const at44 = await oauthSnapshot({ database: { maxLiveGrantsPerAgent: 44 } });
+      expect(at44('OAUTH_LIVE_GRANTS_PER_AGENT_MAX').gate?.status).toBe('OK');
+
+      const at45 = await oauthSnapshot({ database: { maxLiveGrantsPerAgent: 45 } });
+      const row = at45('OAUTH_LIVE_GRANTS_PER_AGENT_MAX');
+      expect(row.value).toBe(45);
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.gate?.summary).toContain('45');
+    });
+
+    it('OAUTH_GRANTS_STOPPED_FOR_REUSE: refresh plus code reuse; any one is critical', async () => {
+      const none = await oauthSnapshot({});
+      expect(none('OAUTH_GRANTS_STOPPED_FOR_REUSE').gate?.status).toBe('OK');
+
+      const signal = await oauthSnapshot({
+        database: { stoppedForRefreshReuse: 1, stoppedForCodeReuse: 2 },
+      });
+      const row = signal('OAUTH_GRANTS_STOPPED_FOR_REUSE');
+      expect(row.value).toBe(3);
+      expect(row.extra).toEqual({ refreshReuse: 1, codeReuse: 2 });
+      expect(row.gate?.status).toBe('CRITICAL');
+    });
+
+    it('OAUTH_REFRESH_STALE_REUSE and OAUTH_REFRESH_GRACE_USES: audit counts, no gate', async () => {
+      const signal = await oauthSnapshot({
+        database: { refreshStaleReuse: 4, refreshGraceUses: 9 },
+      });
+      expect(signal('OAUTH_REFRESH_STALE_REUSE')).toMatchObject({ value: 4, gate: null });
+      expect(signal('OAUTH_REFRESH_GRACE_USES')).toMatchObject({
+        value: 9,
+        unit: 'count / 24h',
+        gate: null,
+      });
+    });
+
+    it('OAUTH_DCR_REGISTRATIONS: warns at 1000 a day, or above 100 under one client_name', async () => {
+      const ok = await oauthSnapshot({
+        database: { dcrRegistrations: 999, dcrMaxPerClientName: 100 },
+      });
+      expect(ok('OAUTH_DCR_REGISTRATIONS')).toMatchObject({
+        value: 999,
+        extra: { maxPerClientName: 100 },
+        gate: { status: 'OK' },
+      });
+
+      const total = await oauthSnapshot({ database: { dcrRegistrations: 1000 } });
+      expect(total('OAUTH_DCR_REGISTRATIONS').gate?.status).toBe('WARN');
+
+      const oneName = await oauthSnapshot({
+        database: { dcrRegistrations: 120, dcrMaxPerClientName: 101 },
+      });
+      const row = oneName('OAUTH_DCR_REGISTRATIONS');
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.gate?.summary).toContain('client_name');
+    });
+
+    it('OAUTH_CIMD_CLIENTS: the CIMD client rows, no gate', async () => {
+      const signal = await oauthSnapshot({ database: { cimdClients: 17 } });
+      expect(signal('OAUTH_CIMD_CLIENTS')).toMatchObject({ value: 17, gate: null });
+    });
+
+    it('OAUTH_TOKEN_RESULTS: the total, with each non-zero grant_type.result', async () => {
+      const signal = await oauthSnapshot({
+        counters: {
+          last24h: {
+            token: {
+              'authorization_code.ok': 5,
+              'refresh_token.ok': 20,
+              'refresh_token.invalid_grant': 2,
+            },
+          },
+        },
+      });
+      expect(signal('OAUTH_TOKEN_RESULTS')).toMatchObject({
+        value: 27,
+        gate: null,
+        extra: {
+          'authorization_code.ok': 5,
+          'refresh_token.ok': 20,
+          'refresh_token.invalid_grant': 2,
+        },
+      });
+    });
+
+    it('OAUTH_CONSENT_STEPS: approved as the value, every step in extra', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { consent: { shown: 12, approved: 10, denied: 1 } } },
+      });
+      expect(signal('OAUTH_CONSENT_STEPS')).toMatchObject({
+        value: 10,
+        extra: { shown: 12, approved: 10, denied: 1 },
+      });
+    });
+
+    it('OAUTH_CONTINUE_COOKIE_MISSING: warns above 5% of approved in the last hour', async () => {
+      const within = await oauthSnapshot({
+        counters: { lastHour: { consentApproved: 40, continueCookieMissing: 2 } },
+      });
+      expect(within('OAUTH_CONTINUE_COOKIE_MISSING')).toMatchObject({
+        value: 2,
+        unit: 'count / 1h',
+        gate: { status: 'OK' },
+      });
+
+      const above = await oauthSnapshot({
+        counters: {
+          last24h: { consent: { continue_cookie_missing: 6 } },
+          lastHour: { consentApproved: 40, continueCookieMissing: 3 },
+        },
+      });
+      const row = above('OAUTH_CONTINUE_COOKIE_MISSING');
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.extra).toEqual({ approvedLastHour: 40, missingLast24h: 6 });
+
+      const noApprovals = await oauthSnapshot({
+        counters: { lastHour: { consentApproved: 0, continueCookieMissing: 1 } },
+      });
+      expect(noApprovals('OAUTH_CONTINUE_COOKIE_MISSING').gate?.status).toBe('WARN');
+    });
+
+    it('OAUTH_AUTHORIZE_OUTCOMES: stored as the value, every outcome in extra', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { authorize: { stored: 30, rate_limited: 2 } } },
+      });
+      expect(signal('OAUTH_AUTHORIZE_OUTCOMES')).toMatchObject({
+        value: 30,
+        extra: { stored: 30, rate_limited: 2 },
+        gate: null,
+      });
+    });
+
+    it('OAUTH_CIMD_FETCHES: warns on any blocked_address', async () => {
+      const ok = await oauthSnapshot({ counters: { last24h: { cimd_fetch: { ok: 8 } } } });
+      expect(ok('OAUTH_CIMD_FETCHES')).toMatchObject({ value: 8, gate: { status: 'OK' } });
+
+      const blocked = await oauthSnapshot({
+        counters: { last24h: { cimd_fetch: { ok: 8, blocked_address: 1 } } },
+      });
+      const row = blocked('OAUTH_CIMD_FETCHES');
+      expect(row.value).toBe(9);
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.extra).toEqual({ ok: 8, blocked_address: 1 });
+    });
+
+    it('MCP_UNAUTHORIZED: the 401s by reason', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { mcp_unauthorized: { missing: 50, revoked: 3 } } },
+      });
+      expect(signal('MCP_UNAUTHORIZED')).toMatchObject({
+        value: 53,
+        extra: { missing: 50, revoked: 3 },
+        gate: null,
+      });
+    });
+
+    it('a failed database read shows the database signals absent, never zero, and keeps the counters', async () => {
+      const signal = await oauthSnapshot({
+        database: null,
+        counters: { last24h: { token: { 'refresh_token.ok': 2 } } },
+      });
+      for (const name of [
+        'OAUTH_LIVE_GRANTS',
+        'OAUTH_LIVE_GRANTS_PER_AGENT_MAX',
+        'OAUTH_GRANTS_STOPPED_FOR_REUSE',
+        'OAUTH_DCR_REGISTRATIONS',
+        'OAUTH_CIMD_CLIENTS',
+      ]) {
+        expect(signal(name)).toMatchObject({ value: null, gate: null });
+        expect(signal(name).reason).toContain('Source unavailable');
+      }
+      expect(signal('OAUTH_TOKEN_RESULTS').value).toBe(2);
+      expect(signal('OAUTH_TOKEN_RESULTS').reason).not.toContain('Source unavailable');
+    });
+
+    it('unreachable counters show the counter signals absent and keep the database ones', async () => {
+      const signal = await oauthSnapshot({ database: { liveGrants: 3 }, counters: null });
+      for (const name of [
+        'OAUTH_TOKEN_RESULTS',
+        'OAUTH_CONSENT_STEPS',
+        'OAUTH_CONTINUE_COOKIE_MISSING',
+        'OAUTH_CIMD_FETCHES',
+        'MCP_UNAUTHORIZED',
+      ]) {
+        expect(signal(name)).toMatchObject({ value: null, gate: null });
+        expect(signal(name).extra).toBeUndefined();
+        expect(signal(name).reason).toContain('Source unavailable');
+      }
+      expect(signal('OAUTH_LIVE_GRANTS').value).toBe(3);
+    });
+  });
+
+  it('a hung OAuth source never holds the money and traffic rows (M1-I2)', async () => {
+    const hung = new OAuthSignalsReader(
+      { query: () => new Promise(() => undefined) } as unknown as DataSource,
+      hungCache(),
+    );
+    const collector = new MetricsCollectorService(
+      fakeReconciliationRunRepository([]),
+      fakeMetricsRepository({}),
+      fakeSlashProposalRepository(),
+      fakeObservabilityMetricsRepository({
+        toolCallSuccessRate: { total: 10, nonSystemError: 10 },
+      }),
+      hung,
+    );
+
+    const started = Date.now();
+    const snapshot = await collector.snapshot();
+    expect(Date.now() - started).toBeLessThan(2500);
+
+    expect(findSignal(snapshot.signals, 'TOOL_CALL_SUCCESS_RATE').value).toBe(1);
+    expect(findSignal(snapshot.signals, 'OAUTH_LIVE_GRANTS').value).toBeNull();
+    expect(findSignal(snapshot.signals, 'OAUTH_TOKEN_RESULTS').value).toBeNull();
   });
 });

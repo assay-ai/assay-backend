@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { offersRail } from '@modules/chains/chain-metadata';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
@@ -10,24 +10,44 @@ import {
   FreeQuotaService,
 } from '@modules/free-tier/services/free-quota.service';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
+import {
+  PricingMode,
+  Tool,
+  ToolKind,
+  ToolTier,
+  ToolVisibility,
+  isListedTool,
+  isNotReviewed,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
+import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
+import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+import { RoutingContext } from '@modules/tool/domain/routing';
+import {
+  NO_CONTRACT_REQUEST,
+  deprecationOf,
+  replacementOf,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
-  X402_FREE_QUOTA,
-  X402_P95_LATENCY_MS,
-  X402_PAID_ALTERNATIVE,
-  X402_PAID_ON_THIS_CHAIN,
-  X402_PRICE,
-  X402_PRICING_MODE,
-  X402_QUALITY_RATE,
-  X402_REFUND_ON_FAILURE,
-  X402_SETTLEMENT_CHAINS,
-  X402_TIER,
-  X402_TOOL_ID,
+  ASSAY_FREE_QUOTA,
+  ASSAY_P95_LATENCY_MS,
+  ASSAY_PAID_ALTERNATIVE,
+  ASSAY_PAID_ON_THIS_CHAIN,
+  ASSAY_PRICE,
+  ASSAY_PRICING_MODE,
+  ASSAY_QUALITY_RATE,
+  ASSAY_REFUND_ON_FAILURE,
+  ASSAY_SETTLEMENT_CHAINS,
+  ASSAY_TIER,
+  ASSAY_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
+import { McpScope, contractFor, forcesFree, rulesFor, scopeAllows } from '../ports/mcp-scope';
 
 /**
  * `tools/list` — the catalogue an agent decides from.
@@ -48,13 +68,90 @@ import { McpErrors } from '../errors/mcp.errors';
 @Injectable()
 export class McpCatalogueService {
   private readonly logger = new Logger(McpCatalogueService.name);
+  private readonly quotes: QuoteIndexService;
 
   constructor(
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
-    private readonly router: ProviderRouterService,
+    router: ProviderRouterService,
     private readonly freeQuota: FreeQuotaService,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
-  ) {}
+    // The quote index every listing prices from. Optional only so a harness
+    // that builds this class by hand gets a private one over the same router.
+    @Optional() quotes?: QuoteIndexService,
+  ) {
+    this.quotes = quotes ?? new QuoteIndexService(router, catalogue);
+  }
+
+  /**
+   * View ∩ access, unpriced: every tool this URL serves that this caller may
+   * call. The one set `tools/list`, `search_tools` and `get_tool` all draw
+   * from, so none of them can ever show a tool the others would hide.
+   */
+  async scopedTools(scope: McpScope): Promise<readonly Tool[]> {
+    const { tools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    return tools.filter((tool) => scopeAllows(scope, tool.id));
+  }
+
+  /** This agent's free calls left today on a FREE or FREEMIUM tool, or `null`. */
+  async freeCallsLeft(viewer: McpCatalogueViewer, toolId: string): Promise<number | null> {
+    const remaining = await this.freeQuota.remainingForTool(
+      viewer.organizationId,
+      viewer.agentId,
+      toolId,
+    );
+    return remaining ? remaining.remaining : null;
+  }
+
+  /**
+   * The `?tools=` names this URL does not serve to this caller, for
+   * `_meta["assay/ignoredTools"]`: measured against view ∩ access, so a tool
+   * the caller may not use reads exactly like one that does not exist.
+   */
+  async ignoredTools(scope: McpScope): Promise<readonly string[]> {
+    const { tools, ignoredTools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    const refused = tools.filter((tool) => !scopeAllows(scope, tool.id)).map((tool) => tool.name);
+    return [...ignoredTools, ...refused].sort();
+  }
+
+  /**
+   * The tool `name` names at this URL, for a call — or `TOOL_NOT_IN_TOOLSET`
+   * (not served here, including a name that exists nowhere) and then
+   * `TOOL_NOT_ALLOWED` (served here, refused by the agent's access).
+   */
+  async admit(name: string, scope: McpScope): Promise<Tool> {
+    const { tools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (!tool) {
+      await this.refuseIfRemoved(name, scope);
+      throw ToolAccessErrors.notInToolset({ details: { name } });
+    }
+    if (!scopeAllows(scope, tool.id)) {
+      throw ToolAccessErrors.notAllowed({ details: { name, toolId: tool.id } });
+    }
+    return tool;
+  }
+
+  /**
+   * `TOOL_REMOVED` for a removed tool this URL served (§7.6 "Removal"): one
+   * its toolset held, or a LISTED one on a catalogue-wide URL. Anything else
+   * stays `TOOL_NOT_IN_TOOLSET`, so a removed PRIVATE or UNLISTED tool's
+   * name is no oracle.
+   */
+  private async refuseIfRemoved(name: string, scope: McpScope): Promise<void> {
+    const removed = await this.catalogue.findRemovedByName?.(name);
+    if (!removed) return;
+    const view = scope.view;
+    const served = view.baseToolIds
+      ? view.baseToolIds.includes(removed.id) &&
+        (removed.visibility === ToolVisibility.LISTED ||
+          (!!view.toolset?.ownerOrgId && view.toolset.ownerOrgId === removed.ownerOrgId))
+      : removed.visibility === ToolVisibility.LISTED &&
+        (!view.baseOwnerOrgId || view.baseOwnerOrgId === removed.ownerOrgId);
+    if (!served) return;
+    throw ToolAccessErrors.removed({
+      details: { name, replacement: removed.replacementToolName },
+    });
+  }
 
   /**
    * Every tool that can actually be called, priced.
@@ -64,15 +161,42 @@ export class McpCatalogueService {
    * chain state. Sequentially that would make `tools/list` —
    * the first thing every agent does — take one round-trip per tool.
    *
-   * `viewer` is who is asking, so `x402/freeQuota` can be
+   * `viewer` is who is asking, so `assay/freeQuota` can be
    * this **agent's own** remaining count rather than nobody's. It is optional
    * because `tools/list`, unlike `tools/call`, has no session threaded to it
    * on every path. Without a `viewer`, every `FREE`/`FREEMIUM` tool is still listed and still
-   * carries `x402/pricingMode`; it simply omits `x402/freeQuota` rather than
+   * carries `assay/pricingMode`; it simply omits `assay/freeQuota` rather than
    * publish a number that is nobody's.
    */
-  async listTools(viewer?: McpCatalogueViewer): Promise<McpToolDescriptor[]> {
-    const tools = await this.catalogue.listTools();
+  async listTools(
+    viewer?: McpCatalogueViewer,
+    scope?: McpScope,
+    options: McpListOptions = {},
+  ): Promise<McpToolDescriptor[]> {
+    return (await this.listQuoted(viewer, scope, options)).map((entry) => entry.descriptor);
+  }
+
+  /**
+   * {@link listTools}, each descriptor beside the tool it describes **at the
+   * contract version a call through this URL would use** — what `get_tool`
+   * and `search_tools` read their schemas, summary, examples and version
+   * from, so the list, the search and the call agree (§7.3).
+   */
+  async listQuoted(
+    viewer?: McpCatalogueViewer,
+    scope?: McpScope,
+    options: McpListOptions = {},
+  ): Promise<McpQuotedTool[]> {
+    // The URL's view, then the agent's access: `tools/list` returns view ∩
+    // access, and prices each tool under the rules a call through this URL
+    // would be routed under. Without a scope (the REST surfaces), the whole
+    // catalogue with no rules.
+    const all = scope
+      ? await this.scopedTools(scope)
+      : (await this.catalogue.listTools()).filter(isListedTool);
+    const tools = options.onlyToolIds
+      ? all.filter((tool) => options.onlyToolIds.has(tool.id))
+      : all;
     // **Not narrowed to the viewer's chain, deliberately.** A tool that
     // settles somewhere the buyer holds nothing must be LISTED and marked, not
     // hidden — hiding it makes the platform look like it lacks the tool —
@@ -92,33 +216,49 @@ export class McpCatalogueService {
     // whose quote throws has no honest price, so it is omitted exactly like a
     // tool with no routable supply, and the failure is logged for whoever owns
     // it. Its own `tools/call` still reports the real error.
-    const quotes = await Promise.all(
-      tools.map((tool) =>
-        this.router
-          .quote(tool.id, {
-            payerChains: this.enabledChains,
-            defaultChainId: viewer?.chainId ?? null,
-            enabledChains: this.enabledChains,
-            // A catalogue is not an offer to be paid. A tool
-            // must be SHOWN rather than hidden when the reader cannot pay for it,
-            // and a standing withdrawal is the buyer's cash management — hiding a
-            // tool for it would make the listing flicker as they move money in and
-            // out. The refusal, when it comes, comes from the CALL path.
-            withdrawingChains: [],
-          })
-          .catch((error: unknown): null => {
-            this.logger.warn(
-              `${tool.name} (${tool.id}): omitted from tools/list — quote failed: ` +
-                (error instanceof Error ? error.message : String(error)),
-            );
-            return null;
-          }),
-      ),
+    //
+    // Priced from the quote index, never `router.quote()`: no registry or
+    // chain read per tool per listing (NFR-2).
+    const context: RoutingContext = {
+      payerChains: this.enabledChains,
+      defaultChainId: viewer?.chainId ?? null,
+      enabledChains: this.enabledChains,
+      // A catalogue is not an offer to be paid. A tool
+      // must be SHOWN rather than hidden when the reader cannot pay for it,
+      // and a standing withdrawal is the buyer's cash management — hiding a
+      // tool for it would make the listing flicker as they move money in and
+      // out. The refusal, when it comes, comes from the CALL path.
+      withdrawingChains: [],
+    };
+    // Each tool is priced under the rules and at the contract version a call
+    // through this URL would use, so the listed schema and price are the
+    // ones the call gets (§7.3, "Contract version").
+    //
+    // The version is chosen for the viewer's own chain, as `requireQuote` and
+    // `offer()` choose it (review P2-1): priced over every chain, but at a
+    // version this buyer's chain can be served at, so the listed price and
+    // `maxAmount` are the ones a call from this buyer is offered.
+    const byId = new Map(tools.map((tool) => [tool.id, tool]));
+    const versionChains = viewer?.chainId ? { versionChains: [viewer.chainId] } : {};
+    const quoted = await this.quotes.quoteMany(
+      tools.map((tool) => tool.id),
+      (toolId) =>
+        scope
+          ? {
+              ...context,
+              rules: rulesFor(scope, toolId),
+              contract: {
+                ...(contractFor(scope, byId.get(toolId) as Tool) ?? NO_CONTRACT_REQUEST),
+                ...versionChains,
+              },
+            }
+          : { ...context, contract: { ...NO_CONTRACT_REQUEST, ...versionChains } },
     );
+    const quotes = tools.map((tool) => quoted.get(tool.id) ?? null);
 
     const freeQuotas = await Promise.all(
       quotes.map((quote) =>
-        viewer && quote && isFreeOrFreemium(quote.pricingMode)
+        viewer && quote && options.freeQuota !== false && isFreeOrFreemium(quote.pricingMode)
           ? this.freeQuota.remainingForTool(viewer.organizationId, viewer.agentId, quote.tool.id)
           : Promise.resolve(null),
       ),
@@ -135,21 +275,41 @@ export class McpCatalogueService {
     // A chain with no paid rail (Solana: `rails: []`) cannot buy a priced
     // tool. Still listed — see above — but not priced as buyable (L6).
     const paidOnViewerChain = viewer?.chainId ? paidRailOffered(viewer.chainId) : true;
+    // `?free=1` never takes a paid path, so nothing listed there can be charged.
+    const freeOnly = forcesFree(scope);
 
-    const listed: McpToolDescriptor[] = [];
+    const listed: McpQuotedTool[] = [];
     quotes.forEach((quote, index) => {
       if (!quote) return;
 
+      // `?free=1` serves only tools that can be free, and that is decided
+      // first: a tool the rules left unpriced has no free supply to show.
+      if (scope && !servesPricingMode(scope.view.filter, quote.pricingMode)) return;
+
       if (!quote.price) {
+        // The agent's or the toolset's rules left no provider: listed, and
+        // saying so, because the tool exists and the fix is the agent's.
+        if (quote.ruleRejections && quote.ruleRejections.length > 0) {
+          listed.push({ tool: quote.tool, descriptor: describeNoProviderFits(quote) });
+          return;
+        }
         this.logger.debug(
           `${quote.tool.name}: omitted from tools/list — ${quote.unroutableReason ?? 'no price'}`,
         );
         return;
       }
 
-      listed.push(
-        describe(quote, quote.price, freeQuotas[index], freeAllowances[index], paidOnViewerChain),
-      );
+      listed.push({
+        tool: quote.tool,
+        descriptor: describe(
+          quote,
+          quote.price,
+          freeQuotas[index],
+          freeAllowances[index],
+          paidOnViewerChain,
+          freeOnly,
+        ),
+      });
     });
 
     return listed;
@@ -168,7 +328,11 @@ export class McpCatalogueService {
    * charge some agents for the wrong one.
    */
   async findByName(name: string): Promise<Tool> {
-    const matches = (await this.catalogue.listTools()).filter((tool) => tool.name === name);
+    // Off the MCP host there is no URL to reach an unlisted tool through, so
+    // only the LISTED catalogue answers (§7.6).
+    const matches = (await this.catalogue.listTools()).filter(
+      (tool) => tool.name === name && isListedTool(tool),
+    );
 
     if (matches.length === 0) {
       throw McpErrors.toolNotFound({ name });
@@ -190,6 +354,23 @@ export class McpCatalogueService {
 // ---------------------------------------------------------------------------
 // The descriptor
 // ---------------------------------------------------------------------------
+
+/** How {@link McpCatalogueService.listTools} prices. */
+export interface McpListOptions {
+  /**
+   * `false` skips the per-agent `assay/freeQuota` read: `search_tools` ranks the
+   * whole view and reads the quota only for the page it returns.
+   */
+  readonly freeQuota?: boolean;
+  /** Price only these tools (still within view ∩ access): a SEARCH list's pinned ones. */
+  readonly onlyToolIds?: ReadonlySet<string>;
+}
+
+/** One listed tool: its descriptor, and the tool at the contract version it describes. */
+export interface McpQuotedTool {
+  readonly tool: Tool;
+  readonly descriptor: McpToolDescriptor;
+}
 
 /** Who is asking `tools/list` — see {@link McpCatalogueService.listTools}. */
 export interface McpCatalogueViewer {
@@ -224,9 +405,36 @@ export interface McpToolDescriptor {
   readonly _meta: Record<string, unknown>;
 }
 
-/** The `x402/price` value: atomic units, the asset that scales them, and a display form. */
+/** The `assay/price` value: atomic units, the asset that scales them, and a display form. */
 export interface McpPriceAnnotation {
   readonly amount: string;
+  /**
+   * The most a paid call of this tool through this URL can be charged, in the
+   * same atomic units of `asset` as `amount`: an integer string, never a
+   * decimal or a float. It is the highest price among the bindings a live call
+   * from this buyer could choose on this chain and asset: the providers the
+   * merged rules (the URL's entry ∧ the agent's) leave, every contract version
+   * the call may use, FALLBACK_BEST when the entry asks for it, with the
+   * providers' rate and daily ceilings relaxed (`ToolQuote.maxPrice`).
+   *
+   * `amount` is the listed price: the dearest binding that can serve right
+   * now. `maxAmount` is never below it and can be above it, when a dearer
+   * binding was at its ceiling when the listing was priced. The local proxy
+   * refuses to sign above `maxAmount` (spec §7.8 G3, §7.10 item 3); the
+   * buyer's own per-call cap (G7) still bounds what it signs.
+   *
+   * No rail B offer exceeds it while the listing is fresh. Binding, provider,
+   * enrolment, slash-hold, grace and stake-monitor writes bump the quote
+   * index's epoch at once; an on-chain stake change made between two
+   * stake-monitor passes is covered only by the index's age limit (at most a
+   * minute, `QUOTE_INDEX_MAX_AGE_MS`), so for up to that long an offer can
+   * exceed it and the proxy refuses until it re-reads the quote. Rail A is
+   * held at the live quote, not at this figure.
+   *
+   * `"0"` on a `FREE` tool with no chargeable binding, and on a `?free=1`
+   * URL, which never takes a paid path.
+   */
+  readonly maxAmount: string;
   readonly asset: string;
   readonly display: string;
 }
@@ -248,54 +456,56 @@ function describe(
   freeQuota: FreeQuotaRemaining | null,
   freePerDay: number | null,
   paidOnThisChain = true,
+  freeOnly = false,
 ): McpToolDescriptor {
   const { tool } = quote;
 
   const annotations: Record<string, unknown> = {
-    [X402_PRICE]: priceAnnotation(
+    [ASSAY_PRICE]: priceAnnotation(
       price,
       quote.pricingMode,
       quote.paidBindings ?? quote.routableBindings,
       freePerDay,
       paidOnThisChain,
+      maxAmountOf(quote, price, freeOnly),
     ),
-    [X402_TIER]: tierLabel(tool.tier),
+    [ASSAY_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
     // of the platform today rather than of the tool. It is published per tool
     // anyway because the free-tier and relay work will make it one.
-    [X402_REFUND_ON_FAILURE]: true,
-    [X402_TOOL_ID]: tool.id,
+    [ASSAY_REFUND_ON_FAILURE]: true,
+    [ASSAY_TOOL_ID]: tool.id,
     // Where this tool settles, so a buyer holding funds on another chain
     // can be told rather than discovering it at PAYMENT_NO_SETTLEABLE_CHAIN.
     // Unconditional, including when empty: a missing LIST reads as
     // "unconstrained", which is the one reading that is never true here — see
-    // `X402_SETTLEMENT_CHAINS`. That is why it sits in the base object beside
-    // the price rather than behind a guard, unlike `x402/p95LatencyMs`.
+    // `ASSAY_SETTLEMENT_CHAINS`. That is why it sits in the base object beside
+    // the price rather than behind a guard, unlike `assay/p95LatencyMs`.
     //
     // Copied, not passed through: `annotations` is handed to an SDK that owns
     // it afterwards, and the quote's array is the router's.
-    [X402_SETTLEMENT_CHAINS]: [...quote.settlementChains],
+    [ASSAY_SETTLEMENT_CHAINS]: [...quote.settlementChains],
   };
 
   // Omitted rather than sent as null. An agent scoring endpoints has to be able
   // to tell "measured, and this is the figure" from "never measured", and a
   // null in a numeric field is read as zero by more clients than not.
   if (quote.p95LatencyMs !== null)
-    annotations[X402_P95_LATENCY_MS] = Math.round(quote.p95LatencyMs);
-  if (quote.qualityRate !== null) annotations[X402_QUALITY_RATE] = quote.qualityRate;
+    annotations[ASSAY_P95_LATENCY_MS] = Math.round(quote.p95LatencyMs);
+  if (quote.qualityRate !== null) annotations[ASSAY_QUALITY_RATE] = quote.qualityRate;
 
   // Free-tier annotations. Every listed tool has a
   // non-null `pricingMode` by the time `describe` runs (see `quotedPricingMode`
   // on `ProviderRouterService.quote`: it is set whenever `eligible.length > 0`,
   // which is the same condition that produced a non-null `price`).
   if (isFreeOrFreemium(quote.pricingMode)) {
-    annotations[X402_PRICING_MODE] = quote.pricingMode;
+    annotations[ASSAY_PRICING_MODE] = quote.pricingMode;
 
     // Present only when the caller supplied a viewer AND the quota is known —
     // never a zeroed placeholder. See `McpCatalogueService.listTools`.
     if (freeQuota) {
-      annotations[X402_FREE_QUOTA] = {
+      annotations[ASSAY_FREE_QUOTA] = {
         remaining: freeQuota.remaining,
         limit: freeQuota.limit,
         resetsAt: freeQuota.resetsAt.toISOString(),
@@ -304,25 +514,105 @@ function describe(
 
     // FREEMIUM's paid path is provably honest: the same tool, at the price
     // already quoted above. FREE has no paid path through this catalogue at
-    // all — see `X402_PAID_ALTERNATIVE`'s own doc comment — so it publishes
+    // all — see `ASSAY_PAID_ALTERNATIVE`'s own doc comment — so it publishes
     // no key rather than a fabricated one.
     if (quote.pricingMode === PricingMode.FREEMIUM && paidOnThisChain) {
-      annotations[X402_PAID_ALTERNATIVE] = tool.name;
+      annotations[ASSAY_PAID_ALTERNATIVE] = tool.name;
     }
   }
   if (!paidOnThisChain && quote.pricingMode !== PricingMode.FREE) {
-    annotations[X402_PAID_ON_THIS_CHAIN] = false;
+    annotations[ASSAY_PAID_ON_THIS_CHAIN] = false;
   }
 
   return {
     name: tool.name,
-    description: tool.description,
+    // The version's stored summary (at most 200 characters), never the full
+    // description: that is `get_tool`'s (§7.4).
+    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}${reviewNote(tool)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
     // The copy an SDK client keeps. Same values, same keys — a client reading
     // one and a client reading the other must never see different prices.
-    _meta: { ...annotations },
+    _meta: { ...annotations, ...contractMetaOf(tool) },
+  };
+}
+
+/** `_meta["assay/deprecated"]`: the contract version this URL serves is deprecated. */
+export const ASSAY_DEPRECATED = 'assay/deprecated';
+
+/**
+ * The contract `_meta` of a listed or described tool: `assay/deprecated`
+ * (`{ sunsetAt, replacement }`) when the version served is deprecated.
+ */
+export function contractMetaOf(tool: Tool): Record<string, unknown> {
+  const version = versionOf(tool);
+  const deprecated = deprecationOf(version, replacementOf(tool, version));
+  return {
+    ...(deprecated ? { [ASSAY_DEPRECATED]: deprecated } : {}),
+    ...providerMetaOf(tool),
+  };
+}
+
+/**
+ * The stable note a "Not reviewed" provider tool's description line ends
+ * with, so a model reading `tools/list` sees it before it pays (§7.6).
+ */
+export function reviewNote(tool: Tool): string {
+  return isNotReviewed(tool) ? ' · Not reviewed' : '';
+}
+
+/** `_meta["assay/kind"]`: `PROVIDER` on one maker's own tool (absent on a standard one). */
+export const ASSAY_KIND = 'assay/kind';
+/** `_meta["assay/notReviewed"]`: a provider tool no operator has reviewed (§7.6). */
+export const ASSAY_NOT_REVIEWED = 'assay/notReviewed';
+
+/**
+ * A provider tool says so beside its price: one maker's API, with no backup
+ * provider, and — until an operator approved it — not reviewed. Calls are
+ * never priced or routed on this; it is what the agent and its owner see.
+ */
+export function providerMetaOf(tool: Tool): Record<string, unknown> {
+  if (!isProviderTool(tool)) return {};
+  return {
+    [ASSAY_KIND]: ToolKind.PROVIDER,
+    ...(isNotReviewed(tool) ? { [ASSAY_NOT_REVIEWED]: true } : {}),
+  };
+}
+
+/**
+ * The one stable line a description ends with (design spec §7.4): the lowest
+ * price the rules leave and the free allowance. Never the free calls left
+ * today, which change on every call and would make the list unstable.
+ */
+function priceLine(quote: ToolQuote, price: Money, freePerDay: number | null): string {
+  if (quote.pricingMode === PricingMode.FREE) return 'Free';
+  const from = `From ${displayPrice(quote.cheapestPrice ?? price)} per call`;
+  if (quote.pricingMode !== PricingMode.FREEMIUM) return from;
+  return freePerDay === null
+    ? `${from} · free calls each day`
+    : `${from} · ${freePerDay} free calls a day`;
+}
+
+/** `assay/noProviderFits`: the rules left no provider for this tool. */
+export const ASSAY_NO_PROVIDER_FITS = 'assay/noProviderFits';
+
+/** A tool the agent's or the toolset's rules leave no provider for. Listed, unpriced. */
+function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
+  const { tool } = quote;
+  const annotations: Record<string, unknown> = {
+    [ASSAY_TIER]: tierLabel(tool.tier),
+    [ASSAY_TOOL_ID]: tool.id,
+    [ASSAY_SETTLEMENT_CHAINS]: [],
+    [ASSAY_NO_PROVIDER_FITS]: true,
+  };
+  return {
+    name: tool.name,
+    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.${reviewNote(tool)}`,
+    inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
+    outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
+    annotations,
+    _meta: { ...annotations, ...contractMetaOf(tool) },
   };
 }
 
@@ -349,9 +639,10 @@ function priceAnnotation(
   paidBindings: number,
   freePerDay: number | null,
   paidOnThisChain = true,
+  maxAmount: string = price.amount,
 ): McpPriceAnnotation {
   if (mode === PricingMode.FREE) {
-    return { amount: price.amount, asset: price.asset, display: 'free' };
+    return { amount: price.amount, maxAmount, asset: price.asset, display: 'free' };
   }
 
   const shown = displayPrice(price);
@@ -362,6 +653,7 @@ function priceAnnotation(
     // cannot pay (review #2, L6). `amount` is still the quote, for reference.
     return {
       amount: price.amount,
+      maxAmount,
       asset: price.asset,
       display:
         mode === PricingMode.FREEMIUM
@@ -371,9 +663,25 @@ function priceAnnotation(
   }
   return {
     amount: price.amount,
+    maxAmount,
     asset: price.asset,
     display: mode === PricingMode.FREEMIUM ? `${free}, then ${paid}` : paid,
   };
+}
+
+/**
+ * `assay/price.maxAmount`, in atomic units of `price.asset`: the quote's
+ * ceiling-relaxed bound ({@link ToolQuote.maxPrice}), never below a chargeable
+ * `price`. `"0"` when nothing can be charged: a `?free=1` URL, or a `FREE`
+ * quote with no chargeable binding even with the ceilings relaxed.
+ */
+function maxAmountOf(quote: ToolQuote, price: Money, freeOnly: boolean): string {
+  if (freeOnly) return '0';
+  const chargeable = quote.pricingMode !== PricingMode.FREE;
+  const bound = quote.maxPrice ?? null;
+  if (!bound || bound.asset !== price.asset) return chargeable ? price.amount : '0';
+  if (!chargeable) return bound.amount;
+  return BigInt(bound.amount) > BigInt(price.amount) ? bound.amount : price.amount;
 }
 
 /** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
@@ -400,7 +708,8 @@ export function displayPrice(price: Money): string {
   return USD_PEGGED_SYMBOLS.has(symbol) ? `$${rendered}` : `${rendered} ${symbol}`;
 }
 
-const USD_PEGGED_SYMBOLS: ReadonlySet<string> = new Set(['USDC', 'USDT', 'PYUSD']);
+/** Dollar stablecoins: shown as `$`. USDG is the Robinhood Chain one (review 2026-10-18: "0.1 USDG"). */
+const USD_PEGGED_SYMBOLS: ReadonlySet<string> = new Set(['USDC', 'USDG', 'USDT', 'PYUSD']);
 
 function trimTrailingZeros(decimal: string): string {
   if (!decimal.includes('.')) return decimal;

@@ -55,6 +55,14 @@ export interface ChainAdapter {
    */
   readonly requiresFeePayer: boolean;
 
+  /**
+   * A deposit is credited on the chain's first (soft) confirmation, so a
+   * pending deposit is usually spendable within a minute. Absent or false: it
+   * waits for finality or for blocks on top of it, which can take minutes.
+   * Display only (the insufficient-funds text).
+   */
+  readonly depositCreditsOnSoftConfirmation?: boolean;
+
   // ── Identity ─────────────────────────────────────────────────────────────
 
   isValidAddress(chainId: ChainId, address: string): boolean;
@@ -156,12 +164,6 @@ export interface ChainAdapter {
    * console must be able to promise can never also authorise a payment. The
    * adapter deciding what was signed is what makes that promise checkable
    * rather than merely intended.
-   *
-   * A withdrawal used to be a third such pair — `buildWithdrawalMessage` /
-   * `verifyWithdrawalSignature`, under `WITHDRAWAL_MESSAGE_VERSION` — before
-   * per-buyer escrows moved the buyer's exit onto a chain transaction the buyer signs
-   * directly (`EscrowIntentBuilderPort`). There is no off-chain withdrawal
-   * authorization left to verify.
    */
   buildPayoutProofMessage(challenge: PayoutProofChallenge): Uint8Array;
   /**

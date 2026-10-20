@@ -30,7 +30,7 @@ import {
   getOpenStakeInstruction,
   getRequestUnstakeInstruction,
   getWithdrawStakeInstruction,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   GAS_NOT_SPONSORED_REASON,
@@ -183,7 +183,7 @@ export const STAKE_INTENT_GAS_LAMPORTS = 10_000_000n;
  *
  * `getOpenStakeInstruction`, `getDepositStakeInstruction`,
  * `getRequestUnstakeInstruction`, `getWithdrawStakeInstruction` from
- * `@x402/settlement-client`, which is Codama output rendered from the program's
+ * `@assay/settlement-client`, which is Codama output rendered from the program's
  * IDL. Two locks enforce it — an ESLint `no-restricted-syntax` rule and
  * `test/unit/chains/solana/settlement-client-only.spec.ts` — and the reason is
  * the usual one, sharpened by what these instructions do: a `u64` written at
@@ -445,8 +445,7 @@ export class SolanaStakeIntentBuilder implements StakeIntentBuilderPort {
    * account.
    *
    * `getAccountInfo` + the generated decoder rather than
-   * `getTokenAccountBalance`, which is what `SquadsVaultService` uses next door:
-   * that method *throws* on a missing account, and the missing account is a
+   * `getTokenAccountBalance`: that method *throws* on a missing account, and the missing account is a
    * first-class answer here. A provider who has never held the stake mint has
    * no ATA, and telling them "0 USDC" instead of "no token account" sends them
    * to a faucet when what they need is an account.

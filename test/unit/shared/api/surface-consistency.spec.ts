@@ -20,17 +20,8 @@ import { join, relative } from 'path';
 
 const SRC = join(__dirname, '../../../../src');
 
-/**
- * Reference material behind `EXAMPLES_ENABLED`, plus the surfaces that are not
- * this REST API.
- *
- * `_examples/` keeps the starter's offset `PaginationDto` deliberately: it is
- * the worked example of the *framework's* patterns, it is off in production,
- * and rewriting it would misrepresent what the starter ships. It is excluded
- * here rather than exempted silently — see the assertion at the bottom, which
- * pins that `PaginationDto` has no other callers.
- */
-const EXCLUDED_DIRS = ['_examples', 'chains/facilitator', 'mcp'];
+/** The surfaces that are not this REST API. */
+const EXCLUDED_DIRS = ['chains/facilitator', 'mcp'];
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -107,6 +98,9 @@ const CONTROLLERS = SURFACE_FILES.filter((file) => file.endsWith('.controller.ts
  * what was reviewed.
  */
 const PUBLIC_SURFACE = new Map<string, number>([
+  // The public half of the keys that sign outbound provider requests (JWKS).
+  // One route, no tenant, nothing secret: a verifier fetches it unauthenticated.
+  ['bootstrap/api/request-keys.controller.ts', 1],
   // Proof of reserves. Four aggregates, one already-public vault
   // address, a count, and four rows of the same aggregates.
   ['modules/settlement/controllers/public-reserves.controller.ts', 1],
@@ -127,6 +121,27 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // It is also the only public route that SPENDS MONEY, which a per-IP window
   // and the demo agent's spend policy pay for.
   ['modules/mcp/controllers/public-demo.controller.ts', 3],
+  // OAuth discovery on the MCP host (spec §6.3.1, §6.3.2, §6.3.6): the two
+  // protected resource metadata forms, the authorization server metadata, the
+  // `openid-configuration` 404 and the built-in client document. Every payload
+  // is built from the public origins and constants; no tenant, no row, no
+  // secret. An OAuth client reads them before it has any token, so a guard
+  // would make sign-in impossible.
+  ['modules/oauth/controllers/oauth-metadata.controller.ts', 5],
+  // The OAuth protocol endpoints on the MCP host (spec §6.3.4–§6.3.12). A
+  // client calls them before it holds any credential (authorize, token,
+  // register) or to give one up (revoke), so a session guard would make
+  // sign-in impossible. Each one is its own gate instead: authorize and
+  // continue bind the request to the browser (`__Host-assay_oar`) and only
+  // mint a code for a request a person approved through the guarded consent
+  // API; token checks the code's PKCE, client and redirect, or the refresh
+  // token's hash; register is open by design (RFC 7591, public clients only,
+  // rate-limited, fails closed); revoke answers 200 whatever it was sent.
+  // None reads a tenant's rows by a caller-chosen id.
+  ['modules/oauth/controllers/oauth-authorize.controller.ts', 2],
+  ['modules/oauth/controllers/oauth-token.controller.ts', 1],
+  ['modules/oauth/controllers/oauth-register.controller.ts', 1],
+  ['modules/oauth/controllers/oauth-revoke.controller.ts', 1],
   // `GET /chains`. Against the three bars above:
   //
   // 1. The payload is four static strings and a number per chain, computed from
@@ -160,13 +175,17 @@ const PUBLIC_SURFACE = new Map<string, number>([
   ['bootstrap/api/public-features.controller.ts', 1],
   // The public Explorer's catalogue. The same derivation as the guarded
   // `catalogue.controller.ts`, whose own comment records that the answer is
-  // identical for every caller and holds nothing about the caller — but
+  // identical for every caller except one per-caller field (`servesYou`, from
+  // the caller's own agents), which the public DTOs do not carry — and
   // copied through its OWN allowlisted DTOs (`public-catalogue.dto.ts`, key
   // sets pinned in the catalogue spec), so a field added to the signed-in
   // catalogue does not reach anonymous readers. The detail route answers only
   // for providers the public list shows; every other id is the same 404.
-  // Cached in process and rate limited per address.
-  ['modules/catalogue/controllers/public-catalogue.controller.ts', 3],
+  // Cached in process and rate limited per address. The fourth route (T3) is
+  // a LISTED tool's published contract versions and changelog: the same
+  // documents `tools/list` and `get_tool` send any key, never a draft, never
+  // an UNLISTED tool, and nothing about a caller.
+  ['modules/catalogue/controllers/public-catalogue.controller.ts', 4],
   // The Explorer's "not charged" feed. Platform-wide paid calls that ended
   // without a charge, and 30-day totals. The payload is tool, provider name,
   // listed price, a reason and a UTC day; no intent, call, buyer, agent, hold
@@ -175,6 +194,19 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // five established buyers, totals cover complete days only, and only
   // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
+  // The toolset catalogue (design spec §7.9): listed tool sets, one listed
+  // tool set's page and versions, one version it serves (with a diff between
+  // two served ones), a public name's profile, the categories, and the
+  // link-only page by token. Only PUBLIC, LISTED tool sets answer by name, at
+  // the newest version published while shared — never the Draft, never a
+  // version `/@…` does not serve — and everything else is the same 404 as a
+  // missing slug. A toolset id appears only where that path serves it. The by-token route
+  // takes the token in a POST body (never a URL, so never a log line) and
+  // answers only while that token serves `/u/`. Fields are copied through
+  // their own allowlisted DTOs (`public-toolsets.dto.ts`); no owner,
+  // reporter or buyer id is selected, and figures are the weekly k = 5 table.
+  // Cached in process and rate limited per address.
+  ['modules/toolset/controllers/public-toolsets.controller.ts', 7],
 ]);
 
 /**
@@ -390,6 +422,19 @@ describe('REST surface consistency', () => {
       'modules/operator/controllers/operator-arbiter.controller.ts',
       'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
+      // The buyer call-dispute queue (G3.B1): disputes filed by tenants, decided
+      // by an operator who has none.
+      'modules/operator/controllers/operator-call-disputes.controller.ts',
+      // `A-15`–`A-23`: delisting and taking down tool sets and public names,
+      // renames and reassignments, and the reports queue. The subject is a
+      // publisher who is never the caller.
+      'modules/operator/controllers/operator-moderation.controller.ts',
+      // `P-10`–`P-12`, the standard contract editor. A STANDARD tool is the
+      // platform's: nobody's tenant.
+      'modules/operator/controllers/operator-contracts.controller.ts',
+      // `A-24`, the provider tool review queue, and promotion. The subject is a
+      // provider who is never the caller.
+      'modules/operator/controllers/operator-provider-tools.controller.ts',
       // `A-12`–`A-14`, the operator directory. Operators have no tenant.
       'modules/operator/controllers/operator-operators.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',
@@ -404,11 +449,9 @@ describe('REST surface consistency', () => {
       // behind `SessionAuthGuard` and is not here, so filing and triaging are
       // two surfaces rather than one route with a role flag.
       'modules/tool-request/controllers/operator-tool-requests.controller.ts',
-      // The Prometheus scrape endpoint and the operator dashboard
-      // that renders the same numbers. Neither has a tenant — every series is
-      // a platform-wide aggregate, the same shape `operator-reference.controller.ts`
+      // The operator dashboard. It has no tenant — every series is a
+      // platform-wide aggregate, the same shape `operator-reference.controller.ts`
       // already serves at `GET /operator/health`.
-      'modules/observability/controllers/metrics.controller.ts',
       'modules/observability/controllers/observability-dashboard.controller.ts',
     ]);
 
@@ -514,13 +557,10 @@ describe('REST surface consistency', () => {
         // provider service — `PaymentIntentRepository.exportQueryBuilder` is
         // the sixth cross-tenant read, same justification as the five above.
         'database/postgres/repositories/payment-intent.repository.ts',
-        // The hourly payout batch runs once per deployment, not once per
-        // tenant: `ProviderRepository.findAllProviders` and
-        // `ProviderPayoutRepository.findResumable` both consider every
-        // organization in one pass, the same shape as the five provider
-        // report services above.
+        // The stake monitor runs once per deployment, not once per tenant:
+        // `ProviderRepository.findAllProviders` considers every organization
+        // in one pass, the same shape as the provider report services above.
         'database/postgres/repositories/provider.repository.ts',
-        'database/postgres/repositories/provider-payout.repository.ts',
         // The binding catalogue read. Routing is the one operation in the system
         // that is *about* comparing tenants: an agent asks for `search_web`
         // and the router weighs every provider who implements it, so
@@ -586,9 +626,9 @@ describe('REST surface consistency', () => {
         // `qualityByProvider` scoped to the caller's own organization would not
         // narrow the answer, it would return nothing — a buyer has no windows.
         // The projection is two integers per provider: no window id, no
-        // deadline, no strike, and no buyer identity. Closed windows only, so
-        // what crosses the boundary is a settled figure rather than one still
-        // moving. `CatalogueService` composes this and writes no SQL of its
+        // deadline, no strike, and no buyer identity. Open and closed windows
+        // of the last 30 days (D5), so the figure covers current traffic;
+        // penalties never read it. `CatalogueService` composes this and writes no SQL of its
         // own, deliberately, so that this list stays the whole conversation.
         'database/postgres/repositories/sla-window.repository.ts',
         // The public proof-of-reserves page. The `Accounts` tile sits
@@ -626,6 +666,12 @@ describe('REST surface consistency', () => {
         //
         // Neither read projects a row: one returns a boolean, the other a sum.
         'database/postgres/repositories/evm-gas-grant.repository.ts',
+        // Buyer call disputes (G3.B1). A dispute row's tenant is the BUYER that
+        // filed it; the provider that served the call reads its disputes by
+        // `respondent_provider_id` (as `ProviderTrafficService` reads intents by
+        // `provider_id`), and the operator queue reads every buyer's. The
+        // provider projection names no buyer organization.
+        'modules/dispute/services/call-dispute.service.ts',
       ]);
 
       const found = SURFACE_FILES.filter(
@@ -764,6 +810,13 @@ describe('REST surface consistency', () => {
       // provider-facing `ToolRequestDto` in the same file does not, because a
       // tenant reading its own ticket learns nothing from being told its own id.
       'modules/tool-request/dto/tool-request.dto.ts',
+      // The provider tool review queue and promotion candidates and invites
+      // (T4): an operator reviews and invites providers who are never the
+      // caller, and a queue row that could not say whose tool it is would be
+      // untriageable. The provider-facing DTOs (`provider-tools.dto.ts`)
+      // carry no organization.
+      'modules/provider-tool/dto/provider-tool-review.dto.ts',
+      'modules/provider-tool/dto/tool-promotion.dto.ts',
     ]);
 
     it('no DTO on the surface declares an organizationId field', () => {
@@ -898,9 +951,8 @@ describe('REST surface consistency', () => {
     const mentions = (source: string, cls: string) => new RegExp(`\\b${cls}\\b`).test(source);
 
     it('is imported by the API bootstrap, or it is a 404 nobody notices', () => {
-      // Reachability is one hop, not zero. `_examples/` nests `DemoApiModule`
-      // and `PostsApiModule` inside `ExamplesApiModule`, which the bootstrap
-      // imports — they are reachable, and a rule that only reads
+      // Reachability is one hop, not zero: an api module nested inside another
+      // that the bootstrap imports is reachable, and a rule that only reads
       // `app.module.ts` would report a working composition as broken. One hop
       // covers that and still fails the case that actually happens: a module
       // written and imported by nothing at all.
@@ -920,23 +972,6 @@ describe('REST surface consistency', () => {
       });
 
       expect(offenders).toEqual([]);
-    });
-  });
-
-  describe('the excluded reference module stays excluded', () => {
-    // If `_examples` ever stops being the only user of the offset DTO, the
-    // exclusion above is hiding a real divergence rather than describing one.
-    it('the offset PaginationDto has no callers outside _examples', () => {
-      const callers = ALL_TS.filter((file) => /\bPaginationDto\b/.test(read(file)))
-        .map(name)
-        // The reference module, which keeps it deliberately.
-        .filter((file) => !file.includes('_examples'))
-        // Where it is defined, and where the replacement documents why.
-        .filter((file) => !file.startsWith('shared/dtos/'))
-        .filter((file) => !file.startsWith('shared/utils/pagination.util'))
-        .filter((file) => !file.startsWith('shared/api/'));
-
-      expect(callers).toEqual([]);
     });
   });
 });

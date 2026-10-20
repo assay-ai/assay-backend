@@ -1,19 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { Brackets, DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
 
 import { OperatorCaseStatus } from '@modules/operator/domain/operator-case-status';
 import {
   CHAIN_DISPUTE_SETTLE_MS,
   DISPUTE_TIMEOUT_MS,
 } from '@modules/slash/constants/slash.constants';
-import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
-
-/** EVM assets, whose cases are disputed and ruled on chain only (`disputesOnChain`). */
-const ON_CHAIN_DISPUTE_LIKE = `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`;
 
 /**
  * {@link OperatorCaseStatus} from the proposal's columns: `operatorCaseStatusOf`
@@ -28,8 +24,7 @@ const ON_CHAIN_DISPUTE_LIKE = `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`;
  *   cancelled. The arbiter's `cancelSlash` closes as `CHAIN_ARBITER` instead.
  * - A chain refusal (`REFUSED`) on a case still open is not on chain, not
  *   cancelled; a refused case is voided, and its status says cancelled.
- * - The off-chain `DISPUTED` is non-EVM only: an EVM case left in an
- *   objection status with no part disputed any more reads by its record.
+ * - A `DISPUTED` case with no part disputed any more reads by its record.
  */
 const OPERATOR_CASE_STATUS_SQL = `CASE
   WHEN p.status = 'REVERSED' THEN 'COMPENSATED'
@@ -38,11 +33,9 @@ const OPERATOR_CASE_STATUS_SQL = `CASE
   WHEN p.status = 'CANCELLED' AND p.resolution_kind = 'AUTO_CHAIN_VOIDED'
        AND p.chain_status = 'CANCELLED' AND p.chain_disputed_at IS NOT NULL THEN 'EXPIRED'
   WHEN p.chain_status = 'CANCELLED'
-       OR p.status IN ('OVERTURNED', 'WAIVED', 'CANCELLED') THEN 'CANCELLED'
+       OR p.status IN ('WAIVED', 'CANCELLED') THEN 'CANCELLED'
   WHEN p.chain_status = 'DISPUTED'
        OR (p.chain_status = 'PENDING' AND p.chain_disputed_parts > 0) THEN 'CHAIN_DISPUTED'
-  WHEN p.status IN ('DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND')
-       AND p.asset_id NOT LIKE '${ON_CHAIN_DISPUTE_LIKE}' THEN 'DISPUTED'
   ELSE 'PROPOSED'
 END`;
 
@@ -62,7 +55,6 @@ const OPERATOR_CASE_DEADLINE_SQL = `CASE s.status
       THEN s.chain_disputed_at + make_interval(secs => $1::int)
     ELSE s.chain_executable_at END
   WHEN 'PROPOSED' THEN COALESCE(s.chain_executable_at, s.earliest_execution_at)
-  WHEN 'DISPUTED' THEN s.platform_decision_due_at
   ELSE NULL
 END`;
 
@@ -86,50 +78,21 @@ export interface OperatorCaseListRow extends OperatorCaseKey {
   readonly proposedAt: Date;
   readonly disputedAt: Date | null;
   readonly nextDeadline: Date | null;
+  /** A record of it was written on chain (`chain_proposed_at` is set). */
+  readonly onChain: boolean;
 }
 
-/**
- * One row of the adjudication queue, projected.
- *
- * A projection rather than the entity for the same reason
- * `UnsettledVerificationRecord` is one: the queue spans tenants and renders six
- * columns, and loading whole proposals to render six columns would pull the
- * arithmetic blob for every open case on every poll.
- */
-export interface QueuedProposalRow {
-  readonly organizationId: string;
-  readonly id: string;
-  readonly providerId: string;
-  readonly bindingId: string;
-  readonly windowId: string | null;
-  readonly status: string;
-  readonly penaltyAmount: string;
-  readonly assetId: string;
-  readonly decimals: number;
-  readonly platformDecisionDueAt: Date | null;
-  readonly rootCauseKey: string | null;
-  readonly disputeId: string | null;
-}
-
-/** A case whose provider window has elapsed with no objection filed. */
+/** A case whose record's door passed with no dispute on chain. */
 export interface UndisputedProposalRow {
   readonly organizationId: string;
   readonly id: string;
-  /** The deadline that passed: `respond_by_at`, or `chain_executable_at` on EVM. */
-  readonly respondByAt: Date;
+  /** The door that passed: the record's `chain_executable_at`. */
+  readonly executableAt: Date;
   /**
-   * EVM: a current record of the case was disputed and then upheld by the
+   * A current record of the case was disputed and then upheld by the
    * arbiter on chain, so the case's uphold is the arbiter's (`CHAIN_ARBITER`).
    */
   readonly arbiterUpheld?: boolean;
-}
-
-/** A case whose **platform** window has elapsed with no decision. */
-export interface OverdueProposalRow {
-  readonly organizationId: string;
-  readonly id: string;
-  readonly disputeId: string | null;
-  readonly platformDecisionDueAt: Date;
 }
 
 /**
@@ -171,30 +134,23 @@ export interface ChainClaimGuards {
  * states are absent by construction rather than by exclusion, so a state added
  * later has to be considered rather than inherited.
  */
-export const CHAIN_PROPOSABLE_STATUSES = [
-  'PROPOSED',
-  'DISPUTED',
-  'UNDER_REVIEW',
-  'AWAITING_SECOND',
-  'UPHELD',
-] as const;
+export const CHAIN_PROPOSABLE_STATUSES = ['PROPOSED', 'DISPUTED', 'UPHELD'] as const;
 
 /**
- * The two statuses a case can carry an `executed_at` in, and so the two
- * `markReversedIfExecuted` may move to `REVERSED`.
+ * The status `markReversedIfExecuted` may move to `REVERSED`.
  *
  * Mirrors the `→ REVERSED` column of `SLASH_PROPOSAL_TRANSITIONS`. It is the
  * *state-machine* half of that method's guard and never the whole of it — what
  * decides a reversal is the money columns. See the method.
  */
-const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
+const REVERSIBLE_STATUSES = ['EXECUTED'] as const;
 
 /**
- * The statuses that close a case with no penalty owed: an operator suspended
- * it, or it was overturned. A record still standing on chain for one of these
- * has to be cancelled — see {@link SlashProposalRepository.findClosedStillPending}.
+ * The statuses that close a case with no penalty owed. A record still
+ * standing on chain for one of these has to be cancelled — see
+ * {@link SlashProposalRepository.findClosedStillPending}.
  */
-export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED', 'OVERTURNED'] as const;
+export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED'] as const;
 
 /**
  * `slash_proposals`.
@@ -238,9 +194,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * reporting (an operator losing to a sweeper: they should be told the case
    * timed out). Collapsing the two here would take that choice away.
    *
-   * `expectedFrom` is a list rather than a single value because two callers
-   * legitimately accept more than one origin: a decision may arrive from
-   * `DISPUTED` or `UNDER_REVIEW`, and a suspension from anywhere non-terminal.
+   * `expectedFrom` is a list rather than a single value because some callers
+   * legitimately accept more than one origin: a reopen may arrive from
+   * `UPHELD` or `EXECUTING`.
    */
   async transitionIfIn(
     organizationId: string,
@@ -329,25 +285,17 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * redundant: this one gives a usable error, the constraint survives a second
    * write path, and only the chain's is authoritative about money.
    *
-   * ## Why this is not `status = 'EXECUTED'`
+   * ## Why the money columns, and not only `status = 'EXECUTED'`
    *
    * **The question a reversal asks is "did money leave the provider", and the
-   * status is not the column that answers it.** `execute_slash` is
-   * permissionless once `executable_at` passes, so a stranger may spend a
-   * standing record after an adjudicator has overturned the case;
-   * `SlashExecutionService.recordAnExecutionNobodyAskedFor` writes the money
-   * columns and leaves `status = 'OVERTURNED'`, because a chain event must not
-   * overwrite a human. That row — the only overturned case where the provider
-   * is out of pocket — is exactly the one a reversal exists for, and a
-   * status-name predicate refuses it.
-   *
-   * So the predicate is `executed_at IS NOT NULL AND applied_amount IS NOT
-   * NULL`, which is the pair `chk_slash_proposals_executed_is_whole` keeps
-   * whole and which `reverse_slash.rs` mirrors with
-   * `record.status == SlashStatus::Executed`. `status IN (…)` stays beside it
-   * as the state-machine half — `SLASH_PROPOSAL_TRANSITIONS` admits `REVERSED`
-   * from these two and nothing else — so a row that somehow carries an
-   * `executed_at` in a status the table does not admit is still refused here.
+   * status alone is not the column that answers it.** So the predicate is
+   * `executed_at IS NOT NULL AND applied_amount IS NOT NULL`, which is the
+   * pair `chk_slash_proposals_executed_is_whole` keeps whole and which
+   * `reverse_slash.rs` mirrors with `record.status == SlashStatus::Executed`.
+   * `status IN (…)` stays beside it as the state-machine half —
+   * `SLASH_PROPOSAL_TRANSITIONS` admits `REVERSED` from `EXECUTED` and nothing
+   * else — so a row that somehow carries an `executed_at` in another status
+   * is still refused here.
    */
   async markReversedIfExecuted(
     organizationId: string,
@@ -387,11 +335,10 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     organizationId: string,
     id: string,
     notifiedAt: Date,
-    respondByAt: Date | null,
   ): Promise<number> {
     const result = await this.createQueryBuilder('proposal')
       .update()
-      .set({ notifiedAt, respondByAt })
+      .set({ notifiedAt })
       .where('organization_id = :organizationId', { organizationId })
       .andWhere('id = :id', { id })
       .andWhere('notified_at IS NULL')
@@ -457,76 +404,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * The adjudication queue.
-   *
-   * **Deliberately cross-organization**, like
-   * `VerificationRecordRepository.findUnsettled` and for the same reason: the
-   * caller is a platform operator with no tenant of their own, and a queue that
-   * had to enumerate tenants would miss the next provider onboarded. The guard
-   * on the base class stops a request-serving query that *forgot* its tenant;
-   * it cannot stop a deliberate act, and this is one — reached only through
-   * `OperatorAuthGuard`, never through `SessionAuthGuard`.
-   *
-   * ## The ordering is the requirement, not a default
-   *
-   * Sort by time remaining, then by penalty amount, not FIFO. FIFO against a
-   * hard deadline guarantees the oldest case expires first — and under the
-   * platform-miss rule an expired case is overturned against us. Sorting by
-   * insertion order is therefore not a neutral choice; it is a choice to lose
-   * the cases we have held longest.
-   *
-   * `NULLS LAST` on the deadline: a case in `DISPUTED` before its dispute row
-   * is committed has no `platform_decision_due_at` for a moment. Sorting nulls
-   * first would put a case with no deadline above one that is minutes from
-   * expiring.
-   */
-  /**
-   * The adjudication queue, as a query builder for `paginate` to finish.
-   *
-   * Returns a builder rather than rows because cursor arithmetic lives in
-   * exactly one place — `@shared/api` — and a list that encodes its own
-   * position is the thing `surface-consistency.spec.ts` fails the build on. The
-   * ordering below is the *filter*; `paginate` adds the sort and the keyset
-   * predicate from `ListSpec`.
-   *
-   * **Deliberately cross-organization**, like
-   * `VerificationRecordRepository.findUnsettled` and for the same reason: the
-   * caller is a platform operator with no tenant of their own, and a queue that
-   * had to enumerate tenants would miss the next provider onboarded. The guard
-   * on the base class stops a request-serving query that *forgot* its tenant;
-   * it cannot stop a deliberate act, and this is one — reached only through
-   * `OperatorAuthGuard`, never through `SessionAuthGuard`.
-   *
-   * ## `platform_decision_due_at IS NOT NULL` is load-bearing, not defensive
-   *
-   * `ListSpec` requires every sortable column to be `NOT NULL`, and it gives
-   * the reason: a row-value comparison involving `NULL` is `NULL`, which is not
-   * `TRUE`, so a row with no value falls out of the pagination entirely —
-   * missing, and missing without an error. The column is nullable across the
-   * table as a whole, because a `PROPOSED` case has no platform deadline yet.
-   *
-   * For the three statuses this queue selects it is always set: the same
-   * statement that moves a proposal to `DISPUTED` writes the deadline. The
-   * predicate states that invariant rather than trusting it, so a future path
-   * that reaches `DISPUTED` without a deadline drops the case out of the queue
-   * *visibly* — it is absent from a list somebody is watching — instead of
-   * invisibly, in the middle of a page.
-   */
-  queueQueryBuilder(): SelectQueryBuilder<SlashProposalEntity> {
-    // EVM cases are decided by the arbiter on chain, never from this queue.
-    return this.manager
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .where('proposal.status IN (:...open)', {
-        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
-      })
-      .andWhere('proposal.platform_decision_due_at IS NOT NULL')
-      .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE });
-  }
-
-  /**
    * One page of every penalty, for the operator console's Penalties list.
    *
-   * Cross-organization like {@link queueQueryBuilder}: an operator has no
+   * Deliberately cross-organization: an operator has no
    * tenant. Reads only the columns the list shows plus the ones its status and
    * deadline are derived from — never the beneficiary, the signatures, the
    * decision's operators or the binding's endpoint (the join reads the
@@ -534,9 +414,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *
    * ## Order
    *
-   * Next deadline first, then the larger penalty, then the newest — the
-   * queue's "time remaining, then amount, not FIFO", extended to rows with no
-   * deadline (closed ones), which follow, newest first. One composite key,
+   * Next deadline first, then the larger penalty, then the newest — "time
+   * remaining, then amount, not FIFO", extended to rows with no deadline
+   * (closed ones), which follow, newest first. One composite key,
    * every part ascending so a single row-value comparison is the keyset:
    *
    * ```text
@@ -587,7 +467,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       WITH s AS (
         SELECT p.id, p.provider_id, p.binding_id, p.penalty_amount, p.asset_id, p.decimals,
                p.proposed_at, p.chain_disputed_at, p.chain_disputed_parts,
-               p.chain_executable_at, p.earliest_execution_at, p.platform_decision_due_at,
+               p.chain_executable_at, p.earliest_execution_at,
+               p.chain_proposed_at IS NOT NULL AS on_chain,
                ${OPERATOR_CASE_STATUS_SQL} AS status
           FROM slash_proposals p
          ${inner.length > 0 ? `WHERE ${inner.join(' AND ')}` : ''}
@@ -604,7 +485,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
              b.tool_id AS "toolId", d.penalty_amount::text AS "penaltyAmount",
              d.asset_id AS "assetId", d.decimals AS "decimals", d.status AS "status",
              d.proposed_at AS "proposedAt", d.chain_disputed_at AS "disputedAt",
-             d.next_deadline AS "nextDeadline",
+             d.next_deadline AS "nextDeadline", d.on_chain AS "onChain",
              CASE WHEN d.k1 = 'infinity'::timestamptz THEN 'infinity'
                   ELSE to_char(d.k1 AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "k1",
              d.k2::text AS "k2", d.k3::text AS "k3"
@@ -618,28 +499,25 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * Cases the provider let pass without objecting. Self-check #2's input.
+   * Cases the provider let pass without disputing on chain. Self-check #2's
+   * input.
    *
-   * Cross-organization for the same reason as `findQueue`, and additionally
-   * because this one has no human caller at all — it runs on a scheduler tick.
+   * Cross-organization: it has no human caller at all — it runs on a
+   * scheduler tick.
    */
   async findUndisputedPast(now: Date, limit: number): Promise<UndisputedProposalRow[]> {
-    // The deadline that passed: the in-app `respond_by_at` (Solana), or on EVM
-    // the record's own door, `chain_executable_at`, with the record still
-    // `PENDING` (not disputed on chain). The on-chain door is the only EVM
-    // clock; no delivery starts it. Review R2-2: on EVM every current part
-    // still pending and never disputed must be past its own door by
-    // `CHAIN_DISPUTE_SETTLE_MS`, so a dispute sent just before the door is
-    // mirrored before the case is labelled undisputed.
-    const deadline =
-      `CASE WHEN proposal.asset_id LIKE :onChain ` +
-      `THEN proposal.chain_executable_at ELSE proposal.respond_by_at END`;
+    // The record's own door, `chain_executable_at`, with the record still
+    // `PENDING` (not disputed on chain). The on-chain door is the only clock;
+    // no delivery starts it. Review R2-2: every current part still pending
+    // and never disputed must be past its own door by `CHAIN_DISPUTE_SETTLE_MS`,
+    // so a dispute sent just before the door is mirrored before the case is
+    // labelled undisputed.
     const settled = new Date(now.getTime() - CHAIN_DISPUTE_SETTLE_MS);
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
-      .addSelect(deadline, 'respondByAt')
+      .addSelect('proposal.chain_executable_at', 'executableAt')
       .addSelect(
         'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
           'WHERE part.organization_id = proposal.organization_id ' +
@@ -649,104 +527,21 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         'arbiterUpheld',
       )
       .where('proposal.status = :proposed', { proposed: 'PROPOSED' })
+      .andWhere("proposal.chain_status = 'PENDING'")
+      .andWhere('proposal.chain_executable_at IS NOT NULL')
+      .andWhere('proposal.chain_executable_at <= :settled', { settled })
       .andWhere(
-        new Brackets((where) =>
-          where
-            .where(
-              'proposal.asset_id NOT LIKE :onChain AND proposal.respond_by_at IS NOT NULL ' +
-                'AND proposal.respond_by_at <= :now',
-            )
-            .orWhere(
-              "proposal.asset_id LIKE :onChain AND proposal.chain_status = 'PENDING' " +
-                'AND proposal.chain_executable_at IS NOT NULL ' +
-                'AND proposal.chain_executable_at <= :settled ' +
-                'AND NOT EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
-                'WHERE part.organization_id = proposal.organization_id ' +
-                'AND part.proposal_id = proposal.id ' +
-                'AND part.chain_epoch = proposal.chain_epoch ' +
-                "AND part.chain_status = 'PENDING' AND part.chain_disputed_at IS NULL " +
-                'AND part.chain_executable_at > :settled)',
-            ),
-        ),
+        'NOT EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+          'WHERE part.organization_id = proposal.organization_id ' +
+          'AND part.proposal_id = proposal.id ' +
+          'AND part.chain_epoch = proposal.chain_epoch ' +
+          "AND part.chain_status = 'PENDING' AND part.chain_disputed_at IS NULL " +
+          'AND part.chain_executable_at > :settled)',
+        { settled },
       )
-      .setParameters({ now, settled, onChain: ON_CHAIN_DISPUTE_LIKE })
-      .orderBy(deadline, 'ASC')
+      .orderBy('proposal.chain_executable_at', 'ASC')
       .limit(limit)
       .getRawMany<UndisputedProposalRow>();
-  }
-
-  /**
-   * Cases **we** let pass without deciding: the platform-miss rule.
-   *
-   * This is the only query in the system whose findings are entirely our own
-   * fault, and it exists so that fact is measured rather than absorbed.
-   */
-  async findOverduePast(now: Date, limit: number): Promise<OverdueProposalRow[]> {
-    // Never on EVM: a missed platform deadline must not acquit a record that
-    // still stands on chain (business review 4). The arbiter rules there, or
-    // the chain's 30-day dispute expiry applies.
-    return this.manager
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .select('proposal.organization_id', 'organizationId')
-      .addSelect('proposal.id', 'id')
-      .addSelect('proposal.dispute_id', 'disputeId')
-      .addSelect('proposal.platform_decision_due_at', 'platformDecisionDueAt')
-      .where('proposal.status IN (:...open)', { open: ['DISPUTED', 'UNDER_REVIEW'] })
-      .andWhere('proposal.platform_decision_due_at IS NOT NULL')
-      .andWhere('proposal.platform_decision_due_at <= :now', { now })
-      .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
-      .orderBy('proposal.platform_decision_due_at', 'ASC')
-      .limit(limit)
-      .getRawMany<OverdueProposalRow>();
-  }
-
-  /**
-   * Every case a fleet sweep should reach — including the providers who never
-   * complained, which is the entire point of a fleet sweep.
-   *
-   * Matching is on the defect key over a time window, not on similarity to the
-   * source case. That makes the set reproducible from the sweep row: anyone can
-   * re-run the same predicate later and get the same list, which is what turns
-   * "we swept it" into a checkable claim.
-   */
-  async findSweepCandidates(
-    defectKey: string,
-    from: Date,
-    to: Date,
-    limit: number,
-  ): Promise<QueuedProposalRow[]> {
-    return (
-      this.manager
-        .createQueryBuilder(SlashProposalEntity, 'proposal')
-        .select('proposal.organization_id', 'organizationId')
-        .addSelect('proposal.id', 'id')
-        .addSelect('proposal.provider_id', 'providerId')
-        .addSelect('proposal.binding_id', 'bindingId')
-        .addSelect('proposal.window_id', 'windowId')
-        .addSelect('proposal.status', 'status')
-        .addSelect('proposal.penalty_amount', 'penaltyAmount')
-        .addSelect('proposal.asset_id', 'assetId')
-        .addSelect('proposal.decimals', 'decimals')
-        .addSelect('proposal.platform_decision_due_at', 'platformDecisionDueAt')
-        .addSelect('proposal.root_cause_key', 'rootCauseKey')
-        .addSelect('proposal.dispute_id', 'disputeId')
-        // Terminal cases are excluded except EXECUTED, which is precisely the one
-        // a sweep must reach: money already moved and the reversal is what the
-        // provider is owed. OVERTURNED and CANCELLED need nothing; REVERSED and
-        // WAIVED are already whole.
-        .where('proposal.status NOT IN (:...done)', {
-          done: ['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'],
-        })
-        // Review N-2: never an EVM case. Its records are decided only on chain,
-        // and an overturn here would stop this platform executing them.
-        .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
-        .andWhere('proposal.root_cause_key = :defectKey', { defectKey })
-        .andWhere('proposal.proposed_at >= :from', { from })
-        .andWhere('proposal.proposed_at <= :to', { to })
-        .orderBy('proposal.proposed_at', 'ASC')
-        .limit(limit)
-        .getRawMany<QueuedProposalRow>()
-    );
   }
 
   /**
@@ -756,8 +551,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *
    * - **`notified_at IS NOT NULL`** — the provider has actually been told.
    *   Proposing before delivery would reserve their stake for a case they
-   *   cannot answer. (Not `respond_by_at`: an EVM case has none, its only
-   *   deadline being the record's own `executableAt`.)
+   *   cannot answer.
    * - **A `PROPOSING` row older than `staleClaimBefore` is included beside the
    *   `NONE` rows.** That is crash recovery (design decision D4, crash point
    *   1), not a race: a process that claims a row `PROPOSING` and then dies
@@ -799,9 +593,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *
    * `chain_status = 'CANCEL_REQUESTED'` and nothing else: the case's own
    * `status` is deliberately not in the predicate, because every route into
-   * this state leaves a different one behind — `OVERTURNED` after an
-   * adjudication, still `UPHELD` after a downward recalculation — and what the
-   * sweep does is identical in both. Ordered by `chain_executable_at` so the
+   * this state may leave a different one behind — `CANCELLED` after a
+   * closure, still `UPHELD` while a record of it stands — and what the sweep
+   * does is identical in both. Ordered by `chain_executable_at` so the
    * records closest to their seven-day expiry grace are looked at first, which
    * is the half of the sweep that has a deadline.
    *
@@ -901,11 +695,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *   (`resolution_kind = 'CHAIN_ARBITER'`) while the case still stands
    *   upheld. A case the platform only labelled upheld (`AUTO_UNDISPUTED`)
    *   counts once a record of it executes, not before.
-   * - **Solana** — the in-app decision is the decision there: a case upheld,
-   *   executing or executed, or one whose judgement was executed.
    *
-   * Never counted: a case closed in the provider's favour (`OVERTURNED`,
-   * `WAIVED`, `REVERSED`), and no cancelled record at all — neither a
+   * Never counted: a case closed in the provider's favour (`WAIVED`,
+   * `REVERSED`), and no cancelled record at all — neither a
    * verifier-key lapse (`VERIFIER_UNAVAILABLE`, which voids a case for reasons
    * that say nothing about the provider) nor a record that expired because
    * the platform did not execute it in time (`EXPIRED`, which the contract
@@ -930,12 +722,12 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         providerIds: [...new Set(providerIds)],
       })
       .andWhere('proposal.status NOT IN (:...providerWon)', {
-        providerWon: ['OVERTURNED', 'WAIVED', 'REVERSED'],
+        providerWon: ['WAIVED', 'REVERSED'],
       })
       .andWhere(
-        `((${executed}) OR (proposal.status IN (:...upheld) AND (` +
-          "proposal.resolution_kind = 'CHAIN_ARBITER' OR proposal.asset_id NOT LIKE :onChain)))",
-        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'], onChain: ON_CHAIN_DISPUTE_LIKE },
+        `((${executed}) OR (proposal.status IN (:...upheld) AND ` +
+          "proposal.resolution_kind = 'CHAIN_ARBITER'))",
+        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'] },
       )
       .andWhere(
         'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
@@ -947,10 +739,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * Review N-3: EVM cases still open from the in-app objection era
-   * (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`) whose records reached the
-   * chain. No queue, sweep or action reaches them any more; the scheduler
-   * re-derives each from its records after it starts. One page in
+   * Review N-3: open `DISPUTED` cases whose records reached the chain; the
+   * scheduler re-derives each from its records after it starts, so one whose
+   * event was missed while it was down still moves. One page in
    * `(proposed_at, id)` order after `after` (review R2-5: the pass pages until
    * a page comes back empty, so more than one page of them is reached).
    */
@@ -963,10 +754,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
       .addSelect('proposal.proposed_at', 'proposedAt')
-      .where('proposal.status IN (:...open)', {
-        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
-      })
-      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .where("proposal.status = 'DISPUTED'")
       .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
         unproposed: ['NONE', 'PROPOSING'],
       });
@@ -984,8 +772,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * Review R2-2: open EVM cases (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`)
-   * whose mirror stands `PENDING` with its door at or before `settledBefore`
+   * Review R2-2: open `DISPUTED` cases whose mirror stands `PENDING` with its door at or before `settledBefore`
    * — the latest door of the case's pending records. The scheduler follows
    * their records again every tick.
    */
@@ -994,10 +781,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
-      .where('proposal.status IN (:...open)', {
-        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
-      })
-      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .where("proposal.status = 'DISPUTED'")
       .andWhere("proposal.chain_status = 'PENDING'")
       .andWhere('proposal.chain_executable_at <= :settledBefore', { settledBefore })
       .orderBy('proposal.chain_executable_at', 'ASC')
@@ -1021,8 +805,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * Cases closed off chain whose record still mirrors `PENDING`: the repair
    * behind every best-effort cancel request.
    *
-   * A suspension (`CANCELLED`) or an overturn (`OVERTURNED`) asks for the
-   * on-chain cancel after its own transaction commits, and that request can be
+   * A case closed in the app (`CANCELLED`) asks for the on-chain cancel
+   * after its own transaction commits, and that request can be
    * lost — the write fails, or the record lands after the case was closed. The
    * row is then selected by nothing: the execute sweep wants `UPHELD` and the
    * admin-cancel sweep wants `CANCEL_REQUESTED`.
@@ -1232,24 +1016,6 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .getRawOne<{ resolved: number; falsePositives: number }>();
 
     return row ?? { resolved: 0, falsePositives: 0 };
-  }
-
-  /** How many open cases share each root cause — the queue's grouping column. */
-  async rootCauseGroupSizes(keys: readonly string[]): Promise<Map<string, number>> {
-    if (keys.length === 0) return new Map();
-
-    const rows = await this.manager
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .select('proposal.root_cause_key', 'key')
-      .addSelect('COUNT(*)::int', 'count')
-      .where('proposal.root_cause_key IN (:...keys)', { keys })
-      .andWhere('proposal.status IN (:...open)', {
-        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
-      })
-      .groupBy('proposal.root_cause_key')
-      .getRawMany<{ key: string; count: number }>();
-
-    return new Map(rows.map((row) => [row.key, row.count]));
   }
 }
 

@@ -102,9 +102,8 @@ interface DriverError {
  * Re-proving used to overwrite the `stake_authority` / `stake_proof` /
  * `stake_proved_at` trio silently, and that is not merely a missing audit
  * trail. The backend derives the stake PDA from the enrolment's
- * `stake_authority_account_id` (formerly `providers.stake_authority`)
- * **at the moment it needs it**, and one of those moments is building a slash
- * attestation. So this sequence worked:
+ * `stake_authority_account_id` **at the moment it needs it**, and one of those
+ * moments is building a slash attestation. So this sequence worked:
  *
  * ```text
  *   provider defects        →  a verdict is forming

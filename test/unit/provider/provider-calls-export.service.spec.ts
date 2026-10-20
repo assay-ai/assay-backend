@@ -37,7 +37,6 @@ function row(index: number): CallExportRow {
     platformFee: '10',
     awaitingRedemption: false,
     credited: true,
-    absorbedReason: null,
     redemptionLastError: null,
     debtOutstanding: false,
     createdAt: new Date(ms),

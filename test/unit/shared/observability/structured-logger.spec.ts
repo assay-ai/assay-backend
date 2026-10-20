@@ -189,4 +189,32 @@ describe('StructuredLogger', () => {
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]).level).toBe('debug');
   });
+
+  it('blanks a requestId the caller logs (a consent rid) but keeps the correlation requestId it adds itself', () => {
+    const { lines, restore } = captureStdout();
+    try {
+      RequestContext.run({ requestId: 'req-42', organizationId: 'org-7' }, () => {
+        new StructuredLogger('OAuth').log({ requestId: 'the-consent-rid', rid: 'the-consent-rid' });
+      });
+    } finally {
+      restore();
+    }
+
+    const line = lastLogged(lines);
+    expect(line.requestId).toBe('req-42');
+    expect(lines[0]).not.toContain('the-consent-rid');
+  });
+
+  it('replaces an assay token interpolated into a message or a stack', () => {
+    const secret = 'assay_rt_' + 'S'.repeat(43);
+    const { lines, restore } = captureStdout();
+    try {
+      new StructuredLogger('OAuth').error(`refresh ${secret} failed`, `Error: ${secret}\n    at x`);
+    } finally {
+      restore();
+    }
+
+    expect(lines.join('')).not.toContain(secret);
+    expect(lines.join('')).toContain('[REDACTED]');
+  });
 });

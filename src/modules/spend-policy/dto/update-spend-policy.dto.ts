@@ -1,6 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsArray,
   IsBoolean,
   IsInt,
   IsOptional,
@@ -9,8 +8,6 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
-
-import { SpendPolicyDto } from './get-spend-policy.dto';
 
 /** Atomic units as a non-negative decimal integer string — same grammar as `MoneyDto.amount`. */
 const ATOMIC_AMOUNT_RE = /^\d+$/;
@@ -92,18 +89,6 @@ export class UpdateSpendPolicyDto {
   maxSpendPerHour?: string | null;
 
   @ApiPropertyOptional({
-    type: [String],
-    nullable: true,
-    description:
-      'Tool allowlist. `null` (or omitted on the first version) allows every tool. `[]` allows ' +
-      'none. An explicit `null` on a later PATCH clears a narrower list back to "every tool"',
-  })
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  allowedTools?: string[] | null;
-
-  @ApiPropertyOptional({
     nullable: true,
     description: 'Atomic units. `null` means every call spends without approval',
   })
@@ -121,22 +106,4 @@ export class UpdateSpendPolicyDto {
   @IsString()
   @MaxLength(512)
   changeReason?: string;
-
-  /**
-   * Ignored. Accepted so an older client that still sends it is not refused,
-   * but the audit trail's actor comes from the authenticated session
-   * (`agent:<agentId>`), never from the request body — a caller-chosen value
-   * would let anyone write any name into the policy history.
-   */
-  @ApiPropertyOptional({
-    maxLength: 128,
-    deprecated: true,
-    description: 'Ignored; set from the session.',
-  })
-  @IsOptional()
-  @IsString()
-  @MaxLength(128)
-  changedBy?: string;
 }
-
-export class UpdateSpendPolicyResponseDto extends SpendPolicyDto {}

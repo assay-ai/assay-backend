@@ -2,6 +2,38 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { ListQueryDto } from '@shared/api';
 
+/** The client an OAuth grant was issued to (spec §7.10 item 4). */
+export class AgentCredentialOAuthClientDto {
+  @ApiProperty({ description: 'The public `client_id`: a CIMD URL, `dcr_…`, or the built-in URL' })
+  clientId: string;
+
+  @ApiProperty({
+    description:
+      "The client's own name, or its listed display name when verified. Self-declared otherwise.",
+  })
+  name: string;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: "eTLD+1 of a CIMD client's host; null when no domain is proven (DCR, built-in)",
+  })
+  registrableDomain: string | null;
+
+  @ApiProperty({
+    description:
+      'Listed in OAUTH_VERIFIED_CLIENTS and every registered redirect is a vendor HTTPS callback. ' +
+      'Never true for the built-in client.',
+  })
+  verified: boolean;
+
+  @ApiProperty({
+    description:
+      'The client may bind a payment key (OAUTH_PAYMENT_CLIENTS: the built-in client only)',
+  })
+  paymentClient: boolean;
+}
+
 /** `GET /api/v1/agents/:agentId/credentials`. No extra filters. */
 export class ListAgentCredentialsQueryDto extends ListQueryDto {}
 
@@ -19,8 +51,25 @@ export class AgentCredentialDto {
   @ApiProperty({ description: 'Human label — "CI deploy", "local dev"' })
   name: string;
 
-  @ApiProperty({ description: 'Clear-text leading characters, for disambiguation only' })
-  prefix: string;
+  @ApiProperty({
+    enum: ['API_KEY', 'OAUTH'],
+    description: 'How the credential was obtained. Everything else about it is the same.',
+  })
+  issuedVia: 'API_KEY' | 'OAUTH';
+
+  @ApiProperty({
+    nullable: true,
+    type: AgentCredentialOAuthClientDto,
+    description: 'The client an OAuth grant was issued to; null for an API key',
+  })
+  oauthClient: AgentCredentialOAuthClientDto | null;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Clear-text leading characters, for disambiguation only; null for an OAuth grant',
+  })
+  prefix: string | null;
 
   @ApiProperty({ type: [String] })
   scopes: string[];

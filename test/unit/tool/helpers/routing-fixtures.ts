@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 
+import type { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -21,9 +22,9 @@ import {
 } from '@modules/provider/ports/chain-enrolment.port';
 import { ProviderStake, stakeKey } from '@modules/provider/ports/provider-stake.port';
 import {
-  ConfigProviderStakeSource,
+  InMemoryProviderStakeSource,
   ProviderStakeSnapshot,
-} from '@modules/provider/services/config-provider-stake.source';
+} from '../../helpers/in-memory-provider-stake.source';
 import { StakeGraceLookup, StakeGracePort } from '@modules/provider/ports/stake-grace.port';
 import {
   ProviderResponse,
@@ -43,14 +44,19 @@ import {
   ToolBinding,
   ToolTier,
 } from '@modules/tool/ports/tool.types';
+import { BindingAttemptRecorder } from '@modules/tool/services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import { BindingCeilingService } from '@modules/tool/services/binding-ceiling.service';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import type { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
+import type { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
+import type { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { DEFAULT_ROUTER_TUNING, RouterConfig } from '@modules/tool/services/routing.config';
 import { MoneyUtil } from '@utils/money.util';
 
+import { noBlocks } from '../../helpers/blocklist';
 import { FakeRedis } from './fake-redis';
 
 /**
@@ -563,6 +569,10 @@ export interface RouterHarnessOptions {
   readonly invoker: BindingInvokerPort;
   readonly random?: () => number;
   readonly config?: Partial<RouterConfig>;
+  /** The observed-stats recorder. Absent: the router records nothing, as before it existed. */
+  readonly observations?: BindingAttemptRecorder;
+  /** The account blocklist. Absent: nothing is blocked. */
+  readonly blocklist?: AccountBlocklistService;
 }
 
 export interface RouterHarness {
@@ -586,9 +596,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
     options.providers.map((provider) => [provider.providerId, provider]),
   );
   // The shorthand is expanded into real `stakeKey`s here, and never inside the
-  // source: `ConfigProviderStakeSource` must be the production class, keyed the
-  // production way, or the fixtures would be testing a different lookup from
-  // the one that runs.
+  // source, so the fixtures key stake the way the real source does.
   const stakeSnapshot: ProviderStakeSnapshot = {
     ...Object.fromEntries(
       Object.entries(options.stakes).map(([providerId, money]) => [
@@ -644,7 +652,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
   const router = new ProviderRouterService(
     catalogue,
     new ConfigProviderRegistry(registrySnapshot),
-    new ConfigProviderStakeSource(stakeSnapshot),
+    new InMemoryProviderStakeSource(stakeSnapshot),
     enrolments,
     graceSource,
     options.invoker,
@@ -654,6 +662,8 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
     // Defaults to "always draw the first entry", which makes selection
     // deterministic for every test that is not about the distribution.
     options.random ?? (() => 0),
+    options.blocklist ?? noBlocks(),
+    options.observations ?? null,
   );
 
   return { router, config, graceSource, ceilings, redis, callCounter };
@@ -681,3 +691,24 @@ export function seededRandom(seed: number): () => number {
 
 /** Re-exported so specs can build the production invoker without a second import path. */
 export { EgressBindingInvoker };
+
+/** A vault with no stored credentials for any binding. */
+export const NO_CREDENTIALS = {
+  headersFor: async () => [],
+} as unknown as CredentialVaultService;
+
+/** A vault that holds one API key for every binding and origin. */
+export const ONE_CREDENTIAL = {
+  headersFor: async () => [{ name: 'X-Provider-Key', value: 'test-key' }],
+} as unknown as CredentialVaultService;
+
+/** A signer with no keys, as in a non-production deployment that configured none. */
+export const UNSIGNED = { sign: async () => ({}) } as unknown as RequestSignerService;
+
+/** The production invoker with no credentials and no signature. */
+export function plainInvoker(
+  http: EgressHttpClient,
+  vault: CredentialVaultService = NO_CREDENTIALS,
+): EgressBindingInvoker {
+  return new EgressBindingInvoker(http, vault, UNSIGNED);
+}

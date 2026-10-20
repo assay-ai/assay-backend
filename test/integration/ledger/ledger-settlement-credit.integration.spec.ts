@@ -5,7 +5,7 @@ import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import {
   INTERNAL_ACCOUNTS,
   LedgerEntryType,
-  LEGACY_POOLED_VAULT_TX_REF,
+  RAIL_A_BOOK_CREDIT_TX_REF,
 } from '@modules/ledger/ports/ledger.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { expectErrorCodeAsync } from '../../unit/helpers/expect-error-code';
@@ -119,7 +119,7 @@ describe('ledger settlement credit — commitHoldAndCredit', () => {
       providerAmount: context.usdc(450n),
       platformFee: context.usdc(50n),
       intentId,
-      chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+      chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
     };
 
     const first = await context.ledger.commitHoldAndCredit(agentOrg, hold.id, credit);
@@ -169,7 +169,7 @@ describe('ledger settlement credit — commitHoldAndCredit', () => {
           // allowed: the remainder is released (a re-priced rail-A call).
           platformFee: context.usdc(150n),
           intentId,
-          chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+          chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
         }),
       LedgerErrorCode.LEDGER_SETTLEMENT_CREDIT_MISMATCH,
     );

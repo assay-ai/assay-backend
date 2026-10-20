@@ -74,6 +74,12 @@ export interface RedeemVoucherInput {
   readonly platformFee: Money;
   readonly chainId: ChainId;
 
+  /**
+   * The CALL's idempotency key (MCP `_meta["assay/idempotency-key"]`), scoped
+   * by the caller. When the key's unique index answers with an earlier
+   * attempt's intent, `redeem` returns that intent untouched — its
+   * `voucherSeq` is not this voucher's — and holds nothing for this voucher.
+   */
   readonly idempotencyKey?: string | null;
 
   /**

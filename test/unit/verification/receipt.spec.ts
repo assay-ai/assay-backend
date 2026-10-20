@@ -3,6 +3,7 @@ import { VerificationRecordEntity } from '@database/postgres/entities/verificati
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import {
   STAGE_STATUS_LABEL,
@@ -41,7 +42,6 @@ function buildIntent(overrides: Partial<PaymentIntentEntity> = {}): PaymentInten
     chainId: 'solana:mainnet',
     expiresAt: new Date('2026-08-10T10:05:00.000Z'),
     idempotencyKey: null,
-    voucherNonce: null,
     holdId: 'hold-1',
     holdReleasedAt: null,
     classification: null,
@@ -100,15 +100,31 @@ function stageResult(
   return { stage, status, code: null, detail: null, score: null, ...patch };
 }
 
-function build(intent: PaymentIntentEntity | null, record: VerificationRecordEntity | null) {
+function build(
+  intent: PaymentIntentEntity | null,
+  record: VerificationRecordEntity | null,
+  refundable: boolean | Error = false,
+  until: Date | null = null,
+) {
   const intents = {
     findOneBy: jest.fn().mockResolvedValue(intent),
   } as unknown as PaymentIntentRepository;
   const records = {
     findByIntentId: jest.fn().mockResolvedValue(record),
   } as unknown as VerificationRecordRepository;
+  const refunds = {
+    ofCall:
+      refundable instanceof Error
+        ? jest.fn().mockRejectedValue(refundable)
+        : jest.fn().mockResolvedValue({ refundable, until }),
+  };
 
-  return { service: new ReceiptService(intents, records), intents, records };
+  return {
+    service: new ReceiptService(intents, records, refunds as unknown as RefundEligibilityService),
+    intents,
+    records,
+    refunds,
+  };
 }
 
 describe('ReceiptService — the four stage rows are always present, in pipeline order', () => {
@@ -266,8 +282,9 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
 
     expect(receipt.listedPrice.amount).toBe('1000');
     expect(receipt.chargedPrice.amount).toBe('0');
-    // Not withheld: the frontend's "listed − charged = withheld" does not hold (M4).
-    expect(receipt.withheld.amount).toBe('0');
+    // Withheld (NOT_COLLECTED): the hold was released, and the aggregate
+    // `GET /withheld` counts it, so the row must too (UX review B1 I3).
+    expect(receipt.withheld.amount).toBe('1000');
     expect(receipt.forfeited).toBe(true);
     expect(receipt.debt).toBeNull();
     expect(receipt.chargeNote).toBe('provider_forfeit:ProviderBelowMinimumStake');
@@ -310,7 +327,34 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
     expect(receipt.chargedPrice.amount).toBe('0');
     expect(receipt.forfeited).toBe(false);
     expect(receipt.debt).toBe('WRITTEN_OFF');
+    // Still owed, so not withheld.
+    expect(receipt.withheld.amount).toBe('0');
   });
+
+  it.each([
+    ['a late verdict', 'voided:REFUND'],
+    ['an upheld report', 'voided:DISPUTE_UPHELD'],
+  ])(
+    'a debt voided by %s is not charged and withholds the listed price (B1 I3)',
+    async (_, mark) => {
+      const { service } = build(
+        buildIntent({
+          status: PaymentIntentStatus.SETTLED,
+          priceAmount: '1000',
+          holdReleasedAt: new Date('2026-10-16T01:00:00Z'),
+          redemptionLapsedAt: new Date('2026-10-16T00:00:00Z'),
+          redemptionLastError: mark,
+        }),
+        buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+      );
+
+      const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+      expect(receipt.chargedPrice.amount).toBe('0');
+      expect(receipt.withheld.amount).toBe('1000');
+      expect(receipt.debt).toBe('VOIDED');
+    },
+  );
 
   it('a plain SETTLED call carries no flag', async () => {
     const { service } = build(
@@ -493,3 +537,43 @@ function passingStages(): StageResult[] {
     stageResult(VerificationStage.SEMANTIC, StageStatus.SKIPPED),
   ];
 }
+
+describe('ReceiptService — refundableIfReportedNow, read-only (wave-1 audit I1)', () => {
+  it.each([true, false])('relays the answer (%s) and its end for this call', async (answer) => {
+    const intent = buildIntent({ status: PaymentIntentStatus.SETTLED });
+    const settledAt = new Date('2026-08-10T10:00:02.000Z');
+    const until = answer ? new Date('2026-08-10T10:59:02.000Z') : null;
+    const { service, refunds } = build(intent, buildRecord({ settledAt }), answer, until);
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.refundableIfReportedNow).toBe(answer);
+    expect(receipt.refundableIfReportedUntil).toEqual(until);
+    expect(refunds.ofCall).toHaveBeenCalledWith(intent, settledAt);
+  });
+
+  it('asks with no settlement time when no verification record exists', async () => {
+    const intent = buildIntent();
+    const { service, refunds } = build(intent, null);
+
+    await service.getReceipt(ORG, INTENT_ID);
+
+    expect(refunds.ofCall).toHaveBeenCalledWith(intent, null);
+  });
+
+  // Review m1: a dispute-side failure removes the promise, never the receipt.
+  it('still answers, promising nothing, when the eligibility check throws', async () => {
+    const { service } = build(
+      buildIntent({ status: PaymentIntentStatus.SETTLED }),
+      null,
+      new Error('db down'),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt).toMatchObject({
+      refundableIfReportedNow: false,
+      refundableIfReportedUntil: null,
+    });
+  });
+});

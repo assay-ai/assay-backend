@@ -8,6 +8,8 @@ import { assertTrustProxyHopsConfigured, parseCorsAllowedOrigins } from '@config
 import { applyHttpSecurity } from '@shared/security/security-headers';
 import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
 import { AppApiModule } from './app.module';
+import { buildGlobalPrefixOptions } from './global-prefix';
+import { applyRouteBodyLimits } from './route-body-limits';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
@@ -41,8 +43,12 @@ async function bootstrapApi() {
   // Security headers, and no `X-Powered-By` (R17-R-02).
   applyHttpSecurity(app);
 
+  // A larger JSON body for the few routes that need one, before Nest's
+  // default 100 KB parser (`route-body-limits.ts`).
+  applyRouteBodyLimits(app);
+
   // Global prefix
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', buildGlobalPrefixOptions());
   app.enableVersioning({
     type: VersioningType.URI, // /api/v1/..., /api/v2/...
     defaultVersion: '1', // Default v1
@@ -195,8 +201,12 @@ async function bootstrapApi() {
     customSiteTitle: 'GoAssay.AI API',
   };
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document, customOptions);
+  // Not served in production unless asked for (`parseApiDocsEnabled`).
+  const docsEnabled = configService.get<boolean>('app.api.docsEnabled') ?? false;
+  if (docsEnabled) {
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, customOptions);
+  }
 
   await app.listen(port);
 
@@ -208,7 +218,7 @@ async function bootstrapApi() {
 
   console.log(`
   🚀 [API SERVER] Application is running on: http://localhost:${port}
-  📚 Swagger documentation: http://localhost:${port}/api/docs${bullBoardLine}
+  📚 Swagger documentation: ${docsEnabled ? `http://localhost:${port}/api/docs` : 'off (API_DOCS_ENABLED)'}${bullBoardLine}
   `);
 }
 

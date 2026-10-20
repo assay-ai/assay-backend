@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { DisputeModule } from '@modules/dispute/dispute.module';
 import { McpModule } from '@modules/mcp/mcp.module';
 
 import { ReceiptsController } from './controllers/receipts.controller';
@@ -24,9 +25,13 @@ import { VerificationModule } from './verification.module';
  * Imports `McpModule` for one reason: it exports `MCP_SESSION_SOURCE`, the DI
  * token `SessionAuthGuard` resolves bearer tokens through
  * (`shared/auth/session-auth.guard.ts`).
+ *
+ * Imports `DisputeModule` for `RefundEligibilityService`: the receipt asks the
+ * dispute module, which sees the same chain hold as the filing, whether a
+ * report now is refunded in full.
  */
 @Module({
-  imports: [McpModule, VerificationModule],
+  imports: [McpModule, VerificationModule, DisputeModule],
   controllers: [ReceiptsController, VerdictsController],
   providers: [ReceiptService, ReceiptSummaryService, VerdictService],
   exports: [ReceiptService, ReceiptSummaryService, VerdictService],

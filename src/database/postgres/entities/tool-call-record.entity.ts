@@ -47,8 +47,8 @@ export class ToolCallRecordEntity extends OrganizationScopedEntityWithoutSoftDel
   @Column({ name: 'call_id', type: 'uuid' })
   callId: string;
 
-  @Column({ name: 'tool_id', type: 'varchar', length: 128 })
-  toolId: string;
+  @Column({ name: 'tool_id', type: 'varchar', length: 128, nullable: true })
+  toolId: string | null;
 
   /** `NULL` when no binding was ever selected — every candidate refused. */
   @Column({ name: 'binding_id', type: 'uuid', nullable: true })
@@ -63,12 +63,12 @@ export class ToolCallRecordEntity extends OrganizationScopedEntityWithoutSoftDel
    * A `PAID` call has a payment intent and belongs in that table. Two rows for
    * one call would make every count in the product ambiguous.
    */
-  @Column({ name: 'pricing_mode', type: 'varchar', length: 16 })
-  pricingMode: string;
+  @Column({ name: 'pricing_mode', type: 'varchar', length: 16, nullable: true })
+  pricingMode: string | null;
 
   /** A `ResponseClass` — classification runs identically on the free path. */
-  @Column({ name: 'classification', type: 'varchar', length: 32 })
-  classification: string;
+  @Column({ name: 'classification', type: 'varchar', length: 32, nullable: true })
+  classification: string | null;
 
   @Column({ name: 'latency_ms', type: 'int' })
   latencyMs: number;
@@ -93,4 +93,42 @@ export class ToolCallRecordEntity extends OrganizationScopedEntityWithoutSoftDel
 
   @Column({ name: 'expires_at', type: 'timestamptz' })
   expiresAt: Date;
+
+  // ── Attribution: which MCP URL the call came through (design spec §7.8) ──
+
+  /** `ROOT` | `HANDLE` | `CATEGORY` | `TOOLSET` — `EndpointKind`. */
+  @Column({ name: 'endpoint_kind', type: 'varchar', length: 12, nullable: true })
+  endpointKind: string | null;
+
+  @Column({ name: 'toolset_id', type: 'uuid', nullable: true })
+  toolsetId: string | null;
+
+  /** `NULL` with a toolset: the Draft. */
+  @Column({ name: 'toolset_version', type: 'int', nullable: true })
+  toolsetVersion: number | null;
+
+  @Column({ name: 'endpoint_handle', type: 'varchar', length: 24, nullable: true })
+  endpointHandle: string | null;
+
+  /** The view filters that differ from the URL's default, or `NULL`. */
+  @Column({ name: 'view_filter', type: 'jsonb', nullable: true })
+  viewFilter: Record<string, unknown> | null;
+
+  // ── A refused call (FR-16): nothing reached a provider, nothing was charged ──
+
+  /** The agent-facing code, e.g. `NO_PROVIDER_MATCHES_RULES`. `NULL` on a served call. */
+  @Column({ name: 'refusal_code', type: 'varchar', length: 48, nullable: true })
+  refusalCode: string | null;
+
+  /** `SERVER` | `AGENT_LIMITS` | `TOOLSET_RULES` — which layer refused it. */
+  @Column({ name: 'refusal_layer', type: 'varchar', length: 16, nullable: true })
+  refusalLayer: string | null;
+
+  /** On `NO_PROVIDER_MATCHES_RULES`: each provider's reason and source. */
+  @Column({ name: 'refusal_detail', type: 'jsonb', nullable: true })
+  refusalDetail: Record<string, unknown> | null;
+
+  /** The name the agent asked for — the only identity of a tool that does not exist. */
+  @Column({ name: 'tool_name', type: 'varchar', length: 128, nullable: true })
+  toolName: string | null;
 }

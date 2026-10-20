@@ -1,4 +1,5 @@
 import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors/error-catalog';
+import type { McpUnauthorizedReason } from '../ports/mcp-unauthorized.port';
 
 /**
  * `MCP_*` — the MCP server surface: `tools/list` with prices and `tools/call`.
@@ -6,13 +7,28 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * errors are the ones an agent sees most often.
  */
 export enum McpErrorCode {
-  MCP_REQUEST_MALFORMED = 'MCP_REQUEST_MALFORMED',
   MCP_METHOD_NOT_SUPPORTED = 'MCP_METHOD_NOT_SUPPORTED',
   MCP_TOOL_NOT_FOUND = 'MCP_TOOL_NOT_FOUND',
   MCP_CREDENTIAL_INVALID = 'MCP_CREDENTIAL_INVALID',
-  MCP_CREDENTIAL_REVOKED = 'MCP_CREDENTIAL_REVOKED',
-  MCP_SESSION_NOT_FOUND = 'MCP_SESSION_NOT_FOUND',
+  /**
+   * This address sent too many refused credentials inside the window
+   * (`McpAuthFailureThrottle`). Refused before any credential is looked up;
+   * retryable once the window rolls over.
+   */
+  MCP_AUTH_RATE_LIMITED = 'MCP_AUTH_RATE_LIMITED',
   MCP_QUOTA_EXCEEDED = 'MCP_QUOTA_EXCEEDED',
+  /**
+   * The path of an MCP URL is not one the host serves, or names something
+   * this credential cannot see — another organization's toolset is the same
+   * 404 as a missing one, so its existence does not leak (design spec §7.4).
+   */
+  MCP_URL_NOT_FOUND = 'MCP_URL_NOT_FOUND',
+  /**
+   * `_meta["assay/idempotency-key"]` is not a printable ASCII string of 1 to
+   * 128 characters. Refused before anything runs, so nothing is charged; not
+   * retryable unchanged.
+   */
+  MCP_IDEMPOTENCY_KEY_INVALID = 'MCP_IDEMPOTENCY_KEY_INVALID',
 
   // ── the public live demo ─────────────────────────────────────────────────
   MCP_DEMO_QUERY_INVALID = 'MCP_DEMO_QUERY_INVALID',
@@ -40,13 +56,6 @@ export enum McpErrorCode {
    * measured in rolls over on its own.
    */
   MCP_VELOCITY_LIMIT_EXCEEDED = 'MCP_VELOCITY_LIMIT_EXCEEDED',
-  /**
-   * `spend_policies.allowed_tools` does not include this tool. Not one of the
-   * UI's four limit codes (those are about caps, velocity, funds and pause);
-   * added here because the allowlist is a fifth, distinct refusal reason that
-   * none of those four codes can honestly carry.
-   */
-  MCP_TOOL_NOT_ALLOWED = 'MCP_TOOL_NOT_ALLOWED',
 }
 
 export type McpErrorCodesArePrefixed = AssertDomainErrorCodes<'MCP', `${McpErrorCode}`>;
@@ -67,12 +76,6 @@ const VELOCITY_REASON_TEXT: Record<string, string> = {
 };
 
 export const McpErrors = createDomainErrorFactory('MCP', {
-  requestMalformed: {
-    code: McpErrorCode.MCP_REQUEST_MALFORMED,
-    statusCode: 400,
-    message: (context?: Record<string, any>) =>
-      `Malformed MCP request${context?.detail ? `: ${context.detail}` : ''}`,
-  },
   methodNotSupported: {
     code: McpErrorCode.MCP_METHOD_NOT_SUPPORTED,
     statusCode: 400,
@@ -88,19 +91,29 @@ export const McpErrors = createDomainErrorFactory('MCP', {
   credentialInvalid: {
     code: McpErrorCode.MCP_CREDENTIAL_INVALID,
     statusCode: 401,
-    message: () => `MCP credential is missing or invalid`,
+    // The optional context carries only the private `unauthorizedReason`
+    // (`mcp-unauthorized.port.ts`): no `publicContext`, so it never reaches
+    // the wire, and the message is the same for every reason.
+    message: (_context?: { unauthorizedReason?: McpUnauthorizedReason }) =>
+      `MCP credential is missing or invalid`,
   },
-  credentialRevoked: {
-    code: McpErrorCode.MCP_CREDENTIAL_REVOKED,
-    statusCode: 401,
-    message: (context?: Record<string, any>) =>
-      `MCP credential has been revoked` + `${context?.revokedAt ? ` at ${context.revokedAt}` : ''}`,
+  /** See `McpErrorCode.MCP_AUTH_RATE_LIMITED`. */
+  authRateLimited: {
+    code: McpErrorCode.MCP_AUTH_RATE_LIMITED,
+    statusCode: 429,
+    message: () => `Too many invalid credentials from this address. Try again shortly.`,
   },
-  sessionNotFound: {
-    code: McpErrorCode.MCP_SESSION_NOT_FOUND,
+  urlNotFound: {
+    code: McpErrorCode.MCP_URL_NOT_FOUND,
     statusCode: 404,
+    message: () => 'No MCP server at this URL',
+  },
+  idempotencyKeyInvalid: {
+    code: McpErrorCode.MCP_IDEMPOTENCY_KEY_INVALID,
+    statusCode: 400,
     message: (context?: Record<string, any>) =>
-      `MCP session not found${context?.sessionId ? `: ${context.sessionId}` : ''}`,
+      `Invalid _meta["assay/idempotency-key"]` +
+      `${context?.reason ? `: ${context.reason}` : ''}. Nothing was charged.`,
   },
   quotaExceeded: {
     code: McpErrorCode.MCP_QUOTA_EXCEEDED,
@@ -145,14 +158,6 @@ export const McpErrors = createDomainErrorFactory('MCP', {
       `nothing was charged` +
       `${context?.retryAfter ? `, retry after ${context.retryAfter}s` : ''}`,
   },
-  /** The tool allowlist. See `McpErrorCode.MCP_TOOL_NOT_ALLOWED`. */
-  toolNotAllowed: {
-    code: McpErrorCode.MCP_TOOL_NOT_ALLOWED,
-    statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      `Tool is not on this agent's spend-policy allowlist${context?.toolId ? `: ${context.toolId}` : ''}`,
-  },
-
   // ── the public live demo ─────────────────────────────────────────────────
 
   /** Free text needs a bound; there is one here and a rate limit behind it. */

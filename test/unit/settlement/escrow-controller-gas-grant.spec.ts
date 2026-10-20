@@ -50,6 +50,7 @@ const SESSION: McpSession = {
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 const GRANTED_WEI = 7_200_000_000_000n;
@@ -80,6 +81,7 @@ function escrowState(): EscrowState {
     // The chain answered — `EscrowState` now says so explicitly, so that an
     // unreadable chain and a readable-but-empty escrow cannot render alike.
     chainReadable: true,
+    lifetime: null,
   };
 }
 

@@ -58,6 +58,7 @@ function escrowState(overrides: Partial<EscrowState> = {}): EscrowState {
     // The chain answered — `EscrowState` now says so explicitly, so that an
     // unreadable chain and a readable-but-empty escrow cannot render alike.
     chainReadable: true,
+    lifetime: null,
     ...overrides,
   };
 }

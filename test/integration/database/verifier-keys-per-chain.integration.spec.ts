@@ -30,7 +30,7 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
  *    journal *after* it had already been produced.
  */
 describe('verifier keys, one ACTIVE per chain', () => {
-  const DATABASE = 'x402_verifier_chain_test';
+  const DATABASE = 'assay_verifier_chain_test';
   const SOLANA = CHAIN_IDS.SOLANA_DEVNET;
   const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
 
@@ -59,7 +59,7 @@ describe('verifier keys, one ACTIVE per chain', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
   }, 300_000);
 
   afterAll(async () => {

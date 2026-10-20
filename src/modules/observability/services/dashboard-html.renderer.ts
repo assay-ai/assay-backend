@@ -23,12 +23,13 @@ export function renderDashboardHtml(
 ): string {
   const money = snapshot.signals.filter((s) => s.section === 'money');
   const traffic = snapshot.signals.filter((s) => s.section === 'traffic');
+  const oauth = snapshot.signals.filter((s) => s.section === 'oauth');
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>x402 — Operator Dashboard</title>
+<title>Assay — Operator Dashboard</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -54,7 +55,7 @@ export function renderDashboardHtml(
 </style>
 </head>
 <body>
-  <h1>x402 — Operator Dashboard</h1>
+  <h1>Assay — Operator Dashboard</h1>
   <div class="meta">
     Generated ${escapeHtml(snapshot.generatedAt)} · cached ${snapshot.cacheTtlMs / 1000}s ·
     viewing as ${escapeHtml(operatorDisplayName)}
@@ -74,6 +75,14 @@ export function renderDashboardHtml(
     <thead><tr><th>Signal</th><th>Value</th><th>Gate</th></tr></thead>
     <tbody>
       ${traffic.map(signalRow).join('\n')}
+    </tbody>
+  </table>
+
+  <h2>OAuth</h2>
+  <table>
+    <thead><tr><th>Signal</th><th>Value</th><th>Gate</th></tr></thead>
+    <tbody>
+      ${oauth.map(signalRow).join('\n')}
     </tbody>
   </table>
 
@@ -99,9 +108,9 @@ export function renderDashboardHtml(
   </table>
 
   <footer>
-    Money and Traffic are the two dashboards served here. Quality, Providers, and both
+    Money, Traffic and OAuth are the dashboards served here. Quality, Providers, and both
     self-serve dashboards are not built yet. A "no data source" badge
-    means this codebase has no table or in-process counter for that signal today, not that the value
+    means this codebase has no table or counter for that signal today, not that the value
     is zero.
   </footer>
 </body>
@@ -128,10 +137,15 @@ function reconciliationRow(row: MetricsSnapshotDto['reconciliation'][number]): s
 }
 
 function signalRow(signal: SignalReadingDto): string {
+  // "no data source": nothing in this codebase computes the signal. "no
+  // data": a source exists but gave no value (an empty window, or a read that
+  // failed or timed out; the row's reason says which).
   const value =
-    signal.availability !== SignalAvailability.SOURCED || signal.value === null
-      ? `<span class="badge badge-absent">${badgeLabel(signal.availability)}</span>`
-      : `${formatValue(signal.value, signal.unit)} <span class="reason">${escapeHtml(signal.unit)}</span>`;
+    signal.availability !== SignalAvailability.SOURCED
+      ? `<span class="badge badge-absent">no data source</span>`
+      : signal.value === null
+        ? `<span class="badge badge-absent">no data</span>`
+        : `${formatValue(signal.value, signal.unit)} <span class="reason">${escapeHtml(signal.unit)}</span>`;
 
   const extra =
     signal.extra && Object.keys(signal.extra).length > 0
@@ -159,12 +173,6 @@ function gateCell(gate: MetricsSnapshotDto['reconciliation'][number]['gate']): s
         ? 'badge-warn'
         : 'badge-ok';
   return `<span class="badge ${cls}">${gate.status}</span><div class="gate reason">${escapeHtml(gate.summary)}</div>`;
-}
-
-function badgeLabel(availability: SignalAvailability): string {
-  return availability === SignalAvailability.AWAITING_INSTRUMENTATION
-    ? 'awaiting instrumentation'
-    : 'no data source';
 }
 
 function formatValue(value: number, unit: string): string {

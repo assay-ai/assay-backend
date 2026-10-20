@@ -159,22 +159,4 @@ export class ProviderEntity extends OrganizationScopedEntityWithoutSoftDelete {
 
   @Column({ name: 'verification_evidence_url', type: 'varchar', length: 2048, nullable: true })
   verificationEvidenceUrl: string | null;
-
-  /**
-   * Payout threshold override — atomic units, above the platform floor only.
-   *
-   * There is no write path yet: no column here is exposed by any controller, so
-   * this is always `NULL` in practice today. It exists so the deleted payout
-   * batch's threshold logic — `max(platform floor, override)` — is written
-   * against a real column from the start rather than a value invented at read
-   * time, and so the day an endpoint writes it, nothing downstream changes.
-   */
-  @Column({
-    name: 'payout_threshold_override',
-    type: 'numeric',
-    precision: 78,
-    scale: 0,
-    nullable: true,
-  })
-  payoutThresholdOverride: string | null;
 }

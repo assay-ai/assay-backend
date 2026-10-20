@@ -18,9 +18,9 @@ verification, settlement of an already-funded balance — injects it. Concretely
 - **New deposits stop.** `DepositService` calls `facilitator.verify()` then `facilitator.settle()`
   to turn an x402 payment payload into a confirmed on-chain deposit. This is the only thing actually
   down.
-- **Withdrawals and provider payouts are a separate path entirely** — `TreasuryVaultService` /
-  `VaultPort` (Squads multisig), not `FacilitatorPort`. A facilitator outage does not touch them; an
-  RPC outage or a Squads issue would, but that is a different incident.
+- **Withdrawals and provider payouts are a separate path entirely** — the buyer's own escrow, not
+  `FacilitatorPort`. A facilitator outage does not touch them; an RPC outage would, but that is a
+  different incident.
 
 So "confirm the hot path is unaffected" is, in this codebase, a one-line grep away from
 being either true or a red flag: `grep -rn FACILITATOR_PORT src/modules --include='*.service.ts'`

@@ -1,20 +1,26 @@
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 import { applyHttpSecurity } from '@shared/security/security-headers';
-import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
+import { assertTrustProxyHopsConfigured } from '@config/app.config';
+import { loadMcpDiscoveryConfig } from '@modules/mcp/config/mcp-discovery.config';
+
 import { AppMcpModule } from './app.module';
+import { mcpCorsOptions } from './mcp-cors';
+import { McpExceptionsFilter } from './mcp-exceptions.filter';
 
 /**
  * The MCP server process — the interface agents actually reach the
  * platform through.
  *
- * **No `setGlobalPrefix`, no versioning.** The route is exactly `/mcp`, because
- * that is a URL an operator pastes into an agent's configuration and an MCP
- * client sends JSON-RPC to. `/api/v1/mcp` would work equally well as HTTP and
- * would be one more thing every integration has to be told.
+ * **No `setGlobalPrefix`, no versioning, no `/mcp`.** The service is its own
+ * host (`mcp.assay.ai`, `MCP_PUBLIC_URL`) and every path at its root is an MCP
+ * server: `/` is the whole catalogue, `/my/{slug}` a toolset (design spec
+ * §7.4). A URL an operator pastes into an agent's configuration is as short as
+ * it can be, and the subdomain already says what the host is for.
  *
  * **No `ValidationPipe`, no `TransformInterceptor`.** Every body on this route
  * is JSON-RPC 2.0 and is validated by the MCP SDK against the specification;
@@ -28,26 +34,35 @@ import { AppMcpModule } from './app.module';
  * JSON-RPC error from a server that does not know who is calling.
  */
 async function bootstrapMcp() {
-  const app = await NestFactory.create(AppMcpModule, {
+  // Fails the boot, not the first paged search, when the cursor secret is
+  // missing in production.
+  loadMcpDiscoveryConfig();
+
+  const app = await NestFactory.create<NestExpressApplication>(AppMcpModule, {
     logger: new StructuredLogger(),
   });
 
-  const port = app.get(ConfigService).get<number>('app.mcp.port');
+  const configService = app.get(ConfigService);
+  const port = configService.get<number>('app.mcp.port');
 
-  // An MCP client may be a browser-hosted agent. `Authorization` has to be
-  // allowed explicitly — it is not a CORS-safelisted request header — and
-  // `mcp-session-id` / `mcp-protocol-version` are the Streamable HTTP headers a
-  // client must be able to send and read back. Any origin, but without
-  // credentials: the bearer token is a header, not a cookie, so nothing is
-  // lost, and `*` with credentials is the pairing R17-R-02 removed.
+  // Client address, as in `api/main.ts`. Both processes sit behind the same
+  // balancer, so they share `API_TRUST_PROXY_HOPS`: without it `request.ip`
+  // here is the balancer's address and every IP-keyed limit (the public demo)
+  // counts all callers as one. Production refuses to start with it unset.
+  assertTrustProxyHopsConfigured();
+  app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
+
+  // An MCP client may be a browser-hosted agent, and an OAuth client may run
+  // in a browser too. CORS is per route family (`mcp-cors.ts`, spec §6.3):
+  // the catch-all allows the MCP headers and exposes the 401 challenge;
+  // discovery, token and revocation get a narrow public policy; register and
+  // authorize get none. Never with credentials.
   applyHttpSecurity(app);
-  app.enableCors({
-    origin: '*',
-    allowedHeaders: ['content-type', 'authorization', 'mcp-session-id', 'mcp-protocol-version'],
-    exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
-  });
+  app.enableCors(mcpCorsOptions);
 
-  app.useGlobalFilters(new AllExceptionsFilter());
+  // `AllExceptionsFilter`, except that a body the parser refuses on the OAuth
+  // token, revoke and register routes answers in RFC 6749 shape.
+  app.useGlobalFilters(new McpExceptionsFilter());
 
   // The ONLY interceptor this process takes. `TransformInterceptor`
   // is deliberately absent (JSON-RPC has its own envelope) and that must not
@@ -61,7 +76,7 @@ async function bootstrapMcp() {
   await app.listen(port);
 
   console.log(`
-  🔌 [MCP SERVER] Streamable HTTP transport on: http://localhost:${port}/mcp
+  🔌 [MCP SERVER] Streamable HTTP transport on every path of: http://localhost:${port}/
   `);
 }
 

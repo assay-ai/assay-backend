@@ -165,7 +165,7 @@ function requirements(row: (typeof CHAINS)[number], amount = '5000000'): Payment
     amount,
     asset: row.asset.split('erc20:')[1],
     payTo: row.buyer,
-    resource: 'x402:deposit:11111111-1111-1111-1111-111111111111',
+    resource: 'assay:deposit:11111111-1111-1111-1111-111111111111',
     maxTimeoutSeconds: 120,
     extra: {
       paymentFlow: 'contract-call',

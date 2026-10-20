@@ -1,7 +1,7 @@
 import { decodeFunctionData, getAddress, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { X402_CONFIG_ARBITER_ABI, X402_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_CONFIG_ARBITER_ABI, ASSAY_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
 import { SlashProposalRequest } from '@modules/slash/ports/slash-executor.port';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
@@ -190,7 +190,7 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
         requestIds: [requestId(1), requestId(2)],
       });
       expect(
-        decodeFunctionData({ abi: X402_STAKE_SLASH_ABI, data: built.call!.data as `0x${string}` }),
+        decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data: built.call!.data as `0x${string}` }),
       ).toMatchObject({
         functionName: 'disputeSlashBatch',
         args: [[`0x${requestId(1)}`, `0x${requestId(2)}`]],
@@ -341,7 +341,7 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
         functionName: 'setBlocked',
       });
       expect(
-        decodeFunctionData({ abi: X402_CONFIG_ARBITER_ABI, data: call.data as `0x${string}` }),
+        decodeFunctionData({ abi: ASSAY_CONFIG_ARBITER_ABI, data: call.data as `0x${string}` }),
       ).toMatchObject({ args: [getAddress(TARGET), true] });
     });
 

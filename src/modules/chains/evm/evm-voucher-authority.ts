@@ -8,7 +8,7 @@ import {
   VoucherAuthorityRefusal,
 } from '../ports/voucher-authority.types';
 import { EVM_CONSTANTS } from './evm.constants';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { decayWindow } from './evm-voucher-prevalidation';
 import { recoverEvmSigner } from './secp256k1-recover';
 
@@ -34,7 +34,7 @@ interface DelegationRead {
 }
 
 /**
- * `X402Escrow._voucherAuthority`, off chain, for one chain's escrow.
+ * `AssayEscrow._voucherAuthority`, off chain, for one chain's escrow.
  *
  * It answers exactly the question the contract will answer at redemption, in
  * the contract's order — the payer's own key, then a delegate the payer
@@ -125,7 +125,7 @@ export class EvmVoucherAuthority {
     try {
       return (await this.client.readContract({
         address: this.escrow,
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'delegationOf',
         args: [payer, delegate],
       })) as DelegationRead;

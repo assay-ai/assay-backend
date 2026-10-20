@@ -197,6 +197,24 @@ describe('SlashPartsService.appliesTo', () => {
   });
 });
 
+/**
+ * Load-bearing for B18 (review m6): a case with no parts in its epoch reads
+ * as `null` — never the case's own request id, even when a record stands
+ * there. That is why the sweeps and the watcher can never settle (or race)
+ * such a case, and why only the operator's stuck-case actions act on it. A
+ * fallback here to the case's own record would make the watcher and `S-16`
+ * write the same execution concurrently.
+ */
+describe('SlashPartsService.readRecord with no parts (B18)', () => {
+  it('is null and reads nothing on chain, whatever stands at the case id', async () => {
+    const { service, proposal, executor } = build([]);
+    executor.records.set(proposal.chainRequestId, { status: 'EXECUTED' } as never);
+    const read = jest.spyOn(executor, 'readRecord');
+    await expect(service.readRecord(proposal, '0xprovider')).resolves.toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
 describe('SlashPartsService.propose', () => {
   it('plans once, proposes every part in one batch, and folds the parts into one record', async () => {
     const { service, proposal, executor, parts } = build([
@@ -743,5 +761,147 @@ describe('review H-2 — the stored plan is checked against the evidence before 
       status: 'PENDING',
     });
     expect(ctx.executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
+  });
+});
+
+/**
+ * B11: a case asked to be cancelled with no part standing (a case opened
+ * before the parts model has no parts at all). What is on chain is read and
+ * named in a 409 SLASH_NOTHING_STANDING, never a 503, and nothing is written:
+ * the case keeps its status for an operator to settle (owner rule).
+ */
+describe('SlashPartsService.buildCancel — nothing standing', () => {
+  const record = (status: SlashRecordSnapshot['status']): SlashRecordSnapshot => ({
+    status,
+    penaltyMinor: '300',
+    appliedMinor: '0',
+    agentAmountMinor: '0',
+    platformAmountMinor: '0',
+    reservedMinor: status === 'PENDING' || status === 'DISPUTED' ? '300' : '0',
+    proposedAt: T0,
+    executableAt: X0,
+    executedAt: null,
+    cancelledAt: null,
+  });
+
+  function withCase(weights: [string, string][] = []) {
+    const ctx = build(weights);
+    const alerts = { emit: jest.fn(async () => undefined) };
+    const service = new SlashPartsService(
+      ctx.parts as never,
+      {} as never,
+      ctx.executor,
+      { dustReportBelowMinor: 0n, stragglerMaxAttempts: 3, stragglerDeadlineMs: 1 },
+      { readCaps: async () => CAPS },
+      alerts as never,
+    );
+    const proposal = {
+      ...ctx.proposal,
+      status: 'CANCELLED',
+      chainStatus: 'CANCEL_REQUESTED',
+      chainProposedAt: null,
+    } as SlashProposalEntity;
+    const built: string[] = [];
+    ctx.executor.buildCancel = (async (request: { requestId: string }) => {
+      built.push(request.requestId);
+      return { transaction: 'tx' } as never;
+    }) as never;
+    return { ...ctx, planner: ctx.service, service, proposal, alerts, built };
+  }
+
+  const refusal = (chainStatus: string) => ({
+    errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+    statusCode: 409,
+    publicContext: { proposalId: 'case-1', chainStatus },
+  });
+
+  it.each([
+    ['CANCELLED', 'CANCELLED'],
+    [null, 'NOT_FOUND'],
+  ] as const)('no parts, record %s: a 409 naming %s, nothing built', async (status, named) => {
+    const ctx = withCase();
+    if (status) ctx.executor.records.set(ctx.proposal.chainRequestId, record(status));
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject(
+      refusal(named),
+    );
+    expect(ctx.built).toEqual([]);
+    expect(ctx.alerts.emit).not.toHaveBeenCalled();
+  });
+
+  it.each(['PENDING', 'DISPUTED'] as const)(
+    'no parts but the case record is %s on chain: builds its cancel',
+    async (status) => {
+      const ctx = withCase();
+      ctx.executor.records.set(ctx.proposal.chainRequestId, record(status));
+      await ctx.service.buildCancel(ctx.proposal, '0xprovider');
+      expect(ctx.built).toEqual([ctx.proposal.chainRequestId]);
+    },
+  );
+
+  // C1: a withdrawn judgement executed while the cancel waited is paged and named EXECUTED.
+  it('C1: an executed record is alerted and refused as EXECUTED', async () => {
+    const ctx = withCase();
+    ctx.executor.records.set(ctx.proposal.chainRequestId, record('EXECUTED'));
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject(
+      refusal('EXECUTED'),
+    );
+    expect(ctx.alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'CRITICAL',
+        name: 'slash_executed_while_cancel_waited',
+        details: expect.objectContaining({ proposalId: 'case-1', where: 'record' }),
+      }),
+    );
+  });
+
+  it('C1: a part that executed is alerted and refused as EXECUTED', async () => {
+    const ctx = withCase([[agent(1), '200']]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    Object.assign(ctx.parts.rows[0], { chainStatus: 'EXECUTED', executedAt: X0 });
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject(
+      refusal('EXECUTED'),
+    );
+    expect(ctx.alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ details: expect.objectContaining({ where: 'part' }) }),
+    );
+  });
+
+  // I3: a case with parts is judged by its parts, never by a read of the case id.
+  it('a case with parts, all cancelled: CANCELLED from the parts, the case id is not read', async () => {
+    const ctx = withCase([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    ctx.parts.rows.forEach((row) => Object.assign(row, { chainStatus: 'CANCELLED' }));
+    const reads = jest.spyOn(ctx.executor, 'readRecord');
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject(
+      refusal('CANCELLED'),
+    );
+    expect(reads.mock.calls.map(([id]) => id)).not.toContain(ctx.proposal.chainRequestId);
+  });
+
+  it('a case with a part still NONE (it may land) is named PROPOSING', async () => {
+    const ctx = withCase([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    Object.assign(ctx.parts.rows[0], { chainStatus: 'CANCELLED' });
+    Object.assign(ctx.parts.rows[1], { chainStatus: 'NONE' });
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject(
+      refusal('PROPOSING'),
+    );
+  });
+
+  it('an unreadable chain is a 503', async () => {
+    const ctx = withCase();
+    ctx.executor.readRecord = async () => {
+      throw new Error('rpc down');
+    };
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
+      publicContext: { reason: expect.stringContaining('could not be read') },
+    });
   });
 });

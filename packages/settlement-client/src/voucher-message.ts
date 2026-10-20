@@ -2,7 +2,7 @@ import { getAddressEncoder } from '@solana/kit';
 import type { Address, ReadonlyUint8Array } from '@solana/kit';
 
 /**
- * The exact 239 bytes a **buyer** signs to authorise one payment out of their
+ * The exact 240 bytes a **buyer** signs to authorise one payment out of their
  * own escrow — the second signed message in this program that is not in the
  * IDL, and the first one signed by somebody who is not the platform.
  *
@@ -15,18 +15,18 @@ import type { Address, ReadonlyUint8Array } from '@solana/kit';
  *
  * ```text
  * offset len  field
- *   0   15   b"x402:voucher:v2"
- *  15   32   program id      (the DEPLOYED id — see below)
- *  47   32   payer           (the buyer)
- *  79   32   pay_to          (= the escrow PDA of payer)
- * 111   32   provider
- * 143    8   amount        u64 LE   the EXACT price, not a ceiling
- * 151   32   resource_hash sha256(resource)
- * 183   32   request_hash
- * 215    8   seq           u64 LE   1-based
- * 223    8   issued_at     i64 LE
- * 231    8   expires_at    i64 LE
- * total 239
+ *   0   16   b"assay:voucher:v2"
+ *  16   32   program id      (the DEPLOYED id — see below)
+ *  48   32   payer           (the buyer)
+ *  80   32   pay_to          (= the escrow PDA of payer)
+ * 112   32   provider
+ * 144    8   amount        u64 LE   the EXACT price, not a ceiling
+ * 152   32   resource_hash sha256(resource)
+ * 184   32   request_hash
+ * 216    8   seq           u64 LE   1-based
+ * 224    8   issued_at     i64 LE
+ * 232    8   expires_at    i64 LE
+ * total 240
  * ```
  *
  * **`issued_at` comes before `expires_at`**, matching the program's own
@@ -39,8 +39,8 @@ import type { Address, ReadonlyUint8Array } from '@solana/kit';
  *
  * ## Why `programAddress` is required here and optional in `attestation-message.ts`
  *
- * The program id sits at offset 15..47, inside the signed bytes. Its sibling
- * defaults to `X402_PAYMENT_PROGRAM_ADDRESS`, which is `declare_id!()` — the
+ * The program id sits at offset 16..48, inside the signed bytes. Its sibling
+ * defaults to `ASSAY_PAYMENT_PROGRAM_ADDRESS`, which is `declare_id!()` — the
  * address the program was *built* for. A redeploy under a **new** id makes the
  * built id and the deployed id differ, and a default here would have every
  * buyer sign bytes naming a program that is not the one about to check them.
@@ -61,13 +61,13 @@ import type { Address, ReadonlyUint8Array } from '@solana/kit';
  * file as one of exactly two allowed to write program bytes by hand.
  */
 
-const VOUCHER_DOMAIN_BYTES = utf8('x402:voucher:v2');
+const VOUCHER_DOMAIN_BYTES = utf8('assay:voucher:v2');
 
-/** `b"x402:voucher:v2"` — 15 bytes, and the first 15 of every voucher message. */
+/** `b"assay:voucher:v2"` — 16 bytes, and the first 16 of every voucher message. */
 export const VOUCHER_DOMAIN = VOUCHER_DOMAIN_BYTES as ReadonlyUint8Array;
 
-/** `VOUCHER_MESSAGE_LEN` — 15 + 32 + 32 + 32 + 32 + 8 + 32 + 32 + 8 + 8 + 8. */
-export const VOUCHER_MESSAGE_LENGTH = 239;
+/** `VOUCHER_MESSAGE_LEN` — 16 + 32 + 32 + 32 + 32 + 8 + 32 + 32 + 8 + 8 + 8. */
+export const VOUCHER_MESSAGE_LENGTH = 240;
 
 export interface VoucherMessageFields {
   /** The buyer. The key whose ed25519 signature the program proves. */
@@ -95,16 +95,16 @@ export interface VoucherMessageFields {
 export function voucherMessage(fields: VoucherMessageFields): Uint8Array {
   const out = new Uint8Array(VOUCHER_MESSAGE_LENGTH);
   out.set(VOUCHER_DOMAIN_BYTES, 0);
-  out.set(addressBytes(fields.programAddress), 15);
-  out.set(addressBytes(fields.payer), 47);
-  out.set(addressBytes(fields.payTo), 79);
-  out.set(addressBytes(fields.provider), 111);
-  out.set(u64le(fields.amount), 143);
-  out.set(fixed(fields.resourceHash, 32), 151);
-  out.set(fixed(fields.requestHash, 32), 183);
-  out.set(u64le(fields.seq), 215);
-  out.set(i64le(fields.issuedAt), 223);
-  out.set(i64le(fields.expiresAt), 231);
+  out.set(addressBytes(fields.programAddress), 16);
+  out.set(addressBytes(fields.payer), 48);
+  out.set(addressBytes(fields.payTo), 80);
+  out.set(addressBytes(fields.provider), 112);
+  out.set(u64le(fields.amount), 144);
+  out.set(fixed(fields.resourceHash, 32), 152);
+  out.set(fixed(fields.requestHash, 32), 184);
+  out.set(u64le(fields.seq), 216);
+  out.set(i64le(fields.issuedAt), 224);
+  out.set(i64le(fields.expiresAt), 232);
   return out;
 }
 

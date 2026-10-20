@@ -1,3 +1,4 @@
+import { ToolVersionBriefDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsUUID } from 'class-validator';
 
@@ -33,8 +34,8 @@ import { ToolTier } from '@modules/tool/ports/tool.types';
  * careful about, and each has a real "we do not know" that must survive to the
  * screen:
  *
- * - **{@link CatalogueProviderDto.quality}** is `null` until the provider has a
- *   closed SLA window. Not `0`, and not `1`. Roughly two thirds of providers on
+ * - **{@link CatalogueProviderDto.quality}** is `null` until the provider has
+ *   an SLA window in the last 30 days. Not `0`, and not `1`. Roughly two thirds of providers on
  *   a young deployment have never been measured, and rendering that as 100%
  *   would make the least-proven provider look like the best one.
  * - **{@link CatalogueProviderDto.stake}** is a list per chain and is EMPTY
@@ -96,8 +97,10 @@ export class CatalogueChainStakeDto {
  * card is the number the provider is held to, rather than a second opinion
  * computed for display.
  *
- * **Closed windows only.** An open window's counters are still moving, and a
- * rate that changes while a buyer compares two providers is not a measurement.
+ * **The last 30 days, open and closed windows** (owner decision D5). Closed
+ * windows alone left a provider's current traffic out of the figure, and a few
+ * old windows could stand for thousands of newer calls. The penalty path does
+ * not read this sum: strikes and slashes still judge one closed window at a time.
  *
  * `measuredCalls` rides along because a rate without a denominator is not
  * comparable: 100% of four calls and 95% of sixteen thousand are not the same
@@ -178,14 +181,90 @@ export class CatalogueProviderDto {
   @ApiPropertyOptional({
     type: CatalogueQualityDto,
     nullable: true,
-    description: 'null until a window has closed. Not measured is not the same as perfect.',
+    description:
+      'null until a call has been checked in the last 30 days. Not measured is not the same as perfect.',
   })
   quality: CatalogueQualityDto | null;
+
+  /**
+   * The chains a call to this provider can settle on right now: the union of
+   * the known {@link CatalogueProviderToolDto.chains} over its tools. Empty
+   * when the router would take no call to it on any chain (paused at the
+   * circuit, at its ceiling, short of stake, on a slash hold); `null` when no
+   * tool's chains could be read — unknown, never "takes no call".
+   */
+  @ApiProperty({
+    type: [String],
+    nullable: true,
+    description:
+      'CAIP-2 chains a call to this provider can settle on now, by the router’s own gates. ' +
+      'Empty when it takes no call on any chain right now; null when that could not be read.',
+  })
+  chains: string[] | null;
+
+  /**
+   * Whether this provider takes a call from the **caller's** agents now: one of
+   * {@link chains} is a chain one of the caller's agents pays on. Only the
+   * signed-in routes fill it, from the caller's own agents; `null` when nobody
+   * is asking, or when the provider's chains could not be read.
+   */
+  @ApiProperty({
+    type: Boolean,
+    nullable: true,
+    description:
+      'Per caller: a call from one of your agents can settle with this provider now (on your ' +
+      'agents’ chains, less a chain with a standing withdrawal). null when unknown.',
+  })
+  servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderListDto {
   @ApiProperty({ type: [CatalogueProviderDto], description: 'Every provider serving traffic.' })
   providers: CatalogueProviderDto[];
+}
+
+/**
+ * What a call costs on one chain, and whose listing sets that price.
+ *
+ * A buyer pays on one chain, so the price that matters to them is that chain's
+ * — the router's quote for a buyer funded there. One tool can settle at $0.10
+ * on one chain and $0.25 on another, and a single headline figure would be
+ * wrong for one of the two readers.
+ */
+export class CatalogueChainPriceDto {
+  @ApiProperty({ description: 'CAIP-2 chain a call settles on at this price' })
+  chainId: string;
+
+  @ApiProperty({
+    type: CatalogueMoneyDto,
+    description: 'The routed quote for a buyer paying on this chain — the most a call is charged.',
+  })
+  price: CatalogueMoneyDto;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The provider whose listing sets this price; null when several eligible listings share it.',
+  })
+  providerId: string | null;
+
+  @ApiProperty({
+    description:
+      'Eligible listings on this chain the price was taken over. Name the provider only when 1.',
+    example: 1,
+  })
+  listings: number;
 }
 
 export class CatalogueToolDto {
@@ -198,8 +277,86 @@ export class CatalogueToolDto {
   @ApiProperty()
   description: string;
 
-  @ApiProperty({ enum: ToolTier })
+  @ApiProperty({ description: 'The current version’s summary (at most 200 characters).' })
+  summary: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '1.1.0',
+    description: 'tools.current_version',
+  })
+  version: string | null;
+
+  @ApiProperty({
+    type: [ToolVersionBriefDto],
+    description: 'Every published version, newest first, with status, sunset and changelog.',
+  })
+  versions: ToolVersionBriefDto[];
+
+  @ApiProperty({
+    type: [Number],
+    example: [1],
+    description: 'Majors that are DEPRECATED (still serving until their sunset).',
+  })
+  deprecatedMajors: number[];
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'What replaces the deprecated majors: the tool to call (this tool at a newer major, or ' +
+      'the operator-named replacement tool, only when it is LISTED). `null` with no deprecated ' +
+      'major or no replacement.',
+  })
+  replacementToolId: string | null;
+
+  @ApiProperty({ type: String, nullable: true, example: 'get_weather' })
+  replacementName: string | null;
+
+  @ApiProperty({ type: Number, nullable: true, example: 2, description: 'The major to call it at' })
+  replacementMajor: number | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '2.0.0',
+    description: 'The replacement’s served version',
+  })
+  replacementVersion: string | null;
+
+  @ApiProperty({ enum: ToolTier, description: 'A provider tool is never GUARANTEED (§7.6).' })
   tier: ToolTier;
+
+  @ApiProperty({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'STANDARD: backed by several providers. PROVIDER: one maker’s own API.',
+  })
+  kind: 'STANDARD' | 'PROVIDER';
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'acme',
+    description: 'The maker’s public name, on a PROVIDER tool (`{handle}__{tool}`).',
+  })
+  handle: string | null;
+
+  @ApiProperty({
+    description:
+      'The "Not reviewed" badge: a provider tool no operator approved. Always false in the ' +
+      'catalogue, which lists reviewed (LISTED) tools only.',
+  })
+  notReviewed: boolean;
+
+  @ApiProperty({
+    example: 'weather',
+    description: 'The tool’s topic (`tools.category`), as `?category=` filters on.',
+  })
+  category: string;
+
+  @ApiProperty({ type: [String], example: ['temperature', 'conditions'] })
+  tags: string[];
 
   @ApiProperty({ description: 'Distinct providers with an ACTIVE binding for this tool.' })
   providerCount: number;
@@ -302,8 +459,8 @@ export class CatalogueToolDto {
    *
    * ## The same fact the MCP surface publishes, from the same derivation
    *
-   * `tools/list` publishes this as `x402/settlementChains`
-   * (`X402_SETTLEMENT_CHAINS`), and both come from the identical expression:
+   * `tools/list` publishes this as `assay/settlementChains`
+   * (`ASSAY_SETTLEMENT_CHAINS`), and both come from the identical expression:
    * `ProviderRouterService.quote(...).settlementChains`, the union of
    * `settleableChains(candidate, context)` over the ELIGIBLE set. Same name,
    * same CAIP-2 values, one derivation. A second derivation off
@@ -342,6 +499,15 @@ export class CatalogueToolDto {
       'nowhere”.',
   })
   settlementChains: string[] | null;
+
+  @ApiProperty({
+    type: [CatalogueChainPriceDto],
+    description:
+      'The price per chain a call can settle on, with the provider setting it — at most one entry ' +
+      'per `settlementChains` entry; a chain that cannot be quoted right now is left out. Empty ' +
+      'when nothing is routable.',
+  })
+  prices: CatalogueChainPriceDto[];
 }
 
 export class CatalogueToolListDto {
@@ -363,6 +529,14 @@ export class CatalogueProviderToolDto {
   @ApiProperty({ type: CatalogueMoneyDto })
   price: CatalogueMoneyDto;
 
+  @ApiProperty({
+    description:
+      'The failure rate this listing promises, 0..1 (`tool_bindings.sla_failure_rate`) — the ' +
+      'line its penalties are measured against.',
+    example: 0.05,
+  })
+  promisedFailureRate: number;
+
   @ApiPropertyOptional({
     type: Number,
     nullable: true,
@@ -371,6 +545,41 @@ export class CatalogueProviderToolDto {
       'the platform default when it set none. null for a PAID binding.',
   })
   freeCallsPerAgentPerDay: number | null;
+
+  /**
+   * The chains a call to this listing can settle on now. Each enabled chain is
+   * asked of the router on its own, as a call from an agent on that chain
+   * would be routed (`payerChains: [chain]`), over this provider's candidates
+   * only, so the stake, slash-hold, ceiling and circuit gates are the router's
+   * own. `null` when the router could not be asked; `[]` when it takes no call
+   * on any chain right now.
+   */
+  @ApiProperty({
+    type: [String],
+    nullable: true,
+    description:
+      'CAIP-2 chains a call to this listing can settle on now; [] when it takes no call; ' +
+      'null when that could not be read.',
+  })
+  chains: string[] | null;
+
+  @ApiProperty({
+    type: Boolean,
+    nullable: true,
+    description:
+      'Per caller: one of your agents’ chains is in `chains`. null when unknown or unasked.',
+  })
+  servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderDetailDto extends CatalogueProviderDto {
@@ -387,4 +596,10 @@ export class GetCatalogueProviderParamsDto {
   @ApiProperty({ description: 'The provider id.' })
   @IsUUID()
   providerId: string;
+}
+
+export class GetCatalogueToolParamsDto {
+  @ApiProperty({ description: 'The tool id (`tools.id`).' })
+  @IsUUID()
+  toolId: string;
 }

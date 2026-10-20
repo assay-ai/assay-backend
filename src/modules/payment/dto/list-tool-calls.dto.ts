@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsEnum, IsOptional, IsUUID } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -42,6 +43,22 @@ export class ListToolCallsQueryDto extends ListQueryDto {
   @IsEnum(VerdictStatus, { each: true })
   @TransformToArray()
   verdict?: VerdictStatus[];
+
+  @ApiPropertyOptional({
+    description:
+      'Only calls a report filed now would refund in full if upheld: the same read-only ' +
+      'predicate as the receipt’s `refundableIfReportedNow` (and the filing’s ' +
+      '`refundGuaranteed`), never the clock alone. Each row then carries ' +
+      '`refundableIfReportedUntil`',
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  })
+  refundable?: boolean;
 }
 
 /** One row of the call list, and the shape `GET /tool-calls/:intentId` returns for one. */
@@ -89,6 +106,29 @@ export class ToolCallDto {
   })
   debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
+  @ApiProperty({
+    description:
+      'SETTLED, and refunded because the buyer reported a bad result and the report was ' +
+      'upheld: not charged (`charged` is zero, `debt` is `VOIDED`)',
+  })
+  refundedByReport: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'When the payment may be collected from the escrow (the dispute hold). Until then the ' +
+      'price stays held and is not the provider’s. Null when the call has no hold',
+  })
+  collectableAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Dispute before this and an upheld dispute refunds the call in full; after it a dispute ' +
+      'is a quality signal. Null when the call has no hold',
+  })
+  disputeWindowEndsAt: Date | null;
+
   @ApiPropertyOptional({
     nullable: true,
     enum: VerdictStatus,
@@ -98,4 +138,13 @@ export class ToolCallDto {
 
   @ApiProperty()
   createdAt: Date;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Only with `refundable=true`: the instant the full-refund answer lapses (the ' +
+      'receipt’s `refundableIfReportedUntil`). Null when no end is known yet: a voucher not ' +
+      'redeemed, whose hour starts at redemption',
+  })
+  refundableIfReportedUntil?: Date | null;
 }

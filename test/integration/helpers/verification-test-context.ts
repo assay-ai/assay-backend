@@ -23,11 +23,15 @@ import {
 } from '@modules/verification/services/redis-policy-kill-switch.service';
 import { VerificationAggregatorService } from '@modules/verification/services/verification-aggregator.service';
 
-import { ensureTestDatabase, testConnectionOptions } from './test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from './test-database';
 
 loadEnv();
 
-const DATABASE = 'x402_verification_test';
+const DATABASE = 'assay_verification_test';
 
 /**
  * Two policy-lifecycle mechanisms only exist across a boundary, so they are only
@@ -90,6 +94,7 @@ export async function createVerificationTestContext(
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const policies = new VerificationPolicyRepository(dataSource);

@@ -30,18 +30,6 @@ export interface LedgerPort {
    */
   appendNow(input: AppendEntryInput): Promise<JournalEntry>;
 
-  /**
-   * Enqueues an entry for the next batch flush.
-   *
-   * Only types that cannot reduce a balance are accepted; anything else raises
-   * `LEDGER_ENTRY_NOT_BUFFERABLE` synchronously at the call site rather than
-   * failing a whole batch 200ms later.
-   */
-  append(input: AppendEntryInput): void;
-
-  /** Flushes the buffer as one all-or-nothing transaction. */
-  flush(): Promise<number>;
-
   readJournal(
     organizationId: string,
     filter?: { accountId?: LedgerAccountId; asset?: AssetId; intentId?: string },

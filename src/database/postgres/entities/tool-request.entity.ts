@@ -83,6 +83,10 @@ export class ToolRequestEntity extends OrganizationScopedEntityWithoutSoftDelete
   @Column({ name: 'resolution_note', type: 'text', nullable: true })
   resolutionNote: string | null;
 
+  /** The DRAFT tool an accepted request created (design spec §7.5). */
+  @Column({ name: 'tool_id', type: 'uuid', nullable: true })
+  toolId: string | null;
+
   /** Required exactly when `status` is `ACCEPTED` or `DECLINED`. */
   @Column({ name: 'closed_at', type: 'timestamptz', nullable: true })
   closedAt: Date | null;

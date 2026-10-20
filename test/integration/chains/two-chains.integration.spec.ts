@@ -109,7 +109,6 @@ describe('two chains, enabled together', () => {
       EVM_RELAYER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'11'.repeat(32)}` }]),
       // And a DIFFERENT redeemer key: the boot refuses the two being equal.
       EVM_REDEEMER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'22'.repeat(32)}` }]),
-      SOLANA_ENABLED_CHAINS: undefined,
       ...overrides,
     });
 

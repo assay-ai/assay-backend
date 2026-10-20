@@ -28,6 +28,25 @@ export class FakeRedis {
     return Promise.resolve('OK');
   }
 
+  /** Releases a claim (`NotificationService` on a failed write). */
+  del(key: string): Promise<number> {
+    this.commands.push(`del ${key}`);
+    if (this.down) {
+      return Promise.reject(new Error('redis is unreachable'));
+    }
+    const existed = this.strings.delete(key);
+    this.ttls.delete(key);
+    return Promise.resolve(existed ? 1 : 0);
+  }
+
+  exists(key: string): Promise<number> {
+    this.commands.push(`exists ${key}`);
+    if (this.down) {
+      return Promise.reject(new Error('redis is unreachable'));
+    }
+    return Promise.resolve(this.strings.has(key) ? 1 : 0);
+  }
+
   flush(): void {
     this.strings.clear();
     this.ttls.clear();

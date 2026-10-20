@@ -17,7 +17,7 @@ import {
 } from '../ports/caip.types';
 import { Money } from '../ports/money.types';
 import { VaultPort } from '../ports/vault.port';
-import { ERC20_ABI, X402_CONFIG_ABI, X402_ESCROW_ABI } from './abi/x402.abi';
+import { ERC20_ABI, ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 
 /** Per chain, the derived addresses of this process's redeemer and relayer keys. */
@@ -65,10 +65,7 @@ export interface EvmVaultClient {
  *
  * ## The vault IS the escrow contract, and there is no second account
  *
- * On Solana the treasury is a Squads multisig PDA that *owns* an ATA, and
- * `assertVaultControl` proves the ATA's authority is the derived PDA and that
- * the PDA is owned by the Squads program. On EVM `X402Escrow` holds the USDG
- * itself and is authorised by its own code. So `getVaultOwner` and
+ * `AssayEscrow` holds the USDG itself and is authorised by its own code. So `getVaultOwner` and
  * `getVaultAccount` return the same address, which is not a shortcut — it is
  * the shape of the thing. Neither costs a round trip: the answer is the
  * deployment record, and the record is what `assertVaultControl` checks.
@@ -113,7 +110,7 @@ export interface EvmVaultClient {
  *
  * ## Why no `balanceOf`-based solvency check appears here, and none may be added
  *
- * `X402Escrow`'s four `balanceOf` reads are all delta halves. A solvency
+ * `AssayEscrow`'s four `balanceOf` reads are all delta halves. A solvency
  * assertion over the pooled balance would refuse EVERY withdrawal rather than
  * the one actually affected the moment anything is off by a unit — USDG is an
  * upgradeable proxy with a blocklist, and a blocklisted contract's
@@ -214,7 +211,7 @@ export class EvmVaultService implements VaultPort {
     // 2. The key that can replace it: the owner, the upgrade authority.
     const owner = (await client.readContract({
       address: getAddress(deployment.config),
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'owner',
     })) as `0x${string}`;
     if (getAddress(owner) !== getAddress(deployment.owner)) {
@@ -229,7 +226,7 @@ export class EvmVaultService implements VaultPort {
     // 3. The operational key the owner appointed.
     const admin = (await client.readContract({
       address: getAddress(deployment.config),
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'admin',
     })) as `0x${string}`;
     if (getAddress(admin) !== getAddress(deployment.admin)) {
@@ -249,7 +246,7 @@ export class EvmVaultService implements VaultPort {
     // 4. The denomination.
     const settled = (await client.readContract({
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'ASSET',
     })) as `0x${string}`;
     if (getAddress(settled) !== getAddress(deployment.asset)) {
@@ -274,7 +271,7 @@ export class EvmVaultService implements VaultPort {
     try {
       pendingOwner = (await client.readContract({
         address: getAddress(deployment.config),
-        abi: X402_CONFIG_ABI,
+        abi: ASSAY_CONFIG_ABI,
         functionName: 'pendingOwner',
       })) as `0x${string}`;
     } catch (error) {
@@ -309,7 +306,7 @@ export class EvmVaultService implements VaultPort {
 
     const params = (await client.readContract({
       address: getAddress(deployment.config),
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'params',
     })) as { redeemer: `0x${string}` };
     const live = getAddress(params.redeemer);

@@ -1,7 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
+  IsEnum,
   IsIn,
   IsInt,
   IsNotEmpty,
@@ -17,7 +19,7 @@ import {
 } from 'class-validator';
 
 import { CHAIN_ID_RE } from '@modules/chains/ports/caip.types';
-import { PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, PricingMode } from '@modules/tool/ports/tool.types';
 import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
 
 import { ToolBindingDetailDto } from './get-tool-bindings.dto';
@@ -75,6 +77,17 @@ export class SaveToolBindingBodyDto {
   @ApiProperty({ enum: PricingMode })
   @IsIn(Object.values(PricingMode))
   pricingMode: PricingMode;
+
+  /**
+   * Required, with no default (D10): the provider says how their endpoint
+   * authenticates calls. A silent `NONE` made the least safe choice for them.
+   */
+  @ApiProperty({
+    enum: BindingAuthMode,
+    description: 'How the endpoint authenticates calls. Required: there is no default.',
+  })
+  @IsEnum(BindingAuthMode)
+  authMode: BindingAuthMode;
 
   /**
    * Minor units, as digits.
@@ -194,6 +207,50 @@ export class SaveToolBindingBodyDto {
    * different deadline changes what served a call.
    */
   @ApiPropertyOptional({
+    example: '^1',
+    maxLength: 32,
+    description:
+      'The contract majors this binding serves: `^1`, or `^1 || ^2`. Defaults to the ' +
+      "tool's current major. Each major needs a green tester run before publishing.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\^\d{1,4}(\s*\|\|\s*\^\d{1,4})*$/, {
+    message: 'toolVersionRange must be a range of majors, e.g. ^1 or ^1 || ^2',
+  })
+  toolVersionRange?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['uv_index'],
+    description:
+      "The contract's optional output fields this binding returns. Routing sends calls " +
+      'that require one only here, and a declared field missing from a response is a ' +
+      'contract violation.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  providesOutputFields?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['units'],
+    description:
+      "The contract's optional input fields this binding passes to its endpoint. A call " +
+      'that uses one is routed only to bindings that support it.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  supportsInputFields?: string[];
+
+  @ApiPropertyOptional({
     nullable: true,
     minimum: 1,
     description:
@@ -251,6 +308,11 @@ export class UpdateToolBindingBodyDto {
   @IsIn(Object.values(PricingMode))
   pricingMode?: PricingMode;
 
+  @ApiPropertyOptional({ enum: BindingAuthMode })
+  @IsOptional()
+  @IsEnum(BindingAuthMode)
+  authMode?: BindingAuthMode;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Matches(/^\d+$/, { message: 'priceAmount must be an integer in minor units' })
@@ -303,6 +365,50 @@ export class UpdateToolBindingBodyDto {
   @Min(0)
   @Max(1)
   slaFailureRate?: number;
+
+  @ApiPropertyOptional({
+    example: '^1',
+    maxLength: 32,
+    description:
+      'The contract majors this binding serves: `^1`, or `^1 || ^2`. Defaults to the ' +
+      "tool's current major. Each major needs a green tester run before publishing.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\^\d{1,4}(\s*\|\|\s*\^\d{1,4})*$/, {
+    message: 'toolVersionRange must be a range of majors, e.g. ^1 or ^1 || ^2',
+  })
+  toolVersionRange?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['uv_index'],
+    description:
+      "The contract's optional output fields this binding returns. Routing sends calls " +
+      'that require one only here, and a declared field missing from a response is a ' +
+      'contract violation.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  providesOutputFields?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['units'],
+    description:
+      "The contract's optional input fields this binding passes to its endpoint. A call " +
+      'that uses one is routed only to bindings that support it.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  supportsInputFields?: string[];
 
   @ApiPropertyOptional()
   @IsOptional()

@@ -68,7 +68,7 @@ interface ForbiddenShape {
  * `negative` on every rule is what holds that claim to account.
  */
 describe('no cross-chain invariant', () => {
-  const sources = walk(SRC).filter((f) => f.endsWith('.ts') && !f.includes('/_examples/'));
+  const sources = walk(SRC).filter((f) => f.endsWith('.ts'));
 
   const forbidden: readonly ForbiddenShape[] = [
     {
@@ -167,23 +167,23 @@ describe('no cross-chain invariant', () => {
     expect(job).not.toMatch(/chains[^\n;]{0,80}\.reduce\(/);
   });
 
-  it('the reconciler visits every enabled chain and reconciles each on its own', async () => {
+  it('the reconciler visits every enabled chain with a vault and reconciles each on its own', async () => {
     // The behaviour behind the source assertion, because a docstring and a
-    // regex both survive a rewrite that starts folding. Two chains in, two
-    // separate `reconcile` calls out — never one call carrying both, and never
-    // one chain's asset standing in for the other's.
+    // regex both survive a rewrite that starts folding. Only `eip155` has a
+    // vault (the escrow contract); an enabled Solana chain contributes no
+    // pass, and never a share of another chain's.
     const reconcile = jest.fn().mockResolvedValue(undefined);
     const job = new ReconciliationJob(
       { reconcile } as unknown as ReconciliationService,
       {
-        enabledChains: () => [CHAIN_IDS.SOLANA_DEVNET, CHAIN_IDS.SOLANA_MAINNET] as ChainId[],
+        enabledChains: () => [CHAIN_IDS.SOLANA_DEVNET, CHAIN_IDS.ROBINHOOD_TESTNET] as ChainId[],
       } as unknown as ChainAdapterRegistry,
     );
 
     await job.handleReconciliation();
 
     const reconciled = reconcile.mock.calls.map(([asset]: [AssetId]) => asset);
-    expect(reconciled).toEqual([ASSET_IDS.USDC_SOLANA_DEVNET, ASSET_IDS.USDC_SOLANA_MAINNET]);
+    expect(reconciled).toEqual([ASSET_IDS.USDG_ROBINHOOD_TESTNET]);
     // Each call is one asset — a string, never a list. A fold would have to
     // hand `reconcile` something plural to be a fold at all.
     for (const [asset] of reconcile.mock.calls) {
@@ -192,32 +192,27 @@ describe('no cross-chain invariant', () => {
   });
 
   it('disabling one chain leaves the other chain’s reconciliation untouched', async () => {
-    // The operational half of independence: if turning off Solana perturbs
-    // anything on the other chain, the independence is not real. Same job, one chain removed from
-    // `ENABLED_CHAINS`; the surviving chain must be reconciled exactly as it
-    // was — not skipped, not doubled, and not with a different asset.
+    // The operational half of independence: turning off Solana must not
+    // perturb anything on the EVM chain — not skipped, not doubled, and not
+    // with a different asset.
     const both = jest.fn().mockResolvedValue(undefined);
     const one = jest.fn().mockResolvedValue(undefined);
 
     await new ReconciliationJob(
       { reconcile: both } as unknown as ReconciliationService,
       {
-        enabledChains: () => [CHAIN_IDS.SOLANA_DEVNET, CHAIN_IDS.SOLANA_MAINNET] as ChainId[],
+        enabledChains: () => [CHAIN_IDS.SOLANA_DEVNET, CHAIN_IDS.ROBINHOOD_TESTNET] as ChainId[],
       } as unknown as ChainAdapterRegistry,
     ).handleReconciliation();
 
     await new ReconciliationJob(
       { reconcile: one } as unknown as ReconciliationService,
       {
-        enabledChains: () => [CHAIN_IDS.SOLANA_MAINNET] as ChainId[],
+        enabledChains: () => [CHAIN_IDS.ROBINHOOD_TESTNET] as ChainId[],
       } as unknown as ChainAdapterRegistry,
     ).handleReconciliation();
 
-    expect(one.mock.calls).toEqual([[ASSET_IDS.USDC_SOLANA_MAINNET]]);
-    // And the surviving chain's call is byte-identical to the one it got when
-    // the other chain was enabled — which is what "unaffected" has to mean.
-    expect(one.mock.calls[0]).toEqual(
-      both.mock.calls.find(([asset]: [AssetId]) => asset === ASSET_IDS.USDC_SOLANA_MAINNET),
-    );
+    expect(one.mock.calls).toEqual([[ASSET_IDS.USDG_ROBINHOOD_TESTNET]]);
+    expect(one.mock.calls).toEqual(both.mock.calls);
   });
 });

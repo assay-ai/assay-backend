@@ -129,6 +129,35 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.ONCE_PER_INCIDENT,
       nonSuppressible: false,
     },
+    [NotificationEvent.CALL_REFUSED_REPEATEDLY]: {
+      severity: NotificationSeverity.WARNING,
+      channels: [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      // The producer sees the edge (the fifth refusal in an hour); the day
+      // keeps a looping agent from paging its owner every hour.
+      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.TOOLSET_UPDATE_AVAILABLE]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // The 7-day digest rule is the producer's (`toolset_notice_log`); this
+      // keeps one version from ever reaching an organization twice.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.TOOL_VERSION_DEPRECATED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      // One per tool major per organization: the producer's dedupe key.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.TOOL_VERSION_RETIRED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
     [NotificationEvent.AGENT_PAUSED]: {
       severity: NotificationSeverity.WARNING,
       channels: EVERYTHING,
@@ -151,6 +180,31 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       channels: EVERYTHING,
       aggregation: NotificationAggregation.ONCE,
       nonSuppressible: true,
+    },
+    [NotificationEvent.OAUTH_GRANT_STOPPED_REUSE]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: EVERYTHING,
+      // A grant is revoked for reuse at most once: it is dead afterwards.
+      aggregation: NotificationAggregation.PER_EVENT,
+      // A copied sign-in is an account-takeover signal, like a withdrawal.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.PAYMENT_KEY_FIRST_SPEND]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      // Once per key: the producer's dedupe key names the chain and the key, and
+      // it only calls when no earlier voucher of that key held money.
+      aggregation: NotificationAggregation.ONCE,
+      // The detection signal for a stolen or misused key (T2, T12). It fires
+      // once per key, so it never becomes noise worth muting.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.PAYMENT_KEY_DAILY_SUMMARY]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // One per organization per UTC day, whichever scheduler run sends it.
+      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      nonSuppressible: false,
     },
 
     // ── Free tier ─────────────────────────────────────────────────────────────
@@ -186,8 +240,11 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       severity: NotificationSeverity.WARNING,
       channels: IN_APP_EMAIL,
       // The monitor sweeps every five minutes and the condition persists until
-      // the provider tops up — per-event would be 288 identical messages a day.
-      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      // the provider tops up — per-event would be 288 identical messages a day,
+      // and once a day repeated the same unchanged warning for weeks. Once per
+      // incident: the producer's key names the stake and the minimum, so only
+      // a change to either is a new incident.
+      aggregation: NotificationAggregation.ONCE,
       nonSuppressible: false,
     },
     [NotificationEvent.PROVIDER_STAKE_GRACE_OPENED]: {
@@ -224,6 +281,31 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       // proposal but not the verdict, or the other way round, learns half a
       // story; and the half they would miss is the one with the money in it.
       nonSuppressible: true,
+    },
+    [NotificationEvent.CALL_DISPUTE_OPENED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // The provider's one chance to reply comes before the decision.
+      nonSuppressible: false,
+    },
+    [NotificationEvent.CALL_DISPUTE_RESPONDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_ONLY,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.CALL_DISPUTE_DECIDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.CALL_DISPUTE_REFUNDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
     },
     [NotificationEvent.PROVIDER_SLASH_EXECUTED]: {
       severity: NotificationSeverity.CRITICAL,
@@ -270,7 +352,57 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.PER_EVENT,
       nonSuppressible: false,
     },
-    [NotificationEvent.PROVIDER_PAYOUT_SENT]: {
+
+    // ── Provider tools (T4) ───────────────────────────────────────────────────
+
+    [NotificationEvent.PROVIDER_TOOL_APPROVED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_REJECTED]: {
+      // The provider has something to fix before the tool (or its change)
+      // reaches the catalogue; nothing already serving stops.
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_TAKEN_DOWN]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: IN_APP_EMAIL_PUSH,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // The tool stopped serving everywhere at once. A provider who muted
+      // this would learn it from their traffic graph, days later.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.PROVIDER_TOOL_TAKEDOWN_LIFTED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_PROMOTION_INVITED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // One per (standard tool, provider tool): the producer's dedupe key. An
+      // invite re-sent for the same pair is the same invitation.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
+
+    // ── Public names (handles) ────────────────────────────────────────────────
+
+    [NotificationEvent.HANDLE_TAKEN_DOWN]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: IN_APP_EMAIL_PUSH,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // Every URL and provider tool under the name stopped at once: the same
+      // class as a tool's own takedown.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.HANDLE_TAKEDOWN_LIFTED]: {
       severity: NotificationSeverity.INFO,
       channels: IN_APP_EMAIL,
       aggregation: NotificationAggregation.PER_EVENT,

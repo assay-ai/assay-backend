@@ -31,8 +31,6 @@ const TERMS: ProviderTerms = {
   ],
 };
 
-const EGRESS_IPS = ['203.0.113.10'];
-
 const SESSION: McpSession = {
   credentialId: 'cred-1',
   organizationId: ORG,
@@ -41,6 +39,7 @@ const SESSION: McpSession = {
   chainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' as any,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 function acceptedTermsInput(overrides: Partial<Record<string, unknown>> = {}) {
@@ -106,7 +105,6 @@ function connectivityCheck(overrides: Partial<Record<string, unknown>> = {}) {
     failureKind: null,
     failureCode: null,
     detail: null,
-    egressIps: EGRESS_IPS,
     createdAt: new Date('2026-08-11T00:00:00.000Z'),
     ...overrides,
   } as any;
@@ -166,7 +164,6 @@ function build(
     chainEnrolments,
     connectivityChecks,
     TERMS,
-    EGRESS_IPS,
   );
 
   return { service, providers, payoutChallenges, chainEnrolments, connectivityChecks };
@@ -281,12 +278,11 @@ describe('ProviderRegistrationService — getRegistration, the onboarding state'
     expect(state.steps.find((s) => s.key === 'terms')?.status).toBe(OnboardingStepStatus.DONE);
   });
 
-  it('serves egressIps and the published terms table from injected configuration', async () => {
+  it('serves the published terms table from injected configuration', async () => {
     const { service } = build({ findOneBy: jest.fn().mockResolvedValue(providerEntity()) });
 
     const state = await service.getRegistration(ORG);
 
-    expect(state.egressIps).toEqual(EGRESS_IPS);
     expect(state.terms.providerAgreementVersion).toBe('v1.0');
     expect(state.terms.commercialTerms).toEqual(TERMS.commercialTerms);
   });
@@ -502,7 +498,6 @@ describe('ProviderRegistrationService — getRegistration, the onboarding state'
       failureKind: null,
       failureCode: null,
       detail: null,
-      egressIps: EGRESS_IPS,
       checkedAt: '2026-08-11T00:00:00.000Z',
     });
   });

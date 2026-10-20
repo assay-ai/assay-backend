@@ -84,8 +84,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    * know about payments — sending `id` upstream would wire that dependency back
    * in.
    *
-   * `UNIQUE`, unscoped to `organization_id` — same reasoning as
-   * `voucher_nonce` below: the platform mints this value itself, so a
+   * `UNIQUE`, unscoped to `organization_id`: the platform mints this value
+   * itself, so a
    * collision is a bug in the minting path, not a legitimate cross-tenant
    * event, and a per-tenant index would hide exactly that.
    */
@@ -167,19 +167,6 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   idempotencyKey: string | null;
 
   /**
-   * The rail-B voucher nonce — the durable half of replay protection.
-   *
-   * The unique index on this column is the replay guarantee, with Redis as a
-   * fast path in front of it. The index is deliberately **not** scoped to
-   * `organization_id`, which is the only index on this table that is not: a
-   * nonce is a one-time token, and an index per tenant would let one signed
-   * voucher be redeemed once in every organization. It also has no TTL and
-   * never will — the record that an authorization was spent does not expire.
-   */
-  @Column({ name: 'voucher_nonce', type: 'varchar', length: 64, nullable: true })
-  voucherNonce: string | null;
-
-  /**
    * The rail-B voucher **sequence number** (voucher v2) — a decimal `u64`.
    *
    * `numeric`/`bigint` over the wire is a string, and it stays one all the way
@@ -187,11 +174,9 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    * rounded at 2^53 is a voucher aimed at the wrong bit of the chain's replay
    * bitmap.
    *
-   * Its uniqueness index is `(agent_account, voucher_seq)` and NOT global — the
-   * opposite of `voucher_nonce` above, and for the same reason stated the other
-   * way round. A nonce is a one-time token in one global space; a seq counts
-   * from 1 per escrow, so buyer A's seq 5 and buyer B's seq 5 are two different
-   * vouchers and a global index would refuse the second.
+   * Its uniqueness index is `(agent_account, voucher_seq)` and NOT global: a
+   * seq counts from 1 per escrow, so buyer A's seq 5 and buyer B's seq 5 are two
+   * different vouchers and a global index would refuse the second.
    */
   @Column({ name: 'voucher_seq', type: 'bigint', nullable: true })
   voucherSeq: string | null;
@@ -211,7 +196,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   voucherSignature: string | null;
 
   /**
-   * `'sha256:' + 64 hex` — offset 151 of the signed bytes.
+   * `'sha256:' + 64 hex` — offset 152 of the signed bytes.
    *
    * The one voucher field that is derivable from nothing else on this row: it
    * hashes the tool's `resource` string, and a binding's resource can change
@@ -234,7 +219,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
 
   /**
    * The DELEGATE key that signed this rail-B voucher (CAIP-10), when it was not
-   * the payer: agent payment delegation, `X402Escrow.authorizeDelegate`. NULL
+   * the payer: agent payment delegation, `AssayEscrow.authorizeDelegate`. NULL
    * when the payer's own key authorised it. Read to add a delegate's in-flight
    * vouchers to its on-chain window before a call is served.
    */
@@ -323,4 +308,44 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /** Verification verdict. */
   @Column({ name: 'verification_verdict', type: 'varchar', length: 32, nullable: true })
   verificationVerdict: string | null;
+
+  /**
+   * A buyer's dispute over this call (G3.B1): `OPEN` while a guaranteed
+   * dispute keeps the hold from being collected, then `UPHELD` | `REJECTED`.
+   * The quality stats count an upheld call as a failed one.
+   */
+  @Column({ name: 'dispute_outcome', type: 'varchar', length: 16, nullable: true })
+  disputeOutcome: string | null;
+
+  /**
+   * The dispute hold ("redeem into hold", G3.B1): `HELD` | `COLLECTED` |
+   * `REFUNDED`. Rail B mirrors the escrow's `held[payer][seq]`; rail A is the
+   * provider's ledger credit withheld for the hold window. Null: no hold (a
+   * call not yet redeemed, or collected the old way).
+   */
+  @Column({ name: 'held_status', type: 'varchar', length: 12, nullable: true })
+  heldStatus: string | null;
+
+  /** When the payment went into the hold (the redemption, or rail A's settlement). */
+  @Column({ name: 'held_at', type: 'timestamptz', nullable: true })
+  heldAt: Date | null;
+
+  /** When the hold may be collected (`PaymentHeld.collectableAt`; rail A: + the window). */
+  @Column({ name: 'collectable_at', type: 'timestamptz', nullable: true })
+  collectableAt: Date | null;
+
+  /** The collect or refund transaction (rail B). */
+  @Column({ name: 'held_tx_ref', type: 'text', nullable: true })
+  heldTxRef: string | null;
+
+  /** Failed collect or refund attempts on the held payment (back-off). */
+  @Column({ name: 'held_attempts', type: 'int', default: 0 })
+  heldAttempts: number;
+
+  /** Not retried before this instant. */
+  @Column({ name: 'held_retry_at', type: 'timestamptz', nullable: true })
+  heldRetryAt: Date | null;
+
+  @Column({ name: 'held_last_error', type: 'text', nullable: true })
+  heldLastError: string | null;
 }

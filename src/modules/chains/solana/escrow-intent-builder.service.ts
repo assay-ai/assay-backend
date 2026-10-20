@@ -24,7 +24,7 @@ import {
   getSetEscrowLimitsInstructionAsync,
   getWithdrawInstructionAsync,
   WITHDRAW_DELAY_SECONDS,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
@@ -123,7 +123,7 @@ export interface EscrowIntentBuilderConfig {
  * ## The instructions are generated, never hand-built
  *
  * `getSetEscrowLimitsInstructionAsync`, `getRequestWithdrawInstructionAsync`
- * and `getWithdrawInstructionAsync` from `@x402/settlement-client` — Codama
+ * and `getWithdrawInstructionAsync` from `@assay/settlement-client` — Codama
  * output rendered from the program's IDL.
  */
 @Injectable()

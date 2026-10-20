@@ -1,3 +1,4 @@
+import { ToolVersionListDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { Injectable } from '@nestjs/common';
 
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
@@ -59,9 +60,20 @@ export class PublicCatalogueService {
     return { providers: providers.map(toPublicProvider) };
   }
 
-  async listTools(): Promise<PublicToolListDto> {
+  /** Every listed tool, or one category's — filtered over the same cached list. */
+  async listTools(category?: string, kind?: 'STANDARD' | 'PROVIDER'): Promise<PublicToolListDto> {
     const { tools } = await this.catalogue.listTools();
-    return { tools: tools.map(toPublicTool) };
+    return {
+      tools: tools
+        .filter((tool) => category === undefined || tool.category === category)
+        .filter((tool) => kind === undefined || tool.kind === kind)
+        .map(toPublicTool),
+    };
+  }
+
+  /** A catalogue tool's published versions and changelog. */
+  async toolVersions(toolId: string): Promise<ToolVersionListDto> {
+    return this.catalogue.toolVersions(toolId);
   }
 
   async getProvider(providerId: string): Promise<PublicProviderDetailDto> {
@@ -82,6 +94,7 @@ export class PublicCatalogueService {
         name: tool.name,
         pricingMode: tool.pricingMode,
         price: toPublicMoney(tool.price),
+        promisedFailureRate: tool.promisedFailureRate,
         freeCallsPerAgentPerDay: tool.freeCallsPerAgentPerDay,
       })),
     };
@@ -106,7 +119,20 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     id: tool.id,
     name: tool.name,
     description: tool.description,
+    summary: tool.summary,
+    version: tool.version,
+    versions: tool.versions.map((version) => ({ ...version })),
+    deprecatedMajors: [...tool.deprecatedMajors],
+    replacementToolId: tool.replacementToolId,
+    replacementName: tool.replacementName,
+    replacementMajor: tool.replacementMajor,
+    replacementVersion: tool.replacementVersion,
     tier: tool.tier,
+    kind: tool.kind,
+    handle: tool.handle,
+    notReviewed: tool.notReviewed,
+    category: tool.category,
+    tags: [...tool.tags],
     providerCount: tool.providerCount,
     fromPrice: tool.fromPrice ? toPublicMoney(tool.fromPrice) : null,
     price: tool.price ? toPublicMoney(tool.price) : null,
@@ -115,6 +141,12 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     paidBindings: tool.paidBindings,
     routable: tool.routable,
     settlementChains: tool.settlementChains ? [...tool.settlementChains] : null,
+    prices: tool.prices.map((entry) => ({
+      chainId: entry.chainId,
+      price: toPublicMoney(entry.price),
+      providerId: entry.providerId,
+      listings: entry.listings,
+    })),
   };
 }
 

@@ -14,11 +14,14 @@ import { redisConfig } from '@config/redis.config';
 // and the cache service are `@Global` dependencies of the payment domain.
 import { DatabaseModule } from '@database/database.module';
 import { AlertingModule } from '@shared/alerting';
+import { AppRoleModule } from '@shared/app-role/app-role.module';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 import { NetworkModule } from '@shared/network/network.module';
 
 import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 
 /**
  * The MCP service.
@@ -56,10 +59,19 @@ import { McpHttpModule } from '@modules/mcp/mcp-http.module';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => configService.get('bullmq'),
     }),
+    // `APP_ROLE = 'mcp'`: this container accepts every OAuth grant.
+    AppRoleModule.forRoot('mcp'),
     NetworkModule,
     DatabaseModule,
     RedisCacheModule,
     AlertingModule,
+    // `tools/call` dials providers: the invoker, the request signer and the
+    // credential vault. The scheduler does not import this, so it needs neither
+    // `PROVIDER_REQUEST_SIGNING_KEYS` nor `CREDENTIAL_VAULT_KEKS`.
+    ToolEgressModule,
+    // Before `McpHttpModule`: the OAuth and well-known routes must be matched
+    // before the MCP catch-all (R-OA-29), the same way as `/health`.
+    OAuthMcpModule,
     McpHttpModule,
   ],
   controllers: [HealthcheckController],

@@ -1,5 +1,5 @@
 /**
- * Sending instructions built by `@x402/settlement-client`.
+ * Sending instructions built by `@assay/settlement-client`.
  *
  * The operator scripts for the settlement program all need the same four
  * things — a keypair loaded off disk as a `TransactionSigner`, a blockhash, a
@@ -10,9 +10,7 @@
  * ## Why not @solana/web3.js
  *
  * The generated client emits `@solana/kit` instructions, and `sendAndConfirm`
- * from web3.js v1 wants `TransactionInstruction`. `scripts/devnet/lib/kit-to-web3.ts`
- * exists to bridge those two for `@sqds/multisig`, which is built on web3.js and
- * gives no choice. Nothing here is in that position, so this stays on one SDK.
+ * from web3.js v1 wants `TransactionInstruction`, so this stays on one SDK.
  *
  * ## Why confirmation is polled rather than subscribed
  *
@@ -40,7 +38,7 @@ import {
   setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
 } from '@solana/kit';
-import { getX402PaymentErrorMessage, X402PaymentError } from '@x402/settlement-client';
+import { getAssayPaymentErrorMessage, AssayPaymentError } from '@assay/settlement-client';
 
 /** How long to wait for a signature to reach the requested commitment. */
 const CONFIRM_TIMEOUT_MS = 60_000;
@@ -85,9 +83,7 @@ export function createSender(rpcUrl: string, commitment: Commitment = 'confirmed
       );
     }
 
-    await rpc
-      .sendTransaction(wire, { encoding: 'base64', preflightCommitment: commitment })
-      .send();
+    await rpc.sendTransaction(wire, { encoding: 'base64', preflightCommitment: commitment }).send();
 
     const signature = getSignatureFromTransaction(signed);
     await confirm(signature);
@@ -136,11 +132,9 @@ export function explainProgramError(err: unknown): string {
     // inside the handler that was reporting the *real* failure, replacing a
     // named program error with a message about JSON. `@solana/kit` decodes u64
     // fields as bigint, so this is the common case rather than the exotic one.
-    return JSON.stringify(err, (_key, value) =>
-      typeof value === 'bigint' ? `${value}` : value,
-    );
+    return JSON.stringify(err, (_key, value) => (typeof value === 'bigint' ? `${value}` : value));
   }
-  const name = getX402PaymentErrorMessage(custom as X402PaymentError);
+  const name = getAssayPaymentErrorMessage(custom as AssayPaymentError);
   return name
     ? `${name} (custom program error ${custom} / 0x${custom.toString(16)})`
     : `custom program error ${custom} / 0x${custom.toString(16)}`;

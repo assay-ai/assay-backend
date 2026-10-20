@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 
 import { ChainsModule } from '@modules/chains/chains.module';
+import { DisputeModule } from '@modules/dispute/dispute.module';
 import { FeePayerSignerModule } from '@modules/chains/facilitator/signing/fee-payer-signer.module';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
@@ -59,6 +60,10 @@ import { NextSeqService } from './services/next-seq.service';
     FeePayerSignerModule,
     ToolModule,
     SpendPolicyModule,
+    // `RefundEligibilityService`: `GET /tool-calls?refundable=true` uses the
+    // receipt's predicate. `DisputeModule` imports `PaymentModule`, not this
+    // API module, so there is no cycle.
+    DisputeModule,
   ],
   controllers: [ToolCallsController, DepositsController, EscrowController],
   providers: [

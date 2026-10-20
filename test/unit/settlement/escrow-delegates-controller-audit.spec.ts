@@ -18,6 +18,7 @@ const SESSION = {
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.HUMAN,
+  paymentsAllowed: true,
 } as McpSession;
 
 function build() {

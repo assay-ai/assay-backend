@@ -44,7 +44,6 @@ import {
   ProviderStakePort,
   stakeKey,
 } from '../ports/provider-stake.port';
-import { PROVIDER_STAKE_SOURCE_MODE_ENV } from './composite-provider-stake.source';
 
 /** DI token — see the class comment for why this duplicates `ToolModule`'s `ROUTER_CONFIG`. */
 export const PROVIDER_MINIMUM_STAKE_PARAMETERS = 'PROVIDER_MINIMUM_STAKE_PARAMETERS';
@@ -269,10 +268,8 @@ export class ProviderStakeService {
       this.enrolments.enrolmentsOf([providerId]),
     ]);
 
-    // The stake authority is a column on the ENROLMENT since `1759300000003`,
-    // one per chain — `providers.stake_authority` is gone, and with it the
-    // possibility of reading one chain's account while reporting another's
-    // floor. So the authority is resolved per chain, into the entry that names
+    // The stake authority is a column on the ENROLMENT, one per chain, so one
+    // chain's account can never be read while reporting another's floor. So the authority is resolved per chain, into the entry that names
     // that chain, and never lifted to the response.
     const authorities = chainsToReport(providerId, enrolments, floorChain);
 
@@ -576,12 +573,10 @@ export class ProviderStakeService {
    *
    * `staked` comes from `PROVIDER_STAKE_SOURCE` and `chainReadable` comes from
    * `ONCHAIN_STAKE_READER`, and they answer different questions — which is
-   * fine until they disagree. Under `PROVIDER_STAKE_SOURCE_MODE=config` (the
-   * DEFAULT, so an unset variable means it) the source is a hand-written seed
-   * file, and a provider who registered through the console is in no seed
-   * file. They then get `hasKnownStake: false` next to a `chainReadable: true`
-   * that says the chain answered — because it did, in this very request, with
-   * their balance in it, which this method is the only place to notice.
+   * fine until they disagree: a stale or failed source read gives
+   * `hasKnownStake: false` next to a `chainReadable: true` that says the chain
+   * answered — because it did, in this very request, with their balance in it,
+   * which this method is the only place to notice.
    *
    * The consequence is not cosmetic: `evaluateStakeGate` reads the same
    * source, so `STAKE_AT_MINIMUM` can never pass and the provider cannot
@@ -590,9 +585,8 @@ export class ProviderStakeService {
    * What is deliberately NOT done here is preferring the chain figure for
    * `staked`. The screen has to show the number the gate will actually
    * compare, or it tells a provider they are covered while the router refuses
-   * them. So the fix for the disagreement is an operator moving
-   * `PROVIDER_STAKE_SOURCE_MODE` forwards — and all this does is stop that
-   * being a silent lockout somebody has to reverse-engineer from a `null`.
+   * them. All this does is stop that being a silent lockout somebody has to
+   * reverse-engineer from a `null`.
    */
   private warnIfTheChainSeesStakeTheSourceDoesNot(
     providerId: string,
@@ -610,10 +604,8 @@ export class ProviderStakeService {
     this.logger.warn(
       `Provider ${providerId} has ${MoneyUtil.format(onChain.bonded)} bonded on ${chainId} under ` +
         `${onChain.account}, but the stake source has no reading for them, so the stake gate ` +
-        `sees STAKE_UNKNOWN and they cannot publish a paid binding. This is what ` +
-        `${PROVIDER_STAKE_SOURCE_MODE_ENV}=config answers for a provider no stake seed file ` +
-        `names; promote it to chain_with_config_fallback to serve a proved stake authority ` +
-        `off the chain.`,
+        `sees STAKE_UNKNOWN and they cannot publish a paid binding. Check the stake source's ` +
+        `chain read for this provider.`,
     );
   }
 
@@ -669,10 +661,7 @@ function toMoneyDto(money: Money): MoneyDto {
  * `requirementTotal`, `headroom`, `shortfall` and `recommendedBuffer` are
  * denominated in the stake floor's asset, so the floor's chain is the one every
  * one of those figures is implicitly about. A response that reported a
- * shortfall against a chain absent from this list could not be read at all —
- * and a provider whose seed-file reading exists without an enrolment row (the
- * ordinary state under `PROVIDER_STAKE_SOURCE_MODE=config`) would otherwise
- * lose the only figure the gate is going to compare.
+ * shortfall against a chain absent from this list could not be read at all.
  *
  * `stakeAuthority` is `null` for a chain with no enrolment and for one enrolled
  * but not yet funded. Those are the same observable state — nothing to read —

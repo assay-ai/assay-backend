@@ -3,7 +3,6 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
-import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { VerificationPolicyEntity } from '../entities/verification-policy.entity';
 import { VerificationRecordEntity } from '../entities/verification-record.entity';
 
@@ -113,34 +112,21 @@ export class PlatformMetricsRepository {
   }
 
   /**
-   * `openDisputes` / `oldestOpenDisputeAgeSeconds`.
-   *
-   * Age is measured from `disputed_at` — when the case *became* one of these
-   * three statuses — not `proposed_at`, which can predate the dispute by
-   * however long the provider took to object. Every status in this set is
-   * only reachable through `DISPUTED` first (see `SlashProposalEntity`'s
-   * state diagram), so `disputed_at` is expected to be set on every row this
-   * matches; `MIN` simply ignores any row where it is not.
+   * The operator's two T4 queues: provider tools whose review is PENDING, and
+   * buyer call disputes still OPEN. Counts only — the queues themselves are
+   * `GET /operator/reviews` and `GET /operator/call-disputes`.
    */
-  async openSlashProposalCounts(
-    now: Date,
-  ): Promise<{ count: number; oldestAgeSeconds: number | null }> {
-    const row = await this.dataSource
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .select('COUNT(*)::int', 'count')
-      .addSelect(
-        'EXTRACT(EPOCH FROM (:now::timestamptz - MIN(proposal.disputed_at)))::float8',
-        'oldestAgeSeconds',
-      )
-      .where('proposal.status IN (:...open)', {
-        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
-      })
-      .setParameter('now', now)
-      .getRawOne<{ count: number; oldestAgeSeconds: number | string | null }>();
-
+  async operatorWorkCounts(): Promise<{ pendingToolReviews: number; openCallDisputes: number }> {
+    const [row] = (await this.dataSource.query(
+      `SELECT
+         (SELECT count(*)::int FROM tools
+           WHERE kind = 'PROVIDER' AND review_status = 'PENDING') AS "pendingToolReviews",
+         (SELECT count(*)::int FROM disputes
+           WHERE intent_id IS NOT NULL AND state = 'OPEN') AS "openCallDisputes"`,
+    )) as { pendingToolReviews: number; openCallDisputes: number }[];
     return {
-      count: row?.count ?? 0,
-      oldestAgeSeconds: toFiniteNumberOrNull(row?.oldestAgeSeconds),
+      pendingToolReviews: Number(row?.pendingToolReviews ?? 0),
+      openCallDisputes: Number(row?.openCallDisputes ?? 0),
     };
   }
 }

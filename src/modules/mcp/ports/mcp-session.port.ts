@@ -27,8 +27,9 @@ export interface McpSession {
 
   /**
    * True only when {@link credentialId} is the id of a stored
-   * `agent_credentials` row — set by `DbCredentialMcpSessionSource` and no
-   * other source. A config-file machine token is also `AGENT`, but its id is
+   * `agent_credentials` row — set by the DB-credential and OAuth sources
+   * (both through `CredentialSessionResolver`) and no other. A config-file
+   * machine token is also `AGENT`, but its id is
    * a free-form label, so anything that writes or looks up the credential by
    * id reads it through {@link storedCredentialIdOf} (review N-1).
    */
@@ -63,6 +64,17 @@ export interface McpSession {
    * key, and PAYMENT_REQUIRED names it. Absent or null for every other source.
    */
   readonly delegateAccount?: AccountId | null;
+
+  /**
+   * Whether this session may take part in paid calls: bind a payment
+   * (delegate) key and receive the enable-paid `fixUrl` (spec §6.3.13, H2).
+   *
+   * True for API keys, for OAuth grants issued to a client in
+   * `OAUTH_PAYMENT_CLIENTS`, and for config and Privy sessions; false only for
+   * other OAuth grants. Set by the source that resolved the token, never read
+   * from the request, and never derived from how the credential was issued.
+   */
+  readonly paymentsAllowed: boolean;
 
   /**
    * Set when the caller's organization, account or delegate is on the

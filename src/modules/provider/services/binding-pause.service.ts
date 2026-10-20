@@ -89,7 +89,7 @@ export class BindingPauseService {
         `${body?.reason ? `: ${body.reason.slice(0, 280)}` : ''}`,
     );
 
-    return toPausedDto(saved);
+    return toPausedDto(saved, await this.editor.publishedEndpoint(saved));
   }
 
   /**
@@ -104,6 +104,9 @@ export class BindingPauseService {
    * published row, by the same CHECK), so the case it catches is a `DRAFT`
    * whose provider pressed the wrong button — and *"publish it rather than
    * resuming it"* is an answer, where *"it is not paused"* would be a riddle.
+   *
+   * An API-key binding without a credential set for its published origin is
+   * refused with `PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE`.
    */
   async resume(organizationId: string, bindingId: string): Promise<PausedToolBindingDto> {
     const row = await this.editor.loadEditable(organizationId, bindingId);
@@ -115,6 +118,11 @@ export class BindingPauseService {
     if (row.status !== BindingStatus.PAUSED) {
       throw ProviderErrors.bindingNotPaused({ bindingId, status: row.status });
     }
+
+    // The same check as switching to API key auth: the resume puts the binding
+    // back on its published address, and without a credential set for it every
+    // call would be a platform fault (say the set was removed while paused).
+    await this.editor.assertLiveCredentials(organizationId, row, row.authMode);
 
     row.status = BindingStatus.ACTIVE;
     // Both, in the one write. `chk_tool_bindings_pause_attributed` refuses a
@@ -128,13 +136,16 @@ export class BindingPauseService {
 
     this.logger.log(`Binding ${bindingId} resumed at revision ${saved.publishedVersion}`);
 
-    return toPausedDto(saved);
+    return toPausedDto(saved, await this.editor.publishedEndpoint(saved));
   }
 }
 
-function toPausedDto(row: ToolBindingEntity): PausedToolBindingDto {
+function toPausedDto(
+  row: ToolBindingEntity,
+  publishedEndpoint: string | null,
+): PausedToolBindingDto {
   return {
-    ...toSavedDto(row),
+    ...toSavedDto(row, publishedEndpoint),
     pauseReason: row.pauseReason as BindingPauseReason | null,
     pausedAt: row.pausedAt,
   };

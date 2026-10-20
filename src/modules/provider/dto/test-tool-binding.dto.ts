@@ -1,11 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsObject } from 'class-validator';
+import { IsInt, IsObject, IsOptional, Min } from 'class-validator';
 
 import {
   BindingTestLayer,
   BindingTestLayerStatus,
   BindingTestOutcome,
   BindingTestPolicySource,
+  BindingTestWarningCode,
 } from '../ports/binding-test.types';
 
 /**
@@ -24,6 +25,18 @@ export class RunBindingTestBodyDto {
   })
   @IsObject()
   input: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    example: 3,
+    description:
+      'The contract version (`tool_versions.version`) to test against, inside the ' +
+      "binding's range. Defaults to the newest published version of the highest major " +
+      'in the range. Publishing needs a green run per major.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  toolVersion?: number;
 }
 
 export class BindingTestLayerResultDto {
@@ -112,6 +125,12 @@ export class BindingTestReportDto {
   @ApiProperty({ description: 'Which revision of the mappings this run exercised.' })
   mappingVersion: number;
 
+  @ApiProperty({ example: 2, description: 'The contract version this run was checked against.' })
+  toolVersion: number;
+
+  @ApiProperty({ example: '1.1.0' })
+  toolVersionSemver: string;
+
   @ApiProperty({ type: [BindingTestLayerResultDto] })
   layers: BindingTestLayerResultDto[];
 
@@ -144,6 +163,19 @@ export class BindingTestReportDto {
 
   @ApiPropertyOptional({ nullable: true, type: BindingTestVerificationDto })
   verification: BindingTestVerificationDto | null;
+
+  @ApiProperty({
+    description:
+      'Findings that never change the outcome, e.g. the endpoint accepted an unauthenticated probe. ' +
+      'Always present; empty when none.',
+    example: [
+      {
+        code: 'ACCEPTS_UNSIGNED',
+        message: 'Your endpoint accepted a request without an Assay signature.',
+      },
+    ],
+  })
+  warnings: { code: BindingTestWarningCode; message: string }[];
 
   @ApiProperty()
   ranAt: Date;

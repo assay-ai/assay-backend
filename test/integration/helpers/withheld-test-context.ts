@@ -1,3 +1,4 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -10,7 +11,7 @@ import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgre
 import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
 
@@ -26,6 +27,7 @@ import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migratio
 import { RoutedPaymentIntents1755600000000 } from '@database/postgres/migrations/1755600000000-routed-payment-intents';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { BindingTrafficControls1757200000000 } from '@database/postgres/migrations/1757200000000-binding-traffic-controls';
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
@@ -42,7 +44,6 @@ import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service'
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import {
   PaymentIntent,
   PaymentIntentCallClass,
@@ -56,6 +57,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -196,6 +198,9 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       // reads, and the partial index its 30-day scans use.
       CreateOrganizationsAndAgents1757900000000,
       PublicExplorerIndex1760400000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',
@@ -203,6 +208,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   // `'each'`, as `postgres.data-source.ts` does: `PublicExplorerIndex1760400000000`
   // builds its index CONCURRENTLY with `transaction = false`, which the default
   // `'all'` mode refuses.
@@ -213,12 +219,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
   const journal = new LedgerJournalService(entries, balanceRepository, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-  const ledger = new LedgerService(
-    journal,
-    new LedgerWriterService(journal, dataSource),
-    balances,
-    holds,
-  );
+  const ledger = new LedgerService(journal, balances, holds);
 
   const repository = new PaymentIntentRepository(dataSource);
   const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE, noBlocks());
@@ -273,7 +274,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
         platformFee,
         requestHash: `sha256:${randomBytes(16).toString('hex')}`,
         chainId: CHAIN_IDS.SOLANA_MAINNET,
-        voucherNonce: randomBytes(16).toString('hex'),
+        voucherSeq: String(randomInt(1, 2 ** 47)),
       });
     },
 

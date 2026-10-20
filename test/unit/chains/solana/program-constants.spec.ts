@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { SLASH_DELAY_SECONDS, WITHDRAW_DELAY_SECONDS } from '@x402/settlement-client';
+import { SLASH_DELAY_SECONDS, WITHDRAW_DELAY_SECONDS } from '@assay/settlement-client';
 
 /**
  * The two `#[constant]` delays, checked against the IDL they claim to come
@@ -20,7 +20,7 @@ import { SLASH_DELAY_SECONDS, WITHDRAW_DELAY_SECONDS } from '@x402/settlement-cl
  */
 const IDL = JSON.parse(
   readFileSync(
-    join(__dirname, '../../../../packages/settlement-client/idl/x402_payment.json'),
+    join(__dirname, '../../../../packages/settlement-client/idl/assay_payment.json'),
     'utf8',
   ),
 ) as { constants: { name: string; type: string; value: string }[] };

@@ -1,17 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
+import { sameAccountSpelling, sameAssetSpelling } from '@modules/chains/evm/eip55';
 import {
   AccountId,
   AssetId,
   ChainId,
   chainIdOf,
   isAccountId,
-  parseAccountId,
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
@@ -23,6 +23,7 @@ import {
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON } from '../constants/payment-intent.constants';
 import { BUYER_DEBT_WRITE_OFF_DAYS } from '../constants/voucher-redemption.constants';
 import {
   VOUCHER_ADMISSION_CHAIN_LAG_MS,
@@ -35,6 +36,7 @@ import { PaymentErrors } from '../errors/payment.errors';
 import {
   PaymentIntent,
   PaymentIntentCallClass,
+  PaymentIntentStatus,
   PaymentRail,
   railName,
 } from '../ports/payment.types';
@@ -42,6 +44,7 @@ import { RedeemVoucherInput, SignedVoucher } from '../ports/voucher.types';
 import { decayVoucherWindow } from '../domain/voucher-window';
 import { EscrowSeqService, assertWithinSeqGap } from './escrow-seq.service';
 import { PaymentIntentService, VoucherAdmission } from './payment-intent.service';
+import { PaymentKeyFirstSpendService } from './payment-key-first-spend.service';
 
 /**
  * C0 and C1 control characters — anything that would break the line-separated
@@ -122,6 +125,9 @@ export class VoucherService {
     private readonly chains: ChainAdapterRegistry,
     private readonly seqs: EscrowSeqService,
     private readonly blocklist: AccountBlocklistService,
+    // `payment_key.first_spend` (spec §7.10 item 6). Optional so a harness
+    // that does not test notices need not build one.
+    @Optional() private readonly firstSpend?: PaymentKeyFirstSpendService,
   ) {}
 
   /**
@@ -131,14 +137,25 @@ export class VoucherService {
    * Returns the intent in `FUNDS_SECURED`. There is no half-way outcome: either
    * the voucher was good and the money is reserved, or nothing happened and
    * this threw.
+   *
+   * The one exception is a keyed call (`input.idempotencyKey`) whose key an
+   * earlier attempt already holds: that attempt's intent comes back as it is,
+   * with another `voucherSeq`, and this voucher reserves nothing.
    */
   async redeem(input: RedeemVoucherInput): Promise<PaymentIntent> {
-    const { voucher, signature } = input.signed;
+    const { voucher: signed, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
 
-    this.assertWellFormed(voucher);
-    this.assertUnexpired(voucher, now);
-    this.assertAuthorisesCall(voucher, input);
+    this.assertWellFormed(signed);
+    this.assertUnexpired(signed, now);
+    this.assertAuthorisesCall(signed, input);
+    // From here on, the server's own spellings of the parties it just matched.
+    const voucher = inServerSpelling(signed, {
+      payer: input.agentAccount,
+      payTo: input.escrowPda,
+      provider: input.providerAccount,
+      asset: input.price.asset,
+    });
     const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
     // AFTER the session binding and the signature (audit E-10): checked first,
     // any agent could send an unsigned voucher naming any wallet and read from
@@ -155,7 +172,20 @@ export class VoucherService {
     await this.assertIssuedSeq(voucher, input);
     await input.beforeHold?.();
 
-    return this.record(voucher, input, delegation);
+    const intent = await this.record(voucher, input, delegation);
+    // A delegate-signed voucher that now holds money: the payment key's first
+    // spend is worth telling the account holder about. Not on a replay, whose
+    // intent is an earlier attempt's and holds nothing for this voucher. Never
+    // awaited: the notice must not slow or fail the call.
+    if (delegation !== null && intent.voucherSeq === voucher.seq) {
+      try {
+        this.firstSpend?.afterAdmitted(intent);
+      } catch (error) {
+        // The hold is taken: a notice that failed must not fail the call.
+        this.logger.warn(`First-spend notice for intent ${intent.id} failed: ${describe(error)}`);
+      }
+    }
+    return intent;
   }
 
   // ── Buyer debt ───────────────────────────────────────────────────────────
@@ -232,8 +262,9 @@ export class VoucherService {
    * live seq of the payer.
    */
   async verifyReplacement(input: ReplacementVoucherInput): Promise<VerifiedReplacement> {
-    const { voucher, signature } = input.signed;
+    const { voucher: signed, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
+    let voucher = signed;
 
     this.assertWellFormed(voucher);
     this.assertUnexpired(voucher, now);
@@ -252,17 +283,17 @@ export class VoucherService {
         });
       }
     }
-    this.assertEquals('payer', voucher.payer, input.payer);
-    this.assertEquals('payTo', voucher.payTo, input.escrowPda);
-    this.assertEquals('provider', voucher.provider, input.providerAccount);
+    this.assertSameAccount('payer', voucher.payer, input.payer);
+    this.assertSameAccount('payTo', voucher.payTo, input.escrowPda);
+    this.assertSameAccount('provider', voucher.provider, input.providerAccount);
     this.assertEquals('resource', voucher.resource, input.resource);
-    this.assertEquals('amount.asset', voucher.amount.asset, input.price.asset);
+    this.assertSameAsset(voucher.amount.asset, input.price.asset);
     this.assertEquals(
       'amount.decimals',
       String(voucher.amount.decimals),
       String(input.price.decimals),
     );
-    if (MoneyUtil.compare(voucher.amount, input.price) !== 0) {
+    if (MoneyUtil.compare(this.inPriceAsset(voucher.amount, input.price), input.price) !== 0) {
       throw PaymentErrors.voucherBindingMismatch({
         field: 'amount',
         expected: input.price.amount,
@@ -275,6 +306,13 @@ export class VoucherService {
         actual: voucher.requestHash,
       });
     }
+    // From here on, the server's own spellings of the parties it just matched.
+    voucher = inServerSpelling(voucher, {
+      payer: input.payer,
+      payTo: input.escrowPda,
+      provider: input.providerAccount,
+      asset: input.price.asset,
+    });
 
     // The admission checks, read off a call-shaped input: only the fields
     // they consult are meaningful here.
@@ -474,15 +512,15 @@ export class VoucherService {
       }
     }
 
-    this.assertEquals('payer', voucher.payer, input.agentAccount);
+    this.assertSameAccount('payer', voucher.payer, input.agentAccount);
     // This session's escrow PDA. v1 compared against the pooled platform
     // vault; there is no pooled vault on the paying path any more, and the
     // program checks the same field against the escrow it derives from
     // `voucher.payer` — so a wrong comparison here can refuse a good voucher
     // but can never redirect a buyer's payment to anyone else's escrow.
-    this.assertEquals('payTo', voucher.payTo, input.escrowPda);
+    this.assertSameAccount('payTo', voucher.payTo, input.escrowPda);
     // New in v2: the payee is inside the signed bytes.
-    this.assertEquals('provider', voucher.provider, input.providerAccount);
+    this.assertSameAccount('provider', voucher.provider, input.providerAccount);
     this.assertEquals('resource', voucher.resource, input.resource);
 
     // Asset and scale first. `MoneyUtil.compare` refuses operands that disagree
@@ -490,7 +528,7 @@ export class VoucherService {
     // authorise this call should say so as a binding failure rather than as
     // arithmetic that could not be performed. Checking here also means the
     // agent-supplied `decimals` never reaches the arithmetic at all.
-    this.assertEquals('amount.asset', voucher.amount.asset, input.price.asset);
+    this.assertSameAsset(voucher.amount.asset, input.price.asset);
     this.assertEquals(
       'amount.decimals',
       String(voucher.amount.decimals),
@@ -504,7 +542,7 @@ export class VoucherService {
     // existed for the `upto` scheme, where usage is metered after the fact;
     // that scheme is not available on this rail, and its absence is a known
     // limitation rather than something to paper over with a tolerance.
-    if (MoneyUtil.compare(voucher.amount, input.price) !== 0) {
+    if (MoneyUtil.compare(this.inPriceAsset(voucher.amount, input.price), input.price) !== 0) {
       throw PaymentErrors.voucherBindingMismatch({
         field: 'amount',
         expected: input.price.amount,
@@ -537,7 +575,7 @@ export class VoucherService {
    * The voucher must be authorised by `voucher.payer` — the account inside the
    * signed message, by then already checked to be the authenticated caller —
    * under the CHAIN's rule, which this mirrors exactly
-   * (`X402Escrow._voucherAuthority`):
+   * (`AssayEscrow._voucherAuthority`):
    *
    *   (a) the payer's own key signed it — checked first, synchronously, with no
    *       I/O, exactly as before delegation existed;
@@ -629,7 +667,7 @@ export class VoucherService {
     terms: VoucherDelegationTerms,
   ): void {
     const bound = input.boundDelegate ?? null;
-    if (bound === null || !sameAccount(bound, delegate)) {
+    if (bound === null || !sameAccountSpelling(bound, delegate)) {
       throw PaymentErrors.voucherDelegateNotBound({ delegate, bound });
     }
 
@@ -704,7 +742,7 @@ export class VoucherService {
       });
     }
 
-    // The chain's seq jump cap (`X402Escrow.MAX_SEQ_GAP`), when this call read
+    // The chain's seq jump cap (`AssayEscrow.MAX_SEQ_GAP`), when this call read
     // the escrow: a voucher the chain would refuse with `VoucherSeqGapTooLarge`
     // is not served on, even though this backend issued its seq.
     if (input.escrow) {
@@ -807,15 +845,23 @@ export class VoucherService {
         // the next delegate-signed call sees it before it reaches the chain.
         voucherDelegate: delegate,
         credentialId: input.credentialId ?? null,
-        // No idempotency key on this path, deliberately. The seq *is* rail B's
-        // idempotency key, and it is stricter: a replayed voucher is refused
-        // rather than answered with the original intent, which is what the
-        // single-use requirement asks for. Carrying both would leave two unique
-        // indexes racing to report the same replay under different error codes.
+        // The seq is rail B's replay guard for the VOUCHER: a replayed voucher
+        // is refused rather than answered with the original intent, which is
+        // what the single-use requirement asks for. The idempotency key is a
+        // different guard, for the CALL: an MCP client that retries one logical
+        // call (G2.1) signs a new voucher with a new seq, and the key is what
+        // says it is the same call. Null unless the caller passed one.
+        idempotencyKey: input.idempotencyKey ?? null,
         expiresAt: new Date(voucher.expiresAt * 1000),
       },
       this.admission(voucher, input, delegation),
     );
+
+    // The key's unique index answered with the intent an earlier attempt of
+    // this call created: that attempt holds (or held) the money, and this
+    // voucher must not be held or redeemed a second time. Returned untouched,
+    // so the caller can tell it apart by its seq.
+    if (input.idempotencyKey && intent.voucherSeq !== voucher.seq) return intent;
 
     try {
       return await this.intents.secureFunds(input.organizationId, intent.id);
@@ -830,6 +876,25 @@ export class VoucherService {
               `window count; it frees at the voucher's deadline. ${describe(abandonError)}`,
           );
         });
+      // A keyed call must not leave its key held by an intent that charged
+      // nothing, or the agent's retry after topping up would be answered as a
+      // replay until the sweep ran. `EXPIRED` releases it at once.
+      if (input.idempotencyKey) {
+        await this.intents
+          .transition(
+            input.organizationId,
+            intent.id,
+            PaymentIntentStatus.CREATED,
+            PaymentIntentStatus.EXPIRED,
+            { reason: PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON },
+          )
+          .catch((expireError: unknown) => {
+            this.logger.warn(
+              `Intent ${intent.id}: funds not secured and its idempotency key could not be ` +
+                `released; it frees at the expiry sweep. ${describe(expireError)}`,
+            );
+          });
+      }
       throw error;
     }
   }
@@ -953,6 +1018,34 @@ export class VoucherService {
       throw PaymentErrors.voucherBindingMismatch({ field, expected, actual });
     }
   }
+
+  /**
+   * One account, exactly — but on eip155 in any spelling of the same address.
+   * The server hands agents EIP-55 spellings to sign (`assay-mcp` signs no
+   * other), while a stored account may be spelled in lower case; the 20 bytes
+   * are what is signed and what the chain pays, so both name one account.
+   * Solana addresses are case-sensitive and still compared exactly.
+   */
+  private assertSameAccount(field: string, actual: string, expected: string): void {
+    if (!sameAccountSpelling(actual, expected)) {
+      throw PaymentErrors.voucherBindingMismatch({ field, expected, actual });
+    }
+  }
+
+  /** {@link assertSameAccount} for the asset: an erc20 address in any spelling. */
+  private assertSameAsset(actual: string, expected: string): void {
+    if (!sameAssetSpelling(actual, expected)) {
+      throw PaymentErrors.voucherBindingMismatch({ field: 'amount.asset', expected, actual });
+    }
+  }
+
+  /**
+   * The voucher's amount in the price's own spelling of the asset, once
+   * {@link assertSameAsset} has passed: `MoneyUtil` compares assets exactly.
+   */
+  private inPriceAsset(amount: Money, price: Money): Money {
+    return { ...amount, asset: price.asset };
+  }
 }
 
 function describe(error: unknown): string {
@@ -987,11 +1080,22 @@ export interface ReplacementVoucherInput {
   readonly escrow?: EscrowChainBalance | null;
 }
 
-/** One account, compared on its chain and its address case-insensitively. */
-function sameAccount(a: AccountId, b: AccountId): boolean {
-  const left = parseAccountId(a);
-  const right = parseAccountId(b);
-  return (
-    left.chainId === right.chainId && left.address.toLowerCase() === right.address.toLowerCase()
-  );
+/**
+ * The voucher with its parties in the server's own spelling, once they matched
+ * (`assertSameAccount`/`assertSameAsset`). On eip155 the signed bytes hold the
+ * 20-byte addresses, so the signature is the same; what changes is that every
+ * later key — the blocklist, the admission scope's asset, the intent — is
+ * spelled as the server stores it, whichever spelling the agent signed.
+ */
+function inServerSpelling(
+  voucher: Voucher,
+  parties: { payer: AccountId; payTo: AccountId; provider: AccountId; asset: AssetId },
+): Voucher {
+  return {
+    ...voucher,
+    payer: parties.payer,
+    payTo: parties.payTo,
+    provider: parties.provider,
+    amount: { ...voucher.amount, asset: parties.asset },
+  };
 }

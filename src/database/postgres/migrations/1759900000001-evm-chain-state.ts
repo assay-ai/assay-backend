@@ -3,7 +3,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 /**
  * The EVM chain-state cache: each chain's pause flag and dispute-upgrade terms
  * (`evm_chain_states`) and the on-chain blocklist (`evm_blocked_addresses`),
- * indexed from `X402Config`'s `PauseToggled` and `BlockedSet` events by
+ * indexed from `AssayConfig`'s `PauseToggled` and `BlockedSet` events by
  * `EvmChainStateIndexer` and reconciled against `paused()` / `blocked()` every
  * few minutes. A cache: the contracts stay the enforcer.
  */

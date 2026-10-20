@@ -1,7 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
+import {
+  AgentCredentialEntity,
+  CredentialIssuedVia,
+} from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { agentLabelOf, formatNoticeTime } from '@modules/notification/domain/notice-text';
 import {
   NOTIFICATION_PORT,
   NotificationEvent,
@@ -50,6 +55,14 @@ export interface CredentialExpirySweepSummary {
  * window and calls `notify()` again. `NotificationAggregation.ONCE`, keyed by
  * `` `${credentialId}:T-7` ``, is what turns "found repeatedly" into
  * "delivered exactly once" — see `NOTIFICATION_CATALOGUE[SESSION_EXPIRING]`.
+ *
+ * ## API keys only
+ *
+ * An OAuth grant (`issued_via = 'OAUTH'`) has an `expires_at` that rolls
+ * forward with its refresh chain and no `prefix` to quote, so warning on it
+ * would notify every idle grant and print "null…". Its app signs in again on
+ * its own; nothing here is for it. The query excludes it, and `sweep` drops
+ * any such row that reaches it anyway.
  */
 @Injectable()
 export class CredentialExpirySweepService {
@@ -59,6 +72,8 @@ export class CredentialExpirySweepService {
     private readonly credentials: AgentCredentialRepository,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     @Inject(CREDENTIAL_EXPIRY_SWEEP_CONFIG) private readonly config: CredentialExpirySweepConfig,
+    // Read only to name the agent in a notice body.
+    private readonly agents: AgentRepository,
   ) {}
 
   /** One pass over every organization's credentials. Never throws. */
@@ -68,7 +83,7 @@ export class CredentialExpirySweepService {
 
     let candidates: AgentCredentialEntity[];
     try {
-      candidates = await this.credentials
+      const rows = await this.credentials
         .createQueryBuilder('credential')
         // Cross-organization, deliberately: this is the platform's own promise
         // to warn before every credential lapses, not a query scoped to one
@@ -77,10 +92,12 @@ export class CredentialExpirySweepService {
         // sweeps use, and it is on `surface-consistency.spec.ts`'s allowlist
         // under this file's own path.
         .where('credential.organizationId IS NOT NULL')
+        .andWhere('credential.issuedVia = :issuedVia', { issuedVia: CredentialIssuedVia.API_KEY })
         .andWhere('credential.revokedAt IS NULL')
         .andWhere('credential.expiresAt IS NOT NULL')
         .andWhere('credential.expiresAt <= :horizon', { horizon })
         .getMany();
+      candidates = rows.filter((row) => row.issuedVia === CredentialIssuedVia.API_KEY);
     } catch (error) {
       this.logger.error(`Could not read credentials due for expiry: ${describe(error)}`);
       return { checked: 0, warnedT7: 0, warnedT1: 0, expired: 0 };
@@ -111,13 +128,17 @@ export class CredentialExpirySweepService {
     now: Date,
   ): Promise<'T7' | 'T1' | 'EXPIRED' | 'none'> {
     const msUntilExpiry = credential.expiresAt.getTime() - now.getTime();
+    if (msUntilExpiry > CREDENTIAL_EXPIRY_WARNING_T7_MS) return 'none';
+
+    const key = await this.keyPhrase(credential);
+    const expires = formatNoticeTime(credential.expiresAt);
 
     if (msUntilExpiry <= 0) {
       await this.notifications.notify({
         organizationId: credential.organizationId,
         event: NotificationEvent.SESSION_EXPIRED,
         title: 'Agent credential expired',
-        body: `Credential "${credential.name}" (${credential.prefix}…) expired and can no longer authenticate. Issue a new one to keep this agent running.`,
+        body: `${key} expired and can no longer authenticate. Make a new key to keep this agent running.`,
         subjectType: 'credential',
         subjectId: credential.id,
         payload: {
@@ -135,7 +156,7 @@ export class CredentialExpirySweepService {
         organizationId: credential.organizationId,
         event: NotificationEvent.SESSION_EXPIRING,
         title: 'Agent credential expiring tomorrow',
-        body: `Credential "${credential.name}" (${credential.prefix}…) expires ${credential.expiresAt.toISOString()}. Renew it now or this agent stops working.`,
+        body: `${key} expires ${expires}. Renew it now or this agent stops working.`,
         subjectType: 'credential',
         subjectId: credential.id,
         payload: {
@@ -154,7 +175,7 @@ export class CredentialExpirySweepService {
         organizationId: credential.organizationId,
         event: NotificationEvent.SESSION_EXPIRING,
         title: 'Agent credential expiring in a week',
-        body: `Credential "${credential.name}" (${credential.prefix}…) expires ${credential.expiresAt.toISOString()}. Renew it before then.`,
+        body: `${key} expires ${expires}. Renew it before then.`,
         subjectType: 'credential',
         subjectId: credential.id,
         payload: {
@@ -169,6 +190,12 @@ export class CredentialExpirySweepService {
     }
 
     return 'none';
+  }
+
+  /** `Key "CI deploy" (assay_live_ab12…) of "research-bot"`: names, never ids. */
+  private async keyPhrase(credential: AgentCredentialEntity): Promise<string> {
+    const label = await agentLabelOf(this.agents, credential.organizationId, credential.agentId);
+    return `Key "${credential.name}" (${credential.prefix}…) of ${label ? `"${label}"` : 'your agent'}`;
   }
 }
 

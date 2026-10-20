@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
-import { IsNull } from 'typeorm';
+import { In, IsNull } from 'typeorm';
 
 import { AccountBlockEntity } from '@database/postgres/entities/account-block.entity';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { asInstant, CursorPageDto, ListSpec, paginate } from '@shared/api';
 import {
   BlockSubjectKind,
@@ -56,6 +58,8 @@ export class OperatorAccountBlockService {
     private readonly operators: OperatorRepository,
     private readonly blocklist: AccountBlocklistService,
     private readonly approvals: OperatorApprovalService,
+    private readonly providers: ProviderRepository,
+    private readonly organizations: OrganizationRepository,
   ) {
     approvals.register(UNBLOCK_APPROVAL_ACTION, {
       code: 'A-10',
@@ -278,12 +282,17 @@ export class OperatorAccountBlockService {
       if (found) subjects.set(id, found.subject);
     }
     const named = (id: string | null) => (id === null ? null : (subjects.get(id) ?? id));
+    const orgNames = await this.organizationNames(rows);
 
     return rows.map((row) => ({
       id: row.id,
       subjectKind: row.subjectKind as BlockSubjectKind,
       subject: row.subject,
       subjectKey: row.subjectKey,
+      subjectName:
+        row.subjectKind === BlockSubjectKind.ORGANIZATION
+          ? (orgNames.get(row.subject) ?? null)
+          : null,
       active: row.unblockedAt === null,
       reasonCode: row.reasonCode,
       note: row.note,
@@ -295,6 +304,35 @@ export class OperatorAccountBlockService {
       unblockedAt: row.unblockedAt,
       unblockNote: row.unblockNote,
     }));
+  }
+
+  /**
+   * A name for every blocked organization that has a public one: the
+   * provider's public name (listed or not, as the case view names it), else
+   * the organization's public handle (`@handle`). Never `organizations.name`:
+   * for a login-created tenant that is the signup email's local part, personal
+   * data no operator screen shows. Without either, null, and the console shows
+   * a short id.
+   */
+  private async organizationNames(
+    rows: readonly AccountBlockEntity[],
+  ): Promise<Map<string, string>> {
+    const ids = [
+      ...new Set(
+        rows
+          .filter((row) => row.subjectKind === BlockSubjectKind.ORGANIZATION)
+          .map((row) => row.subject),
+      ),
+    ];
+    if (ids.length === 0) return new Map();
+    const names = new Map(await this.providers.findDisplayNames(ids));
+    const rest = ids.filter((id) => !names.has(id));
+    if (rest.length > 0) {
+      for (const organization of await this.organizations.findBy({ id: In(rest) })) {
+        if (organization.handle) names.set(organization.id, `@${organization.handle}`);
+      }
+    }
+    return names;
   }
 }
 

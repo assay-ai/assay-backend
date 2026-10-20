@@ -4,7 +4,7 @@
  *
  * > A buyer withdraws with **zero** ETH after the relayer's bounded gas top-up.
  *
- * Two phases, because `X402Escrow` holds a requested withdrawal for `WITHDRAW_DELAY_SECONDS`
+ * Two phases, because `AssayEscrow` holds a requested withdrawal for `WITHDRAW_DELAY_SECONDS`
  * (one hour) and a process that sleeps through it proves nothing a second invocation does not.
  *
  * ## Who plays which part
@@ -39,7 +39,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { requestWithdrawTypedData } from '@modules/chains/evm/eip712/escrow-control';
 import { ChainId, toAccountId, toAssetId } from '@modules/chains/ports/caip.types';
@@ -100,7 +100,7 @@ async function run(phase: string): Promise<E5Result> {
   const readEscrow = async () =>
     (await pub.readContract({
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'escrowOf',
       args: [buyer.address],
     })) as {
@@ -197,7 +197,7 @@ async function run(phase: string): Promise<E5Result> {
     }
     await send('funder depositFor', {
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'depositFor',
       args: [buyer.address, AMOUNT],
       chain,

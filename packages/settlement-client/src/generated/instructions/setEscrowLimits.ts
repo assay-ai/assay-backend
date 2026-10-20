@@ -39,7 +39,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findEscrowPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const SET_ESCROW_LIMITS_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   4, 64, 224, 138, 175, 179, 72, 127,
@@ -50,7 +50,7 @@ export function getSetEscrowLimitsDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type SetEscrowLimitsInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountBuyer extends string | AccountMeta<string> = string,
   TAccountEscrow extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -119,13 +119,13 @@ export type SetEscrowLimitsAsyncInput<
 export async function getSetEscrowLimitsInstructionAsync<
   TAccountBuyer extends string,
   TAccountEscrow extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: SetEscrowLimitsAsyncInput<TAccountBuyer, TAccountEscrow>,
   config?: { programAddress?: TProgramAddress },
 ): Promise<SetEscrowLimitsInstruction<TProgramAddress, TAccountBuyer, TAccountEscrow>> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -170,13 +170,13 @@ export type SetEscrowLimitsInput<
 export function getSetEscrowLimitsInstruction<
   TAccountBuyer extends string,
   TAccountEscrow extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: SetEscrowLimitsInput<TAccountBuyer, TAccountEscrow>,
   config?: { programAddress?: TProgramAddress },
 ): SetEscrowLimitsInstruction<TProgramAddress, TAccountBuyer, TAccountEscrow> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -202,7 +202,7 @@ export function getSetEscrowLimitsInstruction<
 }
 
 export type ParsedSetEscrowLimitsInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

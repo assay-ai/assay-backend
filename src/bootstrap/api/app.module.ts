@@ -13,6 +13,7 @@ import { bullboardConfig } from '@config/bullboard.config';
 // Infrastructure
 import { DatabaseModule } from '@database/database.module';
 import { AlertingModule } from '@shared/alerting';
+import { AppRoleModule } from '@shared/app-role/app-role.module';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { RedisAdapterModule } from '@shared/cache/redis-adapter/redis-adapter.module';
 import { HttpCacheModule } from '@shared/cache/http-cache/http-cache.module';
@@ -25,9 +26,11 @@ import { PaymentApiModule } from '@modules/payment/payment-api.module';
 import { LedgerApiModule } from '@modules/ledger/ledger-api.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolApiModule } from '@modules/tool/tool-api.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { CatalogueApiModule } from '@modules/catalogue/catalogue-api.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ProviderApiModule } from '@modules/provider/provider-api.module';
+import { ProviderToolModule } from '@modules/provider-tool/provider-tool.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { VerificationApiModule } from '@modules/verification/verification-api.module';
 import { SettlementModule } from '@modules/settlement/settlement.module';
@@ -46,6 +49,8 @@ import { McpModule } from '@modules/mcp/mcp.module';
 import { AccountApiModule } from '@modules/account/account-api.module';
 import { AuthApiModule } from '@modules/auth/auth-api.module';
 import { SpendPolicyApiModule } from '@modules/spend-policy/spend-policy-api.module';
+import { ToolsetApiModule } from '@modules/toolset/toolset-api.module';
+import { McpUrlsApiModule } from '@modules/mcp/mcp-urls-api.module';
 import { NotificationApiModule } from '@modules/notification/notification-api.module';
 import { FreeTierApiModule } from '@modules/free-tier/free-tier-api.module';
 import { DisputeApiModule } from '@modules/dispute/dispute-api.module';
@@ -53,14 +58,11 @@ import { OperatorApiModule } from '@modules/operator/operator-api.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolRequestModule } from '@modules/tool-request/tool-request.module';
 import { ObservabilityModule } from '@modules/observability/observability.module';
+import { OAuthApiModule } from '@modules/oauth/oauth-api.module';
 
 // Diagnostics (error-contract probe)
 import { DiagnosticsModule } from '@shared/diagnostics/diagnostics.module';
 import { areDiagnosticsEnabled } from '@shared/diagnostics/diagnostics.flag';
-
-// Starter reference modules — see src/modules/_examples/README.md
-import { ExamplesApiModule } from '@modules/_examples/examples-api.module';
-import { areExamplesEnabled } from '@modules/_examples/examples.flag';
 
 // WebSocket
 import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
@@ -70,6 +72,7 @@ import { WebSocketBoardModule } from '@websocket/websocket-board.module';
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 
 import { PublicFeaturesController } from './public-features.controller';
+import { RequestKeysController } from './request-keys.controller';
 
 // Providers
 import { SingleFlightService } from '@shared/services/single-flight.service';
@@ -99,6 +102,8 @@ import { NetworkModule } from '@shared/network/network.module';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => configService.get('bullmq'),
     }),
+    // `APP_ROLE = 'api'`: OAuth grants of payment clients only (spec §6.3.13).
+    AppRoleModule.forRoot('api'),
     // Infrastructure
     NetworkModule,
     DatabaseModule,
@@ -119,10 +124,15 @@ import { NetworkModule } from '@shared/network/network.module';
     PaymentApiModule,
     LedgerApiModule,
     ToolModule,
+    // The provider call (invoker, request signer, credential vault): the
+    // mapping tester and the public demo dial providers, and the JWKS route
+    // publishes the signer's keys.
+    ToolEgressModule,
     ToolApiModule,
     CatalogueApiModule,
     ProviderModule,
     ProviderApiModule,
+    ProviderToolModule,
     VerificationModule,
     VerificationApiModule,
     SettlementModule,
@@ -151,12 +161,19 @@ import { NetworkModule } from '@shared/network/network.module';
     // stops one being built).
     AuthApiModule,
     SpendPolicyApiModule,
+    // Toolsets, access policies, the Connect preview and Servers in use.
+    ToolsetApiModule,
+    McpUrlsApiModule,
     // The notification channel registry and per-event preferences,
     // and `GET /free-quota`. `NotificationApiModule` is the settings surface;
     // the notification *feed* is still `AccountApiModule`'s.
     NotificationApiModule,
     FreeTierApiModule,
     DisputeApiModule,
+    // The consent API of the OAuth authorization server (`/oauth/requests/:rid`):
+    // a person approves an app here; the MCP app mints the code. Needs the
+    // OAuth configuration (`OAUTH_*`, `AUTH_SESSION_SOURCE=both`).
+    OAuthApiModule,
 
     // Slash proposals, disputes and the operator console. Two surfaces, deliberately separate: the
     // provider reads their own case through `SessionAuthGuard`, and the
@@ -172,9 +189,8 @@ import { NetworkModule } from '@shared/network/network.module';
     // Diagnostics — off by default in production
     ...(areDiagnosticsEnabled() ? [DiagnosticsModule] : []),
     // Starter reference modules — off by default in production
-    ...(areExamplesEnabled() ? [ExamplesApiModule] : []),
   ],
   providers: [SingleFlightService],
-  controllers: [HealthcheckController, PublicFeaturesController],
+  controllers: [HealthcheckController, PublicFeaturesController, RequestKeysController],
 })
 export class AppApiModule {}

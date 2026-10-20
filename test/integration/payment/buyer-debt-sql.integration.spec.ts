@@ -21,8 +21,8 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * the repository; the predicates, the advisory lock and the partial index are
  * properties of the database and are only proven here.
  */
-const DATABASE = 'x402_buyer_debt_sql_test';
-const MIGRATION_DATABASE = 'x402_buyer_debt_migrations_test';
+const DATABASE = 'assay_buyer_debt_sql_test';
+const MIGRATION_DATABASE = 'assay_buyer_debt_migrations_test';
 const CHAIN = 'eip155:84532';
 const ASSET = `${CHAIN}/erc20:0x036cbd53842c5426634e7929541ec2318f3dcf7e`;
 const PAYEE = `${CHAIN}:0x5555555555555555555555555555555555555555`;
@@ -517,7 +517,55 @@ describe('buyer debt migrations, down and up again', () => {
       )) as Array<{ prosrc: string }>
     )[0].prosrc;
 
-  it('reverts 1760900000000 … 1760600000000 one by one and reapplies them', async () => {
+  it('reverts the migrations after 1760900000000, then 1760900000000 … 1760600000000, and reapplies them', async () => {
+    // The migrations after these sit on top of them and touch none of their
+    // objects: undo those first, newest first.
+    const later = [
+      'ConnectUrlServerName1762400000030',
+      'PaymentKeySpendIndexes1762400000020',
+      'OAuthAuditSignalIndex1762400000014',
+      'OAuthCodeReuseDetected1762400000013',
+      'OAuthExpiryIndexes1762400000012',
+      'OAuth1762400000010',
+      'DropUnwrittenSlashColumns1762400000003',
+      'DropDeadDisputeSchema1762400000002',
+      'DropOffChainSlashObjection1762400000001',
+      'DropLegacyPaymentSchema1762400000000',
+      'EscrowWithdrawalEvents1762300000000',
+      'ModerationCutoffPublicReason1762200000000',
+      'CreateVaultKekChecks1762000000003',
+      'ToolBindingAuthMode1762000000002',
+      'CreateBindingCredentials1762000000001',
+      'DropConnectivityEgressIps1762000000000',
+      'ProviderTools1761900000000',
+      'CallDisputes1761800000002',
+      'VerificationRecordDisputeOutcome1761800000001',
+      'PaymentIntentDisputeHold1761800000000',
+      'ToolDraftIntegrity1761600000000',
+      'BindingContractTerms1761500000001',
+      'ToolVersions1761500000000',
+      'ToolsetPublishing1761400000001',
+      'OrgHandles1761400000000',
+      'ReserveMetaToolNames1761300000000',
+      'CallAttributionAndConnectUrls1761200000003',
+      'CreateToolsets1761200000002',
+      'AccessPolicyAndAgentRules1761200000001',
+      'CreateTools1761200000000',
+      'BindingObservations1761100000000',
+      'IdempotencyKeyLiveIntents1761000000000',
+    ];
+    const CONCURRENT_INDEX_MIGRATIONS = new Set([
+      'PaymentKeySpendIndexes1762400000020',
+      'IdempotencyKeyLiveIntents1761000000000',
+    ]);
+    for (const name of later) {
+      expect(await last()).toBe(name);
+      // No wrapping transaction where a down() rebuilds an index CONCURRENTLY.
+      await dataSource.undoLastMigration({
+        transaction: CONCURRENT_INDEX_MIGRATIONS.has(name) ? 'none' : 'each',
+      });
+    }
+
     expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
 
@@ -554,6 +602,7 @@ describe('buyer debt migrations, down and up again', () => {
       'PaymentIntentRedemptionLapsed1760700000000',
       'PaymentIntentDebtReplacing1760800000000',
       'VoucherSeqDebtReplacement1760900000000',
+      ...[...later].reverse(),
     ]);
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
     expect(await columns()).toEqual([

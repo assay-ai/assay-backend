@@ -1,8 +1,8 @@
 /**
- * `@x402/settlement-client` — the typed client for the x402 settlement program.
+ * `@assay/settlement-client` — the typed client for the assay settlement program.
  *
  * Everything under `./generated` is Codama output rendered from
- * `idl/x402_payment.json`, which is itself rendered from the program source. Do
+ * `idl/assay_payment.json`, which is itself rendered from the program source. Do
  * not hand-edit it: `yarn client:check` re-renders and fails on any difference,
  * so an edit here is a red pipeline rather than a silent divergence.
  *
@@ -15,7 +15,7 @@
  *   layouts likewise.
  * - `findStakePda(...)`, `findVerifierKeyPda(...)`, … — seeds taken from the
  *   program's own `#[account(seeds = …)]`, not retyped.
- * - `X402_PAYMENT_ERROR__*` and `getX402PaymentErrorMessage(code)` — the
+ * - `ASSAY_PAYMENT_ERROR__*` and `getAssayPaymentErrorMessage(code)` — the
  *   program's error catalog, so a failed simulation reads as
  *   `StatusDoesNotSlash` rather than as `custom program error: 0x1783`.
  *
@@ -66,7 +66,7 @@ export * from './voucher-message';
  * fresh program keypair, say — must pass `{ programAddress }` to every builder
  * and every `find*Pda` call; it must not edit this.
  */
-export { X402_PAYMENT_PROGRAM_ADDRESS as SETTLEMENT_PROGRAM_ADDRESS } from './generated/programs';
+export { ASSAY_PAYMENT_PROGRAM_ADDRESS as SETTLEMENT_PROGRAM_ADDRESS } from './generated/programs';
 
 /**
  * The two `#[constant]` delays. Codama renders no constants, so these are

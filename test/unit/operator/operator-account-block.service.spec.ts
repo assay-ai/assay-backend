@@ -65,6 +65,10 @@ class FakeBlocks {
   }
 }
 
+const PROVIDER_NAMES = new Map([[ORG.toLowerCase(), 'Open-Meteo Demo BV']]);
+const OTHER_ORG = '7e3a94c1-0000-4000-8000-000000000001';
+const NO_HANDLE_ORG = '7e3a94c1-0000-4000-8000-000000000002';
+
 function build() {
   const runner = {
     connect: async () => undefined,
@@ -100,12 +104,31 @@ function build() {
     operators as never,
     {} as never,
   );
+  const providers = {
+    findDisplayNames: async (ids: readonly string[]) =>
+      new Map(
+        ids
+          .filter((id) => PROVIDER_NAMES.has(id))
+          .map((id) => [id, PROVIDER_NAMES.get(id) as string]),
+      ),
+  };
+  // Login-created tenants: `name` is the signup email's local part; only one has a handle.
+  const orgRows = [
+    { id: OTHER_ORG, name: 'jane.doe', handle: 'acme' },
+    { id: NO_HANDLE_ORG, name: 'john.smith', handle: null },
+  ];
+  const organizations = {
+    findBy: async (where: { id: { _value: string[] } }) =>
+      orgRows.filter((row) => where.id._value.includes(row.id)),
+  };
   const service = new OperatorAccountBlockService(
     overrides,
     blocks as never,
     operators as never,
     blocklist,
     approvals,
+    providers as never,
+    organizations as never,
   );
   return { service, blocks, entries, blocklist, applied, runner, queued };
 }
@@ -194,6 +217,49 @@ describe('OperatorAccountBlockService.block', () => {
 
     expect(entries[0]).toMatchObject({ organizationId: ORG.toLowerCase() });
     expect(blocklist.organizationBlock(ORG)).not.toBeNull();
+  });
+
+  it('names an organization by its public name only: provider name, else @handle, else nothing', async () => {
+    const { service } = build();
+    const provider = await service.block(
+      SRE,
+      { subjectKind: BlockSubjectKind.ORGANIZATION, subject: ORG, reasonCode: 'X', note: NOTE },
+      null,
+    );
+    expect(provider.subjectName).toBe('Open-Meteo Demo BV');
+
+    const buyer = await service.block(
+      SRE,
+      {
+        subjectKind: BlockSubjectKind.ORGANIZATION,
+        subject: OTHER_ORG,
+        reasonCode: 'X',
+        note: NOTE,
+      },
+      null,
+    );
+    expect(buyer.subjectName).toBe('@acme');
+
+    const bare = await service.block(
+      SRE,
+      {
+        subjectKind: BlockSubjectKind.ORGANIZATION,
+        subject: NO_HANDLE_ORG,
+        reasonCode: 'X',
+        note: NOTE,
+      },
+      null,
+    );
+    expect(bare.subjectName).toBeNull();
+    // The email-derived organization name never reaches an operator.
+    expect(JSON.stringify([provider, buyer, bare])).not.toMatch(/jane\.doe|john\.smith/);
+
+    const wallet = await service.block(
+      SRE,
+      { subjectKind: BlockSubjectKind.WALLET, subject: WALLET, reasonCode: 'X', note: NOTE },
+      null,
+    );
+    expect(wallet.subjectName).toBeNull();
   });
 
   it('refuses a subject that is not one, and writes nothing', async () => {

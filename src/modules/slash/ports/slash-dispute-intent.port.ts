@@ -25,9 +25,9 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 export interface SlashChainTerms {
   readonly chainId: ChainId;
   readonly paused: boolean;
-  /** `X402Config.arbiter()`, checksummed, or `null` for none. */
+  /** `AssayConfig.arbiter()`, checksummed, or `null` for none. */
   readonly arbiter: string | null;
-  /** `X402Config.admin()`, checksummed. */
+  /** `AssayConfig.admin()`, checksummed. */
   readonly admin: string;
   /** The delay a proposal made now would freeze into its `executableAt`. */
   readonly slashDelaySeconds: number;

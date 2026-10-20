@@ -1,5 +1,6 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
@@ -42,17 +43,24 @@ import {
   classifyTransportError,
   isRetryable,
 } from '../domain/classification';
-import { JsonObject, JsonValue, mapResponse, mappingFaultOf } from '../domain/mapping';
+import { JsonObject, JsonValue, mappingFaultOf } from '../domain/mapping';
+import { mapServedResponse } from '../domain/contract/served-response';
 import {
   CeilingKind,
   EligibilityResult,
   Ineligible,
   IneligibilityReason,
+  OnEmpty,
   RoutingCandidate,
   RoutingContext,
   RoutingRandom,
+  RoutingRules,
+  RuleRejection,
+  RuleRejectionReason,
   StakeGateVerdict,
   WeightedCandidate,
+  applyContractGate,
+  applyRules,
   applyStakeGrace,
   chooseSettlementChain,
   settleableChains,
@@ -61,13 +69,27 @@ import {
   payoutAccountOn,
   pickWeighted,
   scoreCandidates,
+  withoutEntryPreferences,
+  statsOf,
 } from '../domain/routing';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import {
+  ContractRefusal,
+  NO_CONTRACT_REQUEST,
+  candidateVersions,
+  effectiveOutputSchema,
+  contractReplacementOf,
+  replacementOf,
+  toolAtVersion,
+  versionOf,
+} from '../domain/contract/contract-versions';
 
+import { ToolAccessErrors } from '../errors/tool-access.errors';
 import { ToolErrors } from '../errors/tool.errors';
 import { BINDING_INVOKER, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
-import { PricingMode, Tool, ToolBinding } from '../ports/tool.types';
+import { PricingMode, Tool, ToolBinding, ToolContractVersion } from '../ports/tool.types';
+import { BindingAttemptRecorder } from './binding-attempt-recorder.service';
 import { BindingCallCounterService } from './binding-call-counter.service';
 import { BindingCeilingService } from './binding-ceiling.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from './routing.config';
@@ -142,7 +164,10 @@ export class ProviderRouterService {
     // enrolment can be closed afterwards without anybody touching it.
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
     @Inject(STAKE_GRACE_SOURCE) private readonly grace: StakeGracePort,
-    @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
+    // Provided by `ToolEgressModule`, which only the processes that dial
+    // providers (api, mcp) import. Absent elsewhere — the scheduler reaches this
+    // class for quotes — and then `route` refuses.
+    @Optional() @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort | null,
     // The two traffic counters. Concrete classes rather than ports because they
     // live in this module: `PROVIDER_REGISTRY` and friends are tokens because
     // they cross a module boundary the router must not look past, and inventing
@@ -152,6 +177,13 @@ export class ProviderRouterService {
     private readonly ceilings: BindingCeilingService,
     @Inject(ROUTER_CONFIG) private readonly config: RouterConfig,
     @Inject(ROUTING_RANDOM) private readonly random: RoutingRandom,
+    // The account blocklist, the in-memory copy payment-intent creation and the
+    // catalogue's market read check. A blocked organization's bindings leave
+    // the pool before anything else looks at it — see {@link unblocked}.
+    private readonly blocklist: AccountBlocklistService,
+    // The observed-stats write (`binding_attempts`). Optional: a composition
+    // without it routes exactly as before and simply measures nothing.
+    @Optional() private readonly observations: BindingAttemptRecorder | null = null,
   ) {}
 
   /**
@@ -168,12 +200,17 @@ export class ProviderRouterService {
    * neither is reachable by any provider's stake.
    */
   async route(request: ToolCallRequest): Promise<RoutedCall> {
+    if (!this.invoker) {
+      throw new Error(
+        'ProviderRouterService.route: no BINDING_INVOKER in this process (import ToolEgressModule)',
+      );
+    }
     const tool = await this.catalogue.findTool(request.toolId);
     if (!tool) {
       throw ToolErrors.toolNotFound({ toolId: request.toolId });
     }
 
-    const candidates = await this.gatherCandidates(request.toolId);
+    const candidates = this.unblocked(await this.gatherCandidates(request.toolId));
     if (candidates.length === 0) {
       throw ToolErrors.noEligibleBinding({
         toolId: request.toolId,
@@ -186,6 +223,19 @@ export class ProviderRouterService {
     // module, never inferred by the router* — a router that could invent one
     // is a router that can fail open on the one gate whose job is to refuse.
     const routing = request.context;
+
+    // The contract version, decided ONCE for the whole call (§7.3): every
+    // failover attempt serves the same contract the arguments were checked
+    // against, and a ceiling shed mid-call cannot move it.
+    const contract = this.resolveContract(
+      tool,
+      classPoolOf(candidates, routing),
+      routing,
+      new Date(),
+    );
+    if (!contract.version) throw contractRefused(tool, contract.refusal, routing);
+    const version = contract.version;
+    const versionTool = toolAtVersion(tool, version);
     const excluded = new Set(routing.excludeProviderIds ?? []);
     let settlementChain: ChainId | null = null;
     const attempts: RoutingAttempt[] = [];
@@ -223,12 +273,15 @@ export class ProviderRouterService {
       const {
         picked: selection,
         rejected,
+        ruleRejected,
+        fellBack,
         settlementChainOf,
       } = await this.selectAndReserve(
         candidates,
         { ...routing, excludeProviderIds: [...excluded] },
         shed,
         now,
+        version,
       );
 
       if (!selection) {
@@ -236,7 +289,7 @@ export class ProviderRouterService {
         // entirely on whether we have tried anything yet — see the two codes'
         // doc comments; one is a supply problem and one is an outage.
         if (attempts.length === 0) {
-          throw unroutable(request.toolId, rejected, routing);
+          throw unroutable(request.toolId, rejected, routing, ruleRejected);
         }
 
         throw allBindingsFailed(
@@ -265,7 +318,22 @@ export class ProviderRouterService {
       // ceiling and `totalDeadlineMs` would be decorative.
       const timeoutMs = Math.min(binding.timeoutMs, remainingMs);
       const startedAt = Date.now();
-      const outcome = await this.attempt(tool, binding, request.input, timeoutMs, request.callId);
+      // The contract at the routed version, with this binding's declared
+      // optional outputs made required: a declared field that comes back
+      // missing is a provider contract violation like a missing core field.
+      const mustReturn = routing.contract?.requireOutputFields ?? [];
+      const servedTool: Tool = {
+        ...versionTool,
+        outputSchema: effectiveOutputSchema(version, binding, mustReturn),
+      };
+      const outcome = await this.attempt(
+        servedTool,
+        binding,
+        request.input,
+        timeoutMs,
+        request.callId,
+        mustReturn,
+      );
 
       const record: RoutingAttempt = {
         bindingId: binding.id,
@@ -279,9 +347,26 @@ export class ProviderRouterService {
       };
       attempts.push(record);
 
+      // Every attempt, the failed-over ones included — they are the
+      // provider-caused failures availability measures, and nothing else
+      // records them. Synchronous and buffered: see `BindingAttemptRecorder`.
+      // `maxBudgetMs` is the longest this binding can EVER be given — a
+      // binding may declare more time than a whole request is allowed — so a
+      // timeout on it is the provider's, and only a budget earlier attempts
+      // ate into is not.
+      this.observations?.record({
+        binding,
+        classification: outcome.classification,
+        elapsedMs: record.elapsedMs,
+        timeoutMs,
+        maxBudgetMs: Math.min(binding.timeoutMs, this.config.totalDeadlineMs),
+        callClass: routing.callClass,
+        buyerOrganizationId: routing.buyerOrganizationId,
+      });
+
       if (!isRetryable(outcome.classification.responseClass)) {
         return {
-          tool,
+          tool: servedTool,
           binding,
           providerId: binding.providerId,
           // From the candidate that *won*, not from a fresh registry read: the
@@ -308,6 +393,9 @@ export class ProviderRouterService {
           response: outcome.response,
           output: outcome.output,
           attempts,
+          // FALLBACK_BEST dropped the toolset entry's preferences to serve
+          // this call; the receipt says so.
+          ...(fellBack ? { fellBack: true } : {}),
         };
       }
 
@@ -356,7 +444,7 @@ export class ProviderRouterService {
    *
    * ## Why the statistics are traffic-weighted
    *
-   * `x402/p95LatencyMs` and `x402/qualityRate` are published as the platform's
+   * `assay/p95LatencyMs` and `assay/qualityRate` are published as the platform's
    * measured figures *for the tool*, over every provider behind it. A plain
    * mean would describe a provider that takes 2% of the traffic exactly as
    * loudly as one that takes 60%. The weights used here are the ones routing
@@ -364,15 +452,253 @@ export class ProviderRouterService {
    * should expect from calling this endpoint rather than a property of the
    * supplier list.
    *
-   * Both are `null` when nothing has been measured. The router writes no
-   * reputation, so today they are whatever the config stand-in was seeded with,
-   * and `null` is the honest answer for a tool nobody has scored.
+   * Both are `null` when nothing has been measured. The figures are the ones
+   * the candidates are scored on (`statsOf`): each binding's observed window
+   * from `binding_stats`, falling back to its provider's pooled one, and absent
+   * below the minimum sample size — so `null` is the honest answer for a tool
+   * nobody has measured yet.
    */
   async quote(toolId: string, context: RoutingContext): Promise<ToolQuote | null> {
     const tool = await this.catalogue.findTool(toolId);
     if (!tool) return null;
 
-    const candidates = await this.gatherCandidates(toolId);
+    return this.quoteFromCandidates(tool, await this.gatherCandidates(toolId), context);
+  }
+
+  /**
+   * Every candidate behind a tool, gathered exactly as a call gathers them —
+   * the I/O half of {@link quote}, which the quote index caches so that
+   * `tools/list` never reads the registry or the chain per tool.
+   *
+   * Blocked organizations are NOT dropped here: {@link quoteFromCandidates}
+   * drops them when it prices, against the live blocklist, so a block and an
+   * unblock show in a listing at once rather than when the cached snapshot
+   * ages out.
+   */
+  async snapshotCandidates(toolId: string): Promise<RoutingCandidate[]> {
+    return this.gatherCandidates(toolId);
+  }
+
+  /**
+   * {@link quote} over candidates already gathered: pure, so the quote index
+   * can price a listing under each viewer's own rules from one snapshot.
+   *
+   * The buyer's rules (`context.rules`) are applied before the gates, the
+   * same way {@link select} applies them, and FALLBACK_BEST is honoured the
+   * same way. A quote the rules empty has no price and carries the rule
+   * rejections, which is "No provider fits your limits" to the caller.
+   */
+  quoteFromCandidates(
+    tool: Tool,
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+  ): ToolQuote {
+    const now = new Date();
+    const pool = classPoolOf(this.unblocked(candidates), context);
+    const contract = this.resolveContract(tool, pool, context, now);
+    if (!contract.version) {
+      return {
+        tool,
+        price: null,
+        pricingMode: null,
+        routableBindings: 0,
+        settlementChains: [],
+        p95LatencyMs: null,
+        qualityRate: null,
+        unroutableReason:
+          contract.refusal === ContractRefusal.RETIRED
+            ? 'every contract version this call may use is retired'
+            : 'no contract version this call may use',
+        contractRefusal: {
+          refusal: contract.refusal ?? ContractRefusal.NO_VERSION,
+          replacement: contractReplacement(tool, context),
+        },
+      };
+    }
+
+    const versionTool = toolAtVersion(tool, contract.version);
+    const gate = applyContractGate(pool, contract.version, context.contract ?? NO_CONTRACT_REQUEST);
+    const ruled = this.eligibleUnderRules(gate.kept, context, now);
+    const ruleRejected = [...gate.rejected, ...ruled.ruleRejected];
+    if (ruled.eligible.length === 0) {
+      return {
+        tool: versionTool,
+        price: null,
+        pricingMode: null,
+        routableBindings: 0,
+        settlementChains: [],
+        p95LatencyMs: null,
+        qualityRate: null,
+        unroutableReason: summariseRejections(ruled.rejected, ruleRejected),
+        ...(ruleRejected.length > 0
+          ? { ruleRejections: ruleRejected.map(toRuleRejectionDetail) }
+          : {}),
+      };
+    }
+
+    const quote = this.priceEligible(versionTool, ruled.eligible, context, ruled.fellBack);
+    // The bound is taken on the chain the quote is priced on — the buyer's own
+    // when it is in `settlementChains` — and nowhere else: a binding priced in
+    // this chain's asset but settling only on another one can never be offered
+    // to this buyer, so it must not raise the bound (re-review R1-1).
+    const chain =
+      quote.settlementChains.length > 0
+        ? chooseSettlementChain(
+            quote.settlementChains,
+            context.defaultChainId,
+            context.enabledChains,
+          )
+        : null;
+    const onChain: RoutingContext = chain ? { ...context, payerChains: [chain] } : context;
+    return { ...quote, maxPrice: this.chargeableBound(tool, pool, onChain, now, quote.price) };
+  }
+
+  /**
+   * {@link ToolQuote.maxPrice}: the dearest chargeable binding priced in
+   * `price`'s asset over everything a live call could choose, with the rate and
+   * daily ceilings relaxed. A superset of the quote's own eligible set, so it
+   * is never below the chargeable `price`, by construction.
+   */
+  private chargeableBound(
+    tool: Tool,
+    pool: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+    price: Money | null,
+  ): Money | null {
+    if (!price) return null;
+    const relaxed = pool.map((candidate) =>
+      candidate.ceilingHit ? { ...candidate, ceilingHit: null } : candidate,
+    );
+    const request = context.contract ?? NO_CONTRACT_REQUEST;
+    const { versions } = candidateVersions(tool, request);
+    const passes: (RoutingRules | undefined)[] = [context.rules];
+    if (fallsBack(context.rules))
+      passes.push(withoutEntryPreferences(context.rules as RoutingRules));
+
+    let dearest: ToolBinding | null = null;
+    for (const version of versions) {
+      const { kept } = applyContractGate(relaxed, version, request);
+      if (kept.length === 0) continue;
+      for (const rules of passes) {
+        for (const { binding } of this.eligibleUnder(kept, context, rules, now).eligible) {
+          if (binding.pricingMode === PricingMode.FREE) continue;
+          if (binding.assetId !== price.asset) continue;
+          if (!dearest || BigInt(binding.priceAmount) > BigInt(dearest.priceAmount))
+            dearest = binding;
+        }
+      }
+    }
+    return dearest ? bindingPrice(dearest) : null;
+  }
+
+  /**
+   * The contract version a call is served at (design spec §7.3, "Contract
+   * version"): the most preferred version the call may use that has at least
+   * one eligible binding under the contract's hard constraints and the merged
+   * rules; only when no version has one under the entry's own preferences is
+   * FALLBACK_BEST considered, again over every version. Judged on the whole pool of the call's
+   * class with no pin and no failover exclusion, so `offer()`, the voucher
+   * retry and every failover attempt agree. When no version has one, the most
+   * preferred is returned and the refusal reports its rejections.
+   */
+  private resolveContract(
+    tool: Tool,
+    pool: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+  ): { readonly version: ToolContractVersion | null; readonly refusal: ContractRefusal | null } {
+    const request = context.contract ?? NO_CONTRACT_REQUEST;
+    const { versions, refusal } = candidateVersions(tool, request);
+    if (versions.length === 0) return { version: null, refusal };
+    if (versions.length === 1) return { version: versions[0], refusal: null };
+
+    const unpinned: RoutingContext = {
+      ...context,
+      ...(request.versionChains ? { payerChains: request.versionChains } : {}),
+      onlyProviderId: undefined,
+      excludeProviderIds: [],
+    };
+    // Two passes: the strict rules first over every version, and only when
+    // none qualifies the FALLBACK_BEST rules. A fallback at a higher version
+    // must never win over a version the entry's preferences accept.
+    const passes: (RoutingRules | undefined)[] = [context.rules];
+    if (fallsBack(context.rules))
+      passes.push(withoutEntryPreferences(context.rules as RoutingRules));
+    for (const rules of passes) {
+      for (const version of versions) {
+        const { kept } = applyContractGate(pool, version, request);
+        if (kept.length === 0) continue;
+        if (this.eligibleUnder(kept, unpinned, rules, now).eligible.length > 0) {
+          return { version, refusal: null };
+        }
+      }
+    }
+    return { version: versions[0], refusal: null };
+  }
+
+  /**
+   * The rules, then the gates, then grace — with FALLBACK_BEST re-running the
+   * gates under the agent's rules alone when the entry's left nothing.
+   */
+  private eligibleUnderRules(
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+  ): EligibleUnderRules {
+    const first = this.eligibleUnder(candidates, context, context.rules, now);
+    if (first.eligible.length > 0 || !fallsBack(context.rules)) return first;
+
+    const fallback = this.eligibleUnder(
+      candidates,
+      context,
+      withoutEntryPreferences(context.rules as RoutingRules),
+      now,
+    );
+    return fallback.eligible.length > 0 ? { ...fallback, fellBack: true } : fallback;
+  }
+
+  /**
+   * Whether FALLBACK_BEST applies to this call: the entry asks for it, and its
+   * rules leave no eligible provider in `pool` — judged with no pin and no
+   * failover exclusion, so the answer is the same in `offer()`, in the voucher
+   * retry and on every failover attempt.
+   */
+  private fallsBackOn(
+    pool: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+  ): boolean {
+    if (!fallsBack(context.rules)) return false;
+    const unpinned: RoutingContext = {
+      ...context,
+      onlyProviderId: undefined,
+      excludeProviderIds: [],
+    };
+    return this.eligibleUnder(pool, unpinned, context.rules, now).eligible.length === 0;
+  }
+
+  private eligibleUnder(
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+    rules: RoutingRules | undefined,
+    now: Date,
+  ): EligibleUnderRules {
+    const { kept, rejected: ruleRejected } = applyRules(candidates, rules);
+    const { eligible, rejected, settlementChainOf } = reinstateGraced(
+      kept,
+      filterEligible(kept, this.config.minimumStakeByChain, context),
+      now,
+    );
+    return { eligible, rejected, settlementChainOf, ruleRejected, fellBack: false };
+  }
+
+  private priceEligible(
+    tool: Tool,
+    eligible: readonly RoutingCandidate[],
+    context: RoutingContext,
+    fellBack: boolean,
+  ): ToolQuote {
     // Same two steps as {@link select}, in the same order, through the same
     // helper. That is the whole reason `reinstateGraced` is a function rather
     // than three lines inlined into selection: a quote that called only
@@ -393,25 +719,6 @@ export class ProviderRouterService {
     // per quote would drain a provider's declared allowance on traffic that
     // never reaches their endpoint. `consume` is called from
     // {@link selectAndReserve} and nowhere else.
-    const { eligible, rejected } = reinstateGraced(
-      candidates,
-      filterEligible(candidates, this.config.minimumStakeByChain, context),
-      new Date(),
-    );
-
-    if (eligible.length === 0) {
-      return {
-        tool,
-        price: null,
-        pricingMode: null,
-        routableBindings: 0,
-        settlementChains: [],
-        p95LatencyMs: null,
-        qualityRate: null,
-        unroutableReason: summariseRejections(rejected),
-      };
-    }
-
     const weighted = computeWeights(scoreCandidates(eligible, this.config.weights));
 
     // The union over the routable set, for the caller to render against the
@@ -423,14 +730,15 @@ export class ProviderRouterService {
     ];
     const priced = pricedOnQuotedChain(eligible, settlementChains, context);
     const pricingMode = quotedPricingMode(priced);
+    const chargeable = priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE);
+    const priceSet = pricingMode === PricingMode.FREE ? priced : chargeable;
+    const price = dearestPrice(priceSet);
 
     return {
       tool,
-      price: dearestPrice(
-        pricingMode === PricingMode.FREE
-          ? priced
-          : priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE),
-      ),
+      price,
+      pricedBy: pricedByOf(priceSet, price),
+      listings: priceSet.length,
       pricingMode,
       routableBindings: eligible.length,
       paidBindings: priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE).length,
@@ -441,13 +749,15 @@ export class ProviderRouterService {
           freeDailyBudget: binding.freeDailyBudget ?? null,
         })),
       settlementChains,
-      p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
+      p95LatencyMs: weightedMean(weighted, (c) => statsOf(c).p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
         c.binding.pricingMode === PricingMode.FREE
-          ? c.provider.stats.freeQualityRate
-          : c.provider.stats.paidQualityRate,
+          ? statsOf(c).freeQualityRate
+          : statsOf(c).paidQualityRate,
       ),
       unroutableReason: null,
+      cheapestPrice: chargeable.length > 0 ? cheapestPrice(chargeable) : null,
+      ...(fellBack ? { fellBack: true } : {}),
     };
   }
 
@@ -472,9 +782,22 @@ export class ProviderRouterService {
    * Refuses exactly as the first attempt of {@link route} would.
    */
   async offer(toolId: string, context: RoutingContext): Promise<RoutingOffer> {
-    const candidates = await this.gatherCandidates(toolId);
-    const { picked, rejected, settlementChainOf } = this.select(candidates, context, new Date());
-    if (!picked) throw unroutable(toolId, rejected, context);
+    const tool = await this.catalogue.findTool(toolId);
+    if (!tool) throw ToolErrors.toolNotFound({ toolId });
+    const candidates = this.unblocked(await this.gatherCandidates(toolId));
+    const now = new Date();
+    // Decided on the whole class pool, unpinned: the voucher retry makes the
+    // same choice the first offer made, and a pinned payee whose binding does
+    // not serve it is refused (`PAYEE_NO_LONGER_ELIGIBLE`), never followed.
+    const contract = this.resolveContract(tool, classPoolOf(candidates, context), context, now);
+    if (!contract.version) throw contractRefused(tool, contract.refusal, context);
+    const { picked, rejected, ruleRejected, fellBack, settlementChainOf } = this.select(
+      candidates,
+      context,
+      now,
+      contract.version,
+    );
+    if (!picked) throw unroutable(toolId, rejected, context, ruleRejected);
 
     const settlementChain = settlementChainOf.get(picked.candidate.binding.id);
     return {
@@ -482,7 +805,45 @@ export class ProviderRouterService {
       providerAccount: payoutAccountOn(picked.candidate.provider, settlementChain),
       settlementChain,
       price: bindingPrice(picked.candidate.binding),
+      contractVersion: contract.version.version,
+      ...(fellBack ? { fellBack: true } : {}),
     };
+  }
+
+  // ── The account blocklist ─────────────────────────────────────────────────
+
+  /**
+   * The candidates whose provider organization is not blocked.
+   *
+   * A blocked organization is dropped from the pool, as if it had no bindings,
+   * rather than rejected by a gate. A rejection is reported — in
+   * `unroutableReason`, in a rule refusal's provider list — and the platform
+   * does not confirm that a blocked provider exists (the public catalogue
+   * answers 404 for it). Dropping it also keeps it out of everything priced
+   * off the pool: the quote, `pricedBy`, `listings` and the contract version.
+   *
+   * Rail B's pin (`onlyProviderId`) gets no check of its own, on purpose: a
+   * pinned blocked organization is simply absent from the pool, so the call is
+   * refused exactly as a pin on an unknown id or on a provider with no binding
+   * here is. The pin is echoed by the agent and proves nothing, so any answer
+   * that told a blocked payee apart would let anyone probe the blocklist.
+   *
+   * `DbProviderRegistry` already reads a blocked provider as `SUSPENDED`, so
+   * `filterEligible` refuses it too; that stays as defence in depth, as does
+   * the check in `PaymentIntentService.create`. This one is what holds when
+   * the candidates come from the quote index's cached snapshot, which is up to
+   * a minute old and is not invalidated by a block.
+   *
+   * No I/O: the blocklist is held in memory and answers synchronously, so this
+   * is one map lookup per candidate on every path. Returns the input itself
+   * when nothing is blocked, so an unblocked pool is priced and drawn from the
+   * very same array as before.
+   */
+  private unblocked(candidates: readonly RoutingCandidate[]): readonly RoutingCandidate[] {
+    const kept = candidates.filter(
+      ({ binding }) => !this.blocklist.organizationBlock(binding.providerId),
+    );
+    return kept.length === candidates.length ? candidates : kept;
   }
 
   // ── Selection ─────────────────────────────────────────────────────────────
@@ -509,6 +870,7 @@ export class ProviderRouterService {
     candidates: readonly RoutingCandidate[],
     context: RoutingContext,
     now: Date,
+    version: ToolContractVersion,
   ): Selection {
     // Rail B's pin, applied before the gates so a pinned provider is judged by
     // exactly the rules any other call would judge it by — and so no other
@@ -519,22 +881,60 @@ export class ProviderRouterService {
     // and a free call never reaches a `PAID` one (whose provider it cannot pay).
     // Dropped from the pool rather than rejected, so a refusal names the
     // reasons the remaining supply failed rather than the other class's.
-    const pool = candidates.filter(
-      (candidate) =>
-        (!context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId) &&
-        servesCallClass(candidate.binding, context.callClass),
+    //
+    // The buyer's rules run on that pool, before the gates, and the same way
+    // in both payment phases: `offer()` draws under them, and the voucher
+    // retry's pool is `onlyProviderId ∩ allowProviderIds` minus the rule
+    // exclusions. A pinned payee the rules now drop is
+    // `PAYEE_NO_LONGER_ELIGIBLE` (see `unroutable`).
+    //
+    // FALLBACK_BEST is decided on the WHOLE pool of this call class — before
+    // the pin and before the failover exclusions — so the voucher retry makes
+    // the same decision `offer()` made: it falls back only when the entry's
+    // rules leave nobody at all. Deciding it on the pinned pool would let a
+    // voucher naming a provider outside an ONLY list "fall back" onto itself.
+    //
+    // The contract's hard constraints run first, on both pools, and are never
+    // relaxed: FALLBACK_BEST is decided on what the contract allows, and the
+    // pinned payee is held to the same version, inputs and required outputs.
+    const request = context.contract ?? NO_CONTRACT_REQUEST;
+    const classPool = classPoolOf(candidates, context);
+    const contractPool = applyContractGate(classPool, version, request).kept;
+    const fallingBack = this.fallsBackOn(contractPool, context, now);
+    const rules = fallingBack
+      ? withoutEntryPreferences(context.rules as RoutingRules)
+      : context.rules;
+    const pinned = applyContractGate(
+      classPool.filter(
+        (candidate) =>
+          !context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId,
+      ),
+      version,
+      request,
     );
-    const { eligible, rejected, settlementChainOf } = reinstateGraced(
-      pool,
-      filterEligible(pool, this.config.minimumStakeByChain, context),
-      now,
-    );
+    const {
+      eligible,
+      rejected,
+      ruleRejected: rulesRejected,
+      settlementChainOf,
+    } = this.eligibleUnder(pinned.kept, context, rules, now);
+    const ruleRejected = [...pinned.rejected, ...rulesRejected];
+    // The receipt says "fell back" only for a call that was actually served so.
+    const fellBack = fallingBack && eligible.length > 0;
 
-    if (eligible.length === 0) return { picked: null, rejected, settlementChainOf };
+    if (eligible.length === 0) {
+      return { picked: null, rejected, ruleRejected, fellBack, settlementChainOf };
+    }
 
     const scored = scoreCandidates(eligible, this.config.weights);
     const weighted = computeWeights(scored, this.config.maxProviderShare);
-    return { picked: pickWeighted(weighted, this.random), rejected, settlementChainOf };
+    return {
+      picked: pickWeighted(weighted, this.random),
+      rejected,
+      ruleRejected,
+      fellBack,
+      settlementChainOf,
+    };
   }
 
   /**
@@ -567,19 +967,28 @@ export class ProviderRouterService {
     context: RoutingContext,
     shed: Map<string, CeilingKind>,
     now: Date,
+    version: ToolContractVersion,
   ): Promise<Selection> {
-    let lastRejected: readonly Ineligible[] = [];
-    let lastChains: ReadonlyMap<string, ChainId> = new Map();
+    let last: Selection = {
+      picked: null,
+      rejected: [],
+      ruleRejected: [],
+      fellBack: false,
+      settlementChainOf: new Map(),
+    };
 
     for (let pass = 0; pass <= candidates.length; pass += 1) {
-      const { picked, rejected, settlementChainOf } = this.select(
-        withShed(candidates, shed),
+      // Re-applied on every pass, not only once per call: a block that lands
+      // between two failover attempts must not be the provider tried next.
+      const selection = this.select(
+        withShed(this.unblocked(candidates), shed),
         context,
         now,
+        version,
       );
-      lastRejected = rejected;
-      lastChains = settlementChainOf;
-      if (!picked) return { picked: null, rejected, settlementChainOf };
+      last = selection;
+      const { picked } = selection;
+      if (!picked) return { ...selection, picked: null };
 
       const binding = picked.candidate.binding;
       // A free call's quota first: a binding with no room for this agent is
@@ -590,7 +999,7 @@ export class ProviderRouterService {
         continue;
       }
       const refused = await this.ceilings.consume(binding);
-      if (refused === null) return { picked, rejected, settlementChainOf };
+      if (refused === null) return selection;
       await place?.release();
 
       this.logger.debug(
@@ -600,7 +1009,7 @@ export class ProviderRouterService {
       shed.set(binding.id, refused);
     }
 
-    return { picked: null, rejected: lastRejected, settlementChainOf: lastChains };
+    return { ...last, picked: null };
   }
 
   /**
@@ -743,12 +1152,13 @@ export class ProviderRouterService {
     input: JsonObject,
     timeoutMs: number,
     callId: string,
+    mustReturn: readonly string[] = [],
   ): Promise<AttemptOutcome> {
     let response: ProviderResponse;
 
     try {
       response = await this.withDeadline(
-        this.invoker.invoke({ tool, binding, input, timeoutMs, callId }),
+        this.invoker!.invoke({ tool, binding, input, timeoutMs, callId }),
         timeoutMs,
       );
     } catch (error) {
@@ -787,7 +1197,7 @@ export class ProviderRouterService {
       return { response, classification, output: null };
     }
 
-    return this.mapIntoContract(tool, binding, response, classification);
+    return this.mapIntoContract(tool, binding, response, classification, mustReturn);
   }
 
   private mapIntoContract(
@@ -795,6 +1205,7 @@ export class ProviderRouterService {
     binding: ToolBinding,
     response: ProviderResponse,
     classification: Classification,
+    mustReturn: readonly string[] = [],
   ): AttemptOutcome {
     // Only a JSON body reaches here: the classifier's body gate has already
     // sent an empty or non-JSON body to `SYSTEM_ERROR`, and this narrowing
@@ -804,10 +1215,17 @@ export class ProviderRouterService {
     }
 
     try {
-      const output = mapResponse(binding.responseMapping, response.body.value, {
-        outputSchema: tool.outputSchema,
-        context: { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId },
-      });
+      // The routed contract version, holding this binding to every optional
+      // output it declares: a declared field that is missing is the
+      // provider's contract violation, never a mapping fault to fail over on.
+      const output = mapServedResponse(
+        binding.responseMapping,
+        response.body.value,
+        versionOf(tool),
+        binding,
+        { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId },
+        mustReturn,
+      );
       return { response, classification, output };
     } catch (error) {
       const fault = mappingFaultOf(error);
@@ -979,14 +1397,90 @@ export interface ToolQuote {
    * platform look like it lacks the tool."*
    */
   readonly settlementChains: readonly ChainId[];
+  /**
+   * The providers whose eligible bindings on the quoted chain are at exactly
+   * {@link price} — whose listing sets the quote. Sorted, de-duplicated.
+   * Absent on a quote with no routable supply.
+   */
+  readonly pricedBy?: readonly string[];
+  /**
+   * How many eligible bindings on the quoted chain the price was taken over
+   * (the chargeable ones; every one for a FREE quote). Absent on a quote with
+   * no routable supply.
+   */
+  readonly listings?: number;
   /** Traffic-weighted across eligible bindings. `null` when nothing is measured. */
   readonly p95LatencyMs: number | null;
   readonly qualityRate: number | null;
   /** Why there is no price, or `null` when there is one. */
   readonly unroutableReason: string | null;
+  /**
+   * The cheapest chargeable binding left under the rules, for the "From $X"
+   * line of a listing. `null` when every binding left is FREE; absent on a
+   * quote with no routable supply.
+   */
+  readonly cheapestPrice?: Money | null;
+  /**
+   * The most a paid call under this quote's context can be charged, in
+   * `price`'s asset: the dearest chargeable binding, priced in that asset and
+   * settling on the chain the quote is priced on, that a live call could
+   * choose. That means every contract version the
+   * call may use, the rules and (when the entry asks for it) FALLBACK_BEST,
+   * and every gate except the provider's declared rate and daily ceilings,
+   * which are relaxed.
+   *
+   * A ceiling is transient capacity, not price eligibility: `price` leaves a
+   * binding at its ceiling out (it cannot serve right now), but the quote
+   * index holds that state for up to a minute while a live call reads it
+   * fresh, so a dearer binding can be chosen the moment its ceiling clears.
+   * This is never below `price` when `price` is chargeable, and can be above
+   * it. `null` when no chargeable binding qualifies. Absent on a quote with no
+   * routable supply. What `assay/price.maxAmount` publishes (spec §7.8 G3).
+   */
+  readonly maxPrice?: Money | null;
+  /**
+   * What the buyer's rules dropped, on a quote they emptied: the price is then
+   * `null` and the listing says "No provider fits your limits".
+   */
+  readonly ruleRejections?: readonly RuleRejectionDetail[];
+  /** FALLBACK_BEST was applied to price this. */
+  readonly fellBack?: boolean;
+  /**
+   * Set when no contract version this call may use can serve at all — every
+   * one retired, or none exists. `price` is then `null`.
+   */
+  readonly contractRefusal?: {
+    readonly refusal: ContractRefusal;
+    /** What to use instead: another major, or the replacement tool. */
+    readonly replacement: string | null;
+  };
+}
+
+/** One provider the rules dropped, as a refusal or a listing reports it (FR-6). */
+export interface RuleRejectionDetail {
+  readonly providerId: string;
+  readonly reason: RuleRejectionReason;
+  readonly source: RuleRejection['source'];
+  readonly detail: string;
+  /** On `PAYEE_NO_LONGER_ELIGIBLE`, the rule the pinned payee now fails. */
+  readonly rule?: RuleRejectionReason;
+  /** On `UNSUPPORTED_INPUT_FIELD` and `MISSING_OUTPUT_FIELD`, the fields. */
+  readonly fields?: readonly string[];
+  /** On `CONTRACT_VERSION_MISMATCH`: the majors the binding serves. */
+  readonly servedMajors?: readonly number[];
+  /** On `CONTRACT_VERSION_MISMATCH`: the major the call was routed at. */
+  readonly requestedMajor?: number;
+  /** On `CONTRACT_VERSION_MISMATCH`: the majors the call may use; `null` when unconstrained. */
+  readonly requestedRange?: readonly number[] | null;
 }
 
 export interface RoutedCall {
+  /**
+   * The contract the call was served at: the routed version's schemas, with
+   * the serving binding's declared optional outputs required (`version` says
+   * which). What the response was mapped against, and what verification
+   * judges it against.
+   */
   readonly tool: Tool;
   readonly binding: ToolBinding;
   readonly providerId: string;
@@ -1027,6 +1521,8 @@ export interface RoutedCall {
   readonly output: JsonValue | null;
   /** Every attempt, in order. The last one is the outcome above. */
   readonly attempts: readonly RoutingAttempt[];
+  /** True when FALLBACK_BEST dropped the toolset entry's preferences to serve this. */
+  readonly fellBack?: boolean;
 }
 
 /** Who {@link ProviderRouterService.offer} would route to, where it settles, and at what price. */
@@ -1036,14 +1532,29 @@ export interface RoutingOffer {
   readonly settlementChain: ChainId;
   /** The offered binding's own price — what a rail-B voucher is signed for. */
   readonly price: Money;
+  /** The contract version (`tool_versions.version`) the offer was drawn at. */
+  readonly contractVersion?: number;
+  /** True when FALLBACK_BEST decided the offer; the retry decides it the same way. */
+  readonly fellBack?: boolean;
 }
 
 interface Selection {
   readonly picked: WeightedCandidate | null;
   /** Everything that did not survive the gates, for the error message. */
   readonly rejected: readonly Ineligible[];
+  /** Everything the buyer's rules dropped before the gates ran. */
+  readonly ruleRejected: readonly RuleRejection[];
+  /** FALLBACK_BEST was applied. */
+  readonly fellBack: boolean;
   /** `bindingId` → the chain the gates ran on, carried out rather than re-derived. */
   readonly settlementChainOf: ReadonlyMap<string, ChainId>;
+}
+
+interface EligibleUnderRules extends Pick<EligibilityResult, 'settlementChainOf'> {
+  readonly eligible: readonly RoutingCandidate[];
+  readonly rejected: readonly Ineligible[];
+  readonly ruleRejected: readonly RuleRejection[];
+  readonly fellBack: boolean;
 }
 
 interface AttemptOutcome {
@@ -1071,7 +1582,24 @@ function unroutable(
   toolId: string,
   rejected: readonly Ineligible[],
   routing: RoutingContext,
+  ruleRejected: readonly RuleRejection[] = [],
 ): Error {
+  // The buyer's rules dropped a provider: say so, with each provider's reason
+  // and whose rule it was (FR-6), rather than a supply error the buyer cannot
+  // act on. On the voucher retry the only candidate is the pinned payee, and
+  // its rejection is `PAYEE_NO_LONGER_ELIGIBLE`: not charged, the voucher is
+  // not redeemed, and the agent asks for a new offer.
+  if (ruleRejected.length > 0) {
+    const details = ruleRejected
+      .map(toRuleRejectionDetail)
+      .map((detail) =>
+        routing.onlyProviderId && detail.providerId === routing.onlyProviderId
+          ? { ...detail, reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE, rule: detail.reason }
+          : detail,
+      );
+    return ruleRefusal(toolId, details);
+  }
+
   const allChainRejected =
     rejected.length > 0 &&
     rejected.every((r) => r.reason === IneligibilityReason.CHAIN_NOT_SETTLEABLE);
@@ -1124,6 +1652,8 @@ const TRANSPORT_REASON: Readonly<Record<TransportErrorKind, ClassificationReason
   [TransportErrorKind.TLS_FAILURE]: ClassificationReason.TRANSPORT_TLS_FAILURE,
   [TransportErrorKind.BODY_TRUNCATED]: ClassificationReason.TRANSPORT_BODY_TRUNCATED,
   [TransportErrorKind.SCHEME_NOT_ALLOWED]: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
+  [TransportErrorKind.PLATFORM_UNAVAILABLE]: ClassificationReason.PLATFORM_UNAVAILABLE,
+  [TransportErrorKind.UNUSABLE_RESPONSE]: ClassificationReason.BODY_NOT_JSON,
   [TransportErrorKind.UNKNOWN]: ClassificationReason.TRANSPORT_UNKNOWN,
 });
 
@@ -1215,6 +1745,18 @@ function pricedOnQuotedChain(
     context.enabledChains,
   );
   return eligible.filter((candidate) => settleableChains(candidate, context).includes(chain));
+}
+
+/** The providers whose binding in `set` is priced at exactly `price`, sorted and de-duplicated. */
+function pricedByOf(set: readonly RoutingCandidate[], price: Money): string[] {
+  const atomic = MoneyUtil.toAtomic(price);
+  return [
+    ...new Set(
+      set
+        .filter(({ binding }) => BigInt(binding.priceAmount) === atomic)
+        .map(({ binding }) => binding.providerId),
+    ),
+  ].sort();
 }
 
 /**
@@ -1488,13 +2030,118 @@ function dearestRejectedPrice(rejected: readonly Ineligible[]): Money | null {
     );
 }
 
-function summariseRejections(rejected: readonly Ineligible[]): string {
-  if (rejected.length === 0) return 'no bindings';
+function summariseRejections(
+  rejected: readonly Ineligible[],
+  ruleRejected: readonly RuleRejection[] = [],
+): string {
+  if (rejected.length === 0 && ruleRejected.length === 0) return 'no bindings';
 
   const counts = new Map<string, number>();
-  for (const item of rejected) {
+  for (const item of [...ruleRejected, ...rejected]) {
     counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
   }
 
   return [...counts.entries()].map(([reason, count]) => `${count} ${reason}`).join(', ');
+}
+
+/**
+ * `NO_PROVIDER_MATCHES_RULES`, carrying each provider's reason and source.
+ * Exported for the MCP call path, which raises it from a quote the rules
+ * emptied before any intent exists.
+ */
+export function noProviderMatchesRules(
+  toolId: string,
+  providers: readonly RuleRejectionDetail[],
+): Error {
+  return ToolAccessErrors.noProviderMatchesRules({ details: { toolId, providers } });
+}
+
+/**
+ * The refusal for a set of rule and contract rejections: `UNSUPPORTED_INPUT_FIELD`
+ * when an optional input the arguments use is what no provider supports (the
+ * agent fixes it by dropping the field), else `NO_PROVIDER_MATCHES_RULES`.
+ * Both carry every provider's reason and source.
+ */
+export function ruleRefusal(toolId: string, providers: readonly RuleRejectionDetail[]): Error {
+  const unsupported = providers.filter(
+    (provider) => provider.reason === RuleRejectionReason.UNSUPPORTED_INPUT_FIELD,
+  );
+  if (unsupported.length > 0) {
+    const fields = [...new Set(unsupported.flatMap((provider) => provider.fields ?? []))].sort();
+    return ToolAccessErrors.unsupportedInputField({ details: { toolId, fields, providers } });
+  }
+  return noProviderMatchesRules(toolId, providers);
+}
+
+/**
+ * The refusal for a call no contract version can serve: `CONTRACT_VERSION_RETIRED`
+ * naming the replacement, or `TOOL_NOT_IN_TOOLSET` when the version the call
+ * pins does not exist.
+ */
+export function contractRefused(
+  tool: Tool,
+  refusal: ContractRefusal | null,
+  context?: RoutingContext,
+): Error {
+  if (refusal === ContractRefusal.RETIRED) {
+    const major = retiredMajorOf(context);
+    return ToolAccessErrors.contractVersionRetired({
+      details: {
+        toolId: tool.id,
+        name: tool.name,
+        replacement: replacementOf(tool, { major }),
+        // The same, structured: what the console links to (GET /refused-calls).
+        replacementTool: contractReplacementOf(tool, { major }),
+      },
+    });
+  }
+  return ToolAccessErrors.notInToolset({ details: { name: tool.name } });
+}
+
+/** What replaces the versions a call may use. */
+function contractReplacement(tool: Tool, context?: RoutingContext): string | null {
+  return replacementOf(tool, { major: retiredMajorOf(context) });
+}
+
+/** The newest major the call may use (`0` when its range is unconstrained). */
+function retiredMajorOf(context?: RoutingContext): number {
+  const range = context?.contract?.range ?? null;
+  return range && range.length > 0 ? range[range.length - 1] : 0;
+}
+
+function toRuleRejectionDetail(rejection: RuleRejection): RuleRejectionDetail {
+  return {
+    providerId: rejection.candidate.binding.providerId,
+    reason: rejection.reason,
+    source: rejection.source,
+    detail: rejection.detail,
+    ...(rejection.fields ? { fields: [...rejection.fields] } : {}),
+    ...(rejection.servedMajors ? { servedMajors: [...rejection.servedMajors] } : {}),
+    ...(rejection.requestedMajor !== undefined ? { requestedMajor: rejection.requestedMajor } : {}),
+    ...(rejection.requestedRange !== undefined
+      ? { requestedRange: rejection.requestedRange ? [...rejection.requestedRange] : null }
+      : {}),
+  };
+}
+
+/** The candidates that may serve a call of this class (`RoutingContext.callClass`). */
+function classPoolOf(
+  candidates: readonly RoutingCandidate[],
+  context: RoutingContext,
+): readonly RoutingCandidate[] {
+  return candidates.filter((candidate) => servesCallClass(candidate.binding, context.callClass));
+}
+
+/** Whether the entry asked to fall back to Assay's pick when its rules leave nobody. */
+function fallsBack(rules: RoutingRules | undefined): boolean {
+  return rules?.entry?.onEmpty === OnEmpty.FALLBACK_BEST;
+}
+
+/** The cheapest binding, as `Money` — the "From $X" a listing shows. */
+function cheapestPrice(eligible: readonly RoutingCandidate[]): Money {
+  let cheapest = eligible[0].binding;
+  for (const { binding } of eligible) {
+    if (BigInt(binding.priceAmount) < BigInt(cheapest.priceAmount)) cheapest = binding;
+  }
+  return bindingPrice(cheapest);
 }

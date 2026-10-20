@@ -51,7 +51,7 @@ export interface PaymentIntent {
    *
    * On Solana the escrow PDA both owns the receiving ATA and *is* the buyer's
    * balance, so `payTo` says everything and this field is unread. On EVM
-   * `payTo` is the pooled `X402Escrow` contract (the mirror row's
+   * `payTo` is the pooled `AssayEscrow` contract (the mirror row's
    * `escrowAccountId`), while the buyer whose balance grows is the first
    * argument of `depositFor` and the `buyer` of the `Deposited` event — so the
    * binding check and `observeTransfer` must read this field, never `payTo`.
@@ -96,7 +96,7 @@ export interface BuildRequirementsInput {
    * On Solana the two collapse: the escrow ATA both receives the transfer and
    * is the balance, so `payTo` alone says everything and this field is unread.
    * On EVM they are genuinely different accounts and neither implies the other.
-   * The tokens land in a **pooled** `X402Escrow` contract whose per-buyer
+   * The tokens land in a **pooled** `AssayEscrow` contract whose per-buyer
    * accounting only moves inside `depositFor(buyer, amount)`, and a plain
    * transfer to that contract credits nobody — so the contract
    * must never be advertised as a destination, and the only account an EVM
@@ -159,8 +159,8 @@ export interface SettlementReceipt {
  *    enforces `expires_at - issued_at <= MAX_VOUCHER_LIFETIME_SECONDS` because
  *    the backend that used to enforce that is assumed compromised.
  *
- * **An old signature is refused, never misread.** `b"x402:voucher:v2"` leads
- * the 239 bytes, so a v1 signature does not verify as a v2 voucher with the
+ * **An old signature is refused, never misread.** `b"assay:voucher:v2"` leads
+ * the 240 bytes, so a v1 signature does not verify as a v2 voucher with the
  * fields meaning something else — it simply fails. That is the property that
  * made replacing the layout safe rather than merely necessary.
  *

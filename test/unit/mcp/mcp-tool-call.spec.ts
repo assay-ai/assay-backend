@@ -5,9 +5,9 @@ import {
   MCP_UNROUTABLE_REASON,
   MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
 } from '@modules/mcp/constants/mcp.constants';
-import { ResponseClass } from '@modules/tool/domain/classification';
+import { ClassificationReason, ResponseClass } from '@modules/tool/domain/classification';
 import { PricingMode } from '@modules/tool/ports/tool.types';
-import { McpFailureCode } from '@modules/mcp/services/mcp-tool-call.service';
+import { McpFailureCode, faultOf } from '@modules/mcp/services/mcp-tool-call.service';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { AppError } from '@shared/errors/app-errors';
@@ -787,5 +787,12 @@ describe('McpToolCallService — the paid call loop', () => {
     );
     expect(h.spendPolicy.lockConfirmations).toBe(1);
     expect(h.ledger.kinds).toEqual([]);
+  });
+});
+
+describe('faultOf', () => {
+  it('attributes a call Assay could not prepare to the platform', () => {
+    expect(faultOf({ reason: ClassificationReason.PLATFORM_UNAVAILABLE })).toBe('PLATFORM');
+    expect(faultOf({ reason: ClassificationReason.MAPPING_FAULT_PLATFORM })).toBe('PLATFORM');
   });
 });

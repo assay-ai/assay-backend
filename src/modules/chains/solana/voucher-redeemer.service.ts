@@ -23,7 +23,7 @@ import {
   getConfigDecoder,
   getRedeemVoucherInstructionAsync,
   voucherMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import {
   RedeemOutcome,
@@ -290,7 +290,7 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
    *
    * The generated builder resolves `config` and the three associated token
    * accounts by itself when they are omitted — but it resolves the PDA against
-   * the *compiled-in* `X402_PAYMENT_PROGRAM_ADDRESS`, not against the
+   * the *compiled-in* `ASSAY_PAYMENT_PROGRAM_ADDRESS`, not against the
    * `programAddress` passed in the config. A redeploy under a new id makes
    * those two differ, and an omitted account would then name a PDA of the
    * wrong program.
@@ -376,7 +376,7 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
       { programAddress },
     );
 
-    // The exact 239 bytes the buyer signed, rebuilt from the same nine fields
+    // The exact 240 bytes the buyer signed, rebuilt from the same nine fields
     // the instruction carries. If these two ever disagree the program refuses
     // with `MissingBuyerSignature` after the call has been served, which is why
     // both are built from one set of locals here rather than from two reads.

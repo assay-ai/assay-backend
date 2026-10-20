@@ -14,7 +14,6 @@ import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
-import { USDC_ASSET } from '../helpers/test-database';
 
 /**
  * The operator Penalties list's SQL (`findOperatorCasePage`) against a real
@@ -24,7 +23,7 @@ import { USDC_ASSET } from '../helpers/test-database';
  * audit named (D1–D4) or a neighbour of one, and the list must name it, and
  * date it, exactly as the definition does.
  */
-const DATABASE = 'x402_operator_case_list_test';
+const DATABASE = 'assay_operator_case_list_test';
 const EVM_ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const STAKE_AUTHORITY = `${CHAIN}:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45`;
 const AGENT = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;
@@ -37,7 +36,6 @@ const RESOLVED_AT = new Date('2026-10-03T00:00:00Z');
 interface Scenario {
   readonly name: string;
   readonly expected: OperatorCaseStatus;
-  readonly asset?: string;
   readonly patch: Readonly<Record<string, unknown>>;
 }
 
@@ -45,7 +43,7 @@ const closed = { resolved_at: RESOLVED_AT };
 
 const SCENARIOS: readonly Scenario[] = [
   {
-    name: 'D1: EVM, DISPUTED, its only disputed part gone, a part pending',
+    name: 'D1: DISPUTED, its only disputed part gone, a part pending',
     expected: OperatorCaseStatus.PROPOSED,
     patch: {
       status: 'DISPUTED',
@@ -53,14 +51,7 @@ const SCENARIOS: readonly Scenario[] = [
       chain_disputed_at: DISPUTED_AT,
       chain_disputed_parts: 0,
       chain_executable_at: CHAIN_DOOR,
-      platform_decision_due_at: null,
     },
-  },
-  {
-    name: 'non-EVM, DISPUTED off chain',
-    expected: OperatorCaseStatus.DISPUTED,
-    asset: USDC_ASSET,
-    patch: { status: 'DISPUTED' },
   },
   {
     name: 'D2: PROPOSED on chain, door before the floor',
@@ -183,7 +174,6 @@ describe('the operator case list SQL, against a real database', () => {
         proposedAt: PROPOSED_AT,
       });
       const patch: Record<string, unknown> = { ...scenario.patch };
-      if (scenario.asset) patch.asset_id = scenario.asset;
       // `chk_slash_proposals_chain_pending_is_whole`: a record on chain was proposed.
       if (patch.chain_status) patch.chain_proposed_at = PROPOSED_AT;
       const columns = Object.keys(patch);
@@ -206,16 +196,14 @@ describe('the operator case list SQL, against a real database', () => {
     expect(rows).toHaveLength(SCENARIOS.length);
 
     const stored: Array<Record<string, unknown>> = await dataSource.query(
-      `SELECT id, asset_id, status, chain_status, resolution_kind, chain_disputed_at,
-              chain_disputed_parts, chain_executable_at, earliest_execution_at,
-              platform_decision_due_at
+      `SELECT id, status, chain_status, resolution_kind, chain_disputed_at,
+              chain_disputed_parts, chain_executable_at, earliest_execution_at
          FROM slash_proposals`,
     );
     const factsById = new Map<string, OperatorCaseFacts>(
       stored.map((row) => [
         row.id as string,
         {
-          assetId: row.asset_id as string,
           status: row.status as string,
           chainStatus: (row.chain_status as string | null) ?? 'NONE',
           resolutionKind: row.resolution_kind as string | null,
@@ -223,7 +211,6 @@ describe('the operator case list SQL, against a real database', () => {
           chainDisputedParts: Number(row.chain_disputed_parts ?? 0),
           chainExecutableAt: row.chain_executable_at as Date | null,
           earliestExecutionAt: row.earliest_execution_at as Date | null,
-          platformDecisionDueAt: row.platform_decision_due_at as Date | null,
         },
       ]),
     );
@@ -245,13 +232,18 @@ describe('the operator case list SQL, against a real database', () => {
     }
   });
 
-  it('D1: the EVM case left DISPUTED sorts with the open cases, at its door', async () => {
-    const rows = await repository.findOperatorCasePage({
-      statuses: [OperatorCaseStatus.DISPUTED],
-      limit: 100,
-    });
-    expect(rows.map((row) => ids.get(row.id)!.name)).toEqual(['non-EVM, DISPUTED off chain']);
+  it('says whether a record was ever written on chain', async () => {
+    const rows = await repository.findOperatorCasePage({ limit: 100 });
+    for (const row of rows) {
+      const scenario = ids.get(row.id)!;
+      expect({ name: scenario.name, onChain: row.onChain }).toEqual({
+        name: scenario.name,
+        onChain: 'chain_status' in scenario.patch,
+      });
+    }
+  });
 
+  it('D1: the case left DISPUTED sorts with the open cases, at its door', async () => {
     const d1 = (await repository.findOperatorCasePage({ limit: 100 })).find((row) =>
       ids.get(row.id)!.name.startsWith('D1'),
     )!;

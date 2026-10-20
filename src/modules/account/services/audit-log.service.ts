@@ -5,6 +5,7 @@ import { AuditLogEntryRepository } from '@database/postgres/repositories/audit-l
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
 import { AuditLogEntryDto, ListAuditLogQueryDto } from '../dto/list-audit-log.dto';
+import { containsLikePattern } from '@shared/utils/like-pattern.util';
 
 const AUDIT_LOG_LIST: ListSpec = {
   alias: 'entry',
@@ -51,7 +52,7 @@ export class AuditLogService {
       qb.andWhere(
         '(entry.actorId ILIKE :search OR entry.action ILIKE :search ' +
           'OR entry.resourceType ILIKE :search OR entry.resourceId ILIKE :search)',
-        { search: `%${query.search}%` },
+        { search: containsLikePattern(query.search) },
       );
     }
 

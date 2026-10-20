@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { TYPEORM_MODULE_OPTIONS } from '@database/constants/typeorm-module-options';
+import { ParameterlessQueryLogger } from '@database/postgres/parameterless-query.logger';
 import { AccountBalanceEntity } from './entities/account-balance.entity';
 import { BuyerEscrowEntity } from './entities/buyer-escrow.entity';
 import { DepositIntentEntity } from './entities/deposit-intent.entity';
@@ -10,7 +11,6 @@ import { EvmGasGrantEntity } from './entities/evm-gas-grant.entity';
 import { LedgerEntryEntity } from './entities/ledger-entry.entity';
 import { LedgerHoldEntity } from './entities/ledger-hold.entity';
 import { PaymentIntentEntity } from './entities/payment-intent.entity';
-import { PostEntity } from './entities/post.entity';
 import { ReconciliationRunEntity } from './entities/reconciliation-run.entity';
 import { StakeSnapshotEntity } from './entities/stake-snapshot.entity';
 import { VerificationPolicyEntity } from './entities/verification-policy.entity';
@@ -27,7 +27,6 @@ import { VerifierSigningLogEntryEntity } from './entities/verifier-signing-log-e
 import { ProviderEntity } from './entities/provider.entity';
 import { ProviderPayoutChallengeEntity } from './entities/provider-payout-challenge.entity';
 import { ProviderConnectivityCheckEntity } from './entities/provider-connectivity-check.entity';
-import { ProviderPayoutEntity } from './entities/provider-payout.entity';
 import { AccountBalanceRepository } from './repositories/account-balance.repository';
 import { BuyerEscrowRepository } from './repositories/buyer-escrow.repository';
 import { DepositIntentRepository } from './repositories/deposit-intent.repository';
@@ -35,7 +34,6 @@ import { EvmGasGrantRepository } from './repositories/evm-gas-grant.repository';
 import { LedgerEntryRepository } from './repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from './repositories/ledger-hold.repository';
 import { PaymentIntentRepository } from './repositories/payment-intent.repository';
-import { PostRepository } from './repositories/post.repository';
 import { ReconciliationRunRepository } from './repositories/reconciliation-run.repository';
 import { StakeSnapshotRepository } from './repositories/stake-snapshot.repository';
 import { VerificationPolicyRepository } from './repositories/verification-policy.repository';
@@ -52,11 +50,28 @@ import { VerifierSigningLogEntryRepository } from './repositories/verifier-signi
 import { ProviderRepository } from './repositories/provider.repository';
 import { ProviderPayoutChallengeRepository } from './repositories/provider-payout-challenge.repository';
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
-import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
+import { BindingCredentialEntity } from './entities/binding-credential.entity';
+import { VaultKekCheckEntity } from './entities/vault-kek-check.entity';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
+import { ToolEntity } from './entities/tool.entity';
+import { ToolVersionEntity } from './entities/tool-version.entity';
+import { AgentConnectUrlEntity } from './entities/agent-connect-url.entity';
+import { ToolsetEntity } from './entities/toolset.entity';
+import { ToolPromotionInviteEntity } from './entities/tool-promotion-invite.entity';
+import { ToolsetEntryEntity } from './entities/toolset-entry.entity';
 import { BindingVersionEntity } from './entities/binding-version.entity';
 import { BindingTestRunEntity } from './entities/binding-test-run.entity';
+import { BindingCredentialRepository } from './repositories/binding-credential.repository';
+import { VaultKekCheckRepository } from './repositories/vault-kek-check.repository';
 import { ToolBindingRepository } from './repositories/tool-binding.repository';
+import { ToolRepository } from './repositories/tool.repository';
+import { ToolVersionRepository } from './repositories/tool-version.repository';
+import { AgentConnectUrlRepository } from './repositories/agent-connect-url.repository';
+import { ToolsetEntryRepository, ToolsetRepository } from './repositories/toolset.repository';
+import {
+  TOOLSET_SHARING_ENTITIES,
+  TOOLSET_SHARING_REPOSITORIES,
+} from './repositories/toolset-sharing.repository';
 import { BindingVersionRepository } from './repositories/binding-version.repository';
 import { BindingTestRunRepository } from './repositories/binding-test-run.repository';
 import { ProviderStakeGraceEntity } from './entities/provider-stake-grace.entity';
@@ -85,7 +100,21 @@ import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
 import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
 import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
+import { EscrowWithdrawalEventEntity } from './entities/escrow-withdrawal-event.entity';
+import { EscrowWithdrawalEventRepository } from './repositories/escrow-withdrawal-event.repository';
+import { OAuthClientEntity } from './entities/oauth-client.entity';
+import { OAuthAuthorizationCodeEntity } from './entities/oauth-authorization-code.entity';
+import { OAuthRefreshTokenEntity } from './entities/oauth-refresh-token.entity';
+import { OAuthAccessTokenEntity } from './entities/oauth-access-token.entity';
+import { OAuthClientRepository } from './repositories/oauth-client.repository';
+import { OAuthAuthorizationCodeRepository } from './repositories/oauth-authorization-code.repository';
+import { OAuthRefreshTokenRepository } from './repositories/oauth-refresh-token.repository';
+import { OAuthAccessTokenRepository } from './repositories/oauth-access-token.repository';
 import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
+import { BindingAttemptEntity } from './entities/binding-attempt.entity';
+import { BindingStatsEntity } from './entities/binding-stats.entity';
+import { BindingAttemptRepository } from './repositories/binding-attempt.repository';
+import { BindingStatsRepository } from './repositories/binding-stats.repository';
 import { OperatorRepository } from './repositories/operator.repository';
 import { OperatorApprovalRepository } from './repositories/operator-approval.repository';
 // Due process for taking money.
@@ -96,7 +125,6 @@ import { AgentEntity } from './entities/agent.entity';
 import { SlashProposalEventEntity } from './entities/slash-proposal-event.entity';
 import { SlashProposalPartEntity } from './entities/slash-proposal-part.entity';
 import { OverrideLogEntryEntity } from './entities/override-log-entry.entity';
-import { FleetSweepEntity } from './entities/fleet-sweep.entity';
 import { SlashProposalRepository } from './repositories/slash-proposal.repository';
 import { ToolRequestRepository } from './repositories/tool-request.repository';
 import { OrganizationRepository } from './repositories/organization.repository';
@@ -104,13 +132,12 @@ import { AgentRepository } from './repositories/agent.repository';
 import { SlashProposalEventRepository } from './repositories/slash-proposal-event.repository';
 import { SlashProposalPartRepository } from './repositories/slash-proposal-part.repository';
 import { OverrideLogEntryRepository } from './repositories/override-log-entry.repository';
-import { FleetSweepRepository } from './repositories/fleet-sweep.repository';
 // The case brief's cross-entity reads; no entity of its own.
 import { SlashCaseReadRepository } from './repositories/slash-case-read.repository';
 import { PlatformMetricsRepository } from './repositories/platform-metrics.repository';
 
-const entities = [
-  PostEntity,
+/** Exported for the per-process boot tests, which stub every repository. */
+export const entities = [
   LedgerEntryEntity,
   LedgerHoldEntity,
   AccountBalanceEntity,
@@ -134,8 +161,15 @@ const entities = [
   ProviderEntity,
   ProviderPayoutChallengeEntity,
   ProviderConnectivityCheckEntity,
-  ProviderPayoutEntity,
+  ToolEntity,
+  ToolVersionEntity,
+  ToolPromotionInviteEntity,
+  ToolsetEntity,
+  ToolsetEntryEntity,
+  AgentConnectUrlEntity,
   ToolBindingEntity,
+  BindingCredentialEntity,
+  VaultKekCheckEntity,
   BindingVersionEntity,
   BindingTestRunEntity,
   ProviderStakeGraceEntity,
@@ -152,7 +186,6 @@ const entities = [
   SlashProposalEventEntity,
   SlashProposalPartEntity,
   OverrideLogEntryEntity,
-  FleetSweepEntity,
   OperatorEntity,
   OperatorApprovalEntity,
   OrganizationEntity,
@@ -161,9 +194,16 @@ const entities = [
   EvmChainStateEntity,
   ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
+  EscrowWithdrawalEventEntity,
+  OAuthClientEntity,
+  OAuthAuthorizationCodeEntity,
+  OAuthRefreshTokenEntity,
+  OAuthAccessTokenEntity,
+  BindingAttemptEntity,
+  BindingStatsEntity,
+  ...TOOLSET_SHARING_ENTITIES,
 ];
-const repositories = [
-  PostRepository,
+export const repositories = [
   LedgerEntryRepository,
   LedgerHoldRepository,
   AccountBalanceRepository,
@@ -187,8 +227,14 @@ const repositories = [
   ProviderRepository,
   ProviderPayoutChallengeRepository,
   ProviderConnectivityCheckRepository,
-  ProviderPayoutRepository,
+  ToolRepository,
+  ToolVersionRepository,
+  ToolsetRepository,
+  ToolsetEntryRepository,
+  AgentConnectUrlRepository,
   ToolBindingRepository,
+  BindingCredentialRepository,
+  VaultKekCheckRepository,
   BindingVersionRepository,
   BindingTestRunRepository,
   ProviderStakeGraceRepository,
@@ -205,16 +251,23 @@ const repositories = [
   SlashProposalEventRepository,
   SlashProposalPartRepository,
   OverrideLogEntryRepository,
-  FleetSweepRepository,
   OperatorRepository,
   OperatorApprovalRepository,
   OrganizationRepository,
   AgentRepository,
   AccountBlockRepository,
   EvmChainStateRepository,
+  EscrowWithdrawalEventRepository,
+  OAuthClientRepository,
+  OAuthAuthorizationCodeRepository,
+  OAuthRefreshTokenRepository,
+  OAuthAccessTokenRepository,
   ProviderSlashHoldRepository,
+  BindingAttemptRepository,
+  BindingStatsRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
+  ...TOOLSET_SHARING_REPOSITORIES,
 ];
 
 /**
@@ -245,7 +298,9 @@ const repositories = [
           synchronize: false,
           logging: isLogging,
           ...(isLogging && {
-            logger: TYPEORM_MODULE_OPTIONS.logger,
+            // Never TypeORM's own console loggers: they print the bound
+            // parameters (R-OA-27).
+            logger: new ParameterlessQueryLogger(),
             maxQueryExecutionTime: TYPEORM_MODULE_OPTIONS.maxQueryExecutionTime,
           }),
         };

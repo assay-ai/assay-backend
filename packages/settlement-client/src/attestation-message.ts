@@ -1,7 +1,7 @@
 import { getAddressEncoder } from '@solana/kit';
 import type { Address, ReadonlyUint8Array } from '@solana/kit';
 
-import { X402_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
 
 /**
  * The exact bytes a verifier signs — the one part of the program's interface
@@ -39,7 +39,7 @@ import { X402_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
  * ## Two tags, two lengths, and both are load-bearing
  *
  * There are exactly two signed messages in the program: the verifier's slash
- * attestation (210 bytes, here) and the buyer's voucher (239 bytes, in
+ * attestation (211 bytes, here) and the buyer's voucher (240 bytes, in
  * `voucher-message.ts`). The domain separators stop a signature produced for one
  * door being replayed at another — a `DATA_FAIL` judgement must not be walkable
  * round to the paying door, and a `PASS` must not be walkable round to the
@@ -52,10 +52,10 @@ import { X402_PAYMENT_PROGRAM_ADDRESS } from './generated/programs';
  * than by a verifier's over a message.
  */
 
-const SLASH_DOMAIN = utf8('x402:slash-attestation:v1');
+const SLASH_DOMAIN = utf8('assay:slash-attestation:v1');
 
-/** `ATTESTATION_MESSAGE_LEN` — 25 + 32 + 32 + 32 + 32 + 1 + 8 + 32 + 8 + 8. */
-export const SLASH_MESSAGE_LENGTH = 210;
+/** `ATTESTATION_MESSAGE_LEN` — 26 + 32 + 32 + 32 + 32 + 1 + 8 + 32 + 8 + 8. */
+export const SLASH_MESSAGE_LENGTH = 211;
 
 export const ATTESTATION_DOMAINS = {
   slash: SLASH_DOMAIN as ReadonlyUint8Array,
@@ -92,15 +92,15 @@ export interface SlashAttestationFields {
 export function slashAttestationMessage(fields: SlashAttestationFields): Uint8Array {
   const out = new Uint8Array(SLASH_MESSAGE_LENGTH);
   out.set(SLASH_DOMAIN, 0);
-  out.set(addressBytes(fields.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS), 25);
-  out.set(fixed(fields.requestId, 32), 57);
-  out.set(addressBytes(fields.provider), 89);
-  out.set(addressBytes(fields.beneficiary), 121);
-  out[153] = fields.status;
-  out.set(u64le(fields.penalty), 154);
-  out.set(fixed(fields.policy, 32), 162);
-  out.set(i64le(fields.issuedAt), 194);
-  out.set(i64le(fields.expiresAt), 202);
+  out.set(addressBytes(fields.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS), 26);
+  out.set(fixed(fields.requestId, 32), 58);
+  out.set(addressBytes(fields.provider), 90);
+  out.set(addressBytes(fields.beneficiary), 122);
+  out[154] = fields.status;
+  out.set(u64le(fields.penalty), 155);
+  out.set(fixed(fields.policy, 32), 163);
+  out.set(i64le(fields.issuedAt), 195);
+  out.set(i64le(fields.expiresAt), 203);
   return out;
 }
 

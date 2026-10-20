@@ -5,10 +5,7 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum ToolErrorCode {
   TOOL_NOT_FOUND = 'TOOL_NOT_FOUND',
-  TOOL_DISABLED = 'TOOL_DISABLED',
   TOOL_ARGUMENTS_INVALID = 'TOOL_ARGUMENTS_INVALID',
-  TOOL_BINDING_NOT_FOUND = 'TOOL_BINDING_NOT_FOUND',
-  TOOL_BINDING_NOT_PUBLISHED = 'TOOL_BINDING_NOT_PUBLISHED',
   TOOL_MAPPING_INVALID = 'TOOL_MAPPING_INVALID',
   TOOL_MAPPING_PATH_NOT_FOUND = 'TOOL_MAPPING_PATH_NOT_FOUND',
   TOOL_MAPPING_REQUIRED_FIELD_MISSING = 'TOOL_MAPPING_REQUIRED_FIELD_MISSING',
@@ -19,41 +16,68 @@ export enum ToolErrorCode {
   TOOL_NO_ELIGIBLE_BINDING = 'TOOL_NO_ELIGIBLE_BINDING',
   TOOL_PROVIDER_SLASH_HOLD = 'TOOL_PROVIDER_SLASH_HOLD',
   TOOL_ALL_BINDINGS_FAILED = 'TOOL_ALL_BINDINGS_FAILED',
-  TOOL_UPSTREAM_TIMEOUT = 'TOOL_UPSTREAM_TIMEOUT',
+  /** T3, the contract editor: a version that cannot be a contract (`details.problems`). */
+  TOOL_CONTRACT_INVALID = 'TOOL_CONTRACT_INVALID',
+  /** T3: the action does not fit the tool's or the version's state (`details.reason`). */
+  TOOL_CONTRACT_STATE = 'TOOL_CONTRACT_STATE',
+  /** T3: another tool holds the name. */
+  TOOL_CONTRACT_NAME_TAKEN = 'TOOL_CONTRACT_NAME_TAKEN',
+  /** T3: the draft is identical to the version it is based on. */
+  TOOL_CONTRACT_NO_CHANGES = 'TOOL_CONTRACT_NO_CHANGES',
+  /** T3: no such version of this tool. */
+  TOOL_VERSION_NOT_FOUND = 'TOOL_VERSION_NOT_FOUND',
 }
 
 export type ToolErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOL', `${ToolErrorCode}`>;
 
 export const ToolErrors = createDomainErrorFactory('TOOL', {
+  contractInvalid: {
+    code: ToolErrorCode.TOOL_CONTRACT_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not a valid contract` +
+      `${Array.isArray(context?.problems) && context.problems.length ? `: ${context.problems.join('; ')}` : ''}`,
+    publicContext: ['problems'],
+  },
+  contractState: {
+    code: ToolErrorCode.TOOL_CONTRACT_STATE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Not possible in this state${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason'],
+  },
+  contractNameTaken: {
+    code: ToolErrorCode.TOOL_CONTRACT_NAME_TAKEN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `A tool is already named ${context?.name ?? 'that'}` +
+      `${context?.suggestion ? `; ${context.suggestion} is free` : ''}`,
+    publicContext: ['name', 'suggestion'],
+  },
+  contractNoChanges: {
+    code: ToolErrorCode.TOOL_CONTRACT_NO_CHANGES,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The draft is identical to v${context?.base ?? '?'}; there is nothing to publish`,
+    publicContext: ['base'],
+  },
+  versionNotFound: {
+    code: ToolErrorCode.TOOL_VERSION_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No such version${context?.version ? `: ${context.version}` : ''}`,
+  },
   toolNotFound: {
     code: ToolErrorCode.TOOL_NOT_FOUND,
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Tool not found${context?.toolId ? `: ${context.toolId}` : ''}`,
   },
-  toolDisabled: {
-    code: ToolErrorCode.TOOL_DISABLED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Tool is not accepting calls${context?.toolId ? `: ${context.toolId}` : ''}`,
-  },
   argumentsInvalid: {
     code: ToolErrorCode.TOOL_ARGUMENTS_INVALID,
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Tool arguments failed schema validation` + `${context?.detail ? `: ${context.detail}` : ''}`,
-  },
-  bindingNotFound: {
-    code: ToolErrorCode.TOOL_BINDING_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `Binding not found${context?.bindingId ? `: ${context.bindingId}` : ''}`,
-  },
-  bindingNotPublished: {
-    code: ToolErrorCode.TOOL_BINDING_NOT_PUBLISHED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Binding is not published${context?.bindingId ? `: ${context.bindingId}` : ''}`,
   },
   mappingInvalid: {
     code: ToolErrorCode.TOOL_MAPPING_INVALID,
@@ -167,13 +191,5 @@ export const ToolErrors = createDomainErrorFactory('TOOL', {
       `All ${context?.attempts ?? 0} provider attempts failed` +
       `${context?.toolId ? ` for tool: ${context.toolId}` : ''}` +
       `${context?.detail ? ` (${context.detail})` : ''}`,
-  },
-  upstreamTimeout: {
-    code: ToolErrorCode.TOOL_UPSTREAM_TIMEOUT,
-    statusCode: 504,
-    message: (context?: Record<string, any>) =>
-      `Upstream did not respond in time` +
-      `${context?.timeoutMs ? ` (${context.timeoutMs}ms)` : ''}` +
-      `${context?.bindingId ? ` for binding: ${context.bindingId}` : ''}`,
   },
 });

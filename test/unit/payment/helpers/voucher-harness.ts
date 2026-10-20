@@ -53,7 +53,7 @@ export const RESOURCE = 'https://api.x402.dev/tools/weather-now';
 /**
  * The address the settlement program is deployed to for this harness.
  *
- * Voucher v2 signs the program id at offset 15, and `buildVoucherMessage`
+ * Voucher v2 signs the program id at offset 16, and `buildVoucherMessage`
  * refuses to build without one — deliberately, because a default to the
  * client's compiled-in `declare_id!()` would have every buyer sign for a
  * program that is not the one about to check the signature.
@@ -282,7 +282,6 @@ export class InMemoryIntentWriter {
       chainId: input.chainId,
       expiresAt: input.expiresAt ?? new Date(),
       idempotencyKey: input.idempotencyKey ?? null,
-      voucherNonce: input.voucherNonce ?? null,
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,

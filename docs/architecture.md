@@ -23,7 +23,6 @@ src/
 ├── database/postgres/  # Entities, repositories, migrations, organization-scope guard
 ├── modules/            # Domain modules — payment, ledger, tool, provider,
 │                       #   verification, settlement, mcp, ... and the chains/ boundary
-│   └── _examples/      # Starter reference modules, behind EXAMPLES_ENABLED
 ├── shared/             # Shared utilities, filters, guards, interceptors, DTOs, queue primitives
 ├── websocket/          # WebSocket gateway, processor and services
 └── main.ts             # Entry point (delegates to bootstrap based on SERVICE_TYPE)
@@ -53,11 +52,10 @@ packages/
 | `@utils/*` | `src/shared/utils/*` |
 | `@bootstrap/*` | `src/bootstrap/*` |
 | `@websocket/*` | `src/websocket/*` |
-| `@schedule/*` | `src/modules/_examples/schedule/*` |
 
 ## Naming Conventions
 
-- **Files:** kebab-case (e.g., `post.entity.ts`, `posts.controller.ts`)
+- **Files:** kebab-case (e.g., `tool-request.entity.ts`, `tool-requests.controller.ts`)
 - **Classes:** PascalCase (e.g., `PostEntity`, `PostsService`)
 - **Variables/functions:** camelCase
 - **Constants/enums:** UPPER_SNAKE_CASE
@@ -98,18 +96,13 @@ build on `@solana/*`, `@solana-program/*`, `viem`, `ethers` and friends anywhere
 A comma-separated list of CAIP-2 ids, read once at boot by `chains.module.ts`.
 Absent, empty, malformed, or naming a chain with no adapter, the process
 **exits** — `CHAIN_ENABLED_CHAINS_INVALID` naming the offending value and
-listing what is actually served. The predecessor `SOLANA_ENABLED_CHAINS` is
-refused outright (`CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET`), even alongside a
-valid `ENABLED_CHAINS`, because a deployment that reads one and ignores the
-other is worse than one that will not start. It narrows the adapter registry,
+listing what is actually served. It narrows the adapter registry,
 the reconciler's asset list and the router's eligibility filter from one place,
 so there is no second list to forget. Operating it — adding a chain, removing
 one, and what removing one does to balances already held on it — is
 [`docs/runbooks/chains.md`](runbooks/chains.md).
 
-See `src/modules/_examples/posts/` for a complete worked example of this layout,
-and `src/modules/_examples/README.md` for what each reference module
-demonstrates. Do not import from `_examples/` outside `_examples/`.
+See `src/modules/tool-request/` for a small, complete example of this layout.
 
 ## Multi-Organization Scoping (Important)
 
@@ -149,7 +142,7 @@ Reference: `src/database/postgres/organization-scope/`,
 - Add `@Index('idx_{table}_{column}')` for frequently queried columns
 - Place entity files in `src/database/postgres/entities/`
 
-Reference: `src/database/postgres/entities/post.entity.ts` (an `_examples` table)
+Reference: `src/database/postgres/entities/tool-request.entity.ts`
 
 ## Repository Pattern
 
@@ -163,7 +156,7 @@ Reference: `src/database/postgres/entities/post.entity.ts` (an `_examples` table
 - Register in `postgres.module.ts` (add to `entities` and `repositories` arrays)
 - Export from `src/database/postgres/index.ts`
 
-Reference: `src/database/postgres/repositories/post.repository.ts` (an `_examples` table)
+Reference: `src/database/postgres/repositories/tool-request.repository.ts`
 
 ## Service Pattern
 
@@ -175,7 +168,7 @@ Reference: `src/database/postgres/repositories/post.repository.ts` (an `_example
 - Use `async/await` throughout
 - Add `private readonly logger = new Logger(ClassName.name)`
 
-Reference: `src/modules/_examples/posts/services/posts.service.ts`
+Reference: `src/modules/tool-request/services/tool-request.service.ts`
 
 ## Controller Pattern
 
@@ -187,17 +180,17 @@ Reference: `src/modules/_examples/posts/services/posts.service.ts`
 - RESTful routes: `GET` (list), `GET /:id`, `POST`, `PUT /:id`, `PATCH /:id`, `DELETE /:id`
 - Responses are auto-transformed by `TransformInterceptor` into `{ data, statusCode, message }`
 
-Reference: `src/modules/_examples/posts/controllers/posts.controller.ts`
+Reference: `src/modules/tool-request/controllers/tool-requests.controller.ts`
 
 ## DTO Pattern
 
-- One file per endpoint: `{action}-{resource}.dto.ts` (e.g., `create-post.dto.ts`)
+- One file per endpoint: `{action}-{resource}.dto.ts` (e.g., `update-spend-policy.dto.ts`)
 - Each file contains ALL DTOs for that endpoint (Query, Body, Params, Response)
 - Use classes with `class-validator` decorators (`@IsString`, `@IsNotEmpty`, `@IsUUID`, etc.)
 - Use `@ApiProperty` / `@ApiPropertyOptional` for Swagger documentation
-- List query DTOs extend `PaginationDto` from `@shared/dtos/pagination.dto`
+- List query DTOs extend `ListQueryDto` from `@shared/api/dto/list-query.dto`
 
-Reference: `src/modules/_examples/posts/dto/`
+Reference: `src/modules/tool-request/dto/`
 
 ## Error System (Important)
 
@@ -289,7 +282,7 @@ the first request that raises the code.
 Always throw from **services**, never from controllers:
 ```typescript
 throw PaymentErrors.paymentIntentNotFound({ id });       // 404
-throw PaymentErrors.voucherNonceReplayed({ nonce });     // 409
+throw PaymentErrors.voucherSeqAlreadyUsed({ account });  // 409
 ```
 
 The factory returns a typed function — calling it creates an `AppError` that
@@ -344,7 +337,7 @@ Rules:
   Stateless idempotent jobs override per-publisher with `attempts: 3` + backoff.
 - Job ids cannot contain `:` — use `-`.
 
-Reference: `src/modules/_examples/posts/` (full feature) and `src/modules/_examples/demo/` (minimal).
+Reference: `src/modules/notification/` (publisher, processor, and the api/worker split).
 Rationale: [`docs/adr/0001-bullmq-as-wakeup-mechanism.md`](adr/0001-bullmq-as-wakeup-mechanism.md).
 
 Bull Board is mounted on the API server at `/api${BULLBOARD_PATH}` (default
@@ -378,13 +371,13 @@ the symptom is a `dist/` containing `src/` and `packages/` instead of `main.js`.
 ## The Settlement Client (`packages/settlement-client`)
 
 The Anchor settlement program's interface is **generated, never hand-written**.
-`@x402/settlement-client` is a yarn workspace package holding Codama output
+`@assay/settlement-client` is a yarn workspace package holding Codama output
 rendered from the program's IDL, which `anchor idl build` renders from the
 program source in the `assay-solana` repository. The IDL is vendored at
-`packages/settlement-client/idl/x402_payment.json`.
+`packages/settlement-client/idl/assay_payment.json`.
 
 ```bash
-yarn client:generate     # re-render src/generated/ from idl/x402_payment.json
+yarn client:generate     # re-render src/generated/ from idl/assay_payment.json
 yarn client:check        # CI gate: fails if the two disagree
 yarn client:build        # tsc -> packages/settlement-client/dist
 ```
@@ -397,7 +390,7 @@ Rules:
 
 - **Never build an instruction for that program by hand.** Use
   `get<Name>Instruction[Async]`, `fetch<Name>` / `get<Name>Decoder()`,
-  `find<Name>Pda`, `getX402PaymentErrorMessage`. Two locks enforce this: an
+  `find<Name>Pda`, `getAssayPaymentErrorMessage`. Two locks enforce this: an
   ESLint `no-restricted-syntax` rule under `src/`, and
   `test/unit/chains/solana/settlement-client-only.spec.ts`, which also covers
   `scripts/` (ESLint ignores that directory).
@@ -447,12 +440,11 @@ yarn settlement:exercise localnet     # or devnet
 
 ## Feature Flags
 
-Two groups of routes are gated, both **fail closed**: unset means on outside
+One group of routes is gated, and it **fails closed**: unset means on outside
 production and off when `NODE_ENV=production`; an explicit value wins everywhere.
 
 | Flag | Gates | Helper |
 |---|---|---|
-| `EXAMPLES_ENABLED` | `src/modules/_examples/` — posts, demo, auth, schedule | `areExamplesEnabled()` |
 | `DIAGNOSTICS_ENABLED` | `GET /api/v1/diagnostics/errors/:domain`, the error-contract probe | `areDiagnosticsEnabled()` |
 
 Call the helper INLINE in the bootstrap `imports` array, after

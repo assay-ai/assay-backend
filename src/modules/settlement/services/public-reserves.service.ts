@@ -36,12 +36,8 @@ export interface PublicReservesConfig {
  * **No chain call happens in a page request.** The page promises "reconciled
  * every five minutes" and therefore reads back what the reconciler already
  * wrote, rather than reconciling on demand: a public endpoint that issued an
- * RPC per request would be both slow and a free amplifier.
- *
- * It deliberately does **not** use `TreasuryVaultService.checkReserves()`,
- * which *throws* `SETTLEMENT_RESERVES_BREACH` on a shortfall — exactly the
- * moment this page most needs to render. `ReconciliationService` treats
- * severity as a field, and a field is what a page can print.
+ * RPC per request would be both slow and a free amplifier. `ReconciliationService`
+ * treats a breach's severity as a field, and a field is what a page can print.
  */
 @Injectable()
 export class PublicReservesService {

@@ -1,7 +1,23 @@
+import {
+  ToolContractVersionDto,
+  ToolVersionBriefDto,
+  ToolVersionListDto,
+  ToolVersionProviderDto,
+} from '@modules/tool/dto/tool-contract-version.dto';
+import {
+  contractReplacementOf,
+  contractVersionsOf,
+  currentContractVersion,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
+import { ToolErrors } from '@modules/tool/errors/tool.errors';
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { In } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
@@ -12,10 +28,15 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
+import { chainMetadata } from '@modules/chains/chain-metadata';
+import {
+  ESCROW_BALANCE_READER,
+  EscrowBalanceReaderPort,
+} from '@modules/ledger/ports/escrow-balance-reader.port';
 import { freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
-import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
-import { RoutingContext } from '@modules/tool/domain/routing';
+import { RoutingCandidate, RoutingContext } from '@modules/tool/domain/routing';
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import {
@@ -27,12 +48,25 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import {
+  BindingStatus,
+  PricingMode,
+  Tool,
+  ToolBinding,
+  categoryOf,
+  ToolKind,
+  ToolVersionStatus,
+  isListedTool,
+  isNotReviewed,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
+import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
 import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
+  CatalogueChainPriceDto,
   CatalogueChainStakeDto,
   CatalogueMoneyDto,
   CatalogueProviderDetailDto,
@@ -45,16 +79,30 @@ import {
 } from '../dto/get-catalogue.dto';
 import { TtlCache } from '../domain/ttl-cache';
 
+/**
+ * How long one agent's escrow "withdrawal pending" reading is reused for
+ * `servesYou`: an advisory field, so a short-lived reading spares the RPC on
+ * every signed-in provider read. The call path always reads live.
+ */
+export const WITHDRAWAL_FLAG_CACHE_MS = 15_000;
+
 /** How long one market read is reused, signed-in and public alike. */
 export const CATALOGUE_CACHE_MS = 30_000;
 
 /** The listed market: what {@link CatalogueService.loadMarket} reads once per window. */
-interface ListedMarket {
+export interface ListedMarket {
   /** Every listed binding, at its published revision. */
   readonly bindings: readonly ToolBinding[];
   /** The provider rows behind {@link bindings} — ACTIVE providers only. */
   readonly rows: ReadonlyMap<string, ProviderEntity>;
 }
+
+/**
+ * Per listed provider, per tool it lists: the chains a call to that listing
+ * can settle on now (`null` when the router could not be asked). See
+ * {@link CatalogueService.loadServed}.
+ */
+type ServedChains = ReadonlyMap<string, ReadonlyMap<string, readonly ChainId[] | null>>;
 
 /**
  * One cache window: the market read once, and the two lists derived from that
@@ -67,6 +115,12 @@ interface CatalogueWindow {
   readonly market: ListedMarket;
   providers?: Promise<CatalogueProviderListDto>;
   tools?: Promise<CatalogueToolListDto>;
+  served?: Promise<ServedChains>;
+  /**
+   * One router snapshot per tool per window, shared by the per-chain prices
+   * and the served chains, so a window gathers each tool's candidates once.
+   */
+  snapshots: Map<string, Promise<RoutingCandidate[]>>;
 }
 
 /**
@@ -83,6 +137,12 @@ interface CatalogueWindow {
  * relies on. Nothing here writes SQL, so the gate that makes a new cross-tenant
  * read a conversation is not quietly routed around by a service that happens to
  * sit one layer up.
+ *
+ * The one read about the caller is `servesYou`'s
+ * ({@link CatalogueService.listProvidersFor}): the caller's own ACTIVE agents,
+ * scoped by `organizationId` (`AgentRepository.find`), and those agents' own
+ * escrow accounts for a standing withdrawal. It is never cross-tenant and never
+ * cached.
  *
  * ## Bindings are the spine, not providers
  *
@@ -113,8 +173,10 @@ interface CatalogueWindow {
  *
  * ## Cached in process, once per market
  *
- * Nothing here depends on the caller — no session, no organization — so every
- * answer is shared by every reader, signed-in and public. The listed market
+ * Nothing in the lists depends on the caller — no session, no organization —
+ * so every answer is shared by every reader, signed-in and public. The one
+ * per-caller field, `servesYou`, is laid over the shared answer afterwards
+ * ({@link CatalogueService.listProvidersFor}) and is never cached. The listed market
  * (bindings + provider rows) is ONE cache entry per {@link CATALOGUE_CACHE_MS},
  * and the provider list and the tool list are memoised on that entry rather
  * than cached on their own clocks: a separate 30s cache on top of a market that
@@ -128,6 +190,8 @@ interface CatalogueWindow {
 export class CatalogueService {
   private readonly logger = new Logger(CatalogueService.name);
   private readonly windows = new TtlCache<CatalogueWindow>(CATALOGUE_CACHE_MS);
+  /** `chainId|account` → whether a withdrawal stands, read at most once per {@link WITHDRAWAL_FLAG_CACHE_MS}. */
+  private readonly withdrawalFlags = new Map<string, { expiresAt: number; withdrawing: boolean }>();
 
   constructor(
     private readonly bindings: ToolBindingRepository,
@@ -141,6 +205,9 @@ export class CatalogueService {
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     private readonly blocklist: AccountBlocklistService,
     @Inject(FREE_QUOTA_CONFIG) private readonly freeQuota: FreeQuotaConfig,
+    private readonly agents: AgentRepository,
+    private readonly config: ConfigService,
+    @Inject(ESCROW_BALANCE_READER) private readonly escrow: EscrowBalanceReaderPort,
   ) {}
 
   /**
@@ -153,8 +220,14 @@ export class CatalogueService {
    * still answers, with no tools — see {@link getProvider}.
    */
   private async loadMarket(): Promise<ListedMarket> {
+    // Only bindings of LISTED tools: an UNLISTED or PRIVATE provider tool is
+    // reachable only through its provider's own toolsets (§7.6), so neither
+    // its name nor its provider's card may come from here.
+    const listed = new Set(
+      (await this.catalogue.listTools()).filter(isListedTool).map((tool: Tool) => tool.id),
+    );
     const rows = (await this.bindings.findActiveBindings()).filter(
-      (row) => !this.blocklist.organizationBlock(row.organizationId),
+      (row) => listed.has(row.toolId) && !this.blocklist.organizationBlock(row.organizationId),
     );
     // As traffic is served, not as the row reads now: an unpublished draft
     // must not show on a public page. A drifted row with no published snapshot
@@ -180,7 +253,24 @@ export class CatalogueService {
 
   /** The current window — one market read, shared by every reader in it. */
   private window(): Promise<CatalogueWindow> {
-    return this.windows.get('all', async () => ({ market: await this.loadMarket() }));
+    return this.windows.get('all', async () => ({
+      market: await this.loadMarket(),
+      snapshots: new Map(),
+    }));
+  }
+
+  /** The window's router snapshot of one tool, gathered once; a failed one is retried. */
+  private snapshotOf(window: CatalogueWindow, toolId: string): Promise<RoutingCandidate[]> {
+    let load = window.snapshots.get(toolId);
+    if (!load) {
+      const next = this.router.snapshotCandidates(toolId);
+      load = next;
+      window.snapshots.set(toolId, next);
+      next.catch(() => {
+        if (window.snapshots.get(toolId) === next) window.snapshots.delete(toolId);
+      });
+    }
+    return load;
   }
 
   listProviders(): Promise<CatalogueProviderListDto> {
@@ -190,7 +280,7 @@ export class CatalogueService {
   /** The window's provider list, built once from the window's own market. */
   private providersOf(window: CatalogueWindow): Promise<CatalogueProviderListDto> {
     if (!window.providers) {
-      const load = this.loadProviders(window.market);
+      const load = this.loadProviders(window);
       window.providers = load;
       // A failed derivation is not served for the rest of the window.
       load.catch(() => {
@@ -203,7 +293,7 @@ export class CatalogueService {
   /** The window's tool list, built once from the window's own market. */
   private toolsOf(window: CatalogueWindow): Promise<CatalogueToolListDto> {
     if (!window.tools) {
-      const load = this.loadTools(window.market);
+      const load = this.loadTools(window);
       window.tools = load;
       load.catch(() => {
         if (window.tools === load) window.tools = undefined;
@@ -212,15 +302,224 @@ export class CatalogueService {
     return window.tools;
   }
 
-  private async loadProviders({ bindings, rows }: ListedMarket): Promise<CatalogueProviderListDto> {
+  /** The window's served chains, read once from the window's own market. */
+  private servedOf(window: CatalogueWindow): Promise<ServedChains> {
+    if (!window.served) {
+      const load = this.loadServed(window);
+      window.served = load;
+      load.catch(() => {
+        if (window.served === load) window.served = undefined;
+      });
+    }
+    return window.served;
+  }
+
+  /**
+   * Per listed provider and tool, the chains a call to that listing can settle
+   * on now — answered by the router, not re-derived here.
+   *
+   * Each tool's candidates are read once ({@link ProviderRouterService.snapshotCandidates});
+   * then, for each listed provider of the tool and each enabled chain, the
+   * router prices that provider's candidates alone for a payer on that one
+   * chain, exactly as a call from an agent on it is routed (`payerChains:
+   * [chain]`). A chain is in the answer when the router would route there
+   * (`routableBindings > 0`), so enrolment, stake, slash holds, ceilings, a
+   * paused circuit and the blocklist are all the router's own gates.
+   *
+   * Only providers in the listed market are asked about, so nothing outside it
+   * (blocked, suspended, unlisted tools) is ever named. A tool whose snapshot
+   * fails is `null` for each of its providers — not known, never "not serving".
+   */
+  private async loadServed(window: CatalogueWindow): Promise<ServedChains> {
+    const { bindings } = window.market;
+    // A tool catalogue that cannot be read leaves every tool unknown (null);
+    // it never takes the provider list down with it.
+    const contracts: readonly Tool[] = await this.catalogue.listTools().catch((error: unknown) => {
+      this.logger.warn(`served chains: tool catalogue unreadable — ${String(error)}`);
+      return [];
+    });
+    const tools = new Map<string, Tool>(contracts.map((tool) => [tool.id, tool]));
+    const served = new Map<string, Map<string, readonly ChainId[] | null>>();
+    const record = (providerId: string, toolId: string, chains: readonly ChainId[] | null) => {
+      const own = served.get(providerId) ?? new Map<string, readonly ChainId[] | null>();
+      own.set(toolId, chains);
+      served.set(providerId, own);
+    };
+
+    await Promise.all(
+      [...groupBy(bindings, (binding) => binding.toolId)].map(async ([toolId, own]) => {
+        const providerIds = [...new Set(own.map((binding) => binding.providerId))];
+        const tool = tools.get(toolId);
+        try {
+          if (!tool) throw new Error('not in the catalogue');
+          const candidates = await this.snapshotOf(window, toolId);
+          for (const providerId of providerIds) {
+            const theirs = candidates.filter(
+              (candidate) => candidate.binding.providerId === providerId,
+            );
+            record(
+              providerId,
+              toolId,
+              this.enabledChains.filter(
+                (chainId) =>
+                  this.router.quoteFromCandidates(tool, theirs, {
+                    payerChains: [chainId],
+                    defaultChainId: chainId,
+                    enabledChains: this.enabledChains,
+                    withdrawingChains: [],
+                  }).routableBindings > 0,
+              ),
+            );
+          }
+        } catch (error: unknown) {
+          this.warnChain(tool ?? ({ id: toolId, name: toolId } as Tool), 'served chains', error);
+          for (const providerId of providerIds) record(providerId, toolId, null);
+        }
+      }),
+    );
+    return served;
+  }
+
+  /**
+   * The provider list as one buyer sees it: the shared list, plus
+   * `servesYou` from the caller's own agents' chains. Nothing about another
+   * organization is read: the chains are the router's public answer, and the
+   * agents are the caller's own.
+   */
+  async listProvidersFor(organizationId: string): Promise<CatalogueProviderListDto> {
+    const window = await this.window();
+    const [{ providers }, served, yours] = await Promise.all([
+      this.providersOf(window),
+      this.servedOf(window),
+      this.yourChains(organizationId),
+    ]);
+    return {
+      providers: providers.map((provider) => {
+        const servesYou = servesYouOf(
+          [...(served.get(provider.providerId)?.values() ?? [])],
+          yours.chains,
+        );
+        return { ...provider, servesYou, notServedReason: reasonOf(servesYou, yours) };
+      }),
+    };
+  }
+
+  /** {@link getProvider}, with `servesYou` for the caller on the card and each tool. */
+  async getProviderFor(
+    providerId: string,
+    organizationId: string,
+  ): Promise<CatalogueProviderDetailDto> {
+    const [detail, yours] = await Promise.all([
+      this.getProvider(providerId),
+      this.yourChains(organizationId),
+    ]);
+    const tools = detail.tools.map((tool) => {
+      const servesYou = servesYouOf([tool.chains], yours.chains);
+      return { ...tool, servesYou, notServedReason: reasonOf(servesYou, yours) };
+    });
+    const servesYou = servesYouOf(
+      tools.map((tool) => tool.chains),
+      yours.chains,
+    );
+    return { ...detail, servesYou, notServedReason: reasonOf(servesYou, yours), tools };
+  }
+
+  /**
+   * The chains the caller's agents pay on: each ACTIVE agent's own chain, or
+   * the deployment default for one with no wallet yet (what the agents list
+   * and the Connect preview show as its chain). With no agent at all, the
+   * default — the chain a first agent would pay on.
+   *
+   * A chain on which the agent's escrow has a standing withdrawal does not
+   * count: the router refuses that agent's paid calls there
+   * (`BUYER_WITHDRAWING`), read from the same escrow account the call path
+   * reads (`McpToolCallService.withdrawingChains`). One batched read per chain.
+   * When the escrow cannot be read, the chain still counts and the reason is
+   * logged: this is advisory, and the call path keeps its own fail-closed read.
+   */
+  private async yourChains(organizationId: string): Promise<YourChains> {
+    const fallback = this.config.get<string>('auth.privy.defaultChainId') || this.enabledChains[0];
+    const agents = await this.agents.find({
+      where: { organizationId, status: 'ACTIVE' },
+      select: { id: true, chainId: true, primaryAccountId: true },
+    });
+    if (agents.length === 0) return { chains: new Set([fallback]), allWithdrawing: false };
+
+    const withdrawing = new Set<string>();
+    const wallets = groupBy(
+      agents.filter((agent) => agent.chainId && agent.primaryAccountId),
+      (agent) => agent.chainId as string,
+    );
+    await Promise.all(
+      [...wallets].map(async ([chainId, own]) => {
+        try {
+          const flags = await this.withdrawalFlagsOn(
+            chainId,
+            own.map((agent) => agent.primaryAccountId as AccountId),
+          );
+          for (const agent of own) {
+            if (flags.get(agent.primaryAccountId as AccountId)) withdrawing.add(agent.id);
+          }
+        } catch (error: unknown) {
+          this.logger.warn(`servesYou: escrow unreadable on ${chainId} — ${String(error)}`);
+        }
+      }),
+    );
+
+    const chains = new Set(
+      agents
+        .filter((agent) => !withdrawing.has(agent.id))
+        .map((agent) => agent.chainId ?? fallback),
+    );
+    return { chains, allWithdrawing: chains.size === 0 };
+  }
+
+  /**
+   * Whether each account's escrow on `chainId` has a standing withdrawal,
+   * reusing a reading for {@link WITHDRAWAL_FLAG_CACHE_MS}; only the accounts
+   * with no fresh reading go to the chain, in one batched read. A failed read
+   * is never cached (the caller keeps the chain: fail-open for display).
+   */
+  private async withdrawalFlagsOn(
+    chainId: string,
+    accounts: readonly AccountId[],
+  ): Promise<ReadonlyMap<AccountId, boolean>> {
+    const now = Date.now();
+    const key = (account: AccountId) => `${chainId}|${account}`;
+    const flags = new Map<AccountId, boolean>();
+    const stale: AccountId[] = [];
+    for (const account of accounts) {
+      const hit = this.withdrawalFlags.get(key(account));
+      if (hit && hit.expiresAt > now) flags.set(account, hit.withdrawing);
+      else stale.push(account);
+    }
+    if (stale.length === 0) return flags;
+
+    const asset = chainMetadata(chainId as ChainId).settlementAsset as AssetId;
+    const readings = await this.escrow.readMany(stale, asset);
+    for (const account of stale) {
+      const reading = readings.get(account);
+      const withdrawing = Boolean(reading && reading.withdrawRequested > 0n);
+      flags.set(account, withdrawing);
+      this.withdrawalFlags.set(key(account), {
+        expiresAt: now + WITHDRAWAL_FLAG_CACHE_MS,
+        withdrawing,
+      });
+    }
+    return flags;
+  }
+
+  private async loadProviders(window: CatalogueWindow): Promise<CatalogueProviderListDto> {
+    const { bindings, rows } = window.market;
     const byProvider = groupBy(bindings, (binding) => binding.providerId);
     const providerIds = [...byProvider.keys()];
 
     if (providerIds.length === 0) return { providers: [] };
 
-    const [stakes, quality] = await Promise.all([
+    const [stakes, quality, served] = await Promise.all([
       this.cardStakes(providerIds),
       this.slaWindows.qualityByProvider(providerIds),
+      this.servedOf(window),
     ]);
 
     const providers = providerIds
@@ -236,6 +535,7 @@ export class CatalogueService {
           byProvider.get(providerId) ?? [],
           stakes.get(providerId) ?? [],
           quality.get(providerId) ?? null,
+          knownUnionOf([...(served.get(providerId)?.values() ?? [])]),
         ),
       )
       .sort(byQualityThenName);
@@ -258,9 +558,10 @@ export class CatalogueService {
     // A listed provider's card and its bindings come from ONE window, so the
     // card's counts and `toolIds` always match its `tools`; no query of its own.
     const window = await this.window();
-    const [{ providers }, tools] = await Promise.all([
+    const [{ providers }, tools, served] = await Promise.all([
       this.providersOf(window),
       this.catalogue.listTools(),
+      this.servedOf(window),
     ]);
     const { bindings } = window.market;
     const card = providers.find((provider) => provider.providerId === providerId);
@@ -268,7 +569,7 @@ export class CatalogueService {
 
     if (card) {
       const own = bindings.filter((binding) => binding.providerId === providerId);
-      return { ...card, tools: this.toolRows(own, names) };
+      return { ...card, tools: this.toolRows(own, names, served.get(providerId)) };
     }
 
     // Not listed — paused everything, suspended, blocked, or not registered.
@@ -284,8 +585,15 @@ export class CatalogueService {
       this.slaWindows.qualityByProvider([providerId]),
     ]);
 
+    // Nothing listed, so no chain takes a call to it now.
     return {
-      ...this.toProviderDto(row, [], stakes.get(providerId) ?? [], quality.get(providerId) ?? null),
+      ...this.toProviderDto(
+        row,
+        [],
+        stakes.get(providerId) ?? [],
+        quality.get(providerId) ?? null,
+        [],
+      ),
       tools: [],
     };
   }
@@ -293,6 +601,7 @@ export class CatalogueService {
   private toolRows(
     own: readonly ToolBinding[],
     names: ReadonlyMap<string, string>,
+    served: ReadonlyMap<string, readonly ChainId[] | null> | undefined,
   ): CatalogueProviderToolDto[] {
     return own
       .map(
@@ -301,6 +610,10 @@ export class CatalogueService {
           name: names.get(binding.toolId) ?? binding.toolId,
           pricingMode: binding.pricingMode,
           price: money(binding),
+          // The failure rate this listing promises (`tool_bindings.sla_failure_rate`),
+          // the line its penalties are measured against — so a buyer can read
+          // the observed rate against it.
+          promisedFailureRate: binding.slaFailureRate,
           // What the free tier would grant one agent here: its per-agent
           // quota, never more than the binding's daily free-call budget (a
           // call COUNT across all agents, BUG-R17g-01), each falling back to
@@ -319,6 +632,11 @@ export class CatalogueService {
                   ],
                   this.freeQuota,
                 ),
+          // Per tool, not per binding: the router answers for the provider's
+          // listing of the tool as a whole.
+          chains: chainsOf(served?.get(binding.toolId)),
+          servesYou: null,
+          notServedReason: null,
         }),
       )
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -340,11 +658,14 @@ export class CatalogueService {
     return this.window().then((window) => this.toolsOf(window));
   }
 
-  private async loadTools({ bindings }: ListedMarket): Promise<CatalogueToolListDto> {
+  private async loadTools(window: CatalogueWindow): Promise<CatalogueToolListDto> {
+    const { bindings } = window.market;
     const contracts = await this.catalogue.listTools();
 
     const byTool = groupBy(bindings, (binding) => binding.toolId);
     const listed = contracts.filter((tool: Tool) => byTool.has(tool.id));
+    // A replacement tool is named only when it is itself a LISTED tool.
+    const publicTools = new Set(contracts.filter(isListedTool).map((tool: Tool) => tool.id));
 
     // Every chain this deployment offers, on both sides of the intersection —
     // the catalogue is anonymous and has no buyer to narrow to, and a tool
@@ -383,6 +704,20 @@ export class CatalogueService {
       ),
     );
 
+    // One quote per chain a tool settles on (D6): a buyer pays on ONE chain, so
+    // the headline is that chain's price, never the dearest across chains.
+    const chainPrices = await Promise.all(
+      listed.map((tool: Tool, index) =>
+        this.pricesPerChain(
+          window,
+          tool,
+          quotes[index],
+          quoteContext,
+          new Set((byTool.get(tool.id) ?? []).map((binding) => binding.providerId)),
+        ),
+      ),
+    );
+
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {
       const own = byTool.get(tool.id) ?? [];
       const quote = quotes[index];
@@ -391,7 +726,13 @@ export class CatalogueService {
         id: tool.id,
         name: tool.name,
         description: tool.description,
+        ...versionFieldsOf(tool, (toolId) => publicTools.has(toolId)),
         tier: tool.tier,
+        kind: isProviderTool(tool) ? ToolKind.PROVIDER : ToolKind.STANDARD,
+        handle: isProviderTool(tool) ? (parseProviderToolName(tool.name)?.handle ?? null) : null,
+        notReviewed: isNotReviewed(tool),
+        category: categoryOf(tool),
+        tags: [...(tool.tags ?? [])],
         providerCount: new Set(own.map((binding) => binding.providerId)).size,
         fromPrice: cheapest(own),
         price: quote.price ? toMoneyDto(quote.price) : null,
@@ -408,7 +749,7 @@ export class CatalogueService {
         paidBindings: quote.paidBindings ?? 0,
         unroutableReason: quote.unroutableReason,
         // The settles-elsewhere caveat, off the router's own union — the same value and the
-        // same spelling `tools/list` publishes as `x402/settlementChains`. NOT
+        // same spelling `tools/list` publishes as `assay/settlementChains`. NOT
         // re-derived from `tool_bindings.settlement_chains`: a binding's
         // declared list is narrowed by the provider's ACTIVE enrolments and by
         // `ENABLED_CHAINS` before it is a chain a call can settle on, and a
@@ -422,10 +763,98 @@ export class CatalogueService {
         // should give up on. Keyed off the list itself rather than off `price`
         // so the two can never disagree.
         settlementChains: quote.settlementChains.length > 0 ? [...quote.settlementChains] : null,
+        prices: chainPrices[index],
       };
     });
 
     return { tools: tools.sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+
+  /**
+   * The price a call pays on each chain the tool settles on, with the provider
+   * whose listing sets it.
+   *
+   * Each chain is priced by the router itself with the payer narrowed to that
+   * one chain, so every figure is `quote()`'s own answer for a buyer funded
+   * there — the dearest eligible binding on that chain. The candidates are
+   * read once ({@link ProviderRouterService.snapshotCandidates}) and every
+   * chain is priced from that one snapshot, so the chain lines agree with
+   * each other. A tool on one chain reuses the tool's own quote, which is
+   * that same question. A chain that cannot be priced right now is left out.
+   *
+   * `providerId` and `listings` come from the router's own priced set, so a
+   * binding the router would not route to (understaked, at its ceiling, in a
+   * slash hold) never names a price: `providerId` is the one provider at the
+   * quoted price, or `null` when several are; `listings` is how many eligible
+   * bindings the price was taken over.
+   *
+   * `listed` is the tool's providers in the listed market (ACTIVE, not
+   * blocked). The router does not apply the account blocklist, so a provider
+   * outside it is never named: the public detail route keeps a blocked
+   * provider unconfirmable (wave-1 audit I3).
+   */
+  private async pricesPerChain(
+    window: CatalogueWindow,
+    tool: Tool,
+    quote: ToolQuote,
+    context: RoutingContext,
+    listed: ReadonlySet<string>,
+  ): Promise<CatalogueChainPriceDto[]> {
+    const chains = quote.settlementChains;
+    if (quote.price === null || chains.length === 0) return [];
+    if (chains.length === 1) return [chainPrice(chains[0], quote, listed)].filter(isPriced);
+
+    try {
+      const candidates = await this.snapshotOf(window, tool.id);
+      return chains
+        .map((chainId) => {
+          try {
+            return chainPrice(
+              chainId,
+              this.router.quoteFromCandidates(tool, candidates, {
+                ...context,
+                payerChains: [chainId],
+                defaultChainId: chainId,
+              }),
+              listed,
+            );
+          } catch (error: unknown) {
+            this.warnChain(tool, chainId, error);
+            return null;
+          }
+        })
+        .filter(isPriced);
+    } catch (error: unknown) {
+      this.warnChain(tool, 'every chain', error);
+      return [];
+    }
+  }
+
+  private warnChain(tool: Tool, chain: string, error: unknown): void {
+    const reason = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`${tool.name} (${tool.id}) on ${chain}: quote failed — ${reason}`);
+  }
+
+  /**
+   * A served tool's published versions and their changelog (design spec §7.5:
+   * the deprecation shows in the catalogue). Any tool in the catalogue, served
+   * or not right now; a DRAFT tool is in none and is a 404.
+   */
+  async toolVersions(toolId: string): Promise<ToolVersionListDto> {
+    const tool = await this.catalogue.findTool(toolId);
+    // Only the LISTED catalogue: an UNLISTED tool's contract is its link's to share.
+    if (!tool || !isListedTool(tool)) throw ToolErrors.toolNotFound({ toolId });
+    const current = currentContractVersion(tool);
+    const { market } = await this.window();
+    return {
+      toolId: tool.id,
+      name: tool.name,
+      currentVersion: current?.semver ?? null,
+      versions: contractVersionsOf(tool).map((version) =>
+        ToolContractVersionDto.of(version, tool.currentVersion ?? current?.version),
+      ),
+      providers: providerDeclarationsOf(market, tool.id),
+    };
   }
 
   /**
@@ -545,6 +974,7 @@ export class CatalogueService {
     own: readonly ToolBinding[],
     stake: readonly CatalogueChainStakeDto[],
     counters: ProviderQualityCounters | null,
+    chains: readonly string[] | null,
   ): CatalogueProviderDto {
     return {
       providerId: row.organizationId,
@@ -557,8 +987,54 @@ export class CatalogueService {
       fromPrice: cheapest(own),
       stake: [...stake],
       quality: toQualityDto(counters),
+      chains: chains ? [...chains] : null,
+      servesYou: null,
+      notServedReason: null,
     };
   }
+}
+
+/** A tool's served chains as the wire carries them; absent (not asked) reads as unknown. */
+function chainsOf(chains: readonly ChainId[] | null | undefined): string[] | null {
+  return chains ? [...chains] : null;
+}
+
+/**
+ * Every chain the known lists name, in the enabled order they came in; `null`
+ * when no list is known (every snapshot failed). An unknown tool is never
+ * read as "takes no call".
+ */
+function knownUnionOf(lists: readonly (readonly ChainId[] | null)[]): string[] | null {
+  const known = lists.filter((chains): chains is readonly ChainId[] => chains !== null);
+  if (known.length === 0 && lists.length > 0) return null;
+  return [...new Set(known.flat())];
+}
+
+/** The caller's paying chains, and whether every agent is withdrawing (so none is left). */
+interface YourChains {
+  readonly chains: ReadonlySet<string>;
+  readonly allWithdrawing: boolean;
+}
+
+/**
+ * Why a provider does not serve the caller, when the reason is the caller's
+ * own: every agent has a standing withdrawal, so no chain is left to pay on.
+ * Otherwise `null` (the chain mismatch or "takes no calls" reads from `chains`).
+ */
+function reasonOf(servesYou: boolean | null, yours: YourChains): 'WITHDRAWING' | null {
+  return servesYou === false && yours.allWithdrawing ? 'WITHDRAWING' : null;
+}
+
+/**
+ * Whether any listing takes a call on one of `yours`: true as soon as one
+ * does; `null` when none does and at least one could not be read; else false.
+ */
+export function servesYouOf(
+  lists: readonly (readonly string[] | null)[],
+  yours: ReadonlySet<string>,
+): boolean | null {
+  if (lists.some((chains) => chains?.some((chainId) => yours.has(chainId)))) return true;
+  return lists.some((chains) => chains === null) ? null : false;
 }
 
 /**
@@ -596,6 +1072,29 @@ function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
   }
 
   return best ? money(best) : null;
+}
+
+/**
+ * One chain's entry from the router's quote for a payer on that chain; `null`
+ * when it has no price. The provider is named only when it is in `listed`.
+ */
+function chainPrice(
+  chainId: ChainId,
+  quote: ToolQuote,
+  listed: ReadonlySet<string>,
+): CatalogueChainPriceDto | null {
+  if (quote.price === null) return null;
+  const pricedBy = quote.pricedBy ?? [];
+  return {
+    chainId,
+    price: toMoneyDto(quote.price),
+    providerId: pricedBy.length === 1 && listed.has(pricedBy[0]) ? pricedBy[0] : null,
+    listings: quote.listings ?? 0,
+  };
+}
+
+function isPriced(entry: CatalogueChainPriceDto | null): entry is CatalogueChainPriceDto {
+  return entry !== null;
 }
 
 function money(binding: ToolBinding): CatalogueMoneyDto {
@@ -654,4 +1153,83 @@ function byQualityThenName(a: CatalogueProviderDto, b: CatalogueProviderDto): nu
 
   if (left !== right) return right - left;
   return a.legalName.localeCompare(b.legalName);
+}
+
+/** The contract-version half of a catalogue tool card (T3). */
+export function versionFieldsOf(
+  tool: Tool,
+  isPublicTool: (toolId: string) => boolean = () => true,
+): {
+  summary: string;
+  version: string | null;
+  versions: ToolVersionBriefDto[];
+  deprecatedMajors: number[];
+  replacementToolId: string | null;
+  replacementName: string | null;
+  replacementMajor: number | null;
+  replacementVersion: string | null;
+} {
+  const current = currentContractVersion(tool);
+  const versions = contractVersionsOf(tool);
+  const deprecatedMajors = [
+    ...new Set(
+      versions
+        .filter((version) => version.status === ToolVersionStatus.DEPRECATED)
+        .map((version) => version.major),
+    ),
+  ].sort((a, b) => a - b);
+  // What replaces the newest deprecated major; never a tool the catalogue does not list.
+  const found =
+    deprecatedMajors.length > 0
+      ? contractReplacementOf(tool, { major: deprecatedMajors[deprecatedMajors.length - 1] })
+      : null;
+  const replacement =
+    found && (found.toolId === tool.id || isPublicTool(found.toolId)) ? found : null;
+  return {
+    summary: versionOf(tool).summary,
+    version: current?.semver ?? null,
+    versions: versions.map((version) =>
+      ToolVersionBriefDto.of(version, tool.currentVersion ?? current?.version),
+    ),
+    deprecatedMajors,
+    replacementToolId: replacement?.toolId ?? null,
+    replacementName: replacement?.name ?? null,
+    replacementMajor: replacement?.major ?? null,
+    replacementVersion: replacement?.semver ?? null,
+  };
+}
+
+/**
+ * What each listed provider declares for `toolId`, from the window's market
+ * (listed providers' ACTIVE bindings at their published revision only).
+ */
+export function providerDeclarationsOf(
+  market: ListedMarket,
+  toolId: string,
+): ToolVersionProviderDto[] {
+  const byProvider = groupBy(
+    market.bindings.filter((binding) => binding.toolId === toolId),
+    (binding) => binding.providerId,
+  );
+  const rows: ToolVersionProviderDto[] = [];
+  for (const [providerId, own] of byProvider) {
+    const row = market.rows.get(providerId);
+    if (!row) continue;
+    rows.push({
+      providerId,
+      legalName: row.legalName,
+      servedMajors: sortedUnion(own.flatMap((binding) => bindingRange(binding.toolVersionRange))),
+      providesOutputFields: sortedUnion(
+        own.flatMap((binding) => binding.providesOutputFields ?? []),
+      ),
+      supportsInputFields: sortedUnion(own.flatMap((binding) => binding.supportsInputFields ?? [])),
+    });
+  }
+  return rows.sort((a, b) => a.legalName.localeCompare(b.legalName));
+}
+
+function sortedUnion<T extends number | string>(items: readonly T[]): T[] {
+  return [...new Set(items)].sort((a, b) =>
+    typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b)),
+  );
 }

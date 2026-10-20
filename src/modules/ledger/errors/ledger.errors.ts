@@ -4,18 +4,12 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * `LEDGER_*` — the append-only journal, balances, holds and `withheld`.
  */
 export enum LedgerErrorCode {
-  LEDGER_ACCOUNT_NOT_FOUND = 'LEDGER_ACCOUNT_NOT_FOUND',
-  LEDGER_ENTRY_NOT_FOUND = 'LEDGER_ENTRY_NOT_FOUND',
-  LEDGER_ENTRY_IMMUTABLE = 'LEDGER_ENTRY_IMMUTABLE',
   LEDGER_INSUFFICIENT_AVAILABLE_BALANCE = 'LEDGER_INSUFFICIENT_AVAILABLE_BALANCE',
   LEDGER_HOLD_NOT_FOUND = 'LEDGER_HOLD_NOT_FOUND',
   LEDGER_HOLD_ALREADY_RESOLVED = 'LEDGER_HOLD_ALREADY_RESOLVED',
   LEDGER_ASSET_MISMATCH = 'LEDGER_ASSET_MISMATCH',
-  LEDGER_RECONCILIATION_MISMATCH = 'LEDGER_RECONCILIATION_MISMATCH',
   LEDGER_NEGATIVE_BALANCE = 'LEDGER_NEGATIVE_BALANCE',
   LEDGER_INVALID_ACCOUNT_ID = 'LEDGER_INVALID_ACCOUNT_ID',
-  LEDGER_ENTRY_NOT_BUFFERABLE = 'LEDGER_ENTRY_NOT_BUFFERABLE',
-  LEDGER_BATCH_FLUSH_FAILED = 'LEDGER_BATCH_FLUSH_FAILED',
   LEDGER_HOLD_ALREADY_OPEN = 'LEDGER_HOLD_ALREADY_OPEN',
   LEDGER_SNAPSHOT_DRIFT = 'LEDGER_SNAPSHOT_DRIFT',
   LEDGER_UNKNOWN_ENTRY_TYPE = 'LEDGER_UNKNOWN_ENTRY_TYPE',
@@ -26,25 +20,6 @@ export enum LedgerErrorCode {
 export type LedgerErrorCodesArePrefixed = AssertDomainErrorCodes<'LEDGER', `${LedgerErrorCode}`>;
 
 export const LedgerErrors = createDomainErrorFactory('LEDGER', {
-  accountNotFound: {
-    code: LedgerErrorCode.LEDGER_ACCOUNT_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `Ledger account not found${context?.accountId ? `: ${context.accountId}` : ''}`,
-  },
-  entryNotFound: {
-    code: LedgerErrorCode.LEDGER_ENTRY_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `Ledger entry not found${context?.id ? ` with id: ${context.id}` : ''}`,
-  },
-  entryImmutable: {
-    code: LedgerErrorCode.LEDGER_ENTRY_IMMUTABLE,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Ledger entries are append-only and cannot be modified` +
-      `${context?.id ? ` (attempted on ${context.id})` : ''}`,
-  },
   insufficientAvailableBalance: {
     code: LedgerErrorCode.LEDGER_INSUFFICIENT_AVAILABLE_BALANCE,
     statusCode: 409,
@@ -81,13 +56,6 @@ export const LedgerErrors = createDomainErrorFactory('LEDGER', {
     message: (context?: Record<string, any>) =>
       `Asset mismatch${context?.expected ? `: expected ${context.expected}, got ${context.actual}` : ''}`,
   },
-  reconciliationMismatch: {
-    code: LedgerErrorCode.LEDGER_RECONCILIATION_MISMATCH,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Ledger does not reconcile with on-chain state` +
-      `${context?.delta ? `: delta ${context.delta}` : ''}`,
-  },
   /**
    * The journal folds to an impossible state. Raised instead of clamping to
    * zero: a clamped balance is a plausible-looking number that hides the bug
@@ -107,24 +75,6 @@ export const LedgerErrors = createDomainErrorFactory('LEDGER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Not a ledger account id (expected CAIP-10 or a platform account): ${context?.value}`,
-  },
-  entryNotBufferable: {
-    code: LedgerErrorCode.LEDGER_ENTRY_NOT_BUFFERABLE,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Entry type ${context?.entryType} can reduce a balance and must be written through, not buffered`,
-  },
-  /**
-   * A batch failed and was applied in full by nobody. The message says so
-   * explicitly because the first question asked when this fires at 3am is
-   * "did half of it land?".
-   */
-  batchFlushFailed: {
-    code: LedgerErrorCode.LEDGER_BATCH_FLUSH_FAILED,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Ledger batch ${context?.batchId ?? '(unknown)'} of ${context?.size ?? '?'} entries was rolled back in full; no entry in it was applied` +
-      `${context?.cause ? `: ${context.cause}` : ''}`,
   },
   /**
    * A stored `entry_type` this build has no balance effect for — a row written

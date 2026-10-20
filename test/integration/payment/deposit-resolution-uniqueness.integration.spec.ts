@@ -70,7 +70,7 @@ describe('Deposit resolution uniqueness — one credit per signature', () => {
       expiresAt: new Date(Date.now() + 90_000),
     });
 
-    ctx.ledger.append({
+    await ctx.ledger.appendNow({
       organizationId: ctx.organizationId,
       accountId: account,
       entryType: LedgerEntryType.DEPOSIT_PENDING,
@@ -78,7 +78,6 @@ describe('Deposit resolution uniqueness — one credit per signature', () => {
       intentId: id,
       chainTxRef: `Tx-${id}`,
     });
-    await ctx.ledger.flush();
 
     return { id, account };
   }

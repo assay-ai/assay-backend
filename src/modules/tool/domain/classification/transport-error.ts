@@ -9,6 +9,8 @@
  * value. If the call path caught something, the call failed.
  */
 
+import { BaseError } from '@shared/errors/base.error';
+
 import { TransportError, TransportErrorKind } from './classification.types';
 
 /**
@@ -32,6 +34,10 @@ function stringField(value: unknown, field: string): string | undefined {
   const raw = (value as Record<string, unknown>)[field];
   return typeof raw === 'string' ? raw : undefined;
 }
+
+/** `EgressFailureKind.RELAY_UNAVAILABLE`'s code; see `egress.errors.ts`. */
+const RELAY_UNAVAILABLE_CODE = 'EGRESS_RELAY_UNAVAILABLE';
+const RELAY_UNAVAILABLE_DETAIL = 'egress relay unavailable';
 
 /**
  * Error codes/names, most specific first.
@@ -146,6 +152,17 @@ export function classifyTransportError(
 ): TransportError {
   const chain = causeChain(error);
 
+  // The egress relay failed, so the provider was never reached through it: a
+  // platform fault, never counted against the provider. Fixed detail, because
+  // `detail` reaches buyers and the raw chain may name relay internals.
+  if (chain.some((link) => stringField(link, 'code') === RELAY_UNAVAILABLE_CODE)) {
+    return {
+      kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+      partialBody: null,
+      detail: RELAY_UNAVAILABLE_DETAIL,
+    };
+  }
+
   for (const link of chain) {
     const code = stringField(link, 'code');
     const name = stringField(link, 'name');
@@ -188,4 +205,21 @@ function build(
 
 function errorName(value: unknown): string {
   return stringField(value, 'name') ?? 'UnknownError';
+}
+
+/**
+ * Assay could not prepare the call (the credential vault or the signer
+ * failed), so nothing was sent. A platform fault: classified
+ * `PLATFORM_UNAVAILABLE`, never counted against the provider.
+ *
+ * `detail` reaches buyers (MCP evidence) and tester reports, so it is fixed
+ * copy: an `AppError`'s message is safe, but any other throw (a driver error
+ * naming a host, say) is replaced by `fallbackDetail`.
+ */
+export function platformUnavailable(error: unknown, fallbackDetail: string): TransportError {
+  return {
+    kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+    partialBody: null,
+    detail: error instanceof BaseError ? error.message : fallbackDetail,
+  };
 }

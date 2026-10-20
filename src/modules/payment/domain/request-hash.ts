@@ -190,7 +190,7 @@ export interface RoutedCallHashInput extends RequestCall {
  * must produce different digests rather than silently re-interpreting stored
  * ones.
  */
-export const ROUTED_CALL_HASH_SCHEME = 'x402/routed-call/v1';
+export const ROUTED_CALL_HASH_SCHEME = 'assay/routed-call/v1';
 
 export function computeRoutedCallHash(input: RoutedCallHashInput): string {
   const canonical = canonicalPreImage({

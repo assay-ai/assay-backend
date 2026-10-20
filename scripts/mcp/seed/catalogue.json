@@ -18,6 +18,12 @@
     {
       "id": "06399979-f8b8-4c9e-a9b1-bd2a5924d442",
       "name": "get_weather",
+      "category": "weather",
+      "tags": [
+        "temperature",
+        "conditions",
+        "meteorology"
+      ],
       "description": "Current temperature at a latitude/longitude, from a meteorological forecast model. Use for present conditions at a known point. Not for forecasts, not for place names — resolve a place to coordinates first, and not for historical observations.",
       "inputSchema": {
         "type": "object",
@@ -55,6 +61,12 @@
     {
       "id": "a4b9882a-9bc1-4d64-807a-27c0b93daf0a",
       "name": "get_usd_eur_rate",
+      "category": "finance",
+      "tags": [
+        "currency",
+        "exchange-rate",
+        "ecb"
+      ],
       "description": "The latest USD to EUR reference exchange rate published by the European Central Bank, with the date it was published for. Use for converting amounts at a reference rate. Not a tradeable quote, and not intraday.",
       "inputSchema": {
         "type": "object",
@@ -81,6 +93,12 @@
     {
       "id": "ad39dccc-aff2-54c1-b383-62e0ff392570",
       "name": "geocode_place",
+      "category": "maps",
+      "tags": [
+        "geocoding",
+        "coordinates",
+        "places"
+      ],
       "description": "Resolve a place name to coordinates. Returns the best matches, each with latitude, longitude and country. Use this before any tool that needs a point rather than a name. Not a reverse geocoder — it will not turn coordinates back into a place — and not an address validator.",
       "inputSchema": {
         "type": "object",
@@ -141,6 +159,12 @@
     {
       "id": "d0f8062b-79ab-5517-b1c8-39481c885e7a",
       "name": "get_token_market",
+      "category": "crypto",
+      "tags": [
+        "token",
+        "price",
+        "market"
+      ],
       "description": "Current USD market data for one or more crypto assets by CoinGecko id — price, market capitalisation, maximum supply and the time the figures were last refreshed. Use for a reference price and market size. Not a tradeable quote, not an order book, and not a historical series.",
       "inputSchema": {
         "type": "object",
@@ -208,6 +232,12 @@
     {
       "id": "b08a92cf-7050-57b3-b17e-1ac61ec0ab19",
       "name": "solana_get_balance",
+      "category": "crypto",
+      "tags": [
+        "solana",
+        "wallet",
+        "balance"
+      ],
       "description": "The SOL balance of a Solana mainnet account, in lamports, with the slot the reading was taken at. Use to check funding before building a transaction. Not for SPL token balances, and not for devnet or testnet accounts.",
       "inputSchema": {
         "type": "object",
@@ -241,6 +271,12 @@
     {
       "id": "abae704e-0a56-5674-9074-6c7bfc25fad1",
       "name": "extract_page_text",
+      "category": "web",
+      "tags": [
+        "scrape",
+        "html",
+        "text"
+      ],
       "description": "Fetch a public web page and return its main text with the navigation and boilerplate stripped, plus the resolved source URL and the token count of the extract. Use when a model needs to read a page it already has a link to. Not a search tool, and not for pages behind a login or a paywall.",
       "inputSchema": {
         "type": "object",
@@ -275,12 +311,21 @@
           }
         }
       },
+      "optionalOutputFields": [
+        "title"
+      ],
       "verificationPolicyId": "extract_page_text.default",
       "tier": "VERIFIED"
     },
     {
       "id": "8fa77325-86d3-5e4a-8c6f-6ec85ccf0b33",
       "name": "search_wikipedia",
+      "category": "knowledge",
+      "tags": [
+        "wikipedia",
+        "encyclopedia",
+        "search"
+      ],
       "description": "Search English Wikipedia and return the best-matching articles with a highlighted snippet, plus how many articles matched in total. Use to find an article worth reading. Not a general web search, and a snippet is not an answer — fetch the article for that.",
       "inputSchema": {
         "type": "object",
@@ -342,6 +387,11 @@
     {
       "id": "294afca7-be7c-59d0-a4d2-f7c994c39c45",
       "name": "search_wikipedia_demo_broken",
+      "category": "knowledge",
+      "tags": [
+        "wikipedia",
+        "demo"
+      ],
       "description": "DEMO FIXTURE — DO NOT CALL. A deliberately faulty implementation of search_wikipedia used by the public /demo page to show a call being refused payment. Every result it returns carries the same pageId, so it fails this platform's own quality rules by construction and is never charged. It answers no real question and is useless for any task. Use search_wikipedia instead.",
       "inputSchema": {
         "type": "object",

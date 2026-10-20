@@ -31,23 +31,9 @@ past it; the measurement is recorded in `docs/chain-facts.md` in the assay-evm r
 
 ## Unset is a boot failure. There is no default
 
-The old `DEFAULT_SOLANA_ENABLED_CHAINS` ("mainnet and devnet") is gone. A default here is a default
-that silently enables a *mainnet* nobody asked for. The house rule this follows: operational dials
-fall back so a typo does not stop the process, but a value that silently changes what is live fails
-loudly at boot, where somebody is looking.
-
-## `SOLANA_ENABLED_CHAINS` present at all is also a boot failure
-
-Boot fails if the old variable is set — **even beside a valid `ENABLED_CHAINS`**, and even when it is
-set to the empty string. Blanking a value is how an operator neutralises a configuration key without
-deleting it, so it is the shape most likely to be left behind by a half-finished migration; reading
-it as "not set" would be this guard failing open on the one input it exists to catch.
-
-The error message contains the translated replacement line, ready to paste.
-
-**Consequence for a deploy:** the code change and the configuration change must land in the same window.
-A deployment still carrying `SOLANA_ENABLED_CHAINS` will refuse to start the moment the new image rolls
-out.
+A default here is a default that silently enables a *mainnet* nobody asked for. The house rule this
+follows: operational dials fall back so a typo does not stop the process, but a value that silently
+changes what is live fails loudly at boot, where somebody is looking.
 
 ## What else must cover every enabled `eip155` chain
 
@@ -60,12 +46,12 @@ no-ops when no eip155 chain is enabled:
   defaults; unset is a boot failure**, because an unwatched float is worse than a process that
   refuses to start. `EVM_RELAYER_FLOAT_LOW_WEI` is **one** number read by two things — the grant
   refuses below it (`GasGrantRefusal.RELAYER_FLOAT_LOW`) and `EvmRelayerFloatMonitor` alerts on it
-  — and it was previously called `EVM_RELAYER_FLOAT_LOW_WATER_WEI`. `EVM_RELAYER_FLOAT_CRITICAL_WEI`
-  must be strictly below it. What an operator does when the float runs dry is in the assay-evm repository's deploy runbook.
+  — and `EVM_RELAYER_FLOAT_CRITICAL_WEI` must be strictly below it. What an operator does when the
+  float runs dry is in the assay-evm repository's deploy runbook.
 - `EVM_DEPLOYMENTS` — seven addresses per chain: `config`, `stake`, `escrow`, `asset`,
   `escrowImplementation`, `admin`, `owner`. The last three are what `VaultPort.assertVaultControl`
   compares the live chain against, and they are the ones that **move**: `escrowImplementation` on
-  every upgrade, `owner` (`X402Config.owner()`, the upgrade authority of all three contracts) on
+  every upgrade, `owner` (`AssayConfig.owner()`, the upgrade authority of all three contracts) on
   every ownership transfer, `admin` (the operational key the owner appoints, not the upgrade
   authority) on every appointment. Copy them from `deployments/<chainId>.json` in the assay-evm
   repository. A change that does not update this variable stops the reconciler on its next pass —
@@ -133,13 +119,13 @@ record's `executableAt` (in the alert details) has passed, 72 hours after the pr
 
 Response, from the admin hardware wallet (the backend holds no admin key):
 
-1. **`X402Config.revokeVerifier(<verifier>)`** with the `verifier` from the alert. Execution re-checks
+1. **`AssayConfig.revokeVerifier(<verifier>)`** with the `verifier` from the alert. Execution re-checks
    the key, so this voids every pending record that key signed, including any not yet alerted, and
    stops new ones. Afterwards anyone can call `expireSlash(requestId)` to release the reservations.
-2. If the scope is unclear, or more than one key is involved: **`X402Config.setPaused(true)`**. It
+2. If the scope is unclear, or more than one key is involved: **`AssayConfig.setPaused(true)`**. It
    blocks `proposeSlash` and `executeSlash` (and deposits and redemptions; buyers can still withdraw).
 3. For a single record when the key itself is still trusted (for example a mismatch traced to a
-   database edit): **`X402Stake.cancelSlash(<requestId>)`**.
+   database edit): **`AssayStake.cancelSlash(<requestId>)`**.
 
 Then: register a fresh verifier key (`yarn verifier:registry`), rotate the database and server
 credentials if the cause is not yet known, check the stored parts of every open case against the
@@ -150,7 +136,7 @@ alerts, so a false positive points at a bug in the watcher or in the part rows, 
 
 **The backend assumes the upgraded contracts; upgrade the chain before deploying it.** There is no
 old-versus-new detection. At boot every process logs one error, `contracts not upgraded`, for a
-chain whose `X402Config` does not answer `arbiter()`; disputes, rulings, the on-chain blocklist
+chain whose `AssayConfig` does not answer `arbiter()`; disputes, rulings, the on-chain blocklist
 and the slash delay will not work there. The live `slashDelaySeconds()` is read for every proposal
 pass; a failed read is an RPC error and the case waits for the next tick (no delay is ever
 assumed). The arbiter must be appointed: every cancel and ruling is built for the arbiter, and

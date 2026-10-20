@@ -56,6 +56,8 @@ describe('ConfigMcpSessionSource — the token decides whose balance is spent', 
       // Review A-2: a config token is a machine unless its record says a
       // person uses it, so an agent process handed one is not a person.
       callerKind: McpCallerKind.AGENT,
+      // unchanged behaviour: only third-party OAuth grants are refused paid calls
+      paymentsAllowed: true,
     });
   });
 

@@ -26,7 +26,7 @@
 
 /**
  * The widest jump a voucher's seq may take past the escrow's on-chain
- * `seqHigh`: mirrors `X402Escrow`'s `MAX_SEQ_GAP` (assay-evm
+ * `seqHigh`: mirrors `AssayEscrow`'s `MAX_SEQ_GAP` (assay-evm
  * `Constants.sol`, D-17), which refuses `seq > seqHigh + MAX_SEQ_GAP` with
  * `VoucherSeqGapTooLarge`. So on eip155 gaps are free but **bounded**.
  *
@@ -49,8 +49,7 @@ export const VOUCHER_MAX_SEQ_GAP = 1_000_000;
  * in-flight ceiling went — so a stale value costs an operator a slightly old
  * number and costs a buyer nothing. Redis is a cache here and nothing else: on
  * a miss, or a flush, it is recomputed from Postgres. The *allocator* is a
- * Postgres column for the reason `voucher-nonce.store.ts` already gives about
- * its own fast layer, that flushing Redis must never re-issue a number.
+ * Postgres column because flushing Redis must never re-issue a number.
  */
 export const ESCROW_SEQ_GAP_CACHE_TTL_MS = 2_000;
 

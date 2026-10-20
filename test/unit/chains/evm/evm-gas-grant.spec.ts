@@ -305,7 +305,7 @@ describe('EvmGasGrantService', () => {
 
   // ── The maturity gate reads the CHAIN's clock ────────────────────────────
   //
-  // `X402Escrow.withdraw()` is `if (block.timestamp < e.withdrawAvailableAt)
+  // `AssayEscrow.withdraw()` is `if (block.timestamp < e.withdrawAvailableAt)
   // revert WithdrawNotYetAvailable()`. These two cases move ONE of the two
   // clocks each and disagree about the answer, so neither can pass for the
   // other's reason and neither passes against `Date.now()`.

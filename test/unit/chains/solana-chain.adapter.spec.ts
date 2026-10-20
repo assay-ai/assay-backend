@@ -13,7 +13,7 @@ import {
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
 } from '@solana/kit';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '@x402/settlement-client';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '@assay/settlement-client';
 
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { computeResourceHash, hashHexToBytes } from '@modules/payment/domain/resource-hash';
@@ -49,9 +49,9 @@ const PROVIDER = `${SOLANA_MAINNET}:${PROVIDER_ADDRESS}` as AccountId;
  * The address the settlement program is **deployed** to, which is not the
  * address it was **built** for.
  *
- * Deliberately different from `X402_PAYMENT_PROGRAM_ADDRESS` — the client's
+ * Deliberately different from `ASSAY_PAYMENT_PROGRAM_ADDRESS` — the client's
  * compiled-in `declare_id!()` — because the voucher signs the program id at
- * offset 15 and a redeploy can move it to a new one. A default to the compiled-in
+ * offset 16 and a redeploy can move it to a new one. A default to the compiled-in
  * constant would have every buyer sign bytes naming a program that is not the
  * one about to check them: the call is served, the money is held, and every
  * redemption dies with `MissingBuyerSignature`.
@@ -426,21 +426,21 @@ describe('SolanaChainAdapter — voucher v2', () => {
 
   const addressBytes = (value: string) => Array.from(getAddressEncoder().encode(address(value)));
 
-  it('builds the 239 bytes the settlement program recomputes', () => {
+  it('builds the 240 bytes the settlement program recomputes', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(message).toHaveLength(239);
-    expect(new TextDecoder().decode(message.subarray(0, 15))).toBe('x402:voucher:v2');
+    expect(message).toHaveLength(240);
+    expect(new TextDecoder().decode(message.subarray(0, 16))).toBe('assay:voucher:v2');
   });
 
   it('signs over the DEPLOYED program id, not the one compiled into the client', () => {
-    // The program id is at offset 15..47 of the signed bytes. A redeploy can
+    // The program id is at offset 16..48 of the signed bytes. A redeploy can
     // land under a new id, so a default would have every buyer sign for a program
     // that is not the one about to check the signature.
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(15, 47))).toEqual(addressBytes(DEPLOYED_PROGRAM_ID));
-    expect(DEPLOYED_PROGRAM_ID).not.toBe(X402_PAYMENT_PROGRAM_ADDRESS);
+    expect(Array.from(message.subarray(16, 48))).toEqual(addressBytes(DEPLOYED_PROGRAM_ID));
+    expect(DEPLOYED_PROGRAM_ID).not.toBe(ASSAY_PAYMENT_PROGRAM_ADDRESS);
   });
 
   it('refuses to build a voucher message when the program id is unconfigured', () => {
@@ -459,15 +459,15 @@ describe('SolanaChainAdapter — voucher v2', () => {
   it('puts the payer, the escrow and the provider at the offsets the program reads', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(47, 79))).toEqual(addressBytes(signerAddress));
-    expect(Array.from(message.subarray(79, 111))).toEqual(addressBytes(PAYER_ADDRESS));
-    expect(Array.from(message.subarray(111, 143))).toEqual(addressBytes(PROVIDER_ADDRESS));
+    expect(Array.from(message.subarray(48, 80))).toEqual(addressBytes(signerAddress));
+    expect(Array.from(message.subarray(80, 112))).toEqual(addressBytes(PAYER_ADDRESS));
+    expect(Array.from(message.subarray(112, 144))).toEqual(addressBytes(PROVIDER_ADDRESS));
   });
 
   it('signs sha256(resource) rather than the resource string', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(151, 183))).toEqual(
+    expect(Array.from(message.subarray(152, 184))).toEqual(
       Array.from(hashHexToBytes(computeResourceHash(intent.resource))),
     );
     // The whole message is fixed-width, so the string itself is nowhere in it.
@@ -521,7 +521,7 @@ describe('SolanaChainAdapter — voucher v2', () => {
     const redeployed = new SolanaChainAdapter(
       stubRpc('10000', 6),
       [CHAIN_IDS.SOLANA_MAINNET, CHAIN_IDS.SOLANA_DEVNET],
-      X402_PAYMENT_PROGRAM_ADDRESS,
+      ASSAY_PAYMENT_PROGRAM_ADDRESS,
     );
 
     expect(redeployed.verifyVoucherSignature(voucher, signVoucher(voucher), signer)).toBe(false);
@@ -574,7 +574,7 @@ describe('SolanaChainAdapter — payout proof', () => {
   it('leads with its own version tag, distinct from the voucher', () => {
     const message = new TextDecoder().decode(adapter.buildPayoutProofMessage(challenge));
     expect(message.startsWith(PAYOUT_PROOF_MESSAGE_VERSION)).toBe(true);
-    expect(message).not.toContain('x402:voucher:v2');
+    expect(message).not.toContain('assay:voucher:v2');
   });
 
   it('puts the account being claimed inside the signed bytes', () => {

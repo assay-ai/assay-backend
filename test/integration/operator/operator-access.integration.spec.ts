@@ -13,7 +13,9 @@ import { generatePrivateKey, privateKeyToAccount, PrivateKeyAccount } from 'viem
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { OperatorSessionStore } from '@modules/operator/auth/operator-session.store';
 import { OPERATOR_SIGN_IN_CONFIG } from '@modules/operator/auth/operator-sign-in.config';
@@ -43,7 +45,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * the approvals queue — with the real guards, the real register and the real
  * session store. Only the blocklist's broadcast is stubbed.
  */
-const DATABASE = 'x402_operator_access_test';
+const DATABASE = 'assay_operator_access_test';
 const DOMAIN = 'console.goassay.test';
 const NOTE = 'Provisioned for the on-call rotation this quarter.';
 
@@ -91,6 +93,8 @@ describe('operator access, over HTTP, against a real database and Redis', () => 
         OperatorApprovalRepository,
         OverrideLogEntryRepository,
         AccountBlockRepository,
+        ProviderRepository,
+        OrganizationRepository,
         OperatorService,
         OperatorSessionStore,
         OperatorAuthThrottle,
@@ -480,29 +484,6 @@ describe('operator access, over HTTP, against a real database and Redis', () => 
         active: false,
         unblockApprovedBy: lead.subject,
       });
-    });
-
-    it('ignores an X-Operator-Approver header: the action is queued all the same', async () => {
-      const sre = await seedOperator([OperatorRole.SRE]);
-      const lead = await seedOperator([OperatorRole.ADJL]);
-      const sreToken = await signIn(sre.account);
-      const block = await http()
-        .post('/operator/blocks')
-        .set(bearer(sreToken))
-        .send({
-          subjectKind: 'ORGANIZATION',
-          subject: randomUUID(),
-          reasonCode: 'LEAKED_KEY',
-          note: NOTE,
-        })
-        .expect(201);
-
-      await http()
-        .post(`/operator/blocks/${block.body.data.id}/unblock`)
-        .set(bearer(sreToken))
-        .set('X-Operator-Approver', await signIn(lead.account))
-        .send({ reasonCode: 'KEY_ROTATED', note: NOTE })
-        .expect(202);
     });
   });
 });

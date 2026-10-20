@@ -219,4 +219,12 @@ export class VerificationRecordEntity extends OrganizationScopedEntityWithoutSof
   /** The last failure, so a stuck record explains itself without a log search. */
   @Column({ name: 'last_error', type: 'varchar', length: 512, nullable: true })
   lastError: string | null;
+
+  /**
+   * The decision on a buyer's dispute over this call (G3.B1): `UPHELD` |
+   * `REJECTED`, or null when none was decided. The quality stats count an
+   * upheld call as a failed one.
+   */
+  @Column({ name: 'dispute_outcome', type: 'varchar', length: 16, nullable: true })
+  disputeOutcome: string | null;
 }

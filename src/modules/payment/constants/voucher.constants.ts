@@ -53,9 +53,6 @@ export const VOUCHER_CLOCK_SKEW_TOLERANCE_SECONDS = 120;
  */
 export const VOUCHER_SEQ_RE = /^(0|[1-9][0-9]{0,19})$/;
 
-/** Written to `status_reason` when a voucher creates the intent. */
-export const VOUCHER_REDEEMED_REASON = 'voucher redeemed; signature and sequence verified';
-
 /**
  * How much earlier than a chain read a closed hold still counts as "not in the
  * counter that read returned", in milliseconds (BUG-D1-02).

@@ -5,45 +5,31 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 /**
  * A proposal to take a provider's capital, with a clock on it.
  *
- * This is the object the slash-proposal case screen renders and the row the
- * adjudication queue orders. It is the first thing in the system that reads
+ * This is the object the slash-proposal case screen renders. It is the first thing in the system that reads
  * `sla_strikes`: the SLA window service wrote strikes with
  * `status = 'RECORDED'` and nothing ever moved them, because the lifecycle
  * lives here.
  *
- * ## `status` is the case; `outcome` is the judgement
- *
- * Two columns, because they answer different questions and a single one would
- * lose an answer.
+ * ## `status` is the case
  *
  * ```text
- *   PROPOSED ──── provider objects, in window ────► DISPUTED
- *      │                                              │
- *      │ nobody objects, respond_by_at passes         │ operator claims it
- *      │ (AUTO_UNDISPUTED)                            ▼
- *      │                                        UNDER_REVIEW
- *      │                                              │
- *      │                                     adjudicator decides
- *      │                                              ▼
- *      │                                       AWAITING_SECOND
- *      │                                              │
- *      │                              second signs ───┤─── second objects
- *      │                                              │      (back to
- *      ▼                                              ▼    UNDER_REVIEW)
- *   UPHELD ◄─────────────────────────────────► OVERTURNED (terminal)
+ *   PROPOSED ──── disputeSlash on chain ────► DISPUTED
+ *      │                                        │
+ *      │ the record's door passes undisputed    │ the arbiter: upholdSlash
+ *      │ (AUTO_UNDISPUTED)                      │ (CHAIN_ARBITER), or
+ *      ▼                                        │ cancelSlash / expiry
+ *   UPHELD ◄────────────────────────────────────┘ ──► CANCELLED
  *      │
- *      │ earliest_execution_at has passed
+ *      │ the record's executableAt has passed
  *      ▼
- *   EXECUTING ──► EXECUTED ──── later overturn ──► REVERSED (terminal)
+ *   EXECUTING ──► EXECUTED ──── compensated ──► REVERSED (terminal)
  *
- *   WAIVED    — below the de-minimis floor, never adjudicated (terminal)
- *   CANCELLED — S-1, suspended by an operator pre-attestation (terminal)
+ *   WAIVED    — below the de-minimis floor, never levied (terminal)
+ *   CANCELLED — voided by the chain, or closed with nothing standing (terminal)
  * ```
  *
- * `outcome` carries which of the six outcomes the adjudicator chose. It is NULL
- * for every automatic resolution, and the CHECK
- * `chk_slash_proposals_outcome_needs_adjudicator` makes that exact: an outcome
- * is a judgement, and there are three ways a case ends without one.
+ * Every resolution is the chain's or automatic, so the case carries no
+ * judgement of its own: `resolution_kind` says how it closed.
  *
  * ## The word UPHELD means the opposite here and on `disputes`
  *
@@ -89,24 +75,19 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'tool_id', type: 'uuid' })
   toolId: string;
 
-  /** `SLA_STRIKE` | `DATA_FAIL` — the two doors a slash proposal can come from. */
+  /** `SLA_STRIKE` — the one door a slash proposal comes from. */
   @Column({ name: 'source', type: 'varchar', length: 16 })
   source: string;
 
-  /** Set exactly when `source = 'SLA_STRIKE'`. Unique: one proposal per strike. */
+  /** The strike the proposal was opened from. Unique: one proposal per strike. */
   @Column({ name: 'strike_id', type: 'uuid', nullable: true })
   strikeId: string | null;
-
-  /** Set exactly when `source = 'DATA_FAIL'`. Unique: one proposal per verdict. */
-  @Column({ name: 'verdict_id', type: 'uuid', nullable: true })
-  verdictId: string | null;
 
   /**
    * The window the finding came from, when there is one.
    *
-   * Denormalised off the strike rather than joined, because a `DATA_FAIL`
-   * proposal has a window too (the call belonged to one) and the queue renders
-   * the label on every row.
+   * Denormalised off the strike rather than joined, because the case list
+   * renders the label on every row.
    */
   @Column({ name: 'window_id', type: 'uuid', nullable: true })
   windowId: string | null;
@@ -190,29 +171,15 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   proposedAt: Date;
 
   /**
-   * When the notification was **delivered**, which is when the provider's clock
-   * starts. A webhook to a dead endpoint must not consume their appeal window,
-   * so `respond_by_at` stays NULL until this is set.
+   * When the notification was **delivered**. The case is proposed on chain
+   * only after this is set, so no stake is reserved for a case the provider
+   * was never told about.
    */
   @Column({ name: 'notified_at', type: 'timestamptz', nullable: true })
   notifiedAt: Date | null;
 
   @Column({ name: 'acknowledged_at', type: 'timestamptz', nullable: true })
   acknowledgedAt: Date | null;
-
-  /** Derived from `notified_at`, never from `proposed_at`. */
-  @Column({ name: 'respond_by_at', type: 'timestamptz', nullable: true })
-  respondByAt: Date | null;
-
-  /**
-   * Our own deadline, set when a dispute is filed.
-   *
-   * The one rule that makes understaffing our cost instead of the provider's:
-   * miss it and the case is automatically overturned. Nothing else puts a clock
-   * on us.
-   */
-  @Column({ name: 'platform_decision_due_at', type: 'timestamptz', nullable: true })
-  platformDecisionDueAt: Date | null;
 
   /**
    * The timelock. The case screen states it as a promise — "never before that
@@ -252,20 +219,13 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
    * `SlashRecord.executable_at` — `proposed_at + Config.slash_delay_seconds`.
    *
    * Not the same thing as `earliest_execution_at`, which is this platform's
-   * promise to the provider. Two things an earlier version of this comment got
-   * wrong, both of which cost a guard:
+   * promise to the provider, and **not "always at or after the promise"**: it
+   * is frozen when the record is written, so a record adopted at an older
+   * `proposed_at` puts it BEFORE the promise. `execute_slash` is
+   * permissionless, so that gap is a window in which any stranger may take
+   * the penalty while the provider is still inside the time they were given.
    *
-   * - **`earliest_execution_at` moves.** `ArbitrationService.extendDeadline`
-   *   (`S-8`) pushes it forward, by up to 14 days.
-   * - **This is not "always at or after the promise".** It is frozen when the
-   *   record is written and nothing off-chain can move it, so an extension made
-   *   after the propose, or a record adopted at an older `proposed_at`, puts it
-   *   BEFORE the promise. `execute_slash` is permissionless, so that gap is a
-   *   window in which any stranger may take the penalty while the provider is
-   *   still inside the time they were given.
-   *
-   * Three things keep the two in the right order, and none of them is this
-   * column: `extendDeadline` refuses an extension past a standing door,
+   * Two things keep the two in the right order, and neither is this column:
    * `proposeDue` defers a propose that would open one early, and the executor
    * waits on `max(both clocks)` so at least this process never goes first.
    */
@@ -346,39 +306,15 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   disputeId: string | null;
 
   /**
-   * `ADJUDICATOR` | `AUTO_UNDISPUTED` | `AUTO_PLATFORM_MISS` | `AUTO_DE_MINIMIS`
-   * | `AUTO_CHAIN_VOIDED` | `CHAIN_ARBITER` (the arbiter's on-chain uphold, or
-   * on a `CANCELLED` case its `cancelSlash`).
+   * `AUTO_UNDISPUTED` | `AUTO_DE_MINIMIS` | `AUTO_CHAIN_VOIDED` |
+   * `CHAIN_ARBITER` (the arbiter's on-chain uphold, or on a `CANCELLED` case
+   * its `cancelSlash`).
    */
   @Column({ name: 'resolution_kind', type: 'varchar', length: 24, nullable: true })
   resolutionKind: string | null;
 
-  /**
-   * One of the six outcomes. NOT NULL exactly when `resolutionKind` is
-   * `'ADJUDICATOR'`, with one exception: `AUTO_CHAIN_VOIDED` may land on a case
-   * an adjudicator already upheld, and the human's judgement is left standing
-   * on the row while the *closure* is recorded as automatic. See
-   * `chk_slash_proposals_outcome_needs_adjudicator`.
-   */
-  @Column({ name: 'outcome', type: 'varchar', length: 40, nullable: true })
-  outcome: string | null;
-
   @Column({ name: 'resolved_at', type: 'timestamptz', nullable: true })
   resolvedAt: Date | null;
-
-  @Column({ name: 'decided_by_operator_id', type: 'uuid', nullable: true })
-  decidedByOperatorId: string | null;
-
-  /** The second signature. Constrained at the database to be a different person. */
-  @Column({ name: 'seconded_by_operator_id', type: 'uuid', nullable: true })
-  secondedByOperatorId: string | null;
-
-  @Column({ name: 'seconded_at', type: 'timestamptz', nullable: true })
-  secondedAt: Date | null;
-
-  /** `SIGNED` | `OBJECTED`. An objection carries a reason too. */
-  @Column({ name: 'second_kind', type: 'varchar', length: 16, nullable: true })
-  secondKind: string | null;
 
   @Column({ name: 'executed_at', type: 'timestamptz', nullable: true })
   executedAt: Date | null;
@@ -393,22 +329,9 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   reversalSignature: string | null;
 
   /**
-   * Cases sharing a suspected root cause are grouped and decided once.
-   * Free-form on purpose: the key is whatever the operator judged the cases to
-   * have in common, and a closed vocabulary would need to be complete before
-   * the first incident.
-   */
-  @Column({ name: 'root_cause_key', type: 'varchar', length: 128, nullable: true })
-  rootCauseKey: string | null;
-
-  /** Set on every proposal a fleet sweep reached, including uncomplained ones. */
-  @Column({ name: 'sweep_id', type: 'uuid', nullable: true })
-  sweepId: string | null;
-
-  /**
    * Read by the false-positive metric. Stored rather than derived, because the
-   * outcome taxonomy may grow and a historical false-positive rate must not
-   * move when it does.
+   * resolution vocabulary may grow and a historical false-positive rate must
+   * not move when it does.
    */
   @Column({ name: 'counts_as_false_positive', type: 'boolean', default: false })
   countsAsFalsePositive: boolean;

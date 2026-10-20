@@ -182,14 +182,8 @@ export interface PaymentIntent {
   readonly idempotencyKey: string | null;
 
   /**
-   * The v1 voucher nonce. Null on every rail-B intent voucher v2 writes —
-   * see {@link voucherSeq} — and carried only so a row written before this
-   * platform's cutover to v2 still reads back its original replay key.
-   */
-  readonly voucherNonce: string | null;
-  /**
-   * The voucher v2 sequence number this intent was authorised by.
-   * Always set on rail B under v2, always null on rail A. It is the durable
+   * The voucher sequence number this intent was authorised by.
+   * Always set on rail B, always null on rail A. It is the durable
    * record that this `(account, seq)` pair is spent —
    * `uq_payment_intents_account_voucher_seq` is what makes that true across a
    * process restart or a Redis flush.
@@ -209,6 +203,15 @@ export interface PaymentIntent {
   readonly holdId: string | null;
   /** When the sweep or the settlement path resolved that hold. */
   readonly holdReleasedAt: Date | null;
+  /** The dispute hold (G3.B1): the held payment may be collected from this instant. */
+  readonly collectableAt?: Date | null;
+  /** `HELD` | `COLLECTED` | `REFUNDED`: the payment's dispute hold. */
+  readonly heldStatus?: string | null;
+  readonly heldAt?: Date | null;
+  /** Failed collect, refund or classification attempts (back-off). */
+  readonly heldAttempts?: number;
+  /** `OPEN` while a guaranteed dispute holds the voucher, then `UPHELD` | `REJECTED`. */
+  readonly disputeOutcome?: string | null;
 
   /** Written by the response classifier; typed as a string until that vocabulary lands. */
   readonly classification: string | null;
@@ -252,16 +255,8 @@ export interface CreatePaymentIntentInput {
    */
   readonly idempotencyKey?: string | null;
   /**
-   * The v1 voucher nonce. No new caller sets this — `VoucherService`
-   * writes {@link voucherSeq} instead — so it exists on this input only for the
-   * rail-B insert trigger, which still accepts either field on a row written
-   * before the v2 cutover.
-   */
-  readonly voucherNonce?: string | null;
-  /**
-   * The voucher v2 sequence number. Required on `RAIL_B_VOUCHER` — a
-   * database CHECK enforces one of {@link voucherNonce} or this — and refused
-   * on rail A, whose replay guard is on-chain. Recording it here is what makes
+   * The voucher sequence number. Required on `RAIL_B_VOUCHER` — an insert
+   * trigger enforces it — and refused on rail A, whose replay guard is on-chain. Recording it here is what makes
    * a voucher single-use durably: `uq_payment_intents_account_voucher_seq`
    * refuses the second intent for the same `(account, seq)`.
    */
@@ -360,4 +355,11 @@ export interface PaymentIntentTransitionContext {
    * `PaymentIntentService.resolve` only.
    */
   readonly lapseCause?: string;
+  /**
+   * Rail A's dispute hold (G3.B1): marks the settled call held for
+   * `CALL_DISPUTE_HOLD_WINDOW_MINUTES` in the same statement as the move to
+   * `SETTLED`, so the provider is not credited until it passes. Set by
+   * `PaymentIntentService.resolve` only.
+   */
+  readonly holdForDispute?: boolean;
 }

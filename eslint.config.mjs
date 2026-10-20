@@ -179,7 +179,7 @@ const CHAIN_SDK_BAN = {
     // The generated settlement-program client is a chain SDK like any other:
     // it deals in `Address`, in account layouts and in instruction bytes. It
     // belongs behind the same boundary, or "add EVM" touches every module.
-    '@x402/settlement-client',
+    '@assay/settlement-client',
     // The blockhash reader is a Solana port and nothing outside
     // `src/modules/chains/**` may import it. It sits in this ban rather than in
     // a block of its own because this block ALREADY exempts
@@ -200,7 +200,7 @@ const CHAIN_SDK_BAN = {
 };
 
 /**
- * The settlement program's wire format comes from `@x402/settlement-client` and
+ * The settlement program's wire format comes from `@assay/settlement-client` and
  * nowhere else.
  *
  * The generated client is rendered from the program's IDL and two CI gates keep
@@ -218,13 +218,13 @@ const HAND_ENCODED_INSTRUCTION_BAN = [
   {
     selector: "NewExpression[callee.name='TransactionInstruction']",
     message:
-      'Instructions for the settlement program come from @x402/settlement-client (getSlashInstruction, getOpenStakeInstruction, …). A hand-assembled TransactionInstruction encodes an unchecked copy of the program interface.',
+      'Instructions for the settlement program come from @assay/settlement-client (getSlashInstruction, getOpenStakeInstruction, …). A hand-assembled TransactionInstruction encodes an unchecked copy of the program interface.',
   },
   {
     selector:
       "CallExpression[callee.property.name='update'] > TemplateLiteral > TemplateElement[value.raw=/^(global|account|event):/]",
     message:
-      "sha256('global:<instruction>') is Anchor's discriminator, and it is already in the IDL. Use the builders in @x402/settlement-client rather than recomputing it.",
+      "sha256('global:<instruction>') is Anchor's discriminator, and it is already in the IDL. Use the builders in @assay/settlement-client rather than recomputing it.",
   },
 ];
 
@@ -238,8 +238,11 @@ export default tseslint.config(
       '*.js',
       '*.mjs',
       'scripts/**',
+      'workers/**',
       '.yarn/**',
       'build/**',
+      // Rendered from the IDL and CI-gated by `client:check`; never hand-edited.
+      'packages/settlement-client/src/generated/**',
     ],
   },
   eslint.configs.recommended,

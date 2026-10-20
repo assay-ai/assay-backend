@@ -9,16 +9,7 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * refusing is the correct, expected behaviour, not a malfunction.
  */
 export enum SettlementErrorCode {
-  SETTLEMENT_ATTESTATION_INVALID = 'SETTLEMENT_ATTESTATION_INVALID',
-  SETTLEMENT_ATTESTATION_EXPIRED = 'SETTLEMENT_ATTESTATION_EXPIRED',
-  SETTLEMENT_ATTESTATION_REPLAYED = 'SETTLEMENT_ATTESTATION_REPLAYED',
-  SETTLEMENT_VERIFIER_NOT_REGISTERED = 'SETTLEMENT_VERIFIER_NOT_REGISTERED',
   SETTLEMENT_SLASH_NOT_PERMITTED = 'SETTLEMENT_SLASH_NOT_PERMITTED',
-  SETTLEMENT_WINDOW_ALREADY_SLASHED = 'SETTLEMENT_WINDOW_ALREADY_SLASHED',
-  SETTLEMENT_SHADOW_MODE_ACTIVE = 'SETTLEMENT_SHADOW_MODE_ACTIVE',
-  SETTLEMENT_CHAIN_SUBMISSION_FAILED = 'SETTLEMENT_CHAIN_SUBMISSION_FAILED',
-  SETTLEMENT_RESERVES_BREACH = 'SETTLEMENT_RESERVES_BREACH',
-  SETTLEMENT_WITHDRAWAL_EXCEEDS_RESERVES = 'SETTLEMENT_WITHDRAWAL_EXCEEDS_RESERVES',
 
   // ── The buyer's escrow exit, now a chain transaction ─────────────────────
   SETTLEMENT_WITHDRAWALS_FROZEN = 'SETTLEMENT_WITHDRAWALS_FROZEN',
@@ -58,80 +49,12 @@ export type SettlementErrorCodesArePrefixed = AssertDomainErrorCodes<
 >;
 
 export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
-  attestationInvalid: {
-    code: SettlementErrorCode.SETTLEMENT_ATTESTATION_INVALID,
-    statusCode: 400,
-    message: (context?: Record<string, any>) =>
-      `Attestation failed verification${context?.detail ? `: ${context.detail}` : ''}`,
-  },
-  attestationExpired: {
-    code: SettlementErrorCode.SETTLEMENT_ATTESTATION_EXPIRED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Attestation has expired${context?.expiry ? ` at ${context.expiry}` : ''}`,
-  },
-  attestationReplayed: {
-    code: SettlementErrorCode.SETTLEMENT_ATTESTATION_REPLAYED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Attestation requestId has already been used` +
-      `${context?.requestId ? `: ${context.requestId}` : ''}`,
-  },
-  verifierNotRegistered: {
-    code: SettlementErrorCode.SETTLEMENT_VERIFIER_NOT_REGISTERED,
-    statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      `Signing verifier is not in the approved on-chain registry` +
-      `${context?.verifier ? `: ${context.verifier}` : ''}`,
-  },
   slashNotPermitted: {
     code: SettlementErrorCode.SETTLEMENT_SLASH_NOT_PERMITTED,
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `Slash requires a signed verifier attestation — the platform cannot slash on its own authority` +
       `${context?.classification ? ` (classification: ${context.classification})` : ''}`,
-  },
-  windowAlreadySlashed: {
-    code: SettlementErrorCode.SETTLEMENT_WINDOW_ALREADY_SLASHED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `SLA window has already been slashed${context?.windowId ? `: ${context.windowId}` : ''}`,
-  },
-  shadowModeActive: {
-    code: SettlementErrorCode.SETTLEMENT_SHADOW_MODE_ACTIVE,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Shadow mode is active: the penalty was recorded but not executed` +
-      `${context?.policyId ? ` (policy: ${context.policyId})` : ''}`,
-  },
-  chainSubmissionFailed: {
-    code: SettlementErrorCode.SETTLEMENT_CHAIN_SUBMISSION_FAILED,
-    statusCode: 502,
-    message: (context?: Record<string, any>) =>
-      `Settlement transaction was rejected by the chain` +
-      `${context?.detail ? `: ${context.detail}` : ''}`,
-  },
-  /**
-   * `vault_balance < Σ liabilities` — any breach pages immediately and halts
-   * payouts.
-   * 500, not 409: this is never a caller's mistake to retry around, it means
-   * either an accounting bug or funds leaving the vault without a matching
-   * ledger entry, and both are stop-everything conditions.
-   */
-  reservesBreach: {
-    code: SettlementErrorCode.SETTLEMENT_RESERVES_BREACH,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `PROOF OF RESERVES BREACH on ${context?.asset ?? 'vault asset'}: vault holds ${context?.vaultBalance ?? '?'}` +
-      ` but liabilities total ${context?.liabilities ?? '?'} — halt payouts and freeze withdrawals immediately`,
-  },
-  /** A proposed withdrawal would itself breach reserves; refused before it is built. */
-  withdrawalExceedsReserves: {
-    code: SettlementErrorCode.SETTLEMENT_WITHDRAWAL_EXCEEDS_RESERVES,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Withdrawal of ${context?.amount ?? '?'} would leave the vault below its liabilities` +
-      `${context?.surplus ? ` (current surplus: ${context.surplus})` : ''}`,
   },
 
   // ── Escrow exit ──────────────────────────────────────────────────────────

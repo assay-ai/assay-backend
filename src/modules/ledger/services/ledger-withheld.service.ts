@@ -12,13 +12,13 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import {
   MAX_LISTED_ORPHANED_HOLD_IDS,
   WITHHELD_BUCKET_LABEL,
-  WITHHELD_STATUS_BUCKET,
   WithheldBucket,
   WithheldBucketTotal,
   WithheldPeriod,
   WithheldReconciliation,
   WithheldTotal,
   reconcileWithheld,
+  withheldBucketOf,
 } from '../domain/withheld';
 import { LedgerEntryType } from '../ports/ledger.types';
 
@@ -91,7 +91,11 @@ export class LedgerWithheldService {
     return MoneyUtil.of(row.amount, asset, row.decimals);
   }
 
-  /** The intent side: `Σ` held amount over the withheld buckets, for one asset. */
+  /**
+   * The intent side: `Σ` held amount over the withheld buckets, for one asset.
+   * The `NOT_COLLECTED` bucket is here too: its hold was released, so it is in
+   * `Σ HOLD_RELEASE`, and leaving it out failed the reconciliation by its amount.
+   */
   async withheldFromIntents(
     organizationId: string,
     asset: AssetId,
@@ -150,13 +154,16 @@ export class LedgerWithheldService {
   }
 }
 
+/** Stands in for the hold id the query already required (`hold_id IS NOT NULL`). */
+const HELD = 'held';
+
 /**
  * Folds pre-aggregated `(asset, status)` rows into a `WithheldTotal`.
  *
- * The status → bucket mapping is `WITHHELD_STATUS_BUCKET` from
- * `domain/withheld.ts`, never re-derived: two statuses can share a bucket
- * (`VOIDED` and `EXPIRED` both land in `PROVIDER_OR_PLATFORM_ERROR`), so this
- * is a many-to-one fold, not a relabelling.
+ * The row → bucket mapping is `withheldBucketOf` from `domain/withheld.ts`,
+ * never re-derived: two statuses can share a bucket (`VOIDED` and `EXPIRED`
+ * both land in `PROVIDER_OR_PLATFORM_ERROR`), so this is a many-to-one fold,
+ * not a relabelling. Every row had a hold (the query requires one).
  */
 function toWithheldTotal(
   asset: AssetId,
@@ -171,8 +178,12 @@ function toWithheldTotal(
   }
 
   for (const row of rows) {
-    const bucket = WITHHELD_STATUS_BUCKET[row.status];
-    if (!bucket) continue; // the repository already filters to WITHHELD_STATUSES; defensive only.
+    const bucket = withheldBucketOf({
+      status: row.status,
+      holdId: HELD,
+      notCollected: row.notCollected,
+    });
+    if (!bucket) continue; // the repository already filters to withheld rows; defensive only.
 
     const running = perBucket.get(bucket) as { calls: number; amount: bigint };
     running.calls += row.calls;

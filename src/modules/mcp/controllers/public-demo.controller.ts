@@ -1,9 +1,19 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Req,
+  UseInterceptors,
+} from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
 import { CacheHeader, NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { SingleFlight } from '@shared/decorators/single-flight.decorator';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { DemoVerdictResponseDto, RunDemoBodyDto, RunDemoResponseDto } from '../dto/public-demo.dto';
 import { PublicCompensationService } from '@modules/settlement/services/public-compensation.service';
@@ -48,6 +58,7 @@ import { PublicDemoService } from '../services/public-demo.service';
  * the same fix, harder: a poll wants no browser cache at all.
  */
 @ApiTags('Public')
+@UseInterceptors(PublicReadRateLimitInterceptor)
 @Controller('public/demo')
 export class PublicDemoController {
   constructor(

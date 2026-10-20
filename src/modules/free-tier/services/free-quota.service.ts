@@ -3,9 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import {
+  agentLabelOf,
+  agentPhrase,
+  formatNoticeTime,
+  toolNameOf,
+} from '@modules/notification/domain/notice-text';
 import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { BindingStatus, PricingMode, ToolBinding } from '@modules/tool/ports/tool.types';
 import {
@@ -112,7 +120,7 @@ export interface FreeQuotaBindingReserveInput {
   readonly onFull?: (limit: FreeQuotaLimitKind) => void;
 }
 
-/** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `x402/freeQuota`. */
+/** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `assay/freeQuota`. */
 export interface FreeQuotaRemaining {
   readonly remaining: number;
   readonly limit: number;
@@ -210,6 +218,9 @@ export class FreeQuotaService {
     @Inject(FREE_QUOTA_CONFIG) private readonly config: FreeQuotaConfig,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     private readonly versions: BindingVersionRepository,
+    // Read only to name the agent and the tool in a notice body.
+    private readonly agents: AgentRepository,
+    private readonly tools: ToolRepository,
   ) {}
 
   // ── check — pure, no Redis writes ─────────────────────────────────────────
@@ -234,7 +245,7 @@ export class FreeQuotaService {
   }
 
   /**
-   * What `tools/list` publishes as `x402/freeQuota` — the most generous honest
+   * What `tools/list` publishes as `assay/freeQuota` — the most generous honest
    * answer, across whichever free/freemium binding behind this tool has the
    * most headroom.
    *
@@ -827,13 +838,15 @@ export class FreeQuotaService {
     input: FreeQuotaCheckInput,
     refusal: FreeQuotaRefused,
   ): Promise<void> {
+    const [agentLabel, toolName] = await Promise.all([
+      agentLabelOf(this.agents, input.organizationId, input.agentId),
+      toolNameOf(this.tools, input.toolId),
+    ]);
     await this.notifications.notify({
       organizationId: input.organizationId,
       event: NotificationEvent.FREE_QUOTA_EXHAUSTED,
       title: 'Free quota exhausted',
-      body:
-        `Agent ${input.agentId} hit its ${refusal.limit} limit for ${input.toolId}. ` +
-        `Resets ${refusal.resetsAt.toISOString()}.`,
+      body: freeQuotaNoticeBody(agentPhrase(agentLabel), toolName ?? 'a tool', refusal),
       subjectType: 'agent',
       subjectId: input.agentId,
       payload: {
@@ -845,6 +858,27 @@ export class FreeQuotaService {
       dedupeKey: `${input.agentId}:${input.toolId}`,
     });
   }
+}
+
+/**
+ * The `free_quota.exhausted` body: which limit, for which tool, when it
+ * resets, and what happens until then. Names, never ids or enum codes.
+ */
+export function freeQuotaNoticeBody(
+  agent: string,
+  tool: string,
+  refusal: Pick<FreeQuotaRefused, 'limit' | 'resetsAt' | 'fallThroughToPaid'>,
+): string {
+  const what: Record<FreeQuotaLimitKind, string> = {
+    [FreeQuotaLimitKind.PLATFORM_AGENT_DAILY]: `${agent} reached today's free-call limit for all tools while calling ${tool}.`,
+    [FreeQuotaLimitKind.PLATFORM_RATE_LIMIT]: `${agent} reached the per-minute free-call limit while calling ${tool}.`,
+    [FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY]: `${agent} used all of today's free calls the provider gives each agent for ${tool}.`,
+    [FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET]: `The provider's free calls for ${tool} are used up for today.`,
+  };
+  const until = refusal.fallThroughToPaid
+    ? 'Until then, calls to it are paid calls.'
+    : 'Until then, it cannot be called.';
+  return `${what[refusal.limit]} Resets ${formatNoticeTime(refusal.resetsAt)}. ${until}`;
 }
 
 // ---------------------------------------------------------------------------

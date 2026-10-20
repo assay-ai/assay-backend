@@ -10,11 +10,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  * The check's immediate job is to put a result on the screen, which needs no
  * storage at all. What needs storage is the argument afterwards. A provider
  * whose traffic later fails will say the endpoint was reachable; a row saying
- * *when* we dialled it, *what* answered, and — critically — **which egress
- * addresses we published at the time** turns that into a fact. `egress_ips` is
- * denormalised onto every row for exactly that reason: the allowlist they were
- * told to add is the one that was current when they were told, and a later
- * change to the platform's addresses must not rewrite history.
+ * *when* we dialled it and *what* answered turns that into a fact.
  *
  * ## Blocked is a distinct outcome, not a failure
  *
@@ -59,8 +55,4 @@ export class ProviderConnectivityCheckEntity extends OrganizationScopedEntityWit
 
   @Column({ name: 'detail', type: 'varchar', length: 512, nullable: true })
   detail: string | null;
-
-  /** The allowlist we published at the time of this check. See the class comment. */
-  @Column({ name: 'egress_ips', type: 'jsonb', default: () => `'[]'::jsonb` })
-  egressIps: string[];
 }
