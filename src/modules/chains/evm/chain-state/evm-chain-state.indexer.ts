@@ -300,7 +300,7 @@ export class EvmChainStateIndexer {
       chainId,
       cursorBlock: end,
       headBlock: head,
-      caughtUp: end === head,
+      caughtUp: end === safeHead,
       now,
       ...(paused !== undefined ? { paused } : {}),
       ...(arbiter !== undefined ? { arbiter } : {}),
