@@ -29,7 +29,9 @@ import {
 /** HTTP status of each token error (RFC 6749 §5.2; spec §6.3.10, §6.3.11). */
 const ERROR_STATUS: Readonly<Record<OAuthErrorType, number>> = Object.freeze({
   invalid_request: 400,
-  invalid_client: 401,
+  // 400, or 401 with `WWW-Authenticate` when the client sent an Authorization
+  // header (RFC 6749 §5.2); see `token()`.
+  invalid_client: 400,
   invalid_grant: 400,
   unauthorized_client: 400,
   unsupported_grant_type: 400,
@@ -51,7 +53,9 @@ const INVALID_REQUEST: OAuthError = { error: 'invalid_request' };
  * authorization_code: code, redirect_uri,
  *   client_id, code_verifier (43–128 chars)   else 400 invalid_request (before the code is burned)
  * refresh_token: refresh_token, client_id     else 400 invalid_request
- * the service's answer                        200 pair | 400 | 401 invalid_client
+ * the service's answer                        200 pair | 400 (incl. invalid_client for
+ *                                             an unknown client_id; 401 when an
+ *                                             Authorization header was sent)
  *                                             | 503 temporarily_unavailable
  * ```
  *
@@ -89,7 +93,14 @@ export class OAuthTokenController {
       }
       if (isOAuthError(outcome)) {
         await this.metrics.incToken(grantType, outcome.error);
-        sendOAuthError(res, ERROR_STATUS[outcome.error], outcome.error, outcome.error_description);
+        let status = ERROR_STATUS[outcome.error];
+        if (outcome.error === 'invalid_client' && req.headers.authorization !== undefined) {
+          // The client tried HTTP authentication: RFC 6749 §5.2 requires 401
+          // and the scheme it used. Every client here is public (`none`).
+          status = 401;
+          res.setHeader('WWW-Authenticate', 'Basic realm="oauth"');
+        }
+        sendOAuthError(res, status, outcome.error, outcome.error_description);
         return;
       }
       await this.metrics.incToken(grantType, 'ok');

@@ -602,6 +602,15 @@ describe('OAuth refresh rotation — real database and Redis', () => {
 
   // ── refusals ───────────────────────────────────────────────────────────────
 
+  it('unknown client → invalid_client, token not burned', async () => {
+    const { pair } = await grant();
+    expect(await refresh(pair.refresh_token, 'dcr_AAAAAAAAAAAAAAAAAAAAAA')).toEqual({
+      error: 'invalid_client',
+    });
+    expect((await refreshRow(pair.refresh_token)).usedAt).toBeNull();
+    expectPair(await refresh(pair.refresh_token));
+  });
+
   it('wrong client → invalid_grant', async () => {
     const { pair } = await grant();
     expect(await refresh(pair.refresh_token, otherClient.clientId)).toEqual({

@@ -756,6 +756,29 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
 
   // ── CIMD SSRF over the real authorize endpoint (T7) ──────────────────────
 
+  // ── invalid_client (RFC 6749 §5.2) ─────────────────────────────────────────
+
+  it('token with an unknown client_id → 400 invalid_client, for both grant types', async () => {
+    for (const form of [
+      {
+        grant_type: 'authorization_code',
+        code: `assay_ac_${'A'.repeat(43)}`,
+        redirect_uri: 'http://127.0.0.1:5000/cb',
+        client_id: 'dcr_AAAAAAAAAAAAAAAAAAAAAA',
+        code_verifier: 'v'.repeat(43),
+      },
+      {
+        grant_type: 'refresh_token',
+        refresh_token: `assay_rt_${'A'.repeat(43)}`,
+        client_id: 'https://unknown.example.test/client.json',
+      },
+    ]) {
+      const response = await token(form);
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'invalid_client' });
+    }
+  });
+
   it('verified pre-warm at boot', async () => {
     // The API app booted alone first and looked nothing up.
     expect(vendorLookupsAfterApiBoot).toBe(0);

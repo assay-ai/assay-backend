@@ -699,8 +699,29 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(grant.body).toEqual({ error: 'invalid_grant' });
       expect(grant.headers['cache-control']).toBe('no-store');
 
+      // RFC 6749 §5.2: 400 for a public client; 401 + WWW-Authenticate only
+      // when the client tried HTTP authentication.
       tokens.exchangeCode.mockResolvedValueOnce({ error: 'invalid_client' });
-      expect((await exchange()).status).toBe(401);
+      const unknown = await exchange();
+      expect(unknown.status).toBe(400);
+      expect(unknown.body).toEqual({ error: 'invalid_client' });
+      expect(unknown.headers['www-authenticate']).toBeUndefined();
+
+      tokens.exchangeCode.mockResolvedValueOnce({ error: 'invalid_client' });
+      const basic = await request(app.getHttpServer())
+        .post('/oauth/token')
+        .type('form')
+        .set('Authorization', `Basic ${Buffer.from('x:y').toString('base64')}`)
+        .send({
+          grant_type: 'authorization_code',
+          code: 'assay_ac_x',
+          redirect_uri: LOOPBACK,
+          client_id: BUILTIN_ID,
+          code_verifier: VERIFIER,
+        });
+      expect(basic.status).toBe(401);
+      expect(basic.body).toEqual({ error: 'invalid_client' });
+      expect(basic.headers['www-authenticate']).toBe('Basic realm="oauth"');
     });
 
     it('refresh: a grace-write failure is 503 temporarily_unavailable', async () => {

@@ -131,6 +131,12 @@ export function grantStoppedReuseBody(name: string): string {
 const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
+/**
+ * RFC 6749 §5.2: the `client_id` names no client this server knows (an unknown
+ * or deleted DCR id, a CIMD URL never resolved here). A known client presenting
+ * another client's code or token is still `invalid_grant`.
+ */
+const INVALID_CLIENT: OAuthError = { error: 'invalid_client' };
 const INVALID_TARGET: OAuthError = { error: 'invalid_target' };
 const INVALID_SCOPE: OAuthError = { error: 'invalid_scope' };
 const TEMPORARILY_UNAVAILABLE: OAuthError = { error: 'temporarily_unavailable' };
@@ -222,6 +228,8 @@ export class OAuthTokenService {
 
   /** `grant_type=authorization_code` (§6.3.10). */
   async exchangeCode(input: ExchangeCodeInput): Promise<TokenPair | OAuthError> {
+    // Before the burn: an unknown client must not be able to spend someone's code.
+    if (!(await this.isKnownClient(input.clientId))) return INVALID_CLIENT;
     if (!isWellFormed(input.code, 'assay_ac_')) return INVALID_GRANT;
     const codeHash = hashOpaqueToken(input.code);
 
@@ -291,6 +299,7 @@ export class OAuthTokenService {
    * anything is written, so it does not burn the token.
    */
   async refresh(input: RefreshInput): Promise<TokenPair | OAuthError> {
+    if (!(await this.isKnownClient(input.clientId))) return INVALID_CLIENT;
     if (!isWellFormed(input.refreshToken, 'assay_rt_')) return INVALID_GRANT;
     const tokenHash = hashOpaqueToken(input.refreshToken);
 
@@ -427,6 +436,10 @@ export class OAuthTokenService {
         .andWhere('revoked_at IS NULL')
         .execute();
     }
+  }
+
+  private async isKnownClient(clientId: string): Promise<boolean> {
+    return (await this.clients.findByClientId(clientId)) !== null;
   }
 
   private async isClientOf(oauthClientId: string, clientId: string): Promise<boolean> {
