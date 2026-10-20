@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { In } from 'typeorm';
 
@@ -25,10 +26,43 @@ import { ProviderErrors } from '../errors/provider.errors';
  * required to be the caller's own. The scope guard proves a query references
  * the tenant column; it was never a promise that every query is about the
  * caller's tenant, and a catalogue is the legitimate case where it is not.
+ *
+ * The per-id HTTP route is narrower ({@link getVerificationFor}): a session
+ * reads its own provider, or one its organization has paid a call to. The
+ * catalogue's batched read ({@link getVerifications}) only ever names listed
+ * providers.
  */
 @Injectable()
 export class ProviderVerificationService {
-  constructor(private readonly providers: ProviderRepository) {}
+  constructor(
+    private readonly providers: ProviderRepository,
+    private readonly intents: PaymentIntentRepository,
+  ) {}
+
+  /**
+   * The label as `GET /providers/:providerId/verification` serves it: only
+   * for the caller's own provider, or for a provider the caller's organization
+   * has at least one call with (the receipt page names the provider of the
+   * call it shows). Any other id is `providerNotFound`, the same 404 as an
+   * absent provider, so the route cannot be used to enumerate providers or
+   * read the verification record of one the caller never dealt with. The
+   * catalogue reads labels through {@link getVerifications}, not this route.
+   */
+  async getVerificationFor(
+    callerOrganizationId: string,
+    providerId: string,
+  ): Promise<GetProviderVerificationResponseDto> {
+    if (providerId !== callerOrganizationId) {
+      const hasCalled = await this.intents.existsBy({
+        organizationId: callerOrganizationId,
+        providerId,
+      });
+      if (!hasCalled) {
+        throw ProviderErrors.providerNotFound({ providerId });
+      }
+    }
+    return this.getVerification(providerId);
+  }
 
   /**
    * The label for one provider, `UNVERIFIED_PROFILE`-shaped when nobody has

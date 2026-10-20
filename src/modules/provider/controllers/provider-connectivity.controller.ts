@@ -83,10 +83,16 @@ export class ProviderConnectivityController {
   @ApiParam({ name: 'providerId', description: 'Same value as the provider organization id' })
   @ApiResponse({ status: 200, type: GetProviderVerificationResponseDto })
   @ApiResponse({ status: 400, description: 'providerId is not a UUID' })
-  @ApiResponse({ status: 404, description: 'No provider with this id' })
+  @ApiResponse({
+    status: 404,
+    description:
+      "No provider with this id, or not one the caller may read: only the caller's own " +
+      'provider, or a provider the caller has a call with',
+  })
   async getVerification(
+    @CurrentSession() session: McpSession,
     @Param() params: GetProviderVerificationParamsDto,
   ): Promise<GetProviderVerificationResponseDto> {
-    return this.verification.getVerification(params.providerId);
+    return this.verification.getVerificationFor(session.organizationId, params.providerId);
   }
 }
