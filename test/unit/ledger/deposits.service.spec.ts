@@ -113,3 +113,28 @@ describe('DepositsService.list', () => {
     expect(page.items[0].chainTxRef).toBe('5j7s…');
   });
 });
+
+describe('DepositsService.getOne', () => {
+  function withRow(row: ReturnType<typeof depositRow> | null) {
+    const findOneBy = jest.fn().mockResolvedValue(row);
+    const service = new DepositsService({ findOneBy } as unknown as DepositIntentRepository);
+    return { service, findOneBy };
+  }
+
+  it('reads one row by id within the organization, in the list row’s shape', async () => {
+    const row = depositRow({ status: DepositIntentStatus.SETTLED, settledAmount: '5000000' });
+    const { service, findOneBy } = withRow(row);
+    const list = build([row]).service;
+
+    const one = await service.getOne(ORG, 'dep-1');
+
+    expect(findOneBy).toHaveBeenCalledWith({ organizationId: ORG, id: 'dep-1' });
+    expect(one).toEqual((await list.list(ORG, query())).items[0]);
+  });
+
+  it('is PAYMENT_DEPOSIT_NOT_FOUND when the organization has no such deposit', async () => {
+    await expect(withRow(null).service.getOne(ORG, 'dep-x')).rejects.toMatchObject({
+      errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
+    });
+  });
+});
