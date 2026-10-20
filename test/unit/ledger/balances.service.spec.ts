@@ -59,8 +59,21 @@ function build(options: {
     listBalances: jest.fn().mockResolvedValue(options.balances ?? [accountBalance()]),
   } as unknown as LedgerService;
 
+  const reconcile = options.reconcile ?? jest.fn().mockResolvedValue(emptyReconciliation());
   const withheld = {
-    reconcile: options.reconcile ?? jest.fn().mockResolvedValue(emptyReconciliation()),
+    reconcile,
+    // The batched read folds each asset exactly as `reconcile` would; the
+    // fake forwards to the per-asset mock so assertions name one asset each.
+    reconcileAssets: jest.fn(
+      (org: string, assets: { asset: string; decimals: number }[], period?: unknown) =>
+        Promise.all(
+          assets.map(({ asset, decimals }) =>
+            period === undefined
+              ? reconcile(org, asset, decimals)
+              : reconcile(org, asset, decimals, period),
+          ),
+        ),
+    ),
   } as unknown as LedgerWithheldService;
 
   const fake = fakeQueryBuilder(options.pendingRows ?? []);
@@ -209,6 +222,23 @@ describe('BalancesService.getBalances', () => {
     // rather than out of the asset registry, so an asset the registry does not
     // know can still be reconciled.
     expect(reconcile).toHaveBeenCalledWith(ORG, USDC, USDC_DECIMALS);
+  });
+
+  it('reads the withheld aggregates once for every asset, not once per asset', async () => {
+    const { service, withheld } = build({
+      balances: [
+        accountBalance(),
+        accountBalance({ asset: 'solana:devnet/token:Other' as never, decimals: 9 }),
+      ],
+    });
+
+    await service.getBalances(ORG);
+
+    expect(withheld.reconcileAssets).toHaveBeenCalledTimes(1);
+    expect(withheld.reconcileAssets).toHaveBeenCalledWith(ORG, [
+      { asset: USDC, decimals: USDC_DECIMALS },
+      { asset: 'solana:devnet/token:Other', decimals: 9 },
+    ]);
   });
 
   // `platform:fees` is booked under the BUYER's organizationId — see
