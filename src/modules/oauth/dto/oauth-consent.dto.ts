@@ -137,6 +137,15 @@ export class OAuthConsentReplacesDto {
   live: boolean;
 }
 
+/** The agent a re-login must stay on (`replacesAgent`). */
+export class OAuthConsentReplacesAgentDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty({ description: 'The agent\'s label, or "Unnamed agent"' })
+  name: string;
+}
+
 export class OAuthConsentRequestDto {
   @ApiProperty()
   requestId: string;
@@ -164,6 +173,16 @@ export class OAuthConsentRequestDto {
     description: 'Present only for a sign-in of the Assay app replacing its own earlier one',
   })
   replaces?: OAuthConsentReplacesDto;
+
+  @ApiProperty({
+    type: OAuthConsentReplacesAgentDto,
+    nullable: true,
+    description:
+      'Set when this sign-in replaces a live connection of this organization: the agent it ' +
+      'belongs to. Approving as any other agent is refused (OAUTH_REPLACE_AGENT_MISMATCH); ' +
+      'connecting another agent takes a sign-out first. null otherwise',
+  })
+  replacesAgent: OAuthConsentReplacesAgentDto | null;
 
   @ApiProperty()
   suggestedName: string;

@@ -29,6 +29,7 @@ import { sanitise } from '../domain/client-name';
 import {
   OAUTH_CREDENTIAL_NAME_MAX,
   OAuthConsentAgentDto,
+  OAuthConsentReplacesAgentDto,
   OAuthConsentReplacesDto,
   OAuthConsentRequestDto,
   OAuthRedirectDto,
@@ -121,6 +122,7 @@ export class OAuthConsentService {
       // A dead grant is shown too (spec F5 step 2: after an idle expiry the exchange still
       // copies its tool limits); `live` says whether it also frees a place under the cap.
       ...(replaced ? { replaces: replacesDto(replaced) } : {}),
+      replacesAgent: replacesAgentOf(replaced, agents),
       suggestedName: builtin
         ? `Assay app on ${sanitise(request.device, DEVICE_LABEL_MAX) ?? DEFAULT_DEVICE}`
         : `${display.name} · ${createdAt.toISOString().slice(0, 10)}`,
@@ -155,6 +157,18 @@ export class OAuthConsentService {
     // `assay_replaces` holds only for a grant of this organization, this
     // built-in client and the chosen agent; anything else is dropped silently.
     const replaced = await this.replaceable(organizationId, client, request.replaces);
+    // A re-login replaces the same agent's live connection: approving it as
+    // another agent would leave the old grant holding the payment key, and the
+    // app's rebind would then fail. A dead grant frees nothing and is dropped.
+    if (replaced && isLive(replaced) && replaced.agentId !== agent.id) {
+      const owner = await this.agents.findOne({
+        where: { id: replaced.agentId, organizationId },
+      });
+      throw OAuthErrors.replaceAgentMismatch({
+        agentId: replaced.agentId,
+        agentName: agentName(owner?.label ?? null),
+      });
+    }
     const replaces = replaced && replaced.agentId === agent.id ? replaced : null;
 
     // The cap is checked again, under the per-agent lock, when the code is
@@ -268,6 +282,22 @@ function isLive(credential: AgentCredentialEntity): boolean {
     credential.revokedAt === null &&
     (credential.expiresAt === null || credential.expiresAt.getTime() > Date.now())
   );
+}
+
+const UNNAMED_AGENT = 'Unnamed agent';
+
+function agentName(label: string | null): string {
+  return label && label.trim() !== '' ? label : UNNAMED_AGENT;
+}
+
+/** The agent a live replaced grant belongs to, which the approval must keep. */
+function replacesAgentOf(
+  replaced: AgentCredentialEntity | null,
+  agents: readonly OAuthConsentAgentDto[],
+): OAuthConsentReplacesAgentDto | null {
+  if (!replaced || !isLive(replaced)) return null;
+  const agent = agents.find((candidate) => candidate.id === replaced.agentId);
+  return agent ? { id: agent.id, name: agentName(agent.label) } : null;
 }
 
 function replacesDto(credential: AgentCredentialEntity): OAuthConsentReplacesDto {

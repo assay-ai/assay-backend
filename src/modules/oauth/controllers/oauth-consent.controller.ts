@@ -58,7 +58,9 @@ export class OAuthConsentController {
   @ApiResponse({ status: 404, description: 'OAUTH_REQUEST_NOT_FOUND, ACCOUNT_AGENT_NOT_FOUND' })
   @ApiResponse({
     status: 409,
-    description: 'OAUTH_REQUEST_ALREADY_DECIDED, OAUTH_AGENT_NOT_ACTIVE, OAUTH_GRANT_LIMIT_REACHED',
+    description:
+      'OAUTH_REQUEST_ALREADY_DECIDED, OAUTH_AGENT_NOT_ACTIVE, OAUTH_GRANT_LIMIT_REACHED, ' +
+      'OAUTH_REPLACE_AGENT_MISMATCH',
   })
   approve(
     @CurrentSession() session: McpSession,

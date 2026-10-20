@@ -16,6 +16,7 @@ export enum OAuthErrorCode {
   OAUTH_GRANT_LIMIT_REACHED = 'OAUTH_GRANT_LIMIT_REACHED',
   OAUTH_CREDENTIAL_NAME_INVALID = 'OAUTH_CREDENTIAL_NAME_INVALID',
   OAUTH_REQUEST_STORE_UNAVAILABLE = 'OAUTH_REQUEST_STORE_UNAVAILABLE',
+  OAUTH_REPLACE_AGENT_MISMATCH = 'OAUTH_REPLACE_AGENT_MISMATCH',
 }
 
 export type OAuthErrorCodesArePrefixed = AssertDomainErrorCodes<'OAUTH', `${OAuthErrorCode}`>;
@@ -49,6 +50,18 @@ export const OAuthErrors = createDomainErrorFactory('OAUTH', {
     message: (context?: Record<string, any>) =>
       `This agent already has ${context?.limit ?? 'the maximum number of'} connected apps; ` +
       'disconnect one before adding another',
+  },
+  /**
+   * A re-login (`assay_replaces`) names a live connection of another agent
+   * than the one chosen. The re-login replaces that agent's connection, or the
+   * old one would keep the payment key and the new one could not bind it.
+   */
+  replaceAgentMismatch: {
+    code: OAuthErrorCode.OAUTH_REPLACE_AGENT_MISMATCH,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This sign-in replaces ${context?.agentName ?? 'another agent'}'s connection. ` +
+      'Sign out first to connect another agent.',
   },
   /** The pending-request store (Redis) failed or did not answer in time. */
   requestStoreUnavailable: {
