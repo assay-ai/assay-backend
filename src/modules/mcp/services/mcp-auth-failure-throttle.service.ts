@@ -27,10 +27,15 @@ const KEY_PREFIX = 'mcp:auth:failures:';
  *
  * ## What is counted
  *
- * Only a token that was presented and refused. A request with no token is the
- * first step of every OAuth sign-in (the client reads `WWW-Authenticate` from
- * the 401) and costs no read, so it is never counted. A valid session is never
- * counted or slowed, whatever its address.
+ * Only a presented token no issuer recognises (`unauthorizedReason` `unknown`).
+ * A request with no token is the first step of every OAuth sign-in (the client
+ * reads `WWW-Authenticate` from the 401) and costs no read. An expired, revoked
+ * or wrong-audience token was a real credential, and OAuth access tokens expire
+ * every hour, so a busy hosted connector produces those routinely. Neither is
+ * counted, and a valid session is never counted.
+ *
+ * A valid session **is** refused while its address is over the limit: the
+ * check runs before the token is looked up, which is the point of it.
  *
  * ## The limit is deliberately loose
  *

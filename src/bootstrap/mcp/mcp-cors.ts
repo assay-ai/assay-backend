@@ -46,7 +46,7 @@ export const MCP_CATCH_ALL_CORS: CorsOptions = Object.freeze({
   ],
   // `www-authenticate`: an OAuth client in a browser reads the 401 challenge
   // to find the protected resource metadata (R-OA-3).
-  exposedHeaders: ['mcp-session-id', 'mcp-protocol-version', 'www-authenticate'],
+  exposedHeaders: ['mcp-session-id', 'mcp-protocol-version', 'www-authenticate', 'retry-after'],
 });
 
 /**

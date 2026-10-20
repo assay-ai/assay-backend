@@ -6,6 +6,7 @@ import {
   clientKey,
 } from '@shared/interceptors/public-read-rate-limit.interceptor';
 import { SHARED_WINDOW_RETRY_MS } from '@shared/interceptors/address-rate-limit.interceptor';
+import { REDIS_REQUEST_TIMEOUT_MS } from '@shared/cache/redis-cache/with-redis-timeout';
 import { lastValueFrom, of } from 'rxjs';
 
 /** The per-client window on the public Explorer reads. */
@@ -166,6 +167,30 @@ describe('PublicReadRateLimitInterceptor with Redis', () => {
       expect((await interceptor.takeShared('1.2.3.4')).allowed).toBe(true);
     }
     expect((await interceptor.takeShared('1.2.3.4')).allowed).toBe(false);
+  });
+
+  it('falls back when Redis accepts the call but never answers', async () => {
+    jest.useFakeTimers();
+    try {
+      const hung = {
+        multi: () => {
+          const chain = {
+            incr: () => chain,
+            pexpire: () => chain,
+            exec: () => new Promise(() => undefined),
+          };
+          return chain;
+        },
+      };
+      const interceptor = new PublicReadRateLimitInterceptor(hung as never);
+
+      const outcome = interceptor.takeShared('1.2.3.4');
+      await jest.advanceTimersByTimeAsync(REDIS_REQUEST_TIMEOUT_MS);
+
+      await expect(outcome).resolves.toEqual(expect.objectContaining({ allowed: true }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('skips Redis for a few seconds after a failure, then asks it again', async () => {
