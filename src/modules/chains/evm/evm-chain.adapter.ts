@@ -118,6 +118,7 @@ export type EvmEscrowView = Readonly<Record<(typeof ESCROW_FIELDS)[number], bigi
 export interface EvmReadClient {
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<EvmTransactionReceipt | null>;
   getBlock(args: { blockTag: 'finalized' }): Promise<{ readonly number: bigint | null }>;
+  getBlockNumber(): Promise<bigint>;
   readContract(args: {
     address: `0x${string}`;
     abi: unknown;
@@ -170,10 +171,22 @@ export class EvmChainAdapter implements ChainAdapter {
    */
   readonly requiresFeePayer = false;
 
+  /**
+   * @param depositConfirmations What `observeTransfer` at `finalized` waits for
+   *   on these chains: `null` is the chain's `finalized` head (on
+   *   eip155:46630 ~16 minutes behind latest, since an Orbit L2 is final only
+   *   once its batch is final on the parent chain); a number is that many
+   *   blocks on top of the transaction's own, read from latest. 0 credits a
+   *   deposit as soon as its receipt exists: the sequencer's soft confirmation
+   *   (owner decision, 2026-10-20). Money is not created by crediting early: a
+   *   voucher is redeemed against the escrow's chain balance, so a deposit a
+   *   reorg dropped can only fail a later redemption, never pay out twice.
+   */
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmReadClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     readonly supportedChains: readonly ChainId[],
+    private readonly depositConfirmations: number | null = null,
   ) {}
 
   // ── Identity ─────────────────────────────────────────────────────────────
@@ -464,9 +477,18 @@ export class EvmChainAdapter implements ChainAdapter {
       return null;
     }
     if (options?.commitment === 'finalized') {
-      const finalized = await client.getBlock({ blockTag: 'finalized' }).catch(() => null);
-      if (!finalized || finalized.number === null || finalized.number < receipt.blockNumber) {
-        return null;
+      if (this.depositConfirmations !== null) {
+        if (this.depositConfirmations > 0) {
+          const latest = await client.getBlockNumber().catch(() => null);
+          if (latest === null || latest - receipt.blockNumber < BigInt(this.depositConfirmations)) {
+            return null;
+          }
+        }
+      } else {
+        const finalized = await client.getBlock({ blockTag: 'finalized' }).catch(() => null);
+        if (!finalized || finalized.number === null || finalized.number < receipt.blockNumber) {
+          return null;
+        }
       }
     }
 

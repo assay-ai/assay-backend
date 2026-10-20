@@ -1201,7 +1201,7 @@ export class McpToolCallService {
         `Insufficient balance: this call costs ${price.amount} of ${price.asset}` +
         (pending
           ? `. A deposit of ${pending} is still confirming on chain; it becomes spendable once ` +
-            'the chain finalises it, usually within 30 minutes'
+            'the chain confirms it, usually within a minute'
           : fixUrl
             ? `. Add funds, then call again: ${fixUrl}`
             : ''),

@@ -263,6 +263,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         clients: ReadonlyMap<ChainId, never>,
         deployments: ReadonlyMap<ChainId, EvmDeployment>,
         enabled: readonly ChainId[],
+        config: ConfigService,
       ) =>
         // The INTERSECTION of what is configured with what is enabled, so a
         // Solana-only deployment produces an adapter declaring no chains and
@@ -271,8 +272,9 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           clients,
           deployments,
           enabled.filter((chainId) => deployments.has(chainId)),
+          depositConfirmationsFrom(config.get<string>('EVM_DEPOSIT_CONFIRMATIONS')),
         ),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ENABLED_CHAINS],
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ENABLED_CHAINS, ConfigService],
     },
 
     {
@@ -724,4 +726,21 @@ function readOptionalWei(raw: string | undefined): bigint | undefined {
     });
   }
   return BigInt(raw);
+}
+
+/**
+ * `EVM_DEPOSIT_CONFIRMATIONS`: blocks on top of a deposit before it is credited
+ * (unset: 0, the sequencer's soft confirmation), or `finalized` for the chain's
+ * finalized head. Anything else refuses to boot rather than guess.
+ */
+export function depositConfirmationsFrom(raw: string | undefined): number | null {
+  const value = raw?.trim() ?? '';
+  if (value === '') return 0;
+  if (value === 'finalized') return null;
+  if (!/^\d{1,6}$/.test(value)) {
+    throw new Error(
+      `EVM_DEPOSIT_CONFIRMATIONS must be a block count or "finalized", got "${value}"`,
+    );
+  }
+  return Number(value);
 }
