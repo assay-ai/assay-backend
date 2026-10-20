@@ -242,9 +242,11 @@ describe('the approvals queue, against a real database', () => {
     expect((await approval(approvalId)).status).toBe('EXPIRED');
     const swept = await approvals.get(approvalId);
 
-    expect({ ...read, decidedAt: null }).toEqual({ ...swept, decidedAt: null });
+    // Identical, decidedAt included: both put it at expires_at.
+    expect(read).toEqual(swept);
     expect(read.status).toBe('EXPIRED');
-    expect(read.decidedAt).toBeInstanceOf(Date);
+    expect(read.decidedAt).toEqual(read.expiresAt);
+    expect(await approvals.get(approvalId)).toEqual(swept);
     expect(listedPending).not.toContain(approvalId);
     expect(listedExpired).toContain(approvalId);
     expect(await ids('PENDING')).toEqual(listedPending);

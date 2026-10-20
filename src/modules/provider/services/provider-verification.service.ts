@@ -28,7 +28,8 @@ import { ProviderErrors } from '../errors/provider.errors';
  * caller's tenant, and a catalogue is the legitimate case where it is not.
  *
  * The per-id HTTP route is narrower ({@link getVerificationFor}): a session
- * reads its own provider, or one its organization has paid a call to. The
+ * reads its own provider, or one a call of its organization was routed to,
+ * whatever the call's outcome. The
  * catalogue's batched read ({@link getVerifications}) only ever names listed
  * providers.
  */
@@ -42,8 +43,13 @@ export class ProviderVerificationService {
   /**
    * The label as `GET /providers/:providerId/verification` serves it: only
    * for the caller's own provider, or for a provider the caller's organization
-   * has at least one call with (the receipt page names the provider of the
-   * call it shows). Any other id is `providerNotFound`, the same 404 as an
+   * has at least one call routed to (the receipt page names the provider of
+   * the call it shows). Any status counts, not only a charged one: the
+   * dashboard links a receipt from every call it lists, including the ones
+   * that were not charged (refunded, voided, expired with a hold) and the ones
+   * still in flight, and each of those receipts names its provider. The
+   * provider is on the intent only once routing chose it, so this is still
+   * "a provider this organization dealt with". Any other id is `providerNotFound`, the same 404 as an
    * absent provider, so the route cannot be used to enumerate providers or
    * read the verification record of one the caller never dealt with. The
    * catalogue reads labels through {@link getVerifications}, not this route.

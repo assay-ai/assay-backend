@@ -292,7 +292,7 @@ export class OperatorApprovalService {
   /**
    * `now` given: a stored `PENDING` row already past `expires_at` is shown as
    * the `EXPIRED` row `expireStale(now)` would have made of it, `decidedAt`
-   * included.
+   * included: both put it at `expires_at`, so every read answers the same.
    */
   private async toDtos(
     rows: readonly OperatorApprovalEntity[],
@@ -323,7 +323,7 @@ export class OperatorApprovalService {
         approvedBy: await subjectOf(row.approvedBy),
         rejectedBy: await subjectOf(row.rejectedBy),
         createdAt: row.createdAt,
-        decidedAt: lapsed ? (now as Date) : row.decidedAt,
+        decidedAt: lapsed ? row.expiresAt : row.decidedAt,
         expiresAt: row.expiresAt,
       });
     }

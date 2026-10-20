@@ -12,11 +12,15 @@ export class OperatorApprovalRepository extends AbstractRepository<OperatorAppro
     super(OperatorApprovalEntity, dataSource);
   }
 
-  /** Every `PENDING` row past its `expires_at` becomes `EXPIRED`. Returns how many. */
+  /**
+   * Every `PENDING` row past its `expires_at` becomes `EXPIRED`, decided at
+   * that `expires_at` (when it lapsed, not when a sweep noticed), so the
+   * stored row and a read that presents a lapsed row agree. Returns how many.
+   */
   async expireStale(now: Date = new Date()): Promise<number> {
     const result = await this.createQueryBuilder()
       .update(OperatorApprovalEntity)
-      .set({ status: 'EXPIRED', decidedAt: now })
+      .set({ status: 'EXPIRED', decidedAt: () => '"expires_at"' })
       .where('status = :pending', { pending: 'PENDING' })
       .andWhere('expires_at <= :now', { now })
       .execute();

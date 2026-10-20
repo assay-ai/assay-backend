@@ -8,8 +8,8 @@ import {
   LastSeenKind,
   LastSeenRecorder,
   credentialKey,
-  flushingKey,
   pendingKey,
+  twinsKey,
 } from '@shared/last-seen';
 import { LAST_SEEN_FLUSH_LOCK_KEY, LastSeenFlusher } from '@shared/last-seen/last-seen.flusher';
 
@@ -62,7 +62,8 @@ describe('LastSeenRecorder + LastSeenFlusher', () => {
 
   beforeEach(async () => {
     for (const kind of Object.values(LastSeenKind)) {
-      await redis.del(pendingKey(kind), flushingKey(kind));
+      const twins = await redis.smembers(twinsKey(kind));
+      await redis.del(pendingKey(kind), twinsKey(kind), ...twins);
     }
     await redis.del(LAST_SEEN_FLUSH_LOCK_KEY);
     await dataSource.query(`TRUNCATE agents, agent_credentials, operators`);
@@ -139,7 +140,8 @@ describe('LastSeenRecorder + LastSeenFlusher', () => {
     ).toBe(latest);
     // Flushed and gone from Redis.
     expect(await redis.exists(pendingKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
-    expect(await redis.exists(flushingKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
+    expect(await redis.scard(twinsKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
+    expect(await redis.keys('assay:last-seen:*:flushing:*')).toEqual([]);
   });
 
   it('never moves a column backwards', async () => {
@@ -182,7 +184,7 @@ describe('LastSeenRecorder + LastSeenFlusher', () => {
       cacheOf(redis),
     );
     await failing.flush();
-    expect(await redis.exists(flushingKey(LastSeenKind.AGENT_LOGIN))).toBe(1);
+    expect(await redis.scard(twinsKey(LastSeenKind.AGENT_LOGIN))).toBe(1);
 
     // A stamp recorded meanwhile goes to a fresh hash, and both are overlaid.
     recorder.record(LastSeenKind.AGENT_LOGIN, agent, at('2026-10-20T10:00:09.000Z'));
@@ -195,8 +197,9 @@ describe('LastSeenRecorder + LastSeenFlusher', () => {
     expect((await one<{ t: Date }>(`SELECT last_login_at t FROM agents`, [])).t.toISOString()).toBe(
       '2026-10-20T10:00:09.000Z',
     );
-    expect(await redis.exists(flushingKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
+    expect(await redis.scard(twinsKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
     expect(await redis.exists(pendingKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
+    expect(await redis.keys('assay:last-seen:*:flushing:*')).toEqual([]);
   });
 
   it('loses no stamp recorded while a flush runs', async () => {
@@ -221,6 +224,46 @@ describe('LastSeenRecorder + LastSeenFlusher', () => {
     for (const row of rows) {
       expect(row.last_login_at.getTime()).toBe(base + 1_000 + agents.indexOf(row.id));
     }
+  });
+
+  it('loses nothing when two runs overlap (the lock expired under a slow database)', async () => {
+    const agent = randomUUID();
+    await dataSource.query(`INSERT INTO agents (id) VALUES ($1)`, [agent]);
+    recorder.record(LastSeenKind.AGENT_LOGIN, agent, at('2026-10-20T10:00:01.000Z'));
+    await settle();
+
+    // Run A takes its batch, then stalls in the database.
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => (release = resolve));
+    let taken!: () => void;
+    const tookBatch = new Promise<void>((resolve) => (taken = resolve));
+    const slow = new LastSeenFlusher(
+      {
+        query: async (sql: string, params: unknown[]) => {
+          taken();
+          await stalled;
+          return dataSource.query(sql, params);
+        },
+      } as unknown as DataSource,
+      cacheOf(redis),
+    );
+    const runA = slow.flush();
+    await tookBatch;
+
+    // Its lock lapses; run B starts while A still holds its unwritten batch.
+    recorder.record(LastSeenKind.AGENT_LOGIN, agent, at('2026-10-20T10:00:02.000Z'));
+    await settle();
+    await redis.del(LAST_SEEN_FLUSH_LOCK_KEY);
+    await flusher.flush();
+    release();
+    await runA;
+
+    expect((await one<{ t: Date }>(`SELECT last_login_at t FROM agents`, [])).t.toISOString()).toBe(
+      '2026-10-20T10:00:02.000Z',
+    );
+    expect(await redis.scard(twinsKey(LastSeenKind.AGENT_LOGIN))).toBe(0);
+    expect(await redis.keys('assay:last-seen:*:flushing:*')).toEqual([]);
+    expect(await recorder.pending(LastSeenKind.AGENT_LOGIN, [agent])).toEqual(new Map());
   });
 
   it('skips a flush another replica is running', async () => {
