@@ -5,8 +5,8 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * audit log, agents, and agent credentials.
  *
  * The audit log has no write endpoint (it is append-only, read through this
- * module only). Listing under an unrecognised `agentId` is a filter that
- * matches nothing; minting a credential for one is a 404.
+ * module only). Listing or minting credentials under an unrecognised
+ * `agentId` is a 404.
  */
 export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',

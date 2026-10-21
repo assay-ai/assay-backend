@@ -97,6 +97,11 @@ export class AgentCredentialsService {
     agentId: string,
     query: ListAgentCredentialsQueryDto,
   ): Promise<CursorPageDto<AgentCredentialDto>> {
+    // An agent of another organization, or none at all, is a 404 like
+    // `/agents/:agentId/access`, not an empty page: a client must be able to
+    // tell "no keys" from "no such agent".
+    await this.assertAgentOf(organizationId, agentId);
+
     const qb = this.credentials
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
@@ -183,6 +188,14 @@ export class AgentCredentialsService {
    * yet, as `list` reads it — the DTO and every `health` field derive from
    * what this returns, so the two routes never disagree.
    */
+  /** `ACCOUNT_AGENT_NOT_FOUND` unless the agent exists in this organization. */
+  private async assertAgentOf(organizationId: string, agentId: string): Promise<void> {
+    const agent = await this.agents.findById(agentId);
+    if (!agent || agent.organizationId !== organizationId) {
+      throw AccountErrors.agentNotFound({ agentId });
+    }
+  }
+
   private async withBufferedLastUse(
     rows: AgentCredentialEntity[],
   ): Promise<AgentCredentialEntity[]> {
@@ -212,10 +225,7 @@ export class AgentCredentialsService {
     body: CreateAgentCredentialBodyDto,
     actor: AuditActor,
   ): Promise<CreateAgentCredentialResponseDto> {
-    const agent = await this.agents.findById(agentId);
-    if (!agent || agent.organizationId !== organizationId) {
-      throw AccountErrors.agentNotFound({ agentId });
-    }
+    await this.assertAgentOf(organizationId, agentId);
 
     const token = generateToken();
 
