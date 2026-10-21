@@ -87,6 +87,16 @@ export class ToolCallDto {
   charged: MoneyDto;
 
   @ApiProperty({
+    type: MoneyDto,
+    description:
+      'What the refund guarantee kept back, the receipt’s `withheld` and a part of ' +
+      '`GET /withheld`: the listed price for a call that reserved money and was not charged ' +
+      '(REFUNDED / VOIDED / EXPIRED with a hold, a forfeited or voided-debt call), zero ' +
+      'otherwise — zero for an EXPIRED call that never reserved anything (it never ran)',
+  })
+  withheld: MoneyDto;
+
+  @ApiProperty({
     description:
       'SETTLED, but the provider caused the payment to fail and forfeited it: the buyer is not ' +
       'charged (`charged` is zero) and nobody was paid',

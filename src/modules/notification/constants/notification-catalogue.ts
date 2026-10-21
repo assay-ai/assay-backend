@@ -304,7 +304,9 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
     [NotificationEvent.CALL_DISPUTE_REFUNDED]: {
       severity: NotificationSeverity.INFO,
       channels: IN_APP_EMAIL,
-      aggregation: NotificationAggregation.PER_EVENT,
+      // One per dispute (the producers' `call_dispute.refunded:<id>` key): a
+      // forfeit refund and the upheld refund never both reach the buyer.
+      aggregation: NotificationAggregation.ONCE,
       nonSuppressible: false,
     },
     [NotificationEvent.PROVIDER_SLASH_EXECUTED]: {
