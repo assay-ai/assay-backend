@@ -3,6 +3,7 @@ import {
   BadRequestException,
   HttpException,
   NotFoundException,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -93,6 +94,25 @@ describe('AllExceptionsFilter', () => {
     expect(body.error.statusCode).toBe(413);
     expect(body.error.code).toBe('PAYLOAD_TOO_LARGE');
     expect(body.error.message).toBe('The request body is too large.');
+  });
+
+  it('answers a ParseUUIDPipe refusal with VALIDATION_FAILED, like a DTO (BUG-OPS-CASES-04)', async () => {
+    let refusal: unknown;
+    try {
+      await new ParseUUIDPipe().transform('abc', { type: 'param', data: 'proposalId' });
+    } catch (error) {
+      refusal = error;
+    }
+    const body = capture(refusal);
+
+    expect(body.error.statusCode).toBe(400);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.message).toMatch(/^Validation failed \(.*uuid.* is expected\)$/);
+  });
+
+  it('keeps any other plain 400 a BAD_REQUEST', () => {
+    const body = capture(new BadRequestException('Something else'));
+    expect(body.error.code).toBe('BAD_REQUEST');
   });
 
   it('still answers 500 for an error that is not marked safe to expose', () => {
