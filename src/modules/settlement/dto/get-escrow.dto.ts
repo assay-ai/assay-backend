@@ -189,6 +189,28 @@ export class GetEscrowResponseDto {
       'counter (Solana), with no escrow, or when the chain could not be read.',
   })
   lifetime: EscrowLifetimeDto | null;
+
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Money in this escrow on chain that the ledger has not credited, so agents cannot spend ' +
+      'it yet (a deposit made outside the app, or whose deposit intent expired): chain balance ' +
+      '− (ledger available + held not yet in the escrow hold + pending), floored at zero — the ' +
+      'reconciler’s own comparison. It can still be withdrawn. `null` when the chain could not ' +
+      'be read or there is no escrow.',
+  })
+  uncreditedOnChain: MoneyDto | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: Boolean,
+    description:
+      'The last reconciliation of this escrow’s asset was CRITICAL, so building a withdrawal ' +
+      'is refused (`SETTLEMENT_WITHDRAWALS_FROZEN`). `null` when unknown (the chain could not ' +
+      'be read).',
+  })
+  withdrawalsFrozen: boolean | null;
 }
 
 /**

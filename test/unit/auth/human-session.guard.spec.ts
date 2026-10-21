@@ -25,6 +25,7 @@ import { EscrowAccountService } from '@modules/settlement/services/escrow-accoun
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { SpendPolicyController } from '@modules/spend-policy/controllers/spend-policy.controller';
 import { SpendPolicyService } from '@modules/spend-policy/services/spend-policy.service';
+import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 /**
@@ -75,6 +76,7 @@ describe('human-only control writes', () => {
     getForRequest: jest.fn(async () => ({})),
     patch: jest.fn(),
     history: jest.fn(),
+    dropAgentPolicy: jest.fn(async () => ({})),
   };
   const credentials = { list: jest.fn(async () => ({})), create: jest.fn(), revoke: jest.fn() };
   const notifications = {
@@ -129,6 +131,7 @@ describe('human-only control writes', () => {
         { provide: WithdrawalService, useValue: withdrawals },
         { provide: EscrowDelegationService, useValue: delegation },
         { provide: AuditLogWriter, useValue: { recordAfterCommit: jest.fn() } },
+        { provide: AccessEpochService, useValue: { bump: jest.fn() } },
       ],
     }).compile();
 
@@ -149,6 +152,8 @@ describe('human-only control writes', () => {
     readonly path: string;
   }[] = [
     { method: 'patch', path: '/spend-policy' },
+    // "Use account default" (BUG-BUY-CONNECT-05 part 2): the agent must not drop its own limits.
+    { method: 'delete', path: `/spend-policy/agents/${AGENT_ID}` },
     { method: 'post', path: `/agents/${AGENT_ID}/credentials` },
     {
       method: 'delete',

@@ -6,6 +6,7 @@ import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { assertOrganizationScopedValues } from '@database/postgres/organization-scope';
+import { AccountErrors } from '@modules/account/errors/account.errors';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
@@ -216,9 +217,21 @@ export class SpendPolicyService {
       throw SpendPolicyErrors.assetRequired();
     }
 
+    // After a drop ("Use account default") the scope has no live row but has
+    // a history: the next version continues it rather than restarting at 1.
+    const previousVersion =
+      current?.policyVersion ??
+      (
+        await this.policies.findOne({
+          where: { organizationId, agentId },
+          order: { policyVersion: 'DESC' },
+        })
+      )?.policyVersion ??
+      0;
+
     const values: Partial<SpendPolicyEntity> = {
       agentId,
-      policyVersion: (current?.policyVersion ?? 0) + 1,
+      policyVersion: previousVersion + 1,
       assetId,
       decimals,
       perCallMax: resolveNullable(patch.perCallMax, base?.perCallMax ?? null),
@@ -255,6 +268,80 @@ export class SpendPolicyService {
 
     const row = await this.writeVersion(organizationId, current, values, actor);
     return toDto(row);
+  }
+
+  /**
+   * "Use account default" (BUG-BUY-CONNECT-05 part 2): supersedes the agent's
+   * own live policy with nothing, so the agent falls back to the organization
+   * default, as an agent that never had a policy of its own does. A person's
+   * decision (the route is behind `HumanSessionGuard`), audited as
+   * `spend_policy.dropped` in the same transaction.
+   *
+   * The agent's row is also where its tool access, agent rules and pinned tools
+   * live (`AgentAccessService`), and its pause. Dropping the row must change
+   * the limits only, so it is refused (`SPEND_POLICY_DROP_REFUSED`) when any of
+   * those differs from the default's — it would widen or resume the agent.
+   *
+   * An agent of another organization is a 404, the same as one that does not
+   * exist. An agent with no policy of its own already uses the default: nothing
+   * is written.
+   */
+  async dropAgentPolicy(
+    organizationId: string,
+    agentId: string,
+    actor: AuditActor,
+  ): Promise<SpendPolicyDto> {
+    const agentExists =
+      UUID_PATTERN.test(agentId) &&
+      (await this.dataSource
+        .getRepository(AgentEntity)
+        .exists({ where: { id: agentId, organizationId } }));
+    if (!agentExists) throw AccountErrors.agentNotFound({ agentId });
+
+    const [current, orgDefault] = await Promise.all([
+      this.policies.findOne({ where: { organizationId, agentId, supersededAt: IsNull() } }),
+      this.policies.findOne({
+        where: { organizationId, agentId: IsNull(), supersededAt: IsNull() },
+      }),
+    ]);
+    if (!orgDefault) throw SpendPolicyErrors.notFound({ agentId });
+
+    if (current) {
+      if (comparableAccess(current) !== comparableAccess(orgDefault)) {
+        throw SpendPolicyErrors.dropRefused({ agentId, reason: 'ACCESS_DIFFERS' });
+      }
+      if (current.paused && !orgDefault.paused) {
+        throw SpendPolicyErrors.dropRefused({ agentId, reason: 'PAUSED' });
+      }
+      await this.dataSource.transaction(async (manager) => {
+        const result = await manager
+          .createQueryBuilder()
+          .update(SpendPolicyEntity)
+          .set({ supersededAt: new Date() })
+          .where('organization_id = :organizationId', { organizationId })
+          .andWhere('id = :id', { id: current.id })
+          .andWhere('superseded_at IS NULL')
+          .execute();
+        if (result.affected !== 1) {
+          throw SpendPolicyErrors.concurrentModification({ id: current.id });
+        }
+        await this.audit.record(manager, {
+          organizationId,
+          actor,
+          action: 'spend_policy.dropped',
+          resourceType: 'spend_policy',
+          resourceId: current.id,
+          before: { agentId, ...auditedFieldsOf(current) },
+          after: {
+            agentId,
+            fallsBackTo: orgDefault.id,
+            organizationPolicyVersion: orgDefault.policyVersion,
+          },
+        });
+      });
+    }
+
+    return this.getForRequest(organizationId, agentId, agentId, true);
   }
 
   /**
@@ -385,6 +472,34 @@ const AUDITED_FIELDS = [
   ...ACCESS_FIELDS,
   'policyVersion',
 ] as const;
+
+/**
+ * The access fields in a form two rows can be compared by (review M11): sets
+ * (toolsets, tool ids, excluded providers) sorted, amounts and ratios as numbers, so the order an array was written in
+ * or how a numeric came back from Postgres decides nothing.
+ */
+function comparableAccess(row: SpendPolicyEntity): string {
+  const access = accessFieldsOf(row);
+  const sorted = (values: readonly unknown[]): string[] =>
+    values.map((value) => JSON.stringify(value)).sort();
+  return JSON.stringify({
+    accessMode: access.accessMode,
+    allowedToolsets: sorted(access.allowedToolsets ?? []),
+    allowedToolIds: sorted(access.allowedToolIds ?? []),
+    ruleExcludeProviderIds: sorted(access.ruleExcludeProviderIds ?? []),
+    ruleMaxPrice: access.ruleMaxPrice === null ? null : BigInt(access.ruleMaxPrice).toString(),
+    ruleMinTier: access.ruleMinTier,
+    ruleMinQuality: access.ruleMinQuality === null ? null : Number(access.ruleMinQuality),
+    // Kept in order: the order of pinned tools may mean something.
+    pinnedTools: access.pinnedTools ?? [],
+  });
+}
+
+/** The audited fields of one version, as an audit entry's `before`. */
+function auditedFieldsOf(row: SpendPolicyEntity): Record<string, unknown> {
+  const normalised = { ...row, ...accessFieldsOf(row) };
+  return Object.fromEntries(AUDITED_FIELDS.map((field) => [field, normalised[field] ?? null]));
+}
 
 /** Whether `values` would decide anything differently from the live `current`. */
 function decidesDifferently(
