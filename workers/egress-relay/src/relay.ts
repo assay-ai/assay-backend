@@ -2,6 +2,8 @@ export interface RelayEnv {
   RELAY_TOKEN: string;
   RELAY_TOKEN_NEXT?: string;
   ALLOW_HTTP?: string;
+  /** Comma-separated; each domain and its subdomains are refused. Default `goassay.ai`. */
+  DENIED_HOST_SUFFIXES?: string;
 }
 
 /** Ports Cloudflare proxies for HTTPS; the Worker runtime only reaches these. */
@@ -91,6 +93,19 @@ function isInternalName(hostname: string): boolean {
   return (
     h === 'localhost' || ['.localhost', '.local', '.internal'].some((suffix) => h.endsWith(suffix))
   );
+}
+
+/**
+ * Assay's own domains: a target there would have this Worker call back into our
+ * own origin from inside Cloudflare, past the zone's WAF. Same rule as the
+ * backend's `isDeniedHost` (`EGRESS_DENIED_HOST_SUFFIXES`); keep the lists equal.
+ */
+function isDeniedHost(hostname: string, configured: string | undefined): boolean {
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  const listed = (configured ?? '').split(',').map(normalize).filter(Boolean);
+  const suffixes = listed.length > 0 ? listed : ['goassay.ai'];
+  const host = normalize(hostname);
+  return host !== '' && suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
 }
 
 interface Envelope {
@@ -196,6 +211,7 @@ export async function handleRelay(
   if (target.username || target.password) return relayError('BLOCKED_TARGET');
   if (isIpLiteral(target.hostname)) return relayError('BLOCKED_TARGET');
   if (isInternalName(target.hostname)) return relayError('BLOCKED_TARGET');
+  if (isDeniedHost(target.hostname, env.DENIED_HOST_SUFFIXES)) return relayError('BLOCKED_TARGET');
   const allowedPorts = httpOk ? [...RELAY_ALLOWED_PORTS, 80] : RELAY_ALLOWED_PORTS;
   if (target.port !== '' && !allowedPorts.includes(Number(target.port))) {
     return relayError('BLOCKED_TARGET');
