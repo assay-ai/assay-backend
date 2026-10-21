@@ -16,8 +16,9 @@ export type MinimumStakeReading =
 /**
  * The minimum stake each settlement contract enforces, read live from the
  * contract's own parameters (EVM `params().minimumStake`): the number the
- * operator Contracts page shows. Read-only, for display; the routing gate
- * keeps its own configured floor.
+ * operator Contracts page shows. Read-only. The economics panel shows it,
+ * and the routing gate raises its configured floor to it when it is stricter
+ * (`ContractMinimumStakeFloors`).
  */
 export interface MinimumStakeReaderPort {
   /**

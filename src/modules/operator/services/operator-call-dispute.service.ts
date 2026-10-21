@@ -101,7 +101,7 @@ export class OperatorCallDisputeService {
     ) {
       const settled = await this.disputes.settleRefund(request.disputeId);
       if (settled.refundState !== RefundState.PENDING) {
-        await this.disputes.announceDecision(settled);
+        await this.disputes.announceDecision(settled, { afterRefundRetry: true });
       }
       return this.detail(request.disputeId);
     }

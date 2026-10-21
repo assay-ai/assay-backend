@@ -126,6 +126,38 @@ describe('NotificationService — aggregation rules', () => {
     expect(notifications.insert).toHaveBeenCalledTimes(2);
   });
 
+  it('call_dispute.decided goes out once per side, however often it is announced (BUG-RETEST-R5a-01)', async () => {
+    const decided = (organizationId: string, role: string) =>
+      request({
+        organizationId,
+        event: NotificationEvent.CALL_DISPUTE_DECIDED,
+        dedupeKey: `${NotificationEvent.CALL_DISPUTE_DECIDED}:dispute-1:${organizationId}:${role}:PENDING`,
+      });
+
+    // At the decision, then again when the refund lands.
+    for (let i = 0; i < 2; i += 1) {
+      await service.notify(decided('buyer-org', 'buyer'));
+      await service.notify(decided('provider-org', 'provider'));
+    }
+
+    expect(notifications.insert).toHaveBeenCalledTimes(2);
+    expect(notifications.insert.mock.calls.map(([row]) => row.organizationId)).toEqual([
+      'buyer-org',
+      'provider-org',
+    ]);
+  });
+
+  it('call_dispute.refunded stays once per dispute', async () => {
+    const refunded = request({
+      organizationId: 'buyer-org',
+      event: NotificationEvent.CALL_DISPUTE_REFUNDED,
+      dedupeKey: `${NotificationEvent.CALL_DISPUTE_REFUNDED}:dispute-1`,
+    });
+    await service.notify(refunded);
+    await service.notify(refunded);
+    expect(notifications.insert).toHaveBeenCalledTimes(1);
+  });
+
   it('ONCE_PER_UTC_DAY suppresses a second call the same day', async () => {
     // BALANCE_ZERO is ONCE_PER_UTC_DAY in the catalogue.
     const req = request({ event: NotificationEvent.BALANCE_ZERO, dedupeKey: 'acct-1' });
