@@ -198,6 +198,27 @@ export async function paginate<T extends ObjectLiteral>(
   spec: ListSpec,
 ): Promise<CursorPageDto<T>> {
   const sort = resolveSort(query, spec);
+  const { rows, sortValueOf } = await fetchKeysetRows(qb, query, spec);
+  return toPage(rows, query.limit, sort, spec, sortValueOf);
+}
+
+/**
+ * The fetch half of {@link paginate}: the ordering, the keyset bound and the
+ * `limit + 1` applied to `qb`, and the rows with the `limit + 1`-th still on
+ * them, plus each row's exact cursor sort value.
+ *
+ * Exposed for a list that merges two sources into one cursor (the tool-call
+ * list with its free calls): each source is fetched with the same cursor and
+ * limit, the rows are merged by `(sortValueOf(row), id)`, and the merged slice
+ * is packaged with {@link toPage}. Same predicate, same precision, so the merged
+ * cursor means the same position in both sources.
+ */
+export async function fetchKeysetRows<T extends ObjectLiteral>(
+  qb: SelectQueryBuilder<T>,
+  query: ListQueryDto,
+  spec: ListSpec,
+): Promise<{ rows: T[]; sortValueOf: (row: T) => string }> {
+  const sort = resolveSort(query, spec);
   const idColumn = spec.idColumn ?? `${spec.alias}.id`;
 
   if (query.cursor) {
@@ -234,7 +255,7 @@ export async function paginate<T extends ObjectLiteral>(
 
   if (sort.field.type !== 'timestamptz') {
     const rows = await qb.getMany();
-    return toPage(rows, query.limit, sort, spec);
+    return { rows, sortValueOf: (row) => sort.field.valueOf(row) };
   }
 
   // A `timestamptz` is stored to the microsecond and a JS `Date` keeps only
@@ -251,7 +272,63 @@ export async function paginate<T extends ObjectLiteral>(
     const value = row[EXACT_SORT_VALUE];
     if (id != null && typeof value === 'string') exact.set(String(id), value);
   }
-  return toPage(entities, query.limit, sort, spec, (row) => exact.get(String(row.id)));
+  return {
+    rows: entities,
+    sortValueOf: (row) => exact.get(String(row.id)) ?? sort.field.valueOf(row),
+  };
+}
+
+/**
+ * One page over several sources under one cursor: each source fetched with
+ * {@link fetchKeysetRows} for the same request (so with the same keyset bound
+ * and `limit + 1`), merged by `(sortValue, id)` in the request's direction, and
+ * the first `limit` kept. If any source had more, the merged list does too, so
+ * `hasMore` is never wrong; the cursor names the last row kept, which is the
+ * same position in every source.
+ *
+ * `timestamptz` sorts only: the merge compares the serialised sort values as
+ * strings, which orders like the instants because every one of them is an
+ * ISO-8601 UTC instant of the same width (see `exactInstantSql`).
+ */
+export function mergeKeysetPages<T extends { readonly id: string }>(
+  sources: ReadonlyArray<{ readonly rows: readonly T[]; readonly sortValueOf: (row: T) => string }>,
+  query: ListQueryDto,
+  spec: ListSpec,
+): CursorPageDto<T> {
+  const sort = resolveSort(query, spec);
+  if (sort.field.type !== 'timestamptz') {
+    throw ApiErrors.unknownSortField({ field: sort.key, allowed: [spec.defaultSort] });
+  }
+  const descending = sort.direction === SortDirection.DESC;
+  // A millisecond fallback (`toISOString()`) is widened to the microsecond
+  // form, so every key compares at one width (review M6).
+  const keyed = sources.flatMap((source) =>
+    source.rows.map((row) => ({
+      row,
+      key: source.sortValueOf(row).replace(/\.(\d{3})Z$/, '.$1000Z'),
+    })),
+  );
+  keyed.sort((a, b) => {
+    const order =
+      a.key !== b.key
+        ? a.key < b.key
+          ? -1
+          : 1
+        : a.row.id < b.row.id
+          ? -1
+          : a.row.id > b.row.id
+            ? 1
+            : 0;
+    return descending ? -order : order;
+  });
+  const exact = new Map(keyed.map(({ row, key }) => [row, key] as const));
+  return toPage(
+    keyed.slice(0, query.limit + 1).map(({ row }) => row),
+    query.limit,
+    sort,
+    spec,
+    (row) => exact.get(row),
+  );
 }
 
 /** Raw-result alias {@link paginate} reads the exact sort value under. */

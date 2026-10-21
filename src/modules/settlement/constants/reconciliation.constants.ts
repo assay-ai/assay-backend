@@ -90,4 +90,30 @@ export const RECONCILIATION_ALERTS = {
   RECONCILIATION_BLIND: 'reconciliation_blind',
   ESCROW_SHORTFALL: 'escrow_shortfall',
   ESCROW_MIRROR_DRIFT: 'escrow_mirror_drift',
+  HELD_ORPHAN: 'held_orphan',
+  ESCROW_UNCREDITED_DEPOSIT: 'escrow_uncredited_deposit',
+  ESCROW_SEQ_REALIGNED: 'escrow_seq_realigned',
+  RECONCILIATION_SCAN_TIMEOUT: 'reconciliation_scan_timeout',
 } as const;
+
+/**
+ * Most `held(payer, seq)` reads one pass spends naming orphan holds (A2), and
+ * only while the escrow holds more than the mirror. The highest seqs with no
+ * intent are read first.
+ */
+export const RECONCILIATION_HELD_ORPHAN_SCAN_MAX = 256;
+
+/** Of those, at most this many for one escrow, so one escrow cannot spend the whole pass. */
+export const RECONCILIATION_HELD_ORPHAN_SCAN_PER_ACCOUNT = 64;
+
+/** `held(payer, seq)` reads in flight at once: the RPC quota is shared with redemptions. */
+export const RECONCILIATION_HELD_READ_CONCURRENCY = 8;
+
+/**
+ * The A2 scans' overall time budget per pass. They run after the run row is
+ * written and never delay it; what does not finish waits for the next pass.
+ */
+export const RECONCILIATION_NAMED_SCAN_BUDGET_MS = 30_000;
+
+/** Most escrows one pass scans for uncredited deposits (A2); the rest wait a pass. */
+export const RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS = 20;
