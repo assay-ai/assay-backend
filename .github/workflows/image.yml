@@ -17,8 +17,9 @@ name: Image
 # Secret (optional; without it the image is pushed and nothing is deployed),
 # stored in the "deploy-dispatch" environment (deployment branches: main, develop)
 #   DEPLOY_DISPATCH_TOKEN   fine-grained token on the deploy repository only,
-#                           "Contents: Read and write" (needed to send a
-#                           repository_dispatch event)
+#                           "Actions: Read and write" only, no Contents (enough
+#                           to start its "Deploy backend" workflow, not to
+#                           change it)
 
 on:
   push:
@@ -104,12 +105,15 @@ jobs:
             echo "::notice::DEPLOY_DISPATCH_TOKEN is not set: image pushed, nothing deployed"
             exit 0
           fi
+          # Starts "Deploy backend" on assay-deploy's main. The token has
+          # Actions: write there and no Contents access: it can start that
+          # workflow, never change it.
           payload=$(jq -n --arg environment "$ENVIRONMENT" --arg image "$IMAGE_REF" --arg sha "$GITHUB_SHA" \
-            '{event_type: "backend-image", client_payload: {environment: $environment, image: $image, sha: $sha}}')
+            '{ref: "main", inputs: {environment: $environment, image: $image, source_sha: $sha}}')
           curl -fsS -X POST \
             -H "Authorization: Bearer $DEPLOY_DISPATCH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/assay-ai/assay-deploy/dispatches \
+            https://api.github.com/repos/assay-ai/assay-deploy/actions/workflows/deploy-backend.yml/dispatches \
             -d "$payload"
           echo "::notice::deploy requested: $ENVIRONMENT <- $IMAGE_REF"
