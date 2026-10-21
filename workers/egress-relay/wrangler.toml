@@ -1,4 +1,8 @@
 name = "assay-egress-relay"
+# Deployed twice, one Worker per environment, each with its own RELAY_TOKEN:
+#   npx wrangler deploy --name assay-egress-relay-dev
+#   npx wrangler deploy --name assay-egress-relay-prod
+# A bare `wrangler deploy` creates a third, unrouted Worker under this name.
 main = "src/index.ts"
 compatibility_date = "2026-10-18"
 # Reachable only on its custom domain: the workers.dev and preview URLs would
