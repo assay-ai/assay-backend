@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 
 import { isIP } from 'node:net';
 
+import { isDeniedHost } from './denied-hosts';
 import { EgressError, EgressFailureKind } from './egress.errors';
 import { EgressPolicy, EgressTrust } from './egress.policy';
 import { classifyAddress, isBlockedVerdict } from './ip-rules';
@@ -74,6 +75,14 @@ export async function resolveEgressTarget(
   const hostname = stripBrackets(url.hostname);
   if (hostname.length === 0) {
     throw new EgressError(EgressFailureKind.URL_INVALID, 'URL has no host', { url: rawUrl });
+  }
+
+  // Before any lookup: naming one of our own hosts is refused whatever it
+  // resolves to, and resolving it would only add a query to our own zone.
+  if (isDeniedHost(hostname)) {
+    throw new EgressError(EgressFailureKind.BLOCKED_ADDRESS, "the host is one of Assay's own", {
+      url: url.href,
+    });
   }
 
   const records = isIP(hostname) ? [literal(hostname)] : await resolve(hostname, url.href, lookup);

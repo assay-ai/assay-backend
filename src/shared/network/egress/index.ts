@@ -12,6 +12,7 @@ export {
   isEgressLockdownInstalled,
   withSanctionedEgress,
 } from './egress-lockdown';
+export { EGRESS_DENIED_HOST_SUFFIXES_ENV, deniedHostSuffixes, isDeniedHost } from './denied-hosts';
 export {
   EGRESS_RELAY_CONFIG,
   EGRESS_RELAY_TOKEN_ENV,

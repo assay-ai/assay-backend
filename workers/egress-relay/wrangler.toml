@@ -11,6 +11,9 @@ preview_urls = false
 
 [vars]
 ALLOW_HTTP = "0"
+# Assay's own domains (and subdomains), never fetched. Keep equal to the
+# backend's EGRESS_DENIED_HOST_SUFFIXES.
+DENIED_HOST_SUFFIXES = "goassay.ai"
 
 # Secrets (never in this file): wrangler secret put RELAY_TOKEN
 # Optional during rotation:     wrangler secret put RELAY_TOKEN_NEXT
