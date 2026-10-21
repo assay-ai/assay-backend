@@ -39,6 +39,31 @@ const SECRET_QUERY_KEYS = new Set([
   'assay_replaces',
 ]);
 
+/**
+ * Query keys whose value may be logged as sent: paging, sorting and filters
+ * that carry no user data. Every other value is replaced, so a search term,
+ * an email or an id a client put in the query never reaches the logs; the key
+ * still does, so a log line keeps its shape.
+ */
+const SAFE_QUERY_KEYS = new Set([
+  'limit',
+  'offset',
+  'page',
+  'page_size',
+  'pagesize',
+  'sort',
+  'order',
+  'direction',
+  'status',
+  'type',
+  'kind',
+  'chain',
+  'chainid',
+  'grant_type',
+  'response_type',
+  'client_id',
+]);
+
 function decodedKey(raw: string): string {
   try {
     return decodeURIComponent(raw.replace(/\+/g, ' '));
@@ -49,10 +74,11 @@ function decodedKey(raw: string): string {
 
 /**
  * A request URL as it may be logged or put in `error.path` (R-OA-27): the
- * consent request id and every secret query value become {@link REDACTED},
- * the query of `/oauth/authorize*` and `/oauth/requests/*` is dropped,
- * and the token-shaped value backstop runs over the rest. Everything else is
- * left exactly as it was, so a log line still names the route.
+ * consent request id and every query value outside {@link SAFE_QUERY_KEYS}
+ * become {@link REDACTED}, the query of `/oauth/authorize*` and
+ * `/oauth/requests/*` is dropped, and the token-shaped value backstop runs over
+ * the rest. The path and the query keys are kept, so a log line still names the
+ * route.
  */
 export function redactOAuthUrl(url: string): string {
   const queryStart = url.indexOf('?');
@@ -70,9 +96,10 @@ export function redactOAuthUrl(url: string): string {
             const equals = pair.indexOf('=');
             if (equals === -1) return pair;
             const key = pair.slice(0, equals);
-            return SECRET_QUERY_KEYS.has(decodedKey(key).toLowerCase())
-              ? `${key}=${REDACTED}`
-              : pair;
+            const name = decodedKey(key).toLowerCase();
+            return SAFE_QUERY_KEYS.has(name) && !SECRET_QUERY_KEYS.has(name)
+              ? pair
+              : `${key}=${REDACTED}`;
           })
           .join('&');
 
