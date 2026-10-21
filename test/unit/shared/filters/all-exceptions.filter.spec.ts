@@ -80,6 +80,28 @@ describe('AllExceptionsFilter', () => {
     expect(body.error.statusCode).toBe(500);
   });
 
+  it('keeps a body-parser 4xx (an exposed http-error) a 4xx, not a 500', () => {
+    const tooLarge = Object.assign(new Error('request entity too large'), {
+      status: 413,
+      statusCode: 413,
+      expose: true,
+      type: 'entity.too.large',
+    });
+    const body = capture(tooLarge);
+
+    expectTheOneShape(body);
+    expect(body.error.statusCode).toBe(413);
+    expect(body.error.message).toBe('request entity too large');
+  });
+
+  it('still answers 500 for an error that is not marked safe to expose', () => {
+    const hidden = Object.assign(new Error('internal detail'), { status: 404, expose: false });
+    const body = capture(hidden);
+
+    expect(body.error.statusCode).toBe(500);
+    expect(body.error.message).not.toContain('internal detail');
+  });
+
   it('folds class-validator messages into the single message field', () => {
     const body = capture(
       new BadRequestException({
