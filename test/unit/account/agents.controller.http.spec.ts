@@ -244,7 +244,16 @@ describe('GET /agents?include= over HTTP', () => {
   });
 
   beforeEach(() => {
-    list.mockReset().mockResolvedValue(new CursorPageDto([agent(AGENT_A), agent(AGENT_B)], null));
+    // Like the repository: `onlyAgentId` narrows the page to that agent.
+    list
+      .mockReset()
+      .mockImplementation(async (_org: string, _query: unknown, onlyAgentId?: string) => {
+        const all = [agent(AGENT_A), agent(AGENT_B)];
+        return new CursorPageDto(
+          onlyAgentId ? all.filter((a) => a.agentId === onlyAgentId) : all,
+          null,
+        );
+      });
     firstPagesFor
       .mockReset()
       .mockResolvedValue(new Map([[AGENT_A, { items: [key], hasMore: false }]]));
@@ -257,11 +266,27 @@ describe('GET /agents?include= over HTTP', () => {
       .query(query)
       .set('Authorization', `Bearer ${token}`);
 
-  it('without include is the list as before, for an agent too, and reads no credential', async () => {
+  it('without include, an agent token lists its own agent only and reads no credential', async () => {
     const res = await get('machine');
     expect(res.status).toBe(200);
-    expect(res.body.items).toEqual([agent(AGENT_A), agent(AGENT_B)]);
+    expect(list).toHaveBeenCalledWith(ORG_A, expect.anything(), AGENT_A);
+    expect(res.body.items).toEqual([agent(AGENT_A)]);
+    expect(res.body.nextCursor ?? null).toBeNull();
     expect(firstPagesFor).not.toHaveBeenCalled();
+  });
+
+  it('GET /agents/:otherId is a 404 for an agent token, as for a foreign agent', async () => {
+    const res = await request(app.getHttpServer())
+      .get(`/agents/${AGENT_B}`)
+      .set('Authorization', 'Bearer machine');
+    expect(res.status).toBe(404);
+  });
+
+  it('a person still lists every agent of the organization, not narrowed', async () => {
+    const res = await get('person');
+    expect(res.status).toBe(200);
+    expect(list).toHaveBeenCalledWith(ORG_A, expect.anything(), undefined);
+    expect(res.body.items).toEqual([agent(AGENT_A), agent(AGENT_B)]);
   });
 
   it('reads every agent’s credentials in one call and nests both parts', async () => {
@@ -269,7 +294,7 @@ describe('GET /agents?include= over HTTP', () => {
     expect(res.status).toBe(200);
     expect(firstPagesFor).toHaveBeenCalledTimes(1);
     expect(firstPagesFor).toHaveBeenCalledWith(ORG_A, [AGENT_A, AGENT_B], 50);
-    expect(list).toHaveBeenCalledWith(ORG_A, expect.objectContaining({ limit: 20 }));
+    expect(list).toHaveBeenCalledWith(ORG_A, expect.objectContaining({ limit: 20 }), undefined);
     const [mine, theirs] = res.body.items;
     expect(mine.credentials).toEqual(JSON.parse(JSON.stringify({ items: [key], hasMore: false })));
     expect(mine.health).toMatchObject({
@@ -296,20 +321,20 @@ describe('GET /agents?include= over HTTP', () => {
     expect(ownList).toHaveBeenCalledWith(ORG_A, AGENT_A, expect.objectContaining({ limit: 1 }), {
       credentialId: 'cred-AGENT',
     });
-    const [mine, theirs] = res.body.items;
+    // Only its own agent is listed; no other agent of the organization appears.
+    expect(res.body.items).toHaveLength(1);
+    const [mine] = res.body.items;
     expect(mine.credentials).toEqual(JSON.parse(JSON.stringify({ items: [key], hasMore: false })));
     expect(mine.health).toMatchObject({ liveKeyCount: 1 });
-    // The other agent is listed (the plain list is readable) without either part.
-    expect(theirs).toEqual(agent(AGENT_B));
     expect(JSON.stringify(res.body)).not.toMatch(/tokenHash|secret/i);
   });
 
   it('reads nothing for an agent whose own agent is not on the page', async () => {
-    list.mockResolvedValue(new CursorPageDto([agent(AGENT_B)], null));
+    list.mockResolvedValue(new CursorPageDto([], null));
     const res = await get('machine', { include: 'credentials' });
     expect(res.status).toBe(200);
     expect(ownList).not.toHaveBeenCalled();
-    expect(res.body.items).toEqual([agent(AGENT_B)]);
+    expect(res.body.items).toEqual([]);
   });
 
   it('gives a config-file machine token (no stored key) an empty page for its agent', async () => {

@@ -18,6 +18,7 @@ import { DataSource } from 'typeorm';
 
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
@@ -672,16 +673,36 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
     });
 
     it("an agent token never gets a person's cached `include` answer", async () => {
+      // A second agent in the same organization: the person sees both, the
+      // agent token only itself, and neither list answers the other.
+      const sibling = await dataSource.getRepository(AgentEntity).save(
+        dataSource.getRepository(AgentEntity).create({
+          organizationId: orgA,
+          privyUserId: `did:privy:${randomUUID()}`,
+          email: null,
+          label: 'Sibling A',
+          status: 'ACTIVE',
+          primaryAccountId: null,
+          chainId: null,
+          lastLoginAt: new Date(),
+        }),
+      );
+      const ids = (res: { body: { data: { items: { agentId: string }[] } } }) =>
+        res.body.data.items.map((a) => a.agentId);
       const spy = jest.spyOn(agentsService, 'list');
-      await get('/agents?include=health', 'personA').expect(200);
+      const person = await get('/agents?include=health', 'personA').expect(200);
       await get('/agents?include=health', 'personA').expect(200);
       expect(spy).toHaveBeenCalledTimes(1);
+      expect(ids(person)).toEqual(expect.arrayContaining([agentA, sibling.id]));
       // An agent token is allowed the route (BUG-DEMO-02) but is a different
       // cache entry: the handler runs for it, and it sees its own agent only.
       const machine = await get('/agents?include=health', 'machineA').expect(200);
       expect(spy).toHaveBeenCalledTimes(2);
-      expect(machine.body.data.items.map((a: { agentId: string }) => a.agentId)).toEqual([agentA]);
+      expect(ids(machine)).toEqual([agentA]);
       expect(machine.body.data.items[0]).not.toHaveProperty('credentials');
+      // And the other way round: the agent's list never answers the person.
+      const personAgain = await get('/agents?include=health', 'personA').expect(200);
+      expect(ids(personAgain)).toEqual(expect.arrayContaining([agentA, sibling.id]));
     });
   });
 
