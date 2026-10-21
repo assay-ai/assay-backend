@@ -17,6 +17,7 @@ import { auditActorOf } from '@shared/audit';
 import {
   AllowedWhileBlocked,
   CurrentSession,
+  HumanOrOwnAgentGuard,
   HumanSessionGuard,
   SessionAuthGuard,
 } from '@shared/auth';
@@ -50,13 +51,14 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 export class AgentCredentialsController {
   constructor(private readonly credentials: AgentCredentialsService) {}
 
-  // A person's read too: the list names every sibling credential, its prefix,
-  // its bound delegate key and its expiry, which a leaked machine token must
-  // not be able to enumerate. An agent reads its own binding through
-  // `GET /agents/me/delegate`.
+  // A person's read, and an agent's read of ITSELF (BUG-DEMO-02): the list
+  // names its credentials' prefixes, bound delegate keys and expiries — never
+  // a secret (`AgentCredentialDto` has no hash). A machine token may not
+  // enumerate another agent's keys: `HumanOrOwnAgentGuard` refuses any
+  // `:agentId` that is not its own, before the cache can answer.
   @Get()
   @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
-  @UseGuards(HumanSessionGuard)
+  @UseGuards(HumanOrOwnAgentGuard)
   @ApiOperation({ summary: 'Credentials for one agent, newest first' })
   @ApiCursorPage(AgentCredentialDto)
   async list(
