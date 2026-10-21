@@ -44,6 +44,23 @@ export enum ReconciliationFindingCode {
    * `PaymentHeld` / `HeldCollected` / `HeldRefunded`.
    */
   HELD_MIRROR_DRIFT = 'HELD_MIRROR_DRIFT',
+  /**
+   * One hold the escrow has (`held(payer, seq)` is HELD) for a seq no payment
+   * intent of that payer carries: what a persistent `HELD_MIRROR_DRIFT` is made
+   * of, by name (A2). WARN: read and report only.
+   */
+  HELD_ORPHAN = 'HELD_ORPHAN',
+  /**
+   * One `Deposited` event into a buyer's escrow that no deposit intent credited
+   * (A2, BUG-BUY-MONEY-02): money on chain agents cannot spend. WARN.
+   */
+  ESCROW_UNCREDITED_DEPOSIT = 'ESCROW_UNCREDITED_DEPOSIT',
+  /**
+   * `realignSeq` moved a buyer's `next_seq` past the chain's `seq_high`: some
+   * other signer or redeemer used this escrow (a copy of this database, a
+   * restored backup). WARN.
+   */
+  ESCROW_SEQ_REALIGNED = 'ESCROW_SEQ_REALIGNED',
   /** The pass could not complete; the figures are unknown, not healthy. */
   RECONCILIATION_FAILED = 'RECONCILIATION_FAILED',
   /** Enough consecutive failures that nobody has checked the money in a while. */
