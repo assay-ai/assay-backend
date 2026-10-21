@@ -12,6 +12,7 @@ export enum SpendPolicyErrorCode {
   SPEND_POLICY_NOT_FOUND = 'SPEND_POLICY_NOT_FOUND',
   SPEND_POLICY_ASSET_REQUIRED = 'SPEND_POLICY_ASSET_REQUIRED',
   SPEND_POLICY_CONCURRENT_MODIFICATION = 'SPEND_POLICY_CONCURRENT_MODIFICATION',
+  SPEND_POLICY_DROP_REFUSED = 'SPEND_POLICY_DROP_REFUSED',
 }
 
 export type SpendPolicyErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -52,5 +53,23 @@ export const SpendPolicyErrors = createDomainErrorFactory('SPEND_POLICY', {
     message: (context?: Record<string, any>) =>
       `The policy being superseded was already changed by another request` +
       `${context?.id ? ` (${context.id})` : ''}. Re-read the live policy and retry`,
+  },
+  /**
+   * `DELETE /spend-policy/agents/:agentId` would change more than the agent's
+   * limits (BUG-BUY-CONNECT-05): the agent's own row also carries its tool
+   * access, agent rules and pinned tools (`ACCESS_DIFFERS`), or its pause
+   * (`PAUSED`), and dropping the row would widen or resume the agent. Change
+   * the limits, or the access, instead.
+   */
+  dropRefused: {
+    code: SpendPolicyErrorCode.SPEND_POLICY_DROP_REFUSED,
+    statusCode: 409,
+    publicContext: ['reason'],
+    message: (context?: Record<string, any>) =>
+      context?.reason === 'PAUSED'
+        ? `The agent is paused and the account default is not: using the account default ` +
+          `would resume it. Resume the agent first`
+        : `The agent has its own tool access or agent rules, kept in the same policy: using ` +
+          `the account default would change them too. Change the agent's limits instead`,
   },
 });
