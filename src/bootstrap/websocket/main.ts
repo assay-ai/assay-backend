@@ -19,16 +19,20 @@ async function bootstrapWebSocket() {
   // Get config
   const port = configService.get<number>('app.websocket.port');
 
+  // The same allowlist as the API (`CORS_ALLOWED_ORIGINS`), never `*`. The
+  // socket.io server gets it through the adapter (engine.io answers
+  // `/socket.io/` itself, BUG-SEC-03); `enableCors` covers Nest's own routes.
+  const corsAllowedOrigins = parseCorsAllowedOrigins();
+
   // Setup Redis adapter for horizontal scaling
-  const redisIoAdapter = new RedisIoAdapter(app);
+  const redisIoAdapter = new RedisIoAdapter(app, corsAllowedOrigins);
   await redisIoAdapter.connectToRedis();
   app.useWebSocketAdapter(redisIoAdapter);
 
   applyHttpSecurity(app);
 
-  // CORS for WebSocket: the same allowlist as the API (`CORS_ALLOWED_ORIGINS`).
   app.enableCors({
-    origin: parseCorsAllowedOrigins(),
+    origin: corsAllowedOrigins,
     credentials: true,
   });
 
