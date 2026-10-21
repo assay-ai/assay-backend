@@ -23,12 +23,14 @@ import { OperatorOverrideGuard } from '../guards/operator-override.guard';
  *
  * That access logging does not exist yet.
  *
- * ## Why the search is full-text over `reason` and not over everything
+ * ## What the search matches
  *
- * The reason is the field an incident review actually greps —
- * `idx_override_log_entries_reason_fts` backs it. Actor, target and ticket have
- * their own exact-match filters and their own indexes; making them fuzzy would
- * mean a search for one operator's actions could return another's.
+ * Full text over `reason` — the field an incident review actually greps,
+ * backed by `idx_override_log_entries_reason_fts` — plus a literal contains
+ * match on the ticket and on the actor's or approver's display name or email,
+ * which is what the console's "who, reason, ticket" box promises. Actor, target
+ * and ticket keep their own exact-match filters for a precise read; `q` is the
+ * loose one.
  */
 @ApiTags('Operator')
 @ApiBearerAuth()
