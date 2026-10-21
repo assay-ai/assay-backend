@@ -170,6 +170,18 @@ describe('AllExceptionsFilter', () => {
   });
 
   describe('error.context, only where the definition declares it safe', () => {
+    it('puts ACCOUNT_BLOCKED role on the wire, so a client tells its own block from another party', () => {
+      const own = capture(
+        AccountErrors.accountBlocked({ role: 'ORGANIZATION', subjectKind: 'ORGANIZATION' }),
+      );
+      expect(own.error).toMatchObject({
+        code: 'ACCOUNT_BLOCKED',
+        statusCode: 403,
+        message: 'Your account is blocked by Assay; contact support',
+        context: { role: 'ORGANIZATION' },
+      });
+    });
+
     it('puts SLASH_CHAIN_BATCH_REFUSED refusals[] on the wire', () => {
       const refusals = [
         { requestId: 'ab'.repeat(32), reason: 'SlashNotPending', detail: 'the record is EXECUTED' },
@@ -189,8 +201,10 @@ describe('AllExceptionsFilter', () => {
           note: 'internal: key leaked in a public repo',
         } as never),
       );
-      expectTheOneShape(blocked);
+      // Only the declared `role`: never the note, never the subject kind.
+      expect(blocked.error.context).toEqual({ role: 'PAYER' });
       expect(JSON.stringify(blocked)).not.toContain('leaked');
+      expect(JSON.stringify(blocked)).not.toContain('WALLET');
 
       const notFound = capture(PaymentErrors.paymentIntentNotFound({ id: 'abc-123' }));
       expectTheOneShape(notFound);
