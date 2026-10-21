@@ -47,22 +47,21 @@ export const DNS_RETRY_DELAY_MS = 100;
 
 /**
  * Lookup errors that say "the resolver could not answer now", not "the name
- * has no address". `ENOTFOUND` is in the list on purpose: it is how Node
- * reports `EAI_NONAME`, which macOS and glibc also return when the system
- * resolver itself is unreachable — the failure the e2e run hit (BUG-X-04).
- * A real NXDOMAIN reads the same, so a name deleted on purpose keeps its last
- * checked address for at most {@link LAST_GOOD_DNS_MAX_AGE_MS}; a name never
- * resolved before (`nonexistent.invalid`) has no entry and still fails.
+ * has no address": a timeout, `EAI_AGAIN` (what getaddrinfo reports on Linux
+ * when the resolver is unreachable) and SERVFAIL.
+ *
+ * **`ENOTFOUND` is deliberately not here** (review M-1). It is NXDOMAIN, and
+ * a name that was deleted, or a domain that lapsed, must stop receiving calls
+ * — with the binding's credential headers — at once, not keep its old address
+ * for ten minutes in case the IP has been reassigned. The cost: on macOS,
+ * whose resolver also answers `ENOTFOUND` when it cannot be reached (the e2e
+ * run of BUG-X-04), the fallback does not apply.
  */
 const TRANSIENT_DNS_CODES: ReadonlySet<string> = new Set([
   'EAI_AGAIN',
-  'EAI_FAIL',
-  'ENOTFOUND',
   'ESERVFAIL',
   'ETIMEOUT',
   'ETIMEDOUT',
-  'ECONNREFUSED',
-  'ECONNRESET',
 ]);
 
 function isTransientDnsFailure(error: unknown): boolean {
@@ -93,7 +92,9 @@ export class LastGoodDnsAnswers {
   constructor(
     private readonly maxAgeMs: number = LAST_GOOD_DNS_MAX_AGE_MS,
     private readonly now: () => number = () => Date.now(),
-    private readonly maxEntries = 1000,
+    // Each success re-inserts its host at the newest end, so a host in use
+    // is not pushed out by a burst of others; the cap only bounds memory.
+    private readonly maxEntries = 5000,
   ) {}
 
   remember(key: string, records: readonly LookupAddress[]): void {

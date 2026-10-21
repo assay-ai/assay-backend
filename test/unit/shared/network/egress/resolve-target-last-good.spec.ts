@@ -80,7 +80,7 @@ describe('resolveEgressTarget — last good answer on a transient DNS failure', 
     await resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted([PUBLIC]), cache);
     now += 9 * 60 * 1000;
 
-    const failing = scripted(dnsError('ENOTFOUND'));
+    const failing = scripted(dnsError('EAI_AGAIN'));
     const target = await resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, failing, cache);
 
     expect(target.address).toBe(PUBLIC.address);
@@ -92,13 +92,13 @@ describe('resolveEgressTarget — last good answer on a transient DNS failure', 
     now += LAST_GOOD_DNS_MAX_AGE_MS + 1;
 
     const error = await refusal(
-      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('ENOTFOUND')), cache),
+      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('EAI_AGAIN')), cache),
     );
     expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
   });
 
   it('fails DNS_FAILED for a host never resolved before (no entry)', async () => {
-    const lookup = scripted(dnsError('ENOTFOUND'));
+    const lookup = scripted(dnsError('EAI_AGAIN'));
     const error = await refusal(
       resolveEgressTarget('https://nonexistent.invalid/', UNTRUSTED_EGRESS_POLICY, lookup, cache),
     );
@@ -112,7 +112,7 @@ describe('resolveEgressTarget — last good answer on a transient DNS failure', 
       resolveEgressTarget(
         'https://other.example.test/',
         UNTRUSTED_EGRESS_POLICY,
-        scripted(dnsError('ENOTFOUND')),
+        scripted(dnsError('EAI_AGAIN')),
         cache,
       ),
     );
@@ -143,7 +143,7 @@ describe('resolveEgressTarget — last good answer on a transient DNS failure', 
       resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted([PUBLIC, PRIVATE]), cache),
     );
     const error = await refusal(
-      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('ENOTFOUND')), cache),
+      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('EAI_AGAIN')), cache),
     );
     expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
   });
@@ -153,24 +153,72 @@ describe('resolveEgressTarget — last good answer on a transient DNS failure', 
     await resolveEgressTarget(URL_A, INTERNAL_EGRESS_POLICY, scripted([PRIVATE]), cache);
 
     const publicOnly = await refusal(
-      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('ENOTFOUND')), cache),
+      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('EAI_AGAIN')), cache),
     );
     expect(publicOnly.kind).toBe(EgressFailureKind.DNS_FAILED);
 
     const internal = await resolveEgressTarget(
       URL_A,
       INTERNAL_EGRESS_POLICY,
-      scripted(dnsError('ENOTFOUND')),
+      scripted(dnsError('EAI_AGAIN')),
       cache,
     );
     expect(internal.address).toBe(PRIVATE.address);
   });
 
   it('without a cache behaves as before (retry once, then DNS_FAILED)', async () => {
-    const lookup = scripted(dnsError('ENOTFOUND'));
+    const lookup = scripted(dnsError('EAI_AGAIN'));
     const error = await refusal(resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, lookup));
     expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
     expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['ENOTFOUND', 'ENODATA', 'ECONNREFUSED', 'EAI_FAIL'])(
+    'never reuses an answer on %s (a name that is gone is gone, review M-1)',
+    async (code) => {
+      await resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted([PUBLIC]), cache);
+      const lookup = scripted(dnsError(code));
+      const error = await refusal(
+        resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, lookup, cache),
+      );
+      expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
+      // Not transient: no retry either.
+      expect(lookup).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['ETIMEOUT', 'ETIMEDOUT', 'ESERVFAIL'])(
+    'reuses the checked answer on %s',
+    async (code) => {
+      await resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted([PUBLIC]), cache);
+      const target = await resolveEgressTarget(
+        URL_A,
+        UNTRUSTED_EGRESS_POLICY,
+        scripted(dnsError(code)),
+        cache,
+      );
+      expect(target.address).toBe(PUBLIC.address);
+    },
+  );
+
+  it('re-checks a reused answer against the guard of the request it serves', async () => {
+    // An entry that holds a private address under PUBLIC_ONLY can only come
+    // from a broken store; the guard still refuses it on reuse.
+    cache.remember(`${UNTRUSTED_EGRESS_POLICY.trust}|rpc.example.test`, [PRIVATE]);
+    const error = await refusal(
+      resolveEgressTarget(URL_A, UNTRUSTED_EGRESS_POLICY, scripted(dnsError('EAI_AGAIN')), cache),
+    );
+    expect(error.kind).toBe(EgressFailureKind.BLOCKED_ADDRESS);
+  });
+
+  it('keeps a host in use at the newest end, so others do not push it out', () => {
+    const small = new LastGoodDnsAnswers(LAST_GOOD_DNS_MAX_AGE_MS, () => now, 2);
+    small.remember('a', [PUBLIC]);
+    small.remember('b', [PUBLIC]);
+    small.remember('a', [PUBLIC]); // resolved again
+    small.remember('c', [PUBLIC]);
+    expect(small.recall('a')).not.toBeNull();
+    expect(small.recall('b')).toBeNull();
   });
 
   it('keeps at most maxEntries hosts, dropping the oldest', () => {
