@@ -143,11 +143,23 @@ export class ReceiptsSummaryFigures {
   inProgressCalls: number;
 
   /**
-   * Calls listed at zero (free tier), counted in `calls`. A count of calls,
-   * not of groups: a tool that served both free and paid calls counts its
-   * free ones here whatever the grouping.
+   * Free calls in the window. Free-tier calls have no payment record (they are
+   * `tool_call_records` rows), so they are not in `calls` or any amount, and no
+   * `asset` filter applies to them; a key with free-tier calls only is a group
+   * of its own (`calls` 0, every amount zero). A zero-price intent, rare, is
+   * counted both here and in `calls`. The total is the same whatever the
+   * grouping, with two limits: free-tier rows are kept 30 days, so an older
+   * window (or a previous period reaching past it) undercounts them; and a free
+   * call records no credential, so `groupBy=credential` puts it under
+   * `agent:<agentId>`, apart from that credential's paid calls.
    */
-  @ApiProperty({ description: 'Calls listed at zero (free tier), counted in calls' })
+  @ApiProperty({
+    description:
+      'Free calls: free-tier calls (no payment record) are not in calls or any amount, and a ' +
+      'key with only those is a group whose other figures are zero; a zero-price intent, rare, ' +
+      'is in both. Free-tier rows are kept 30 days; groupBy=credential files them under ' +
+      'agent:<agentId>',
+  })
   freeCalls: number;
 
   /**

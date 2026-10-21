@@ -115,7 +115,10 @@ export interface ReceiptsSummaryRow {
   /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
   readonly inProgressTotal: bigint;
   readonly inProgressCalls: number;
-  /** Calls listed at zero (free tier). Counted in `calls`, adding nothing to any amount. */
+  /**
+   * Intents listed at zero, counted in `calls`. A free-tier call has no intent:
+   * `ReceiptSummaryService` adds those from `tool_call_records`, outside `calls`.
+   */
   readonly freeCalls: number;
   /** The UTC day (`YYYY-MM-DD`), present only when asked for with `byUtcDay`. */
   readonly day?: string;

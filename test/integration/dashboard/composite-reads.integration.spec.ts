@@ -17,6 +17,7 @@ import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hol
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { AccountBlockStatusController } from '@modules/account/controllers/account-block-status.controller';
 import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
@@ -289,7 +290,10 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       gate,
     );
     const holds = new HoldsService(new LedgerHoldRepository(dataSource));
-    const summaries = new ReceiptSummaryService(paymentIntents);
+    const summaries = new ReceiptSummaryService(
+      paymentIntents,
+      new ToolCallRecordRepository(dataSource),
+    );
     const toolCalls = new ToolCallsService(
       paymentIntents,
       new VerificationRecordRepository(dataSource),
