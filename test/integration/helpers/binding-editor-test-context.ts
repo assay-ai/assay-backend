@@ -29,6 +29,7 @@ import { AuditLogEntryEntity } from '@database/postgres/entities/audit-log-entry
 import { AuditLogWriter } from '@shared/audit';
 import { VaultKekCheckEntity } from '@database/postgres/entities/vault-kek-check.entity';
 import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
+import { BindingTestRunAuthMode1762400000050 } from '@database/postgres/migrations/1762400000050-binding-test-run-auth-mode';
 import { CreateVaultKekChecks1762000000003 } from '@database/postgres/migrations/1762000000003-create-vault-kek-checks';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
@@ -324,6 +325,7 @@ export async function createBindingEditorTestContext(
       CreateBindingCredentials1762000000001,
       ToolBindingAuthMode1762000000002,
       CreateVaultKekChecks1762000000003,
+      BindingTestRunAuthMode1762400000050,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',
