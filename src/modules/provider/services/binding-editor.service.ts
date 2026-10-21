@@ -178,6 +178,10 @@ export class BindingEditorService {
 
     if (body.direction === MappingDirection.REQUEST) {
       const request = inspectRequestMapping(body.mapping, context);
+      // The same header count, `x-assay-*`, secret-constant and credential
+      // query checks the save runs, so the editor can say so as the provider
+      // types. No endpoint here: only the mapping's own entries are checked.
+      assertNoCredentialsInMapping('', request.spec);
       return {
         canonical: request.spec,
         selectors: [...request.selectors],
