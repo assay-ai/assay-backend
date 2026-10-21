@@ -57,6 +57,27 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
   }
 
   /**
+   * Which of these deposit transaction hashes a deposit intent credited or is
+   * crediting (`SETTLING` / `SETTLED`). For the reconciler (A2): a `Deposited`
+   * event whose hash is not here was never credited. Plain equality on the
+   * column so `idx_deposit_intents_chain_tx_ref` serves it: the settle path
+   * stores the chain adapter's hash, lower-case hex, and the inputs are
+   * lower-cased to match. Deliberately cross-tenant: the escrow walk is a
+   * platform job.
+   */
+  async findCreditedTxRefs(txRefs: readonly string[]): Promise<Set<string>> {
+    if (txRefs.length === 0) return new Set();
+    const rows = (await this.manager.query(
+      `SELECT DISTINCT "chain_tx_ref" AS "ref"
+         FROM "deposit_intents"
+        WHERE "status" IN ('SETTLING', 'SETTLED')
+          AND "chain_tx_ref" = ANY($1)`,
+      [txRefs.map((ref) => ref.toLowerCase())],
+    )) as { ref: string }[];
+    return new Set(rows.map((row) => row.ref));
+  }
+
+  /**
    * `SETTLED` deposits with a transaction to re-check for finality.
    *
    * The ledger journal remains the source of truth for whether a promotion
@@ -75,24 +96,6 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    *
    * Deliberately cross-tenant, same reasoning as `findDueForExpiry`.
    */
-  /**
-   * Which of these deposit transaction hashes a deposit intent credited or is
-   * crediting (`SETTLING` / `SETTLED`), compared lower-case. For the reconciler
-   * (A2): a `Deposited` event whose hash is not here was never credited.
-   * Deliberately cross-tenant: the escrow walk is a platform job.
-   */
-  async findCreditedTxRefs(txRefs: readonly string[]): Promise<Set<string>> {
-    if (txRefs.length === 0) return new Set();
-    const rows = (await this.manager.query(
-      `SELECT DISTINCT lower("chain_tx_ref") AS "ref"
-         FROM "deposit_intents"
-        WHERE "status" IN ('SETTLING', 'SETTLED')
-          AND lower("chain_tx_ref") = ANY($1)`,
-      [txRefs.map((ref) => ref.toLowerCase())],
-    )) as { ref: string }[];
-    return new Set(rows.map((row) => row.ref));
-  }
-
   async findSettledAwaitingFinality(limit: number): Promise<SettledDepositIntent[]> {
     return this.createQueryBuilder('intent')
       .select('intent.organizationId', 'organizationId')
