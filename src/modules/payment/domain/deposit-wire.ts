@@ -56,3 +56,21 @@ export function asPayloadChainId(network: string): ChainId {
   }
   return network;
 }
+
+/**
+ * The x402 scheme every deposit is quoted in — `SOLANA_PAYMENT_SCHEME` and
+ * `EVM_PAYMENT_SCHEME` alike.
+ */
+export const DEPOSIT_PAYMENT_SCHEME = 'exact';
+
+/**
+ * Refuse a settle body in another scheme before its payload is decoded, so
+ * the caller is told the scheme is wrong rather than that the bytes are.
+ */
+export function assertDepositScheme(scheme: string): void {
+  if (scheme !== DEPOSIT_PAYMENT_SCHEME) {
+    throw PaymentErrors.unsupportedScheme({
+      reason: `deposits are settled in the ${DEPOSIT_PAYMENT_SCHEME} scheme, not ${scheme}`,
+    });
+  }
+}
