@@ -34,6 +34,9 @@ import {
   VerifierRegistryRowDto,
 } from '../dto/operator-reference.dto';
 
+/** The economics panel waits this long per chain for `minimumStake`, then shows the configured floor. */
+export const MINIMUM_STAKE_READ_TIMEOUT_MS = 2_000;
+
 /**
  * The three read-only reference panels behind `GET /operator/policies`,
  * `/verifiers`, `/economics` and `/override-register`.
@@ -149,7 +152,8 @@ export class OperatorReferenceService {
         verifierId: row.keyId,
         truncatedKey,
         state: null,
-        unreadableReason: `chain unreadable: ${reason}`,
+        // Fixed text: the error can carry an internal RPC address; the log has it.
+        unreadableReason: 'chain unreadable',
         expiresAt: null,
       };
     }
@@ -208,8 +212,11 @@ export class OperatorReferenceService {
    * One value when the chains agree, one `chain value` pair per chain when
    * they do not. When the configured routing floor
    * (`PROVIDER_MINIMUM_STAKE_FLOOR`) differs, `note` names it so the panel
-   * does not hide the gap. With no EVM deployment, or when the chain cannot
-   * be read, the row falls back to the configured floor and says why.
+   * does not hide the gap. Each chain is read within
+   * {@link MINIMUM_STAKE_READ_TIMEOUT_MS}; a chain that does not answer shows
+   * the configured floor, and with no answer at all the row is the configured
+   * floor, the note saying which chains and why (a short code, never the
+   * error text).
    */
   private async minimumStakeRow(
     configured: string,
@@ -226,34 +233,49 @@ export class OperatorReferenceService {
 
     if (!this.minimumStakes) return configRow(null);
 
-    let perChain: { chainId: ChainId; value: string }[];
-    try {
-      perChain = (await this.minimumStakes.readMinimumStakes()).map((entry) => ({
-        chainId: entry.chainId,
-        value: toDisplayAmount(entry.minimumStake),
-      }));
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Minimum stake read from the settlement contract failed: ${reason}`);
-      return configRow(`chain unreadable: ${reason}. Showing the configured floor.`);
-    }
-    if (perChain.length === 0) return configRow(null);
+    const readings = await this.minimumStakes.readMinimumStakes({
+      timeoutMs: MINIMUM_STAKE_READ_TIMEOUT_MS,
+    });
+    if (readings.length === 0) return configRow(null);
 
+    const answered = readings.filter((reading) => reading.minimumStake !== null);
+    const failed = readings.filter((reading) => reading.failure !== null);
+    // A fixed sentence and a short code, never the error itself: an RPC
+    // error can carry an internal node address (the reader logs the detail).
+    const failedNote =
+      failed.length > 0
+        ? `No answer from the settlement contract on ${failed
+            .map((reading) => `${reading.chainId} (${reading.failure})`)
+            .join(', ')}; the configured floor is shown for it.`
+        : null;
+    if (answered.length === 0) return configRow(failedNote);
+
+    // A chain that did not answer shows the configured floor, labelled in the note.
+    const perChain = readings.map((reading) => ({
+      chainId: reading.chainId,
+      value: reading.minimumStake ? toDisplayAmount(reading.minimumStake) : configured,
+    }));
     const distinct = new Set(perChain.map((entry) => entry.value));
     const value =
       distinct.size === 1
         ? perChain[0].value
         : perChain.map((entry) => `${entry.chainId} ${entry.value}`).join(' · ');
-    const differs = perChain.some((entry) => entry.value !== configured);
+    const differs = answered.some(
+      (reading) => toDisplayAmount(reading.minimumStake!) !== configured,
+    );
+    const notes = [
+      differs
+        ? `The configured routing floor (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}.`
+        : null,
+      failedNote,
+    ].filter((note): note is string => note !== null);
     return {
       key: 'minimumStake',
       label: 'Minimum stake',
       value,
       source: 'chain',
       overrideCount,
-      note: differs
-        ? `The configured routing floor (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}.`
-        : null,
+      note: notes.length > 0 ? notes.join(' ') : null,
     };
   }
 
