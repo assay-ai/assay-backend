@@ -307,7 +307,7 @@ export class SpendPolicyService {
     if (!orgDefault) throw SpendPolicyErrors.notFound({ agentId });
 
     if (current) {
-      if (JSON.stringify(accessFieldsOf(current)) !== JSON.stringify(accessFieldsOf(orgDefault))) {
+      if (comparableAccess(current) !== comparableAccess(orgDefault)) {
         throw SpendPolicyErrors.dropRefused({ agentId, reason: 'ACCESS_DIFFERS' });
       }
       if (current.paused && !orgDefault.paused) {
@@ -472,6 +472,28 @@ const AUDITED_FIELDS = [
   ...ACCESS_FIELDS,
   'policyVersion',
 ] as const;
+
+/**
+ * The access fields in a form two rows can be compared by (review M11): sets
+ * (toolsets, tool ids, excluded providers) sorted, amounts and ratios as numbers, so the order an array was written in
+ * or how a numeric came back from Postgres decides nothing.
+ */
+function comparableAccess(row: SpendPolicyEntity): string {
+  const access = accessFieldsOf(row);
+  const sorted = (values: readonly unknown[]): string[] =>
+    values.map((value) => JSON.stringify(value)).sort();
+  return JSON.stringify({
+    accessMode: access.accessMode,
+    allowedToolsets: sorted(access.allowedToolsets ?? []),
+    allowedToolIds: sorted(access.allowedToolIds ?? []),
+    ruleExcludeProviderIds: sorted(access.ruleExcludeProviderIds ?? []),
+    ruleMaxPrice: access.ruleMaxPrice === null ? null : BigInt(access.ruleMaxPrice).toString(),
+    ruleMinTier: access.ruleMinTier,
+    ruleMinQuality: access.ruleMinQuality === null ? null : Number(access.ruleMinQuality),
+    // Kept in order: the order of pinned tools may mean something.
+    pinnedTools: access.pinnedTools ?? [],
+  });
+}
 
 /** The audited fields of one version, as an audit entry's `before`. */
 function auditedFieldsOf(row: SpendPolicyEntity): Record<string, unknown> {
