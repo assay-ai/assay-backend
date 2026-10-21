@@ -10,7 +10,7 @@ import {
   SETTLEMENT_ERROR_NAMES,
 } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
-import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
+import { ProviderErrorCode, ProviderErrors } from '@modules/provider/errors/provider.errors';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import {
   SlashCancelRequest,
@@ -1265,6 +1265,21 @@ describe('proposeDue', () => {
     expect(saved.chainLastError).toBe('transport');
     // The claim is what the stale sweep reaps ten minutes later.
     expect(saved.chainClaimedAt).toEqual(NOW);
+  });
+
+  it('stores the local refusal code, not transport, when the provider has no stake authority (BUG-OPS-CASES-02)', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(proposable({ id: 'p1' }));
+    executor.proposeImpl = async () => {
+      throw ProviderErrors.stakeAuthorityUnprovenFor({ providerId: 'prov', chainId: 'eip155:1' });
+    };
+
+    const result = await service.proposeDue(NOW);
+
+    expect(result).toEqual({ proposed: 0, refused: 0, failed: 1 });
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.chainStatus).toBe('PROPOSING');
+    expect(saved.chainLastError).toBe(ProviderErrorCode.PROVIDER_STAKE_AUTHORITY_UNPROVEN);
   });
 
   it('retries a WAIT refusal rather than closing the case', async () => {
