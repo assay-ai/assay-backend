@@ -3458,14 +3458,14 @@ function bareAddress(account: string): string {
 
 /**
  * A refusal this platform raised before anything reached the chain, by its
- * own code (`SLASH_NO_HARMED_AGENTS`, …), so `chain_last_error` says why a
- * case is not being proposed instead of the catch-all `'transport'`. Still
- * retried: these are facts about the window or the deployment, and a human
- * decides what to do about them.
+ * own code (`SLASH_NO_HARMED_AGENTS`, `PROVIDER_STAKE_AUTHORITY_UNPROVEN`, …),
+ * so `chain_last_error` says why a case is not being proposed instead of the
+ * catch-all `'transport'`. Still retried: these are facts about the window,
+ * the provider or the deployment, and a human decides what to do about them.
  */
 function localRefusalName(error: unknown): string | null {
   const code = (error as { errorCode?: unknown })?.errorCode;
-  return typeof code === 'string' && code.startsWith('SLASH_') ? code.slice(0, 64) : null;
+  return typeof code === 'string' && /^(SLASH|PROVIDER)_/.test(code) ? code.slice(0, 64) : null;
 }
 
 /** A Postgres unique violation (23505) on the named constraint or index. */
