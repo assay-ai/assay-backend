@@ -122,6 +122,13 @@ export interface PublishGateInput {
   /** The revision that would go live. */
   readonly mappingVersion: number;
   /**
+   * Earlier revisions whose call is the same as {@link mappingVersion}'s
+   * (`revisionsWithSameCall`: only the price, the pricing mode, the asset or
+   * the chains differ). A run at one of them counts as a run at this revision
+   * (BUG-PRV-CATALOG-02). Absent or empty: only `mappingVersion` counts.
+   */
+  readonly sameCallRevisions?: readonly number[];
+  /**
    * The newest run **for that revision**, or `null` when there is none.
    *
    * Selecting by revision is the repository's job (`findLatestForRevision`);
@@ -211,6 +218,11 @@ function perMajor(
     });
 }
 
+/** Whether a run at `revision` vouches for the revision that would go live. */
+function countsFor(input: PublishGateInput, revision: number): boolean {
+  return revision === input.mappingVersion || (input.sameCallRevisions ?? []).includes(revision);
+}
+
 function testerRunRequirement(input: PublishGateInput): PublishRequirementResult {
   const { latestRun, mappingVersion } = input;
 
@@ -223,7 +235,7 @@ function testerRunRequirement(input: PublishGateInput): PublishRequirementResult
     };
   }
 
-  if (latestRun.mappingVersion !== mappingVersion) {
+  if (!countsFor(input, latestRun.mappingVersion)) {
     return {
       requirement: PublishRequirement.TESTER_RUN,
       met: false,
@@ -247,7 +259,7 @@ function testerRunRequirement(input: PublishGateInput): PublishRequirementResult
 function testerPassedRequirement(input: PublishGateInput): PublishRequirementResult {
   const { latestRun, mappingVersion } = input;
 
-  if (!latestRun || latestRun.mappingVersion !== mappingVersion) {
+  if (!latestRun || !countsFor(input, latestRun.mappingVersion)) {
     return {
       requirement: PublishRequirement.TESTER_PASSED,
       met: false,
