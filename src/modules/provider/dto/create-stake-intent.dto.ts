@@ -34,6 +34,7 @@ export class CreateStakeIntentBodyDto {
   @IsNotEmpty()
   @MaxLength(32)
   @Matches(/^\d+$/, { message: 'amount must be a non-negative decimal integer string' })
+  @Matches(/[1-9]/, { message: 'amount must be greater than 0' })
   amount: string;
 }
 
