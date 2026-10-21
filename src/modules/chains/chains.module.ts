@@ -109,6 +109,8 @@ import { EvmStakeIntentBuilder } from './evm/evm-stake-intent-builder.service';
 import { EvmVaultService } from './evm/evm-vault.service';
 import { EvmVerifierRegistryService } from './evm/evm-verifier-registry.service';
 import { EvmHeldPayments } from './evm/evm-held-payments.service';
+import { EvmEscrowDepositLogs } from './evm/evm-escrow-deposit-logs.service';
+import { ESCROW_DEPOSIT_LOGS } from './ports/escrow-deposit-logs.port';
 import { EvmVoucherRedeemer } from './evm/evm-voucher-redeemer.service';
 import { NamespaceHeldPayments } from './multiplex/namespace-held-payments';
 import { HELD_PAYMENTS } from '@modules/payment/ports/held-payments.port';
@@ -568,6 +570,8 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
       useFactory: (evm: EvmHeldPayments) => new NamespaceHeldPayments(evm),
       inject: [EvmHeldPayments],
     },
+    // A2: deposits into one escrow, read-only; `null` for a non-eip155 asset.
+    { provide: ESCROW_DEPOSIT_LOGS, useExisting: EvmEscrowDepositLogs },
 
     // `open_escrow`. Unlike the redeemer above, the account this
     // instruction moves rent for (`escrow`) is `init`, never signed by a
@@ -613,6 +617,7 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
     SLASH_DISPUTE_INTENTS,
     VOUCHER_REDEEMER,
     HELD_PAYMENTS,
+    ESCROW_DEPOSIT_LOGS,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,
     ESCROW_DELEGATION,

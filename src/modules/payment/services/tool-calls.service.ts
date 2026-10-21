@@ -2,24 +2,30 @@ import {
   DISPUTE_FILING_GUARD_SECONDS,
   disputeWindowEndOf,
 } from '../constants/collection-hold.constants';
-import { Injectable } from '@nestjs/common';
-import { In } from 'typeorm';
+import { Injectable, Optional } from '@nestjs/common';
+import { In, SelectQueryBuilder } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
+import { ToolCallRecordEntity } from '@database/postgres/entities/tool-call-record.entity';
 import { VerificationRecordEntity } from '@database/postgres/entities/verification-record.entity';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { isWithheldIntent } from '@modules/ledger/domain/withheld';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
 import {
+  ApiErrors,
   CursorPageDto,
   ListSpec,
   applyTimeWindow,
   asExactNumber,
   asInstant,
+  fetchKeysetRows,
+  mergeKeysetPages,
   paginate,
+  resolveSort,
 } from '@shared/api';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -31,7 +37,13 @@ import {
   isNotCollected,
   isRefundedByReport,
 } from '../domain/collection';
-import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
+import {
+  FreeToolCallDto,
+  ListToolCallsQueryDto,
+  PaidToolCallRowDto,
+  ToolCallDto,
+  ToolCallListItemDto,
+} from '../dto/list-tool-calls.dto';
 import { PaymentErrors } from '../errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
 import { containsLikePattern } from '@shared/utils/like-pattern.util';
@@ -79,6 +91,24 @@ const TOOL_CALLS_LIST: ListSpec = {
 };
 
 /**
+ * The served free calls (`tool_call_records`, BUG-AGT-01), for
+ * `GET /tool-calls?include=free`. `createdAt` only: a free call has no price,
+ * and the cursor stamp (`createdAt:<dir>`) is the paid list's, so one cursor
+ * names one position in both lists.
+ */
+const FREE_CALLS_LIST: ListSpec = {
+  alias: 'call',
+  defaultSort: 'createdAt',
+  sortable: {
+    createdAt: {
+      column: 'call.created_at',
+      type: 'timestamptz',
+      valueOf: asInstant((row: ToolCallRecordEntity) => row.createdAt),
+    },
+  },
+};
+
+/**
  * `GET /api/v1/tool-calls` and `GET /api/v1/tool-calls/:intentId`.
  *
  * The call list every buyer screen opens with — `payment_intents` LEFT JOIN
@@ -106,9 +136,143 @@ export class ToolCallsService {
   constructor(
     private readonly paymentIntents: PaymentIntentRepository,
     private readonly verificationRecords: VerificationRecordRepository,
+    // `include=free` only. Optional so the older direct constructions keep
+    // compiling; a request for free rows without it fails loudly.
+    @Optional() private readonly freeCalls: ToolCallRecordRepository | null = null,
   ) {}
 
+  /**
+   * `GET /tool-calls`. Without `include=free` this is exactly the paid list it
+   * always was. With it (BUG-AGT-01), the served free calls are merged in by
+   * `createdAt` under one cursor and every item carries `kind`.
+   */
   async list(
+    organizationId: string,
+    query: ListToolCallsQueryDto & { include?: undefined; kind?: undefined },
+    refundableCheck?: RefundableCheck,
+  ): Promise<CursorPageDto<ToolCallDto>>;
+  async list(
+    organizationId: string,
+    query: ListToolCallsQueryDto,
+    refundableCheck?: RefundableCheck,
+  ): Promise<CursorPageDto<ToolCallListItemDto>>;
+  async list(
+    organizationId: string,
+    query: ListToolCallsQueryDto,
+    refundableCheck?: RefundableCheck,
+  ): Promise<CursorPageDto<ToolCallListItemDto>> {
+    if (query.kind !== undefined && query.include !== 'free') {
+      throw ApiErrors.invalidFilter({
+        filter: 'kind',
+        value: query.kind,
+        allowed: ['include=free'],
+      });
+    }
+    if (query.include !== 'free') {
+      return this.listPaid(organizationId, query, refundableCheck);
+    }
+
+    const sort = resolveSort(query, TOOL_CALLS_LIST);
+    if (sort.key !== 'createdAt') {
+      throw ApiErrors.unknownSortField({ field: sort.key, allowed: ['createdAt'] });
+    }
+    // A free call has no payment status and is never refundable.
+    const withFree = query.kind !== 'paid' && !query.status?.length && !query.refundable;
+    if (!withFree) {
+      const page = await this.listPaid(organizationId, query, refundableCheck);
+      return page.map((row): PaidToolCallRowDto => ({ ...row, kind: 'paid' }));
+    }
+    if (query.kind === 'free') {
+      const page = await paginate(this.freeQuery(organizationId, query), query, FREE_CALLS_LIST);
+      return page.map(toFreeDto);
+    }
+    return this.listMerged(organizationId, query);
+  }
+
+  /**
+   * Paid and free rows under one cursor: each source fetched with the same
+   * keyset bound and `limit + 1`, merged by `(createdAt, id)` at microsecond
+   * precision, and the first `limit` kept. If either source had more, the
+   * merged list does too, so `hasMore` is never wrong.
+   */
+  private async listMerged(
+    organizationId: string,
+    query: ListToolCallsQueryDto,
+  ): Promise<CursorPageDto<ToolCallListItemDto>> {
+    const [paid, free] = await Promise.all([
+      fetchKeysetRows(this.paidQuery(organizationId, query, new Date()), query, TOOL_CALLS_LIST),
+      fetchKeysetRows(this.freeQuery(organizationId, query), query, FREE_CALLS_LIST),
+    ]);
+    type Merged =
+      | { readonly id: string; readonly at: string; readonly paid: PaymentIntentEntity }
+      | { readonly id: string; readonly at: string; readonly free: ToolCallRecordEntity };
+    const page = mergeKeysetPages<Merged>(
+      [
+        {
+          rows: paid.rows.map((row) => ({ id: row.id, at: paid.sortValueOf(row), paid: row })),
+          sortValueOf: (row) => row.at,
+        },
+        {
+          rows: free.rows.map((row) => ({ id: row.id, at: free.sortValueOf(row), free: row })),
+          sortValueOf: (row) => row.at,
+        },
+      ],
+      query,
+      TOOL_CALLS_LIST,
+    );
+    const records = await this.recordsByIntentId(
+      organizationId,
+      page.items.flatMap((item) => ('paid' in item ? [item.id] : [])),
+    );
+    return page.map((item): ToolCallListItemDto => {
+      if (!('paid' in item)) return toFreeDto(item.free);
+      const status = records.get(item.id)?.verdictStatus;
+      return {
+        ...this.toDto(item.paid, status ? (status as VerdictStatus) : null),
+        kind: 'paid',
+      };
+    });
+  }
+
+  /**
+   * The served free calls: a free or freemium call that reached a provider
+   * (`refusal_code IS NULL`), with the filters that mean something for it.
+   */
+  private freeQuery(
+    organizationId: string,
+    query: ListToolCallsQueryDto,
+  ): SelectQueryBuilder<ToolCallRecordEntity> {
+    if (!this.freeCalls) {
+      throw new Error('include=free needs the tool-call record repository');
+    }
+    const qb = this.freeCalls
+      .createQueryBuilder('call')
+      .where('call.organizationId = :organizationId', { organizationId })
+      .andWhere('call.pricingMode IS NOT NULL')
+      .andWhere('call.refusalCode IS NULL');
+    if (query.toolId) qb.andWhere('call.toolId = :toolId', { toolId: query.toolId });
+    if (query.providerId) {
+      qb.andWhere('call.providerId = :providerId', { providerId: query.providerId });
+    }
+    if (query.verdict?.length) {
+      // `verdict[]` takes VerdictStatus values only, so an unsampled free call
+      // (verdict NULL) matches no verdict filter, as an unjudged paid call does not.
+      qb.andWhere('call.verdict IN (:...verdicts)', { verdicts: query.verdict });
+    }
+    if (query.search) {
+      qb.andWhere('(call.callId::text ILIKE :search OR call.requestHash ILIKE :search)', {
+        search: containsLikePattern(query.search),
+      });
+    }
+    applyTimeWindow(qb, query, FREE_CALLS_LIST);
+    return qb;
+  }
+
+  /**
+   * The paid list: `payment_intents`, exactly as it always was (the list
+   * without `include=free`, and the dashboard overview's recent calls).
+   */
+  async listPaid(
     organizationId: string,
     query: ListToolCallsQueryDto,
     refundableCheck?: RefundableCheck,
@@ -118,6 +282,53 @@ export class ToolCallsService {
       throw new Error('refundable=true needs the refund eligibility check');
     }
     const now = new Date();
+    const qb = this.paidQuery(organizationId, query, now);
+    const page = await paginate(qb, query, TOOL_CALLS_LIST);
+    const records = await this.recordsByIntentId(
+      organizationId,
+      page.items.map((intent) => intent.id),
+    );
+    const verdictOf = (intentId: string): VerdictStatus | null => {
+      const status = records.get(intentId)?.verdictStatus;
+      return status ? (status as VerdictStatus) : null;
+    };
+
+    if (!query.refundable || !refundableCheck) {
+      return page.map((intent) => this.toDto(intent, verdictOf(intent.id)));
+    }
+
+    // The same answer the receipt gives, for the page at once. A row that no
+    // longer qualifies, or already carries an open report (it cannot be
+    // reported again), is dropped from the page; the cursor is unaffected.
+    const checked = await refundableCheck(
+      page.items.map((intent) => ({
+        intent,
+        settledAt: records.get(intent.id)?.settledAt ?? null,
+      })),
+      now,
+    );
+    const answers = new Map<string, Date | null>();
+    for (const intent of page.items) {
+      const answer = checked.get(intent.id);
+      if (answer?.refundable && !answer.reported) answers.set(intent.id, answer.until);
+    }
+    return new CursorPageDto(
+      page.items
+        .filter((intent) => answers.has(intent.id))
+        .map((intent) => ({
+          ...this.toDto(intent, verdictOf(intent.id)),
+          refundableIfReportedUntil: answers.get(intent.id) ?? null,
+        })),
+      page.pageInfo.nextCursor,
+    );
+  }
+
+  /** The paid rows' query, every filter applied; ordering and the bound are the caller's. */
+  private paidQuery(
+    organizationId: string,
+    query: ListToolCallsQueryDto,
+    now: Date,
+  ): SelectQueryBuilder<PaymentIntentEntity> {
     const qb = this.paymentIntents
       .createQueryBuilder('intent')
       .where('intent.organizationId = :organizationId', { organizationId })
@@ -171,45 +382,7 @@ export class ToolCallsService {
     }
 
     applyTimeWindow(qb, query, TOOL_CALLS_LIST);
-
-    const page = await paginate(qb, query, TOOL_CALLS_LIST);
-    const records = await this.recordsByIntentId(
-      organizationId,
-      page.items.map((intent) => intent.id),
-    );
-    const verdictOf = (intentId: string): VerdictStatus | null => {
-      const status = records.get(intentId)?.verdictStatus;
-      return status ? (status as VerdictStatus) : null;
-    };
-
-    if (!query.refundable || !refundableCheck) {
-      return page.map((intent) => this.toDto(intent, verdictOf(intent.id)));
-    }
-
-    // The same answer the receipt gives, for the page at once. A row that no
-    // longer qualifies, or already carries an open report (it cannot be
-    // reported again), is dropped from the page; the cursor is unaffected.
-    const checked = await refundableCheck(
-      page.items.map((intent) => ({
-        intent,
-        settledAt: records.get(intent.id)?.settledAt ?? null,
-      })),
-      now,
-    );
-    const answers = new Map<string, Date | null>();
-    for (const intent of page.items) {
-      const answer = checked.get(intent.id);
-      if (answer?.refundable && !answer.reported) answers.set(intent.id, answer.until);
-    }
-    return new CursorPageDto(
-      page.items
-        .filter((intent) => answers.has(intent.id))
-        .map((intent) => ({
-          ...this.toDto(intent, verdictOf(intent.id)),
-          refundableIfReportedUntil: answers.get(intent.id) ?? null,
-        })),
-      page.pageInfo.nextCursor,
-    );
+    return qb;
   }
 
   async getOne(organizationId: string, intentId: string): Promise<ToolCallDto> {
@@ -286,4 +459,18 @@ export class ToolCallsService {
 
 function toMoneyDto(money: Money): ToolCallDto['price'] {
   return { amount: money.amount, asset: money.asset, decimals: money.decimals };
+}
+
+function toFreeDto(call: ToolCallRecordEntity): FreeToolCallDto {
+  return {
+    kind: 'free',
+    intentId: null,
+    callId: call.callId,
+    toolId: call.toolId,
+    toolName: call.toolName ?? null,
+    providerId: call.providerId,
+    pricingMode: call.pricingMode as string,
+    verdict: call.verdict ?? null,
+    createdAt: call.createdAt,
+  };
 }
