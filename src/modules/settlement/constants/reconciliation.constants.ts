@@ -92,6 +92,7 @@ export const RECONCILIATION_ALERTS = {
   ESCROW_MIRROR_DRIFT: 'escrow_mirror_drift',
   HELD_ORPHAN: 'held_orphan',
   ESCROW_UNCREDITED_DEPOSIT: 'escrow_uncredited_deposit',
+  ESCROW_SURPLUS_UNEXPLAINED: 'escrow_surplus_unexplained',
   ESCROW_SEQ_REALIGNED: 'escrow_seq_realigned',
   RECONCILIATION_SCAN_TIMEOUT: 'reconciliation_scan_timeout',
 } as const;

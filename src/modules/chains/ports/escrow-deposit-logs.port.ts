@@ -9,6 +9,13 @@ export interface EscrowDepositLog {
   readonly blockNumber: bigint;
 }
 
+/** The deposits found and the block range that was actually read (inclusive). */
+export interface EscrowDepositScan {
+  readonly logs: readonly EscrowDepositLog[];
+  readonly fromBlock: bigint;
+  readonly toBlock: bigint;
+}
+
 /**
  * The deposits into one buyer's escrow over a recent window of blocks, for the
  * reconciler to name a deposit that no deposit intent credited (A2). Read-only.
@@ -17,7 +24,7 @@ export interface EscrowDepositLog {
  * "not looked" is never an empty list.
  */
 export interface EscrowDepositLogsPort {
-  depositsTo(asset: AssetId, buyer: AccountId): Promise<readonly EscrowDepositLog[] | null>;
+  depositsTo(asset: AssetId, buyer: AccountId): Promise<EscrowDepositScan | null>;
 }
 
 export const ESCROW_DEPOSIT_LOGS = 'ESCROW_DEPOSIT_LOGS';
