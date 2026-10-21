@@ -38,10 +38,24 @@ function egressRelayConfigFactory(): EgressRelayConfig | null {
 function egressDnsLookupFactory(config: ConfigService): EgressDnsLookup | undefined {
   const servers = parseDnsServers(config.get<string>(DNS_SERVERS_ENV));
   if (!servers) return undefined;
-  new Logger('NetworkModule').log(
-    `Egress DNS lookups go to ${servers.length} configured server(s)`,
-  );
+  const logger = new Logger('NetworkModule');
+  logger.log(`Egress DNS lookups go to ${servers.length} configured server(s)`);
+  // A single-label host (a Docker service name) is only known to the local
+  // resolver, which DNS_SERVERS bypasses (review M-3). Named, never resolved here.
+  for (const host of singleLabelConfigHosts(config)) {
+    logger.warn(
+      `${DNS_SERVERS_ENV} is set, but the configured host "${host}" has no dot: ` +
+        'the configured name servers are unlikely to resolve it',
+    );
+  }
   return dnsServersLookup(servers);
+}
+
+/** Config-URL hosts with no dot (e.g. `kora`), which public name servers do not know. */
+export function singleLabelConfigHosts(config: ConfigService): string[] {
+  return [...configOriginEgressHosts((name) => config.get<string>(name))].filter(
+    (host) => !host.includes('.'),
+  );
 }
 
 /** Hosts of the URLs the server's configuration names (see `EGRESS_CONFIG_HOSTS`). */
