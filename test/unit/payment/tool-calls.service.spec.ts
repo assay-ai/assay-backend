@@ -353,3 +353,163 @@ describe('ToolCallsService.list — refundable=true (B7)', () => {
     expect(page.items[0]).not.toHaveProperty('refundableIfReportedUntil');
   });
 });
+
+describe('ToolCallsService.list — include=free (BUG-AGT-01)', () => {
+  const FREE_ID = '55555555-5555-5555-5555-555555555555';
+  const CALL_ID = '66666666-6666-6666-6666-666666666666';
+
+  function freeRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: FREE_ID,
+      callId: CALL_ID,
+      toolId: TOOL_ID,
+      toolName: null,
+      providerId: PROVIDER_ID,
+      pricingMode: 'FREE',
+      verdict: null,
+      requestHash: 'hash',
+      refusalCode: null,
+      createdAt: new Date('2026-08-10T11:00:00.000Z'),
+      ...overrides,
+    };
+  }
+
+  function harness(paid: ReturnType<typeof intentRow>[], free: ReturnType<typeof freeRow>[]) {
+    const paidFake = fakeQueryBuilder(paid);
+    const freeFake = fakeQueryBuilder(free);
+    const paymentIntents = {
+      createQueryBuilder: jest.fn().mockReturnValue(paidFake.qb),
+      findOneBy: jest.fn(),
+    };
+    const verificationRecords = {
+      find: jest.fn().mockResolvedValue([]),
+      findByIntentId: jest.fn(),
+    };
+    const freeCalls = { createQueryBuilder: jest.fn().mockReturnValue(freeFake.qb) };
+    const service = new ToolCallsService(
+      paymentIntents as any,
+      verificationRecords as any,
+      freeCalls as any,
+    );
+    return { service, paidFake, freeFake, freeCalls, verificationRecords };
+  }
+
+  it('without include=free the response is byte-identical to the paid list and never reads free calls', async () => {
+    const { service, freeCalls } = harness([intentRow()], [freeRow()]);
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery());
+
+    expect(freeCalls.createQueryBuilder).not.toHaveBeenCalled();
+    expect(JSON.stringify(page)).toBe(
+      JSON.stringify({
+        items: [
+          {
+            intentId: INTENT_ID,
+            toolId: TOOL_ID,
+            providerId: PROVIDER_ID,
+            status: 'SETTLED',
+            price: { amount: '1000000', asset: USDC, decimals: 6 },
+            charged: { amount: '1000000', asset: USDC, decimals: 6 },
+            withheld: { amount: '0', asset: USDC, decimals: 6 },
+            forfeited: false,
+            debt: null,
+            refundedByReport: false,
+            collectableAt: null,
+            disputeWindowEndsAt: null,
+            verdict: null,
+            createdAt: '2026-08-10T10:00:00.000Z',
+          },
+        ],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }),
+    );
+    expect(JSON.stringify(page)).toBe(
+      JSON.stringify(await service.listPaid(ORGANIZATION_ID, baseQuery())),
+    );
+  });
+
+  it('merges served free calls with paid rows, newest first, each with its kind', async () => {
+    const { service, freeFake } = harness([intentRow()], [freeRow()]);
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery({ include: 'free' }));
+
+    expect(page.items.map((item) => (item as unknown as { kind: string }).kind)).toEqual([
+      'free',
+      'paid',
+    ]);
+    expect(page.items[0]).toEqual({
+      kind: 'free',
+      intentId: null,
+      callId: CALL_ID,
+      toolId: TOOL_ID,
+      toolName: null,
+      providerId: PROVIDER_ID,
+      pricingMode: 'FREE',
+      verdict: null,
+      createdAt: new Date('2026-08-10T11:00:00.000Z'),
+    });
+    expect(page.items[1]).toMatchObject({ kind: 'paid', intentId: INTENT_ID, status: 'SETTLED' });
+    expect(page.items[0]).not.toHaveProperty('status');
+    expect(page.items[0]).not.toHaveProperty('price');
+    expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: false });
+    // Scoped to the caller, served calls only.
+    expect(freeFake.wheres.slice(0, 3)).toEqual([
+      { sql: 'call.organizationId = :organizationId', params: { organizationId: ORGANIZATION_ID } },
+      { sql: 'call.pricingMode IS NOT NULL', params: {} },
+      { sql: 'call.refusalCode IS NULL', params: {} },
+    ]);
+  });
+
+  it('pages the merged list with one cursor at the last row kept', async () => {
+    const { service } = harness(
+      [intentRow({ createdAt: new Date('2026-08-10T10:00:00.000Z') })],
+      [freeRow()],
+    );
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery({ include: 'free', limit: 1 }));
+
+    expect(page.items).toHaveLength(1);
+    expect((page.items[0] as unknown as { kind: string }).kind).toBe('free');
+    expect(page.pageInfo.hasMore).toBe(true);
+    const decoded = JSON.parse(
+      Buffer.from(page.pageInfo.nextCursor as string, 'base64url').toString('utf8'),
+    );
+    expect(decoded).toEqual({
+      v: 1,
+      k: '2026-08-10T11:00:00.000Z',
+      i: FREE_ID,
+      s: 'createdAt:desc',
+    });
+  });
+
+  it('kind=free lists only the free calls; a payment status filter leaves them out', async () => {
+    const free = harness([intentRow()], [freeRow()]);
+    const onlyFree = await free.service.list(
+      ORGANIZATION_ID,
+      baseQuery({ include: 'free', kind: 'free' }),
+    );
+    expect(onlyFree.items.map((item) => (item as unknown as { kind: string }).kind)).toEqual([
+      'free',
+    ]);
+
+    const paid = harness([intentRow()], [freeRow()]);
+    const settled = await paid.service.list(
+      ORGANIZATION_ID,
+      baseQuery({ include: 'free', status: [PaymentIntentStatus.SETTLED] }),
+    );
+    expect(paid.freeCalls.createQueryBuilder).not.toHaveBeenCalled();
+    expect(settled.items).toEqual([expect.objectContaining({ kind: 'paid', intentId: INTENT_ID })]);
+  });
+
+  it('refuses kind without include=free, and a price sort with it', async () => {
+    const { service } = harness([], []);
+    await expectErrorCodeAsync(
+      () => service.list(ORGANIZATION_ID, baseQuery({ kind: 'free' })),
+      'API_INVALID_FILTER',
+    );
+    await expectErrorCodeAsync(
+      () => service.list(ORGANIZATION_ID, baseQuery({ include: 'free', sort: 'priceAmount' })),
+      'API_UNKNOWN_SORT_FIELD',
+    );
+  });
+});

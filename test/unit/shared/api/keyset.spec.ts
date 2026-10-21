@@ -10,6 +10,7 @@ import {
   exactInstantSql,
   paginate,
   resolveSort,
+  mergeKeysetPages,
 } from '@shared/api/keyset';
 import { BaseError } from '@shared/errors/base.error';
 
@@ -408,5 +409,49 @@ describe('paginate', () => {
     await expect(
       paginate(fake.qb, query({ limit: 10, cursor, sort: 'amount' }), SPEC),
     ).rejects.toMatchObject({ errorCode: ApiErrorCode.API_INVALID_CURSOR });
+  });
+});
+
+describe('mergeKeysetPages', () => {
+  const spec = {
+    alias: 'row',
+    defaultSort: 'createdAt',
+    sortable: {
+      createdAt: { column: 'row.created_at', type: 'timestamptz' as const, valueOf: () => '' },
+    },
+  };
+  const row = (id: string, at: string) => ({ id, at });
+  const source = (rows: { id: string; at: string }[]) => ({
+    rows,
+    sortValueOf: (r: { at: string }) => r.at,
+  });
+
+  it('merges two sources by (sortValue, id) and cursors at the last row kept', () => {
+    const query = Object.assign(new ListQueryDto(), { limit: 2, order: SortDirection.DESC });
+    const page = mergeKeysetPages<{ id: string; at: string }>(
+      [
+        source([row('a', '2026-08-10T10:00:00.000003Z'), row('b', '2026-08-10T09:00:00.000000Z')]),
+        source([row('c', '2026-08-10T10:00:00.000002Z')]),
+      ],
+      query,
+      spec,
+    );
+    expect(page.items.map((r) => r.id)).toEqual(['a', 'c']);
+    expect(decodeCursor(page.pageInfo.nextCursor as string, 'createdAt:desc')).toEqual({
+      sortValue: '2026-08-10T10:00:00.000002Z',
+      id: 'c',
+      sort: 'createdAt:desc',
+    });
+  });
+
+  it('ends the list when every source is exhausted', () => {
+    const query = Object.assign(new ListQueryDto(), { limit: 5, order: SortDirection.ASC });
+    const page = mergeKeysetPages<{ id: string; at: string }>(
+      [source([row('a', '1')]), source([row('b', '0')])],
+      query,
+      spec,
+    );
+    expect(page.items.map((r) => r.id)).toEqual(['b', 'a']);
+    expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: false });
   });
 });
