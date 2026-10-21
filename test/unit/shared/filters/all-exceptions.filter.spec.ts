@@ -91,7 +91,8 @@ describe('AllExceptionsFilter', () => {
 
     expectTheOneShape(body);
     expect(body.error.statusCode).toBe(413);
-    expect(body.error.message).toBe('request entity too large');
+    expect(body.error.code).toBe('PAYLOAD_TOO_LARGE');
+    expect(body.error.message).toBe('The request body is too large.');
   });
 
   it('still answers 500 for an error that is not marked safe to expose', () => {

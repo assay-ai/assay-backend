@@ -45,10 +45,6 @@ async function bootstrapApi() {
   // Security headers, and no `X-Powered-By` (R17-R-02).
   applyHttpSecurity(app);
 
-  // A larger JSON body for the few routes that need one, before Nest's
-  // default 100 KB parser (`route-body-limits.ts`).
-  applyRouteBodyLimits(app);
-
   // Global prefix
   app.setGlobalPrefix('api', buildGlobalPrefixOptions());
   app.enableVersioning({
@@ -98,6 +94,12 @@ async function bootstrapApi() {
   // session headers; the two services expose different things and neither list
   // is the other's.
   app.enableCors(buildApiCorsOptionsDelegate(parseCorsAllowedOrigins()));
+
+  // A larger JSON body for the few routes that need one, before Nest's
+  // default 100 KB parser (`route-body-limits.ts`). After CORS, so a body
+  // this parser refuses (413) still carries the CORS headers and a browser
+  // can read the error instead of failing the fetch.
+  applyRouteBodyLimits(app);
 
   // Validation
   app.useGlobalPipes(

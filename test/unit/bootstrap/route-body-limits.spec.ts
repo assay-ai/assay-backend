@@ -5,6 +5,7 @@ import express, { json } from 'express';
 import request from 'supertest';
 
 import { ROUTE_BODY_LIMITS, applyRouteBodyLimits } from '@bootstrap/api/route-body-limits';
+import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 /** The try route takes a 512 KB OpenAPI document; every other route keeps 100 KB. */
 describe('route body limits', () => {
@@ -68,6 +69,34 @@ describe('route body limits in a Nest app', () => {
         .post('/api/v1/provider/tools/try')
         .send({ blob: 'x'.repeat(512 * 1024) })
         .expect(404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * Mounted after CORS (as `api/main.ts` does), a body the route-scoped parser
+ * refuses still carries the CORS headers, so the page can read the 413.
+ */
+describe('route body limits after CORS', () => {
+  it('answers an oversized try body 413 PAYLOAD_TOO_LARGE with the CORS header', async () => {
+    const app = await NestFactory.create<NestExpressApplication>(EchoModule, { logger: false });
+    app.enableCors({ origin: ['http://localhost:4001'], credentials: true });
+    applyRouteBodyLimits(app);
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+    try {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/provider/tools/try')
+        .set('Origin', 'http://localhost:4001')
+        .send({ openapi: 'x'.repeat(700 * 1024) });
+      expect(response.status).toBe(413);
+      expect(response.headers['access-control-allow-origin']).toBe('http://localhost:4001');
+      expect(response.body).toMatchObject({
+        success: false,
+        error: { code: 'PAYLOAD_TOO_LARGE', statusCode: 413 },
+      });
     } finally {
       await app.close();
     }
