@@ -115,9 +115,8 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
   /**
    * A party to this request is on the account blocklist: a wallet that is the
    * payer, payee, delegate or stake authority, or the provider serving the
-   * call. A blocked *organization's own* session is refused with
-   * `AUTH_ORGANIZATION_SUSPENDED` instead, the code the dashboard already
-   * handles.
+   * call, or the organization behind the session itself (`ORGANIZATION`:
+   * "Your account is blocked by Assay", on the API and the MCP host).
    *
    * 403: the request is well formed and re-authenticating will not help. The
    * context names the role (`PAYER`, `PAYEE`, …) and never the reason, which is
@@ -127,7 +126,9 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
     code: AccountErrorCode.ACCOUNT_BLOCKED,
     statusCode: 403,
     message: (context?: Record<string, any>) =>
-      `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
-      'contact support',
+      context?.role === 'ORGANIZATION'
+        ? 'Your account is blocked by Assay; contact support'
+        : `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
+          'contact support',
   },
 });
