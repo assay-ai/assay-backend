@@ -61,6 +61,11 @@ export enum ReconciliationFindingCode {
    * restored backup). WARN.
    */
   ESCROW_SEQ_REALIGNED = 'ESCROW_SEQ_REALIGNED',
+  /**
+   * The A2 scans (orphan holds, uncredited deposits) ran out of their time
+   * budget this pass. WARN, never CRITICAL: the run's own figures are recorded.
+   */
+  RECONCILIATION_SCAN_TIMEOUT = 'RECONCILIATION_SCAN_TIMEOUT',
   /** The pass could not complete; the figures are unknown, not healthy. */
   RECONCILIATION_FAILED = 'RECONCILIATION_FAILED',
   /** Enough consecutive failures that nobody has checked the money in a while. */

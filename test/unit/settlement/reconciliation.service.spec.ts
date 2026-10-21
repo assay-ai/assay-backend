@@ -1073,12 +1073,13 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       findCreditedTxRefs: jest.fn(async () => new Set(options.credited ?? [])),
     };
     const vaultBalance = options.escrows.reduce((sum, escrow) => sum + escrow.chain, 0n);
+    const runs = fakeRuns();
     const service = new ReconciliationService(
       fakeVault(vaultBalance),
       alerts,
       fakeEntries({}),
       fakeBalances(0n, 0n, 0n, options.escrows),
-      fakeRuns(),
+      runs,
       escrowReader,
       escrowRepository,
       intents as never,
@@ -1086,7 +1087,7 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       deposits as never,
       depositLogs as never,
     );
-    return { service, alerts, intents, held, depositLogs, deposits, escrowRepository };
+    return { service, alerts, intents, held, depositLogs, deposits, escrowRepository, runs };
   }
 
   it('names each orphan hold (payer, seq, amount) once the held drift outlives a pass', async () => {
@@ -1113,7 +1114,8 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       expect.objectContaining({ account: BUYER_A, seq: '38', amount: '10000' }),
     ]);
     expect(orphans[0].severity).toBe(ReconciliationSeverity.WARN);
-    expect(named.intents.voucherSeqGaps).toHaveBeenCalledWith(USDC, BUYER_A, 40n, 256);
+    // At most 64 seqs for one escrow (of the 256 a pass).
+    expect(named.intents.voucherSeqGaps).toHaveBeenCalledWith(USDC, BUYER_A, 40n, 64);
     // One alert per hold, not one per payer.
     const keys = named.alerts.emitted
       .filter((alert) => alert.name === 'held_orphan')
@@ -1203,5 +1205,89 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
     });
     expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_seq_realigned');
     expect(named.escrowRepository.bumpNextSeqTo).toHaveBeenCalledWith('org-1', BUYER_A, 40n);
+  });
+
+  it('records the run before the scans, and a scan out of time is a WARN, never a delay', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n }],
+    });
+    (named.service as unknown as { namedScanBudgetMs: number }).namedScanBudgetMs = 20;
+    await named.service.reconcile(USDC);
+    // The second pass scans; the chain never answers.
+    named.depositLogs.depositsTo.mockImplementation(() => new Promise(() => undefined));
+    named.runs.save.mockClear();
+
+    const report = await named.service.reconcile(USDC);
+
+    expect(named.runs.save).toHaveBeenCalledTimes(1);
+    const timeout = report.findings.find(
+      (f) => f.code === ReconciliationFindingCode.RECONCILIATION_SCAN_TIMEOUT,
+    );
+    expect(timeout?.severity).toBe(ReconciliationSeverity.WARN);
+    expect(report.severity).toBe(ReconciliationSeverity.WARN);
+    // Appended to the row already written, and alerted.
+    expect(named.runs.update).toHaveBeenCalledWith(
+      { id: report.id },
+      expect.objectContaining({
+        findings: expect.arrayContaining([
+          expect.objectContaining({ code: 'RECONCILIATION_SCAN_TIMEOUT' }),
+        ]),
+      }),
+    );
+    expect(named.alerts.emitted.map((alert) => alert.name)).toContain(
+      'reconciliation_scan_timeout',
+    );
+    expect(await named.service.isFrozen(USDC)).toBe(false);
+  });
+
+  it('a CRITICAL figure is recorded before any scan starts', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 0n, openHolds: 1n, seqHigh: 5n, nextSeq: 6n }],
+      totalHeld: 30_000n,
+      mirroredHeld: 10_000n,
+      gaps: { [BUYER_A]: ['4'] },
+    });
+    await named.service.reconcile(USDC);
+    let frozenWhenScanned: boolean | null = null;
+    named.held.readHeld.mockImplementation(async () => {
+      frozenWhenScanned = await named.service.isFrozen(USDC);
+      return null;
+    });
+    await named.service.reconcile(USDC);
+    expect(frozenWhenScanned).toBe(true);
+  });
+
+  it('reads held() at most 8 at a time', async () => {
+    const seqs = Array.from({ length: 20 }, (_, index) => String(40 - index));
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 0n, seqHigh: 40n, nextSeq: 41n }],
+      totalHeld: 30_000n,
+      mirroredHeld: 10_000n,
+      gaps: { [BUYER_A]: seqs },
+    });
+    let inFlight = 0;
+    let most = 0;
+    named.held.readHeld.mockImplementation(async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return null;
+    });
+    await named.service.reconcile(USDC);
+    await named.service.reconcile(USDC);
+    expect(named.held.readHeld).toHaveBeenCalledTimes(20);
+    expect(most).toBeLessThanOrEqual(8);
+  });
+
+  it('no realign alert when the bump moved nothing (a race, not another signer)', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 1n, mirror: 1n, seqHigh: 39n, nextSeq: 36n }],
+    });
+    named.escrowRepository.bumpNextSeqTo.mockResolvedValue(0);
+    const report = await named.service.reconcile(USDC);
+    expect(report.findings.map((f) => f.code)).not.toContain(
+      ReconciliationFindingCode.ESCROW_SEQ_REALIGNED,
+    );
   });
 });
