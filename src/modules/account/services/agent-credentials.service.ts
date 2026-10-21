@@ -182,12 +182,6 @@ export class AgentCredentialsService {
     return pages;
   }
 
-  /**
-   * The one place rows read for {@link firstPagesFor} get their `lastUsedAt`:
-   * the latest of the column and the stamp `LastSeenRecorder` has not written
-   * yet, as `list` reads it — the DTO and every `health` field derive from
-   * what this returns, so the two routes never disagree.
-   */
   /** `ACCOUNT_AGENT_NOT_FOUND` unless the agent exists in this organization. */
   private async assertAgentOf(organizationId: string, agentId: string): Promise<void> {
     const agent = await this.agents.findById(agentId);
@@ -196,6 +190,12 @@ export class AgentCredentialsService {
     }
   }
 
+  /**
+   * The one place rows read for {@link firstPagesFor} get their `lastUsedAt`:
+   * the latest of the column and the stamp `LastSeenRecorder` has not written
+   * yet, as `list` reads it — the DTO and every `health` field derive from
+   * what this returns, so the two routes never disagree.
+   */
   private async withBufferedLastUse(
     rows: AgentCredentialEntity[],
   ): Promise<AgentCredentialEntity[]> {
