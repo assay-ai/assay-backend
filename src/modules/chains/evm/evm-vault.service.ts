@@ -125,6 +125,9 @@ export interface EvmVaultClient {
  * happen — this paragraph is here because the next reader will otherwise
  * think it is a copy-paste from the Solana implementation.
  */
+/** Wait before the one retry of an anchored balance read. */
+const BALANCE_READ_RETRY_MS = 500;
+
 @Injectable()
 export class EvmVaultService implements VaultPort {
   private readonly logger = new Logger(EvmVaultService.name);
@@ -170,17 +173,26 @@ export class EvmVaultService implements VaultPort {
     const client = this.client(chainId);
 
     const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
-    const raw = (await client.readContract({
-      address: getAddress(deployment.asset),
-      abi: ERC20_ABI,
-      functionName: 'balanceOf',
-      // The TOKEN's ledger, not `totalEscrowed()`. The contract's own counter is
-      // the contract's opinion of what it holds; proof of reserves is about
-      // what the token says it holds, and the whole value of the page is that
-      // the two are compared by somebody else.
-      args: [getAddress(deployment.escrow)],
-      blockNumber,
-    })) as bigint;
+    const read = async (): Promise<bigint> =>
+      (await client.readContract({
+        address: getAddress(deployment.asset),
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        // The TOKEN's ledger, not `totalEscrowed()`. The contract's own counter is
+        // the contract's opinion of what it holds; proof of reserves is about
+        // what the token says it holds, and the whole value of the page is that
+        // the two are compared by somebody else.
+        args: [getAddress(deployment.escrow)],
+        blockNumber,
+      })) as bigint;
+    // A load-balanced RPC can answer `eth_blockNumber` from a node one block
+    // ahead of the one that serves the `eth_call`, which then refuses the
+    // block as unknown. Ask once more, a moment later, for the SAME block:
+    // retrying at `latest` or at another block would break the anchoring.
+    const raw = await read().catch(async () => {
+      await new Promise((resolve) => setTimeout(resolve, BALANCE_READ_RETRY_MS));
+      return read();
+    });
 
     return {
       balance: MoneyUtil.of(raw.toString(), asset, getAssetMetadata(asset).decimals),
