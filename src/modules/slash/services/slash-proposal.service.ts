@@ -293,14 +293,6 @@ export class SlashProposalService {
 
     proposal.acknowledgedAt = new Date();
     const saved = await this.proposals.save(proposal);
-    // Words, not minor units and a binding id: the operator console prints the
-    // summary as is on the case History (BUG-OPS-CASES-03). The WAIVED line is
-    // left as it was: the provider console rewrites it by pattern.
-    const penalty = formatDollars({
-      amount: saved.penaltyAmount,
-      decimals: saved.decimals,
-      asset: saved.assetId,
-    });
 
     await this.events.append({
       organizationId,
