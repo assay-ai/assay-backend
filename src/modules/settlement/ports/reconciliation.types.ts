@@ -56,6 +56,11 @@ export enum ReconciliationFindingCode {
    */
   ESCROW_UNCREDITED_DEPOSIT = 'ESCROW_UNCREDITED_DEPOSIT',
   /**
+   * Part of a buyer escrow's surplus that no `Deposited` event in the scanned
+   * block window explains (an older deposit or a direct transfer). WARN.
+   */
+  ESCROW_SURPLUS_UNEXPLAINED = 'ESCROW_SURPLUS_UNEXPLAINED',
+  /**
    * `realignSeq` moved a buyer's `next_seq` past the chain's `seq_high`: some
    * other signer or redeemer used this escrow (a copy of this database, a
    * restored backup). WARN.

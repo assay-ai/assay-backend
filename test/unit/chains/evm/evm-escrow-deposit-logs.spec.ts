@@ -40,7 +40,11 @@ describe('EvmEscrowDepositLogs', () => {
 
     const found = await logs.depositsTo(ASSET, `${CHAIN}:${BUYER}` as AccountId);
 
-    expect(found).toEqual([{ txHash: '0x473e1319', amount: 5_000_000n, blockNumber: 95_004n }]);
+    expect(found).toEqual({
+      logs: [{ txHash: '0x473e1319', amount: 5_000_000n, blockNumber: 95_004n }],
+      fromBlock: 95_001n,
+      toBlock: 100_000n,
+    });
     expect(getContractEvents).toHaveBeenCalledTimes(Math.ceil(5_000 / Number(DEPOSIT_LOG_CHUNK)));
     expect(getContractEvents.mock.calls[0][0]).toMatchObject({
       eventName: 'Deposited',

@@ -1065,9 +1065,11 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       }),
     };
     const depositLogs = {
-      depositsTo: jest.fn(
-        async (_asset: string, account: string) => options.deposits?.[account] ?? [],
-      ),
+      depositsTo: jest.fn(async (_asset: string, account: string) => ({
+        logs: options.deposits?.[account] ?? [],
+        fromBlock: 1_000n,
+        toBlock: 50_999n,
+      })),
     };
     const deposits = {
       findCreditedTxRefs: jest.fn(async () => new Set(options.credited ?? [])),
@@ -1172,6 +1174,52 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
     });
     expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(['0xcredited', '0x473e1319']);
     expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_uncredited_deposit');
+  });
+
+  describe('surplus no scanned deposit explains', () => {
+    const unexplainedOf = async (named: ReturnType<typeof buildNamed>) => {
+      await named.service.reconcile(USDC);
+      const report = await named.service.reconcile(USDC);
+      return report.findings.filter(
+        (f) => f.code === ReconciliationFindingCode.ESCROW_SURPLUS_UNEXPLAINED,
+      );
+    };
+
+    it('reports the whole surplus when the window misses the deposit', async () => {
+      const named = buildNamed({
+        escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n, seqHigh: 0n }],
+        deposits: { [BUYER_A]: [] },
+      });
+      const found = await unexplainedOf(named);
+      expect(found).toHaveLength(1);
+      expect(found[0].severity).toBe(ReconciliationSeverity.WARN);
+      expect(found[0].details).toEqual({
+        asset: USDC,
+        account: BUYER_A,
+        amount: '5000000',
+        lookbackBlocks: '50000',
+        fromBlock: '1000',
+        toBlock: '50999',
+      });
+    });
+
+    it('stays quiet when the named deposits explain the whole surplus', async () => {
+      const named = buildNamed({
+        escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n, seqHigh: 0n }],
+        deposits: { [BUYER_A]: [{ txHash: '0xa', amount: 5_000_000n, blockNumber: 12n }] },
+      });
+      expect(await unexplainedOf(named)).toHaveLength(0);
+    });
+
+    it('reports only the remainder after a partial explanation', async () => {
+      const named = buildNamed({
+        escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n, seqHigh: 0n }],
+        deposits: { [BUYER_A]: [{ txHash: '0xa', amount: 2_000_000n, blockNumber: 12n }] },
+      });
+      const found = await unexplainedOf(named);
+      expect(found).toHaveLength(1);
+      expect(found[0].details).toMatchObject({ amount: '3000000' });
+    });
   });
 
   it('a scan that fails is logged, never fails the pass', async () => {
