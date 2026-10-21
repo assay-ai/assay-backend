@@ -35,6 +35,9 @@ const POLICY_HISTORY_LIST: ListSpec = {
   },
 };
 
+/** A uuid, checked before it reaches a `uuid` column (an invalid one would be a 500). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * The live spend policy, its edit path, and its version history.
  *
@@ -56,9 +59,6 @@ const POLICY_HISTORY_LIST: ListSpec = {
  * `spend_policy.updated`, the changed fields before and after) in the same
  * transaction as the version it describes — see `writeVersion`.
  */
-/** A uuid, checked before it reaches a `uuid` column (an invalid one would be a 500). */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 @Injectable()
 export class SpendPolicyService {
   private readonly logger = new Logger(SpendPolicyService.name);
@@ -81,33 +81,61 @@ export class SpendPolicyService {
   ) {}
 
   /**
-   * The live policy for `agentId`, falling back to the organization default,
-   * with `usage` attached when both optional collaborators are
-   * wired and computing it does not fail.
-   */
-  /**
    * Which agent `GET /spend-policy?agentId=` reads (BUG-BUY-CONNECT-05): the
    * named agent only when a person asks and the agent belongs to the
-   * caller's own organization. Anything else — no `agentId`, an agent
-   * credential asking about another agent, a malformed id, an agent of
-   * another organization or none at all — reads the session's own agent, as
-   * the route did before the parameter existed, so a foreign id learns
-   * nothing about that agent.
+   * caller's own organization. Anything else — an agent credential asking
+   * about another agent, a malformed or repeated id, an agent of another
+   * organization or none at all — reads the session's own agent, as the route
+   * did before the parameter existed, so a foreign id learns nothing about
+   * that agent. `ignored` says so, for the response.
    */
   async readableAgentId(
     organizationId: string,
     sessionAgentId: string,
-    requestedAgentId: string | undefined,
+    requestedAgentId: unknown,
     human: boolean,
-  ): Promise<string> {
-    if (!requestedAgentId || requestedAgentId === sessionAgentId || !human) return sessionAgentId;
-    if (!UUID_PATTERN.test(requestedAgentId)) return sessionAgentId;
-    const own = await this.dataSource
+  ): Promise<{ agentId: string; ignored: boolean }> {
+    if (requestedAgentId === undefined || requestedAgentId === sessionAgentId) {
+      return { agentId: sessionAgentId, ignored: false };
+    }
+    const own = { agentId: sessionAgentId, ignored: true };
+    if (!human || typeof requestedAgentId !== 'string' || !UUID_PATTERN.test(requestedAgentId)) {
+      return own;
+    }
+    const exists = await this.dataSource
       .getRepository(AgentEntity)
       .exists({ where: { id: requestedAgentId, organizationId } });
-    return own ? requestedAgentId : sessionAgentId;
+    return exists ? { agentId: requestedAgentId, ignored: false } : own;
   }
 
+  /**
+   * `GET /spend-policy`: {@link get} for the agent {@link readableAgentId}
+   * picks, saying which agent that was (`subjectAgentId`) and whether a
+   * requested `agentId` was not read (`requestedAgentIgnored`).
+   */
+  async getForRequest(
+    organizationId: string,
+    sessionAgentId: string,
+    requestedAgentId: unknown,
+    human: boolean,
+  ): Promise<SpendPolicyDto> {
+    const subject = await this.readableAgentId(
+      organizationId,
+      sessionAgentId,
+      requestedAgentId,
+      human,
+    );
+    const dto = await this.get(organizationId, subject.agentId);
+    dto.subjectAgentId = subject.agentId;
+    dto.requestedAgentIgnored = subject.ignored;
+    return dto;
+  }
+
+  /**
+   * The live policy for `agentId`, falling back to the organization default,
+   * with `usage` attached when both optional collaborators are
+   * wired and computing it does not fail.
+   */
   async get(organizationId: string, agentId: string): Promise<SpendPolicyDto> {
     const row = await this.policies.findLive(organizationId, agentId);
     if (!row) {

@@ -72,7 +72,7 @@ describe('human-only control writes', () => {
 
   const spendPolicy = {
     get: jest.fn(async () => ({})),
-    readableAgentId: jest.fn(async (_organizationId: string, own: string) => own),
+    getForRequest: jest.fn(async () => ({})),
     patch: jest.fn(),
     history: jest.fn(),
   };
