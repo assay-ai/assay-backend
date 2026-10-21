@@ -1,17 +1,16 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { getAddress } from 'viem';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { VerificationPolicyEntity } from '@database/postgres/entities/verification-policy.entity';
 import { VerificationPolicyRepository } from '@database/postgres/repositories/verification-policy.repository';
 import { VerifierSigningKeyEntity } from '@database/postgres/entities/verifier-signing-key.entity';
 import { VerifierSigningKeyRepository } from '@database/postgres/repositories/verifier-signing-key.repository';
-import { ASSAY_CONFIG_ABI } from '@modules/chains/evm/abi/assay.abi';
-import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
-import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from '@modules/chains/evm/evm.constants';
-import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
-import { ChainId, toAssetId } from '@modules/chains/ports/caip.types';
+import { ChainId } from '@modules/chains/ports/caip.types';
+import {
+  MINIMUM_STAKE_READER,
+  MinimumStakeReaderPort,
+} from '@modules/chains/ports/minimum-stake-reader.port';
 import { Money } from '@modules/chains/ports/money.types';
 import { PolicyLifecycle } from '@modules/verification/domain/aggregation/decision-policy.types';
 import {
@@ -55,15 +54,12 @@ export class OperatorReferenceService {
     private readonly providers: ProviderRepository,
     @Inject(PROVIDER_REGISTRY) private readonly providerRegistry: ProviderRegistryPort,
     private readonly config: ConfigService,
-    // The EVM settlement contracts, for `params().minimumStake` — the same
-    // value the operator Contracts page reads. Optional so a process (or a
-    // test) without EVM chains still lists the panel from config.
+    // The settlement contracts' own minimum stake — the value the operator
+    // Contracts page reads. Optional so a process (or a test) without it
+    // still lists the panel from config.
     @Optional()
-    @Inject(EVM_RPC_CLIENTS)
-    private readonly evmClients: ReadonlyMap<ChainId, EvmReaderClient> | null = null,
-    @Optional()
-    @Inject(EVM_DEPLOYMENTS)
-    private readonly evmDeployments: ReadonlyMap<ChainId, EvmDeployment> | null = null,
+    @Inject(MINIMUM_STAKE_READER)
+    private readonly minimumStakes: MinimumStakeReaderPort | null = null,
   ) {}
 
   // ── Policy lifecycle ─────────────────────────────────────────────────────
@@ -208,7 +204,7 @@ export class OperatorReferenceService {
   }
 
   /**
-   * `params().minimumStake` of every EVM settlement deployment, read live.
+   * The minimum stake of every settlement deployment (EVM `params()`), read live.
    * One value when the chains agree, one `chain value` pair per chain when
    * they do not. When the configured routing floor
    * (`PROVIDER_MINIMUM_STAKE_FLOOR`) differs, `note` names it so the panel
@@ -228,24 +224,20 @@ export class OperatorReferenceService {
       note,
     });
 
-    const deployments = [...(this.evmDeployments?.values() ?? [])].filter((deployment) =>
-      this.evmClients?.has(deployment.chainId),
-    );
-    if (deployments.length === 0) return configRow(null);
+    if (!this.minimumStakes) return configRow(null);
 
     let perChain: { chainId: ChainId; value: string }[];
     try {
-      perChain = await Promise.all(
-        deployments.map(async (deployment) => ({
-          chainId: deployment.chainId,
-          value: await this.readChainMinimumStake(deployment),
-        })),
-      );
+      perChain = (await this.minimumStakes.readMinimumStakes()).map((entry) => ({
+        chainId: entry.chainId,
+        value: toDisplayAmount(entry.minimumStake),
+      }));
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.logger.warn(`Minimum stake read from the settlement contract failed: ${reason}`);
       return configRow(`chain unreadable: ${reason}. Showing the configured floor.`);
     }
+    if (perChain.length === 0) return configRow(null);
 
     const distinct = new Set(perChain.map((entry) => entry.value));
     const value =
@@ -263,20 +255,6 @@ export class OperatorReferenceService {
         ? `The configured routing floor (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}.`
         : null,
     };
-  }
-
-  private async readChainMinimumStake(deployment: EvmDeployment): Promise<string> {
-    const client = this.evmClients!.get(deployment.chainId)!;
-    const params = (await client.readContract({
-      address: getAddress(deployment.config),
-      abi: ASSAY_CONFIG_ABI,
-      functionName: 'params',
-      args: [],
-    })) as { minimumStake: bigint };
-    const asset = toAssetId(deployment.chainId, 'erc20', getAddress(deployment.asset));
-    return toDisplayAmount(
-      MoneyUtil.of(BigInt(params.minimumStake).toString(), asset, getAssetMetadata(asset).decimals),
-    );
   }
 
   /**

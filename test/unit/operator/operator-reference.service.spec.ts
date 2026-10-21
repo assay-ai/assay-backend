@@ -1,5 +1,6 @@
 import { OperatorReferenceService } from '@modules/operator/services/operator-reference.service';
-import { ChainId } from '@modules/chains/ports/caip.types';
+import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { MoneyUtil } from '@shared/utils/money.util';
 import { OVERRIDE_CODES } from '@modules/operator/domain/override-register';
 import { SigningKeyState } from '@modules/verification/signing/domain/key-lifecycle';
 import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/verifier-registry.port';
@@ -27,33 +28,18 @@ function build(
   } = {},
 ): OperatorReferenceService {
   const evm = options.evm;
-  const clients = evm
-    ? new Map([
-        [
-          EVM_CHAIN,
-          {
-            readContract: jest.fn(async (args: { functionName: string }) => {
-              if (evm.fail) throw evm.fail;
-              expect(args.functionName).toBe('params');
-              return { minimumStake: evm.minimumStake ?? 0n };
-            }),
-          },
-        ],
-      ])
-    : null;
-  const deployments = evm
-    ? new Map([
-        [
-          EVM_CHAIN,
-          {
-            chainId: EVM_CHAIN,
-            config: '0x00000000000000000000000000000000000000c0',
-            stake: '0x00000000000000000000000000000000000000c1',
-            escrow: '0x00000000000000000000000000000000000000c2',
-            asset: EVM_ASSET,
-          },
-        ],
-      ])
+  const minimumStakes = evm
+    ? {
+        readMinimumStakes: jest.fn(async () => {
+          if (evm.fail) throw evm.fail;
+          return [
+            {
+              chainId: EVM_CHAIN,
+              minimumStake: MoneyUtil.of(evm.minimumStake ?? 0n, EVM_ASSET, 6),
+            },
+          ];
+        }),
+      }
     : null;
   return new OperatorReferenceService(
     fakePolicyRepository(options.policies ?? []),
@@ -62,13 +48,12 @@ function build(
     fakeProviderRepositoryFor(options.providerIds ?? []),
     options.providerRegistry ?? fakeProviderRegistry(),
     fakeConfigService(options.config ?? {}),
-    clients as never,
-    deployments as never,
+    minimumStakes,
   );
 }
 
 const EVM_CHAIN = 'eip155:46630' as ChainId;
-const EVM_ASSET = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
+const EVM_ASSET = `${EVM_CHAIN}/erc20:0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac` as AssetId;
 
 describe('OperatorReferenceService — policy lifecycle', () => {
   it('returns an empty list against an empty database', async () => {

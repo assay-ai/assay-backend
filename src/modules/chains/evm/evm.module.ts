@@ -43,6 +43,7 @@ import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmHeldPayments, parseHoldLiveChains } from './evm-held-payments.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
+import { EvmMinimumStakeReader } from './evm-minimum-stake-reader.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
 import { ModuleRef } from '@nestjs/core';
@@ -330,6 +331,13 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       useClass: EvmRelayedEscrowIntentSubmitter,
     },
     {
+      // `params().minimumStake` per chain, for the operator economics panel.
+      provide: EvmMinimumStakeReader,
+      useFactory: (clients: never, deployments: never) =>
+        new EvmMinimumStakeReader(clients, deployments),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+    },
+    {
       // Whether each chain's escrow has the tighten delay (D-21), by asking it.
       provide: EvmTightenDelayProbe,
       useFactory: (clients: never, deployments: never) =>
@@ -521,6 +529,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmVoucherRedeemer,
     EvmHeldPayments,
     EvmTightenDelayProbe,
+    EvmMinimumStakeReader,
     EvmSlashExecutor,
     EvmVerifierRegistryService,
     EvmVaultService,
