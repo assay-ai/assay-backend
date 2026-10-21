@@ -73,6 +73,9 @@ export class OperatorApprovalsController {
     // The approver of the policy rows (P-10, P-11) and of nothing else: the
     // service checks the row's own `approverRoles` (BUG-OPS-CORE-01).
     OperatorRole.POLA,
+    // The second approver of A-22 (handle reassignment) alongside ADJL, and of
+    // nothing else: the same per-row check limits it to that row.
+    OperatorRole.CMP,
   )
   @ApiOperation({ summary: 'Approve, as a second operator: runs the action now' })
   @ApiResponse({ status: 200, type: ApprovalDecisionDto })
@@ -98,6 +101,8 @@ export class OperatorApprovalsController {
     // else's. The service allows only that (BUG-OPS-CORE-01).
     OperatorRole.POL,
     OperatorRole.POLA,
+    // CMP turns down an A-22 request (or withdraws its own); nothing else.
+    OperatorRole.CMP,
   )
   @ApiOperation({ summary: 'Reject (or, as the requester, withdraw) a queued action' })
   @ApiResponse({ status: 200, type: ApprovalDecisionDto })

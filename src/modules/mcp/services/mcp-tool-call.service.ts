@@ -12,6 +12,7 @@ import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import {
   ESCROW_BALANCE_READER,
   EscrowBalanceReaderPort,
+  EscrowChainBalance,
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON } from '@modules/payment/constants/payment-intent.constants';
@@ -911,6 +912,10 @@ export class McpToolCallService {
       // No payment key bound yet: where to get one (§7.10 item 2). Read off
       // the session alone — no chain read is added to this path (R-PAY-4).
       const keyNotice = paymentKeyNotice(session, this.host?.webAppUrl);
+      // No escrow on chain yet (the read above, no extra one): the quote
+      // stands unchanged, but the buyer is told that the voucher cannot be
+      // paid until funds open the escrow (BUG-SEC-02, lot 1 C12).
+      const escrowNotice = escrowNotOpenHint(reading);
       return {
         kind: 'ERROR',
         code: McpFailureCode.PAYMENT_REQUIRED,
@@ -920,13 +925,15 @@ export class McpToolCallService {
           `call again with it in _meta["assay/voucher"]` +
           delegationHint(session) +
           (isNotReviewed(tool) ? ' This maker’s tool is not reviewed.' : '') +
-          keyNotice.sentence,
+          keyNotice.sentence +
+          (escrowNotice ? ` ${escrowNotice.escrowHint}` : ''),
         intentId: null,
         // Beside the voucher, never inside it: the requirement is what is signed.
         detail: {
           ...(keyNotice.fixUrl ? { fixUrl: keyNotice.fixUrl } : {}),
           paymentRequired: requirement,
           ...(isNotReviewed(tool) ? { notReviewed: true } : {}),
+          ...(escrowNotice ?? {}),
         },
       };
     }
@@ -2567,6 +2574,25 @@ export function escrowNotOpenNotice(
     });
   }
   return PaymentErrors.escrowNotOpen({ account, hint: ASSAY_APP_SENTENCE });
+}
+
+/** The sentence a rail-B PAYMENT_REQUIRED adds when the payer has no escrow on chain. */
+export const ESCROW_NOT_OPEN_SENTENCE =
+  'No escrow is open for this account yet. Add funds first, or the signed voucher cannot be paid.';
+
+/** What a rail-B PAYMENT_REQUIRED adds when no escrow is open: additive `_meta["assay/error"]` fields. */
+export interface EscrowNotOpenHint {
+  readonly escrow: 'not_open';
+  readonly escrowHint: string;
+}
+
+/**
+ * `{ escrow: 'not_open', escrowHint }` when the chain read found no escrow for
+ * the payer, else `null`. Only a hint: the requirement is quoted exactly as for
+ * a funded buyer, and nothing is refused here.
+ */
+export function escrowNotOpenHint(reading: EscrowChainBalance | null): EscrowNotOpenHint | null {
+  return reading ? null : { escrow: 'not_open', escrowHint: ESCROW_NOT_OPEN_SENTENCE };
 }
 
 /** What a rail-B PAYMENT_REQUIRED adds about the payment key: a sentence, and maybe a link. */

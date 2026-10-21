@@ -15,6 +15,7 @@ import {
 import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
+  ESCROW_NOT_OPEN_SENTENCE,
   McpFailureCode,
   VoucherRequirement,
   chooseRail,
@@ -261,6 +262,56 @@ describe('rail B over MCP', () => {
       const requirement = await requirementOf(h);
 
       expect(requirement.seq).toBe('8');
+    });
+
+    describe('a buyer with no open escrow (BUG-SEC-02, lot 1 C12)', () => {
+      async function unpaid(h: ReturnType<typeof harness>) {
+        const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+          voucher: null,
+        });
+        if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+        return outcome;
+      }
+
+      it('adds escrow: "not_open" and a plain sentence, beside an unchanged quote', async () => {
+        const none = harness(); // the fake reader's default: no escrow on chain
+        const funded = harness();
+        funded.escrow.withdrawRequested = 0n;
+
+        const without = await unpaid(none);
+        const withEscrow = await unpaid(funded);
+
+        expect(without.code).toBe(McpFailureCode.PAYMENT_REQUIRED);
+        expect(without.detail).toMatchObject({
+          escrow: 'not_open',
+          escrowHint: ESCROW_NOT_OPEN_SENTENCE,
+        });
+        expect(without.message).toContain(ESCROW_NOT_OPEN_SENTENCE);
+        // The quote is the same one a buyer with an open escrow gets.
+        expect(without.detail.paymentRequired).toEqual(withEscrow.detail.paymentRequired);
+        expect(without.detail.paymentRequired).not.toHaveProperty('escrow');
+      });
+
+      it('adds nothing when the escrow is open', async () => {
+        const h = harness();
+        h.escrow.withdrawRequested = 0n;
+
+        const outcome = await unpaid(h);
+
+        expect(outcome.detail).not.toHaveProperty('escrow');
+        expect(outcome.detail).not.toHaveProperty('escrowHint');
+        expect(outcome.message).not.toContain(ESCROW_NOT_OPEN_SENTENCE);
+      });
+
+      it('allocates the seq as before and reads the escrow once', async () => {
+        const h = harness();
+
+        await unpaid(h);
+
+        expect(h.escrow.reads).toHaveLength(1);
+        expect(h.seqs.allocated).toEqual(['1']);
+      });
     });
   });
 
@@ -678,6 +729,16 @@ describe('rail B over MCP', () => {
       });
       const requirement = refused._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
       expect(requirement.seq).toBe('1');
+      // No escrow on chain in this harness: the hint rides in assay/error,
+      // never inside the requirement that is signed (lot 1 C12).
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
+        escrow: 'not_open',
+        escrowHint: ESCROW_NOT_OPEN_SENTENCE,
+      });
+      expect(requirement).not.toHaveProperty('escrow');
+      expect((refused.content as Array<{ text: string }>)[0].text).toContain(
+        ESCROW_NOT_OPEN_SENTENCE,
+      );
 
       const voucher = voucherFor(requirement);
       const paid = (await client.callTool({
