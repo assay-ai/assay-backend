@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
@@ -62,6 +62,9 @@ export interface RefusalNotice {
  */
 @Injectable()
 export class McpCallRecorder {
+  private readonly logger = new Logger(McpCallRecorder.name);
+  private unwiredWarned = false;
+
   constructor(
     private readonly records: ToolCallRecordWriter,
     @Optional() private readonly connectUrls?: ConnectUrlsService,
@@ -116,7 +119,10 @@ export class McpCallRecorder {
    * the count is. Best effort — an alert never changes an outcome.
    */
   private async alertOnRepeat(session: McpSession, toolName: string, code: string): Promise<void> {
-    if (!this.cache || !this.notifications) return;
+    if (!this.cache || !this.notifications) {
+      this.warnUnwired();
+      return;
+    }
     // The name is the agent's own input: kept to the characters a tool name
     // can have, and short, before it reaches a key, a title or a body.
     const name = safeToolName(toolName);
@@ -139,9 +145,24 @@ export class McpCallRecorder {
         payload: { toolName: name, code },
         dedupeKey: `${session.agentId}:${name}:${code}`,
       });
-    } catch {
+    } catch (error) {
       // Bookkeeping; the refusal itself already reached the agent.
+      this.logger.warn(
+        `refusal repeat alert skipped for agent ${session.agentId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
+  }
+
+  /** Said once: a missing cache or notification port turns the repeat alert off. */
+  private warnUnwired(): void {
+    if (this.unwiredWarned) return;
+    this.unwiredWarned = true;
+    const missing = [!this.cache && 'CacheService', !this.notifications && 'NOTIFICATION_PORT']
+      .filter(Boolean)
+      .join(' and ');
+    this.logger.warn(`${missing} not provided: call.refused_repeatedly is never sent`);
   }
 
   async markFirstCall(session: McpSession, scope: McpScope | undefined): Promise<void> {

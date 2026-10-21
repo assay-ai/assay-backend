@@ -133,14 +133,13 @@ export class EconomicParameterRowDto {
   value: string | null;
 
   @ApiProperty({
-    enum: ['config'],
+    enum: ['config', 'chain'],
     description:
-      'Always `config` today. None of the six economic parameters are read from the settlement ' +
-      'program — contrast `Config.stakeMint` / `Config.unbondingPeriodSeconds`, which are. Kept as ' +
-      'a field rather than a class-level comment so a future parameter that does move on chain can ' +
-      'say so per row instead of everything silently staying `config` after one of six changes.',
+      '`chain` when the value is read live from the settlement contract (`minimumStake`, from ' +
+      '`params()`, the value the Contracts page shows); `config` otherwise, and for ' +
+      '`minimumStake` when no contract could be read (then `note` says why).',
   })
-  source: 'config';
+  source: 'config' | 'chain';
 
   @ApiPropertyOptional({
     nullable: true,
@@ -154,7 +153,10 @@ export class EconomicParameterRowDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'Set only when `value` is null, explaining why no fixed value could be reported.',
+    description:
+      'Explains why no fixed value could be reported when `value` is null; for `minimumStake`, ' +
+      'names the configured routing floor when it differs from the chain value, or why the ' +
+      'chain could not be read.',
   })
   note: string | null;
 }

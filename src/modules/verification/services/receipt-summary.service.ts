@@ -5,6 +5,10 @@ import {
   ReceiptsSummaryGroupBy,
   ReceiptsSummaryRow,
 } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  FreeCallsSummaryRow,
+  ToolCallRecordRepository,
+} from '@database/postgres/repositories/tool-call-record.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 
@@ -69,7 +73,11 @@ const ZERO_FIGURES: Figures = {
  */
 @Injectable()
 export class ReceiptSummaryService {
-  constructor(private readonly intents: PaymentIntentRepository) {}
+  constructor(
+    private readonly intents: PaymentIntentRepository,
+    // Free calls have no payment intent: `freeCalls` reads them here.
+    private readonly freeCalls: ToolCallRecordRepository,
+  ) {}
 
   async getSummary(
     organizationId: string,
@@ -94,22 +102,35 @@ export class ReceiptSummaryService {
       });
     }
 
-    const currentRows = await this.intents.summarizeReceipts(
+    const paidRows = await this.intents.summarizeReceipts(
       organizationId,
       query.groupBy,
       window,
       query.asset,
     );
 
-    const asset = this.resolveAsset(currentRows, query.asset);
+    const asset = this.resolveAsset(paidRows, query.asset);
+    const currentRows = withFreeCalls(
+      paidRows,
+      await this.freeCalls.summarizeFreeCalls(organizationId, query.groupBy, window),
+      asset,
+    );
 
     const compareRequested = query.compareTo === SummaryCompareTo.PREVIOUS_PERIOD;
     const previousRows = compareRequested
-      ? await this.intents.summarizeReceipts(
-          organizationId,
-          query.groupBy,
-          previousWindow(window),
-          asset ?? query.asset,
+      ? withFreeCalls(
+          await this.intents.summarizeReceipts(
+            organizationId,
+            query.groupBy,
+            previousWindow(window),
+            asset ?? query.asset,
+          ),
+          await this.freeCalls.summarizeFreeCalls(
+            organizationId,
+            query.groupBy,
+            previousWindow(window),
+          ),
+          asset,
         )
       : [];
 
@@ -162,10 +183,19 @@ export class ReceiptSummaryService {
       { byUtcDay: true },
     );
 
+    const free = await this.freeCalls.summarizeFreeCalls(organizationId, query.groupBy, window, {
+      byUtcDay: true,
+    });
+
     return {
       days: days.map((day) => {
-        const dayRows = rows.filter((row) => row.day === day.key);
-        const asset = this.resolveAsset(dayRows, query.asset);
+        const paidRows = rows.filter((row) => row.day === day.key);
+        const asset = this.resolveAsset(paidRows, query.asset);
+        const dayRows = withFreeCalls(
+          paidRows,
+          free.filter((row) => row.day === day.key),
+          asset,
+        );
         return { ...day, summary: toResponse(dayRows, null, asset, query.asset) };
       }),
     };
@@ -259,6 +289,43 @@ function toResponse(
     totals: toFiguresDto(totals, asset, decimals),
     asset: asset ?? requestedAsset ?? '',
   };
+}
+
+/**
+ * The paid rows with the window's free calls added to `freeCalls` (BUG-AGT-01).
+ * A free call has no payment intent, so it is in no other figure: not in
+ * `calls`, which counts the calls behind the money, nor in any amount. A key
+ * with free calls only becomes a group of its own, all zero but `freeCalls`, so
+ * `totals` stays the sum of `groups`. Rows stay in key order.
+ */
+function withFreeCalls(
+  rows: readonly ReceiptsSummaryRow[],
+  free: readonly FreeCallsSummaryRow[],
+  asset: AssetId | null,
+): ReceiptsSummaryRow[] {
+  if (free.length === 0) return [...rows];
+  const byKey = new Map<string, number>();
+  for (const row of free) byKey.set(row.key, (byKey.get(row.key) ?? 0) + row.freeCalls);
+
+  const merged = rows.map((row) => {
+    const count = byKey.get(row.key);
+    if (count === undefined) return row;
+    byKey.delete(row.key);
+    return { ...row, freeCalls: row.freeCalls + count };
+  });
+  if (byKey.size === 0) return merged;
+
+  const decimals = asset ? getAssetMetadata(asset).decimals : 0;
+  const added = [...byKey].map(
+    ([key, count]): ReceiptsSummaryRow => ({
+      key,
+      asset: asset ?? '',
+      decimals,
+      ...ZERO_FIGURES,
+      freeCalls: count,
+    }),
+  );
+  return [...merged, ...added].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
 /** The immediately preceding window of the same length. */

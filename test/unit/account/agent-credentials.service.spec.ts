@@ -232,6 +232,35 @@ describe('AgentCredentialsService.list', () => {
       'createdAt',
     ]);
   });
+
+  it('refuses an agent that does not exist with ACCOUNT_AGENT_NOT_FOUND, not an empty page (BUG-NF-02)', async () => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () => service.list(ORGANIZATION_ID, OTHER_AGENT_ID, baseQuery()),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(credentials.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it("refuses another organization's agent with the same 404", async () => {
+    const { service, agents } = buildHarness([credentialRow()]);
+    agents.findById.mockResolvedValueOnce({
+      id: AGENT_ID,
+      organizationId: '99999999-9999-9999-9999-999999999999',
+    });
+
+    await expectErrorCodeAsync(
+      () => service.list(ORGANIZATION_ID, AGENT_ID, baseQuery()),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+  });
+
+  it('still answers an empty page for an own agent with no credentials', async () => {
+    const { service } = buildHarness([]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+    expect(page.items).toEqual([]);
+  });
 });
 
 describe('AgentCredentialsService.list — buffered last_used_at (B1)', () => {

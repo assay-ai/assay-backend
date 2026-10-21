@@ -332,11 +332,11 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
   });
 
   it.each([
-    ['a late verdict', 'voided:REFUND'],
-    ['an upheld report', 'voided:DISPUTE_UPHELD'],
+    ['a late verdict', 'voided:REFUND', false],
+    ['an upheld report', 'voided:DISPUTE_UPHELD', true],
   ])(
     'a debt voided by %s is not charged and withholds the listed price (B1 I3)',
-    async (_, mark) => {
+    async (_, mark, byReport) => {
       const { service } = build(
         buildIntent({
           status: PaymentIntentStatus.SETTLED,
@@ -353,8 +353,29 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
       expect(receipt.chargedPrice.amount).toBe('0');
       expect(receipt.withheld.amount).toBe('1000');
       expect(receipt.debt).toBe('VOIDED');
+      // BUG-X-01: only the upheld report is flagged, as on the call list.
+      expect(receipt.refundedByReport).toBe(byReport);
     },
   );
+
+  it('flags a held payment refunded by an upheld report, never a lapsed debt (BUG-X-01)', async () => {
+    const { service } = build(
+      buildIntent({
+        status: PaymentIntentStatus.SETTLED,
+        priceAmount: '1000',
+        heldStatus: 'REFUNDED',
+        holdReleasedAt: new Date('2026-10-16T01:00:00Z'),
+        redemptionLastError: 'voided:DISPUTE_UPHELD',
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.refundedByReport).toBe(true);
+    expect(receipt.chargedPrice.amount).toBe('0');
+    expect(receipt.chargeNote).toBe('voided:DISPUTE_UPHELD');
+  });
 
   it('a plain SETTLED call carries no flag', async () => {
     const { service } = build(
@@ -366,6 +387,7 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
 
     expect(receipt.forfeited).toBe(false);
     expect(receipt.debt).toBeNull();
+    expect(receipt.refundedByReport).toBe(false);
     expect(receipt.chargeNote).toBeNull();
   });
 

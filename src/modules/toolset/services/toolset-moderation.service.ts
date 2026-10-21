@@ -397,7 +397,8 @@ export class ToolsetModerationService {
       where: { id: toOrganizationId },
       lock: { mode: 'pessimistic_write' },
     });
-    if (!to) throw ToolsetErrors.handleReassignRefused({ reason: 'unknown organization' });
+    // The same 404 the pre-queue check gives, on the approved and the direct path alike.
+    if (!to) throw ToolsetErrors.organizationNotFound();
     if (to.handleLockedAt || to.handleStatus === HandleStatus.FROZEN) {
       throw ToolsetErrors.handleReassignRefused({
         reason: 'the organization already has a public name in use',
@@ -687,6 +688,23 @@ export class ToolsetModerationService {
       .getOne();
     if (!cutoff) throw ToolsetErrors.cutoffNotFound();
     return cutoff;
+  }
+
+  /**
+   * The lookups a rename or reassign makes before it is queued for a second
+   * operator, so a request naming a handle (or, for a reassign, an
+   * organization) that does not exist is a 404 and never an approval. The
+   * write re-checks everything under its locks once approved.
+   */
+  async assertHandleTargetsExist(
+    rawHandle: string,
+    toOrganizationId: string | null = null,
+  ): Promise<void> {
+    const manager = this.dataSource.manager;
+    await this.requireHandleOwner(manager, normalizeHandle(rawHandle));
+    if (toOrganizationId === null) return;
+    const exists = await manager.exists(OrganizationEntity, { where: { id: toOrganizationId } });
+    if (!exists) throw ToolsetErrors.organizationNotFound();
   }
 
   private async requireHandleOwner(

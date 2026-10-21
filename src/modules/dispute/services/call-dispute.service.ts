@@ -717,27 +717,78 @@ export class CallDisputeService {
     }
 
     const amount = dispute.refundAmount ?? intent.settledAmount ?? intent.priceAmount;
-    await this.dataSource.query(
-      `UPDATE "disputes"
-          SET "refund_source" = $2, "refund_state" = $3,
-              "refund_amount" = $4, "restored_amount" = $5, "updated_at" = now()
-        WHERE "id" = $1 AND "refund_state" = 'PENDING'`,
-      [
-        disputeId,
-        columns.source,
-        columns.state,
-        columns.source === RefundSource.NONE ? null : amount,
-        columns.state === RefundState.REFUNDED ? amount : null,
-      ],
-    );
+    const moved = returned(
+      await this.dataSource.query(
+        `UPDATE "disputes"
+            SET "refund_source" = $2, "refund_state" = $3,
+                "refund_amount" = $4, "restored_amount" = $5, "updated_at" = now()
+          WHERE "id" = $1 AND "refund_state" = 'PENDING'
+          RETURNING "id"`,
+        [
+          disputeId,
+          columns.source,
+          columns.state,
+          columns.source === RefundSource.NONE ? null : amount,
+          columns.state === RefundState.REFUNDED ? amount : null,
+        ],
+      ),
+    ).length;
+    // The held payment went back to the buyer (`refundHeld`, or rail A's
+    // withheld credit released): the refund has landed, not only been decided.
+    // Only the run whose compare-and-swap moved the row tells the buyer, so two
+    // concurrent runs (the operator's and the refund job's) send one notice;
+    // sent before the reads below, so a failure there cannot lose it.
+    if (moved > 0 && columns.state === RefundState.REFUNDED && intent.heldStatus === 'REFUNDED') {
+      await this.notifyRefunded({ ...dispute, refundState: RefundState.REFUNDED } as DisputeEntity);
+    }
     await this.touched(null, dispute.organizationId, dispute.respondentProviderId);
     return this.requireAny(disputeId);
   }
 
-  /** Tell both sides. Best-effort: the decision stands whether or not this lands. */
-  async announceDecision(dispute: DisputeEntity): Promise<void> {
+  /** `call_dispute.refunded` to the buyer: once per dispute, whichever path booked it. */
+  private async notifyRefunded(dispute: DisputeEntity): Promise<void> {
+    await this.notify(
+      dispute.organizationId,
+      'buyer',
+      NotificationEvent.CALL_DISPUTE_REFUNDED,
+      dispute,
+      {
+        title: 'Your disputed call was refunded',
+        body:
+          'Your dispute over a call was upheld, and its payment went back to your balance. ' +
+          'The provider was not paid for the call.',
+        // The key `HeldCollectionService` uses for a blocked provider's
+        // refund; the catalogue sends this event ONCE per key.
+        dedupeKey: `${NotificationEvent.CALL_DISPUTE_REFUNDED}:${dispute.id}`,
+      },
+    );
+  }
+
+  /**
+   * Tell both sides. Best-effort: the decision stands whether or not this lands.
+   *
+   * Once per side per refund state (BUG-RETEST-R5a-01): the notice at the
+   * decision, and — when a pending refund later ends — one more with how it
+   * ended. `afterRefundRetry` marks that later call: it says nothing when the
+   * refund went back to the buyer's held payment, because
+   * `call_dispute.refunded` already told the buyer that, and nothing while the
+   * refund is still pending.
+   */
+  async announceDecision(
+    dispute: DisputeEntity,
+    options: { readonly afterRefundRetry?: boolean } = {},
+  ): Promise<void> {
+    if (options.afterRefundRetry) {
+      if (dispute.refundState === RefundState.PENDING) return;
+      if (dispute.refundState === RefundState.REFUNDED && (await this.refundNoticeSent(dispute))) {
+        return;
+      }
+    }
     const upheld = dispute.state === DisputeState.UPHELD;
     const refund = describeRefund(dispute.refundState);
+    const dedupeKey = (organizationId: string, role: CallDisputeRole) =>
+      `${NotificationEvent.CALL_DISPUTE_DECIDED}:${dispute.id}:${organizationId}:${role}:` +
+      `${dispute.refundState ?? 'NONE'}`;
     await this.notify(
       dispute.organizationId,
       'buyer',
@@ -752,6 +803,7 @@ export class CallDisputeService {
                 ? ' The call was refunded anyway: its provider was blocked.'
                 : ''
             }`,
+        dedupeKey: dedupeKey(dispute.organizationId, 'buyer'),
       },
     );
     await this.notify(
@@ -767,8 +819,28 @@ export class CallDisputeService {
           ? 'A buyer’s dispute over a call you served was upheld; it counts against the ' +
             `tool’s quality. ${refund}`
           : 'A buyer’s dispute over a call you served was rejected.',
+        dedupeKey: dedupeKey(dispute.respondentProviderId as string, 'provider'),
       },
     );
+  }
+
+  /**
+   * Whether `settleRefund` told the buyer `call_dispute.refunded`: it does so
+   * exactly when the held payment itself went back (`held_status REFUNDED`). A
+   * refund booked another way (a voided debt) has no such notice, so the
+   * decision notice carries it. Unreadable: answer no, so the outcome is told.
+   */
+  private async refundNoticeSent(dispute: DisputeEntity): Promise<boolean> {
+    if (!dispute.intentId) return false;
+    try {
+      const intent = await this.paymentIntents.findOneBy({
+        organizationId: dispute.organizationId,
+        id: dispute.intentId,
+      });
+      return intent?.heldStatus === 'REFUNDED';
+    } catch {
+      return false;
+    }
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
@@ -1010,7 +1082,12 @@ export class CallDisputeService {
     role: CallDisputeRole,
     event: NotificationEvent,
     dispute: DisputeEntity,
-    message: { title: string; body: string; payload?: Record<string, unknown> },
+    message: {
+      title: string;
+      body: string;
+      payload?: Record<string, unknown>;
+      dedupeKey?: string;
+    },
   ): Promise<void> {
     try {
       await this.notifications.notify({
@@ -1020,7 +1097,7 @@ export class CallDisputeService {
         body: message.body,
         subjectType: CALL_DISPUTE_TARGET,
         subjectId: dispute.id,
-        dedupeKey: `${event}:${dispute.id}:${organizationId}:${role}`,
+        dedupeKey: message.dedupeKey ?? `${event}:${dispute.id}:${organizationId}:${role}`,
         payload: {
           disputeId: dispute.id,
           intentId: dispute.intentId,

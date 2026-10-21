@@ -3,6 +3,10 @@ import {
   ReceiptsSummaryGroupBy,
   ReceiptsSummaryRow,
 } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  FreeCallsSummaryRow,
+  ToolCallRecordRepository,
+} from '@database/postgres/repositories/tool-call-record.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { VerificationErrorCode } from '@modules/verification/errors/verification.errors';
 import { ReceiptSummaryService } from '@modules/verification/services/receipt-summary.service';
@@ -32,14 +36,30 @@ function row(overrides: Partial<ReceiptsSummaryRow>): ReceiptsSummaryRow {
   };
 }
 
-function build(rowsByWindow: { current: ReceiptsSummaryRow[]; previous?: ReceiptsSummaryRow[] }) {
+/** No free calls unless a test gives some. */
+function freeRepo(
+  current: FreeCallsSummaryRow[] = [],
+  previous: FreeCallsSummaryRow[] = [],
+): ToolCallRecordRepository {
+  return {
+    summarizeFreeCalls: jest.fn().mockResolvedValueOnce(current).mockResolvedValueOnce(previous),
+  } as unknown as ToolCallRecordRepository;
+}
+
+function build(rowsByWindow: {
+  current: ReceiptsSummaryRow[];
+  previous?: ReceiptsSummaryRow[];
+  free?: FreeCallsSummaryRow[];
+  previousFree?: FreeCallsSummaryRow[];
+}) {
   const summarizeReceipts = jest
     .fn()
     .mockResolvedValueOnce(rowsByWindow.current)
     .mockResolvedValueOnce(rowsByWindow.previous ?? []);
 
   const intents = { summarizeReceipts } as unknown as PaymentIntentRepository;
-  return { service: new ReceiptSummaryService(intents), intents };
+  const free = freeRepo(rowsByWindow.free, rowsByWindow.previousFree);
+  return { service: new ReceiptSummaryService(intents, free), intents, free };
 }
 
 const WINDOW = { from: '2026-08-01T00:00:00.000Z', to: '2026-08-08T00:00:00.000Z' };
@@ -163,6 +183,64 @@ describe('ReceiptSummaryService — group totals reconcile exactly to the overal
 
     expect(summary.groups.map((group) => group.freeCalls)).toEqual([2, 3]);
     expect(summary.totals.freeCalls).toBe(5);
+  });
+
+  it('counts free-tier calls, which have no intent, in freeCalls only (BUG-AGT-01)', async () => {
+    const { service, free } = build({
+      current: [row({ key: 'tool-1', calls: 17, listedTotal: 170n, chargedTotal: 170n })],
+      free: [
+        { key: 'tool-1', freeCalls: 1 },
+        { key: 'tool-0', freeCalls: 7 },
+      ],
+    });
+
+    const summary = await service.getSummary(ORG, {
+      ...WINDOW,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+
+    expect(free.summarizeFreeCalls).toHaveBeenCalledWith(ORG, ReceiptsSummaryGroupBy.TOOL, {
+      from: new Date(WINDOW.from),
+      to: new Date(WINDOW.to),
+    });
+    // A key with free calls only is its own group, in key order, money zero.
+    expect(summary.groups.map((g) => [g.key, g.calls, g.freeCalls])).toEqual([
+      ['tool-0', 0, 7],
+      ['tool-1', 17, 1],
+    ]);
+    expect(summary.groups[0]).toMatchObject({
+      listedTotal: { amount: '0', asset: USDC, decimals: 6 },
+      notChargedCalls: 0,
+      failRate: null,
+    });
+    // Paid figures are untouched: calls and the money are the paid calls'.
+    expect(summary.totals).toMatchObject({
+      calls: 17,
+      freeCalls: 8,
+      listedTotal: { amount: '170' },
+      chargedTotal: { amount: '170' },
+      notChargedCalls: 0,
+    });
+  });
+
+  it('counts free calls in the previous window too, for the comparison', async () => {
+    const { service } = build({
+      current: [],
+      previous: [],
+      free: [{ key: 'tool-0', freeCalls: 2 }],
+      previousFree: [{ key: 'tool-0', freeCalls: 5 }],
+    });
+
+    const summary = await service.getSummary(ORG, {
+      ...WINDOW,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+      compareTo: SummaryCompareTo.PREVIOUS_PERIOD,
+    });
+
+    expect(summary.groups).toHaveLength(1);
+    expect(summary.groups[0].freeCalls).toBe(2);
+    expect(summary.groups[0].comparison?.freeCalls).toBe(5);
+    expect(summary.totals.freeCalls).toBe(2);
   });
 
   it('carries not charged and owed so listed = charged + not charged + owed (R17b-B-01)', async () => {
@@ -387,9 +465,12 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
 
   it('asks for the whole window once, split by UTC day', async () => {
     const summarizeReceipts = jest.fn().mockResolvedValue(rows);
-    const service = new ReceiptSummaryService({
-      summarizeReceipts,
-    } as unknown as PaymentIntentRepository);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts,
+      } as unknown as PaymentIntentRepository,
+      freeRepo(),
+    );
 
     await service.getDailySummaries(ORG, { ...DAILY, groupBy: ReceiptsSummaryGroupBy.TOOL });
 
@@ -405,9 +486,12 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
 
   it('answers each day exactly as getSummary answers that day’s rows, empty days included', async () => {
     const summarizeReceipts = jest.fn().mockResolvedValue(rows);
-    const service = new ReceiptSummaryService({
-      summarizeReceipts,
-    } as unknown as PaymentIntentRepository);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts,
+      } as unknown as PaymentIntentRepository,
+      freeRepo(),
+    );
     const daily = await service.getDailySummaries(ORG, {
       ...DAILY,
       groupBy: ReceiptsSummaryGroupBy.TOOL,
@@ -434,6 +518,36 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
     expect(daily.days[1].summary).toMatchObject({ groups: [], asset: '' });
   });
 
+  it('puts each day’s free calls on that day only (BUG-AGT-01)', async () => {
+    const summarizeFreeCalls = jest.fn().mockResolvedValue([
+      { key: 'tool-1', day: '2026-08-01', freeCalls: 3 },
+      { key: 'tool-9', day: '2026-08-02', freeCalls: 4 },
+    ]);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts: jest.fn().mockResolvedValue(rows),
+      } as unknown as PaymentIntentRepository,
+      { summarizeFreeCalls } as unknown as ToolCallRecordRepository,
+    );
+
+    const daily = await service.getDailySummaries(ORG, {
+      ...DAILY,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+
+    expect(summarizeFreeCalls).toHaveBeenCalledWith(
+      ORG,
+      ReceiptsSummaryGroupBy.TOOL,
+      { from: new Date(DAILY.from), to: new Date(DAILY.to) },
+      { byUtcDay: true },
+    );
+    expect(daily.days.map((d) => d.summary.totals.freeCalls)).toEqual([3, 4, 0]);
+    expect(daily.days[0].summary.totals.calls).toBe(3);
+    expect(daily.days[1].summary.groups).toEqual([
+      expect.objectContaining({ key: 'tool-9', calls: 0, freeCalls: 4 }),
+    ]);
+  });
+
   it('refuses a day spanning two assets the way a per-day call does', async () => {
     const summarizeReceipts = jest
       .fn()
@@ -441,9 +555,12 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
         row({ day: '2026-08-01', asset: USDC }),
         row({ day: '2026-08-01', asset: ASSET_IDS.USDC_SOLANA_DEVNET }),
       ]);
-    const service = new ReceiptSummaryService({
-      summarizeReceipts,
-    } as unknown as PaymentIntentRepository);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts,
+      } as unknown as PaymentIntentRepository,
+      freeRepo(),
+    );
 
     await expect(
       service.getDailySummaries(ORG, { ...DAILY, groupBy: ReceiptsSummaryGroupBy.TOOL }),
@@ -459,9 +576,12 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
     ['32 days', '2026-08-01T00:00:00.000Z', '2026-09-02T00:00:00.000Z'],
   ])('refuses %s without querying', async (_name, from, to) => {
     const summarizeReceipts = jest.fn();
-    const service = new ReceiptSummaryService({
-      summarizeReceipts,
-    } as unknown as PaymentIntentRepository);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts,
+      } as unknown as PaymentIntentRepository,
+      freeRepo(),
+    );
 
     await expect(
       service.getDailySummaries(ORG, { from, to, groupBy: ReceiptsSummaryGroupBy.TOOL }),
@@ -472,9 +592,12 @@ describe('ReceiptSummaryService — getDailySummaries', () => {
   });
 
   it('accepts 31 days', async () => {
-    const service = new ReceiptSummaryService({
-      summarizeReceipts: jest.fn().mockResolvedValue([]),
-    } as unknown as PaymentIntentRepository);
+    const service = new ReceiptSummaryService(
+      {
+        summarizeReceipts: jest.fn().mockResolvedValue([]),
+      } as unknown as PaymentIntentRepository,
+      freeRepo(),
+    );
     const daily = await service.getDailySummaries(ORG, {
       from: '2026-08-01T00:00:00.000Z',
       to: '2026-09-01T00:00:00.000Z',

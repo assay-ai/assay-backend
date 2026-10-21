@@ -22,7 +22,8 @@ import { EscrowSeqService, NextSeq } from './escrow-seq.service';
  * voucher. So each agent credential gets {@link NEXT_SEQ_RATE_LIMITS} (the
  * public demo's sliding window, which fails closed), and the allocation reads
  * the escrow like the MCP path does: that applies the gap cap and rewinds a
- * counter that is already past it.
+ * counter that is already past it. An account with no escrow on chain is
+ * refused `PAYMENT_ESCROW_NOT_OPEN` (409) before anything is allocated.
  */
 @Injectable()
 export class NextSeqService {
@@ -52,6 +53,11 @@ export class NextSeqService {
 
     const asset = chainMetadata(chainId).settlementAsset as AssetId;
     const reading = await this.escrow.read(account, asset);
-    return this.seqs.allocate(organizationId, account, reading ? reading.seqHigh : null);
+    // No escrow on chain: a voucher over this seq could never be redeemed, so
+    // hand none out and do not advance the counter (spec SEC-16, BUG-SEC-02).
+    // An eip155 buyer may have a mirror row before funding, which is why the
+    // allocator alone does not refuse it.
+    if (!reading) throw PaymentErrors.escrowNotOpen({ account });
+    return this.seqs.allocate(organizationId, account, reading.seqHigh);
   }
 }
