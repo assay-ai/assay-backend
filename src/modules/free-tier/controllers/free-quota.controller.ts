@@ -6,6 +6,7 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import { FreeQuotaResponseDto } from '../dto/free-quota-response.dto';
 import { FreeQuotaService } from '../services/free-quota.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/free-quota`.
@@ -24,6 +25,7 @@ export class FreeQuotaController {
   constructor(private readonly quota: FreeQuotaService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'agent', epochs: ['money'], singleFlight: true })
   @ApiOperation({ summary: "This agent's own free-tier standing" })
   @ApiResponse({ status: 200, type: FreeQuotaResponseDto })
   async get(@CurrentSession() session: McpSession): Promise<FreeQuotaResponseDto> {

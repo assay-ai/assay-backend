@@ -219,6 +219,48 @@ describe('the approvals queue, against a real database', () => {
     expect(await entries(target)).toEqual([]);
   });
 
+  it('reads a lapsed request as EXPIRED without writing, exactly as the swept row reads', async () => {
+    const { approvalId } = await queued();
+    await dataSource.query(
+      `UPDATE operator_approvals SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      [approvalId],
+    );
+    const ids = async (status?: 'PENDING' | 'EXPIRED') =>
+      (await approvals.list({ status, action: ACTION, limit: 100 } as never)).items.map(
+        (item) => item.id,
+      );
+
+    const read = await approvals.get(approvalId);
+    const listedPending = await ids('PENDING');
+    const listedExpired = await ids('EXPIRED');
+    const listedAll = await ids();
+    // A read writes nothing now.
+    expect((await approval(approvalId)).status).toBe('PENDING');
+
+    // What the old read path did first: sweep, then read.
+    await new OperatorApprovalRepository(dataSource).expireStale();
+    expect((await approval(approvalId)).status).toBe('EXPIRED');
+    const swept = await approvals.get(approvalId);
+
+    // Identical, decidedAt included: both put it at expires_at.
+    expect(read).toEqual(swept);
+    expect(read.status).toBe('EXPIRED');
+    expect(read.decidedAt).toEqual(read.expiresAt);
+    expect(await approvals.get(approvalId)).toEqual(swept);
+    expect(listedPending).not.toContain(approvalId);
+    expect(listedExpired).toContain(approvalId);
+    expect(await ids('PENDING')).toEqual(listedPending);
+    expect(await ids('EXPIRED')).toEqual(listedExpired);
+    expect(await ids()).toEqual(listedAll);
+  });
+
+  it('still lists a live request as PENDING', async () => {
+    const { approvalId } = await queued();
+    const listed = await approvals.list({ status: 'PENDING', limit: 100 } as never);
+    expect(listed.items.find((item) => item.id === approvalId)?.status).toBe('PENDING');
+    expect((await approvals.get(approvalId)).decidedAt).toBeNull();
+  });
+
   it('is closed by a rejection, and cannot then be approved', async () => {
     const { target, approvalId } = await queued();
 

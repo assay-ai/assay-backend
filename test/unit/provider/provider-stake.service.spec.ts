@@ -112,6 +112,8 @@ function build(options: {
   stake?: { staked: { amount: string; asset: string; decimals: number }; observedAt: Date };
   minimumStakeOverride?: { amount: string; asset: string; decimals: number };
   bindings?: Array<Record<string, unknown>>;
+  /** The catalogue answers `findBindingsOfProvider` (the production catalogue does). */
+  providerScopedCatalogue?: boolean;
   grace?: ProviderStakeGraceEntity[];
   stakeAuthority?: string | null;
   providerRow?: boolean;
@@ -189,6 +191,9 @@ function build(options: {
     findTool: jest.fn(),
     listTools: jest.fn().mockResolvedValue([{ id: 'search_web' }]),
     findBindings: jest.fn().mockResolvedValue(bindings),
+    ...(options.providerScopedCatalogue
+      ? { findBindingsOfProvider: jest.fn().mockResolvedValue(bindings) }
+      : {}),
   };
 
   // Per ACCOUNT, so one chain's RPC can fail while another answers — the
@@ -236,6 +241,7 @@ function build(options: {
   } as unknown as ProviderStakeGraceRepository;
 
   return {
+    catalogue,
     service: new ProviderStakeService(
       stakes,
       registry,
@@ -988,5 +994,27 @@ describe('GET /providers/me/stake reports stake PER CHAIN', () => {
     expect(res.requirementTotal).toEqual(usdc('50000000'));
     expect(res.shortfall).toEqual(usdc('5000000'));
     expect(res.headroom).toEqual(usdc('0'));
+  });
+});
+
+describe("ProviderStakeService — reads only the provider's own bindings (B3)", () => {
+  const mixed = () => [
+    binding({ id: 'a', toolId: 'search_web', priceAmount: '10000' }),
+    binding({ id: 'b', toolId: 'ais_lookup', priceAmount: '200000' }),
+    binding({ id: 'c', toolId: 'search_web', pricingMode: PricingMode.FREE, priceAmount: '0' }),
+    binding({ id: 'd', toolId: 'search_web', status: BindingStatus.PAUSED }),
+    binding({ id: 'e', toolId: 'search_web', providerId: 'someone-else' }),
+  ];
+
+  it('answers exactly what the every-tool scan answered, without listing tools', async () => {
+    const scanned = await build({ bindings: mixed() }).service.getStake(PROVIDER);
+    const scoped = build({ bindings: mixed(), providerScopedCatalogue: true });
+
+    const result = await scoped.service.getStake(PROVIDER);
+
+    expect(result).toEqual(scanned);
+    expect(scoped.catalogue.findBindingsOfProvider).toHaveBeenCalledWith(PROVIDER);
+    expect(scoped.catalogue.listTools).not.toHaveBeenCalled();
+    expect(scoped.catalogue.findBindings).not.toHaveBeenCalled();
   });
 });

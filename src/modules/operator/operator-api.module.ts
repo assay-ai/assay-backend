@@ -37,6 +37,7 @@ import { OperatorProviderToolsService } from './services/operator-provider-tools
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
+import { LastSeenModule } from '@shared/last-seen';
 
 /**
  * The operator console's HTTP surface.
@@ -71,6 +72,8 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   // `ToolsetModule` supplies the toolset and handle moderation writes the
   // moderation controller runs inside the register's transaction.
   imports: [
+    // The operator directory overlays the buffered `last_seen_at`.
+    LastSeenModule,
     OperatorModule,
     SlashModule,
     ProviderModule,

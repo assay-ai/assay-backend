@@ -6,7 +6,10 @@ import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AgentsController } from '@modules/account/controllers/agents.controller';
+import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
+import { AgentListService } from '@modules/account/services/agent-list.service';
 import { AgentsService } from '@modules/account/services/agents.service';
+import { CursorPageDto } from '@shared/api';
 import { MCP_SESSION_SOURCE, McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { AuditLogWriter } from '@shared/audit';
@@ -65,6 +68,8 @@ describe('PATCH /agents/:agentId over HTTP', () => {
       controllers: [AgentsController],
       providers: [
         AgentsService,
+        AgentListService,
+        { provide: AgentCredentialsService, useValue: {} },
         { provide: MCP_SESSION_SOURCE, useValue: sessions },
         {
           provide: AgentRepository,
@@ -155,5 +160,154 @@ describe('PATCH /agents/:agentId over HTTP', () => {
   it('refuses a non-UUID agent id with 400', async () => {
     const res = await patch('me', 'person', { label: 'ok' });
     expect(res.status).toBe(400);
+  });
+});
+
+/**
+ * `GET /agents?include=` over HTTP: the plain list is unchanged and open to an
+ * agent; `include` is a person's read (it nests the credentials route's
+ * items), and only what was asked for is added.
+ */
+describe('GET /agents?include= over HTTP', () => {
+  let app: INestApplication;
+  const firstPagesFor = jest.fn();
+  const list = jest.fn();
+
+  const session = (callerKind: McpCallerKind) => ({
+    credentialId: `cred-${callerKind}`,
+    organizationId: ORG_A,
+    agentId: AGENT_A,
+    agentAccount: 'eip155:46630:0x0000000000000000000000000000000000000001',
+    chainId: 'eip155:46630',
+    label: null,
+    callerKind,
+  });
+  const sessions = {
+    resolve: jest.fn(async (token: string | null) => {
+      if (token === 'person') return session(McpCallerKind.HUMAN);
+      if (token === 'machine') return session(McpCallerKind.AGENT);
+      throw McpErrors.credentialInvalid();
+    }),
+  };
+
+  const agent = (agentId: string) => ({
+    agentId,
+    label: 'Agent',
+    agentAccount: null,
+    chainId: 'eip155:46630',
+    credentialCount: 1,
+  });
+  const key = {
+    id: 'k1',
+    agentId: AGENT_A,
+    name: 'laptop',
+    issuedVia: 'API_KEY',
+    oauthClient: null,
+    prefix: 'assay_sk_live_ab',
+    scopes: [],
+    lastUsedAt: new Date('2026-10-19T08:00:00.000Z'),
+    expiresAt: null,
+    revokedAt: null,
+    rotatedFromId: null,
+    delegateAccount: 'eip155:46630:0x0000000000000000000000000000000000000002',
+    delegateBoundAt: new Date('2026-10-18T08:00:00.000Z'),
+    createdAt: new Date('2026-10-18T07:00:00.000Z'),
+  };
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AgentsController],
+      providers: [
+        AgentListService,
+        { provide: AgentsService, useValue: { list } },
+        { provide: AgentCredentialsService, useValue: { firstPagesFor } },
+        { provide: MCP_SESSION_SOURCE, useValue: sessions },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
+    );
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+  }, 30_000);
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    list.mockReset().mockResolvedValue(new CursorPageDto([agent(AGENT_A), agent(AGENT_B)], null));
+    firstPagesFor
+      .mockReset()
+      .mockResolvedValue(new Map([[AGENT_A, { items: [key], hasMore: false }]]));
+  });
+
+  const get = (token: string, query: Record<string, string> = {}) =>
+    request(app.getHttpServer())
+      .get('/agents')
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+  it('without include is the list as before, for an agent too, and reads no credential', async () => {
+    const res = await get('machine');
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual([agent(AGENT_A), agent(AGENT_B)]);
+    expect(firstPagesFor).not.toHaveBeenCalled();
+  });
+
+  it('reads every agent’s credentials in one call and nests both parts', async () => {
+    const res = await get('person', { include: 'credentials,health', limit: '20' });
+    expect(res.status).toBe(200);
+    expect(firstPagesFor).toHaveBeenCalledTimes(1);
+    expect(firstPagesFor).toHaveBeenCalledWith(ORG_A, [AGENT_A, AGENT_B], 50);
+    expect(list).toHaveBeenCalledWith(ORG_A, expect.objectContaining({ limit: 20 }));
+    const [mine, theirs] = res.body.items;
+    expect(mine.credentials).toEqual(JSON.parse(JSON.stringify({ items: [key], hasMore: false })));
+    expect(mine.health).toMatchObject({
+      liveKeyCount: 1,
+      keyBound: true,
+      lastUsedAt: '2026-10-19T08:00:00.000Z',
+    });
+    // An agent the batch returned nothing for has an empty page, not a gap.
+    expect(theirs.credentials).toEqual({ items: [], hasMore: false });
+    expect(theirs.health).toMatchObject({ liveKeyCount: 0, keyBound: false, lastUsedAt: null });
+  });
+
+  it('adds only what was asked for', async () => {
+    const res = await get('person', { include: 'health' });
+    expect(res.body.items[0]).toHaveProperty('health');
+    expect(res.body.items[0]).not.toHaveProperty('credentials');
+  });
+
+  it('refuses include to an agent credential with 403, reading nothing', async () => {
+    const res = await get('machine', { include: 'health' });
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
+    expect(list).not.toHaveBeenCalled();
+    expect(firstPagesFor).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['repeated', '?include=credentials&include=health'],
+    ['repeated and comma-separated', '?include=credentials,&include=,health'],
+    ['with spaces and empty entries', '?include=%20credentials%20,,health'],
+  ])('reads include %s as both parts', async (_name, search) => {
+    const res = await request(app.getHttpServer())
+      .get(`/agents${search}`)
+      .set('Authorization', 'Bearer person');
+    expect(res.status).toBe(200);
+    expect(res.body.items[0]).toHaveProperty('credentials');
+    expect(res.body.items[0]).toHaveProperty('health');
+  });
+
+  it('reads an empty include as none: the plain list, open to an agent', async () => {
+    const res = await get('machine', { include: ',' });
+    expect(res.status).toBe(200);
+    expect(firstPagesFor).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown include with 400', async () => {
+    expect((await get('person', { include: 'secrets' })).status).toBe(400);
   });
 });

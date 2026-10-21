@@ -95,6 +95,9 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
    * Written on a coarse cadence rather than on every request: a synchronous
    * write here would put a row update on the hot path of every authenticated
    * call to serve a column whose UI only ever renders it as "3 minutes ago".
+   * Each use is buffered in Redis by `LastSeenRecorder` and written in a batch
+   * every 30 s; a reader shows the latest of this column and
+   * `LastSeenRecorder.pending` (see `AgentCredentialsService.list`).
    */
   @Column({ name: 'last_used_at', type: 'timestamptz', nullable: true })
   lastUsedAt: Date | null;

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
 import { OperatorEntity } from '@database/postgres/entities/operator.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -22,6 +22,7 @@ import { OperatorApprover, OperatorSession } from '../ports/operator-session.por
 import { OperatorApprovalService } from './operator-approval.service';
 import { OperatorService } from './operator.service';
 import { OverrideLogService } from './override-log.service';
+import { LastSeenKind, LastSeenRecorder } from '@shared/last-seen';
 
 const TARGET_TYPE = 'operator';
 
@@ -100,6 +101,7 @@ export class OperatorDirectoryService {
     private readonly directory: OperatorService,
     private readonly sessions: OperatorSessionStore,
     private readonly approvals: OperatorApprovalService,
+    @Optional() private readonly lastSeen: LastSeenRecorder | null = null,
   ) {
     approvals.register(DIRECTORY_APPROVAL_ACTIONS.add, {
       code: 'A-12',
@@ -134,8 +136,15 @@ export class OperatorDirectoryService {
     const qb = this.operators.createQueryBuilder('operator');
     if (query.status) qb.andWhere('operator.status = :status', { status: query.status });
     const page = await paginate(qb, query, OPERATOR_LIST);
+    // `last_seen_at` is buffered (`LastSeenRecorder`): the screen reads the
+    // latest of the row and the stamps not yet written.
+    const pending =
+      (await this.lastSeen?.pending(
+        LastSeenKind.OPERATOR_SEEN,
+        page.items.map((row) => row.id),
+      )) ?? new Map<string, Date>();
     return new CursorPageDto(
-      page.items.map((row) => this.toEntry(row)),
+      page.items.map((row) => this.toEntry(row, pending.get(row.id))),
       page.pageInfo.nextCursor,
     );
   }
@@ -382,11 +391,11 @@ export class OperatorDirectoryService {
     return row;
   }
 
-  private toEntry(row: OperatorEntity): OperatorDirectoryEntryDto {
+  private toEntry(row: OperatorEntity, seen?: Date): OperatorDirectoryEntryDto {
     return {
       ...this.directory.toDto(row),
       email: row.email,
-      lastSeenAt: row.lastSeenAt,
+      lastSeenAt: LastSeenRecorder.latest(row.lastSeenAt, seen),
       createdAt: row.createdAt,
     };
   }

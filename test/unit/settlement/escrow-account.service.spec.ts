@@ -78,11 +78,17 @@ function buildService(options?: {
       ? jest.fn().mockRejectedValue(options.holdsThrow)
       : jest.fn().mockResolvedValue(options?.openHoldsAtomic ?? 0n),
   };
+  // One `buyer_escrows` row answers both the mirror ids and `next_seq`
+  // (`peekNextSeq` is that row's column): no row when `nextSeq` is null.
+  const nextSeq = options?.nextSeq === undefined ? 1n : options.nextSeq;
   const escrows = {
-    peekNextSeq: options?.peekNextSeqThrows
+    findByAccount: options?.peekNextSeqThrows
       ? jest.fn().mockRejectedValue(options.peekNextSeqThrows)
-      : jest.fn().mockResolvedValue(options?.nextSeq === undefined ? 1n : options.nextSeq),
-    findByAccount: jest.fn().mockResolvedValue(options?.mirrorRow ?? null),
+      : jest
+          .fn()
+          .mockResolvedValue(
+            nextSeq === null ? null : { ...(options?.mirrorRow ?? {}), nextSeq: String(nextSeq) },
+          ),
   };
   const builder = {
     escrowAsset: options?.escrowAssetThrows
@@ -143,6 +149,27 @@ describe('EscrowAccountService.get', () => {
       expect(state.escrowPda).toBeNull();
       expect(state.escrowTokenAccount).toBeNull();
     });
+  });
+
+  it('reads the buyer_escrows row once for both next_seq and the mirror ids (B7)', async () => {
+    for (const reading of [chainBalance(), null]) {
+      const { service, escrows } = buildService({ reading, mirrorRow: MIRROR_ROW, nextSeq: 42n });
+
+      const state = await service.get(ORG, ACCOUNT, USDC);
+
+      expect(escrows.findByAccount).toHaveBeenCalledTimes(1);
+      expect(state.nextSeq).toBe('42');
+      expect(state.escrowPda).toBe(ESCROW_ACCOUNT_ID);
+    }
+    const { service, escrows } = buildService({ readerThrows: new Error('rpc down'), nextSeq: 7n });
+    const degraded = await service.getForConsole(ORG, ACCOUNT);
+    expect(escrows.findByAccount).toHaveBeenCalledTimes(1);
+    expect(degraded.nextSeq).toBe('7');
+  });
+
+  it('answers next_seq 0 when there is no buyer_escrows row', async () => {
+    const { service } = buildService({ nextSeq: null });
+    expect((await service.get(ORG, ACCOUNT, USDC)).nextSeq).toBe('0');
   });
 
   it('returns a server-supplied INSTANT for the withdrawal, never a delay the client adds', async () => {

@@ -83,12 +83,7 @@ export class LedgerWithheldService {
       LedgerEntryType.HOLD_RELEASE,
       period,
     );
-    const row = rows.find((candidate) => candidate.asset === asset);
-
-    if (!row) {
-      return MoneyUtil.zero(asset, decimals);
-    }
-    return MoneyUtil.of(row.amount, asset, row.decimals);
+    return journalTotalFor(asset, decimals, rows);
   }
 
   /**
@@ -121,9 +116,32 @@ export class LedgerWithheldService {
     decimals: number,
     period: WithheldPeriod = {},
   ): Promise<WithheldReconciliation> {
-    const [withheld, holdReleaseTotal, summaries] = await Promise.all([
-      this.withheldFromIntents(organizationId, asset, decimals, period),
-      this.withheldFromJournal(organizationId, asset, decimals, period),
+    const [reconciliation] = await this.reconcileAssets(
+      organizationId,
+      [{ asset, decimals }],
+      period,
+    );
+    return reconciliation as WithheldReconciliation;
+  }
+
+  /**
+   * {@link reconcile} for several assets, in the order given.
+   *
+   * The three aggregates already group by asset and are scoped by organization
+   * and period only, so each runs once and every asset's reconciliation is
+   * folded from the same rows. Reading them once per asset returned the same
+   * rows each time. No asset, no query.
+   */
+  async reconcileAssets(
+    organizationId: string,
+    assets: readonly { asset: AssetId; decimals: number }[],
+    period: WithheldPeriod = {},
+  ): Promise<WithheldReconciliation[]> {
+    if (assets.length === 0) return [];
+
+    const [intentRows, journalRows, summaries] = await Promise.all([
+      this.intents.sumWithheldByAssetAndStatus(organizationId, period),
+      this.entries.sumEntryTypeByAsset(organizationId, LedgerEntryType.HOLD_RELEASE, period),
       this.entries.summarizeOrphanedHoldReleases(
         organizationId,
         period,
@@ -131,27 +149,46 @@ export class LedgerWithheldService {
       ),
     ]);
 
-    const forAsset = summaries.filter((summary) => summary.asset === asset);
-    const sum = (term: (row: (typeof forAsset)[number]) => bigint) =>
-      forAsset.reduce((total, row) => total + term(row), 0n);
+    return assets.map(({ asset, decimals }) => {
+      const forAsset = summaries.filter((summary) => summary.asset === asset);
+      const sum = (term: (row: (typeof forAsset)[number]) => bigint) =>
+        forAsset.reduce((total, row) => total + term(row), 0n);
 
-    return reconcileWithheld({
-      withheld,
-      holdReleaseTotal,
-      orphanedReleases: MoneyUtil.of(
-        sum((row) => row.orphanedReleases),
-        asset,
-        decimals,
-      ),
-      orphanedHoldIds: forAsset.flatMap((row) => row.orphanedHoldIds),
-      orphanedHoldCount: forAsset.reduce((total, row) => total + row.orphanedHoldCount, 0),
-      settlementRemainders: MoneyUtil.of(
-        sum((row) => row.settlementRemainders),
-        asset,
-        decimals,
-      ),
+      return reconcileWithheld({
+        withheld: toWithheldTotal(
+          asset,
+          decimals,
+          intentRows.filter((row) => row.asset === asset),
+        ),
+        holdReleaseTotal: journalTotalFor(asset, decimals, journalRows),
+        orphanedReleases: MoneyUtil.of(
+          sum((row) => row.orphanedReleases),
+          asset,
+          decimals,
+        ),
+        orphanedHoldIds: forAsset.flatMap((row) => row.orphanedHoldIds),
+        orphanedHoldCount: forAsset.reduce((total, row) => total + row.orphanedHoldCount, 0),
+        settlementRemainders: MoneyUtil.of(
+          sum((row) => row.settlementRemainders),
+          asset,
+          decimals,
+        ),
+      });
     });
   }
+}
+
+/** `Σ HOLD_RELEASE` for one asset out of the per-asset rows; zero at `decimals` when absent. */
+function journalTotalFor(
+  asset: AssetId,
+  decimals: number,
+  rows: readonly { asset: string; decimals: number; amount: bigint }[],
+): Money {
+  const row = rows.find((candidate) => candidate.asset === asset);
+  if (!row) {
+    return MoneyUtil.zero(asset, decimals);
+  }
+  return MoneyUtil.of(row.amount, asset, row.decimals);
 }
 
 /** Stands in for the hold id the query already required (`hold_id IS NOT NULL`). */

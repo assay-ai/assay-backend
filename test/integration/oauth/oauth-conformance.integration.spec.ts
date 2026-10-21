@@ -612,7 +612,10 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     );
     api.useGlobalFilters(new AllExceptionsFilter());
     api.useGlobalInterceptors(new LoggingInterceptor(), new TransformInterceptor());
-    await api.init();
+    // Bound once, on 127.0.0.1 exactly: supertest then reuses this address
+    // instead of an ephemeral wildcard listen per request, which another local
+    // process holding the same port on 127.0.0.1 could answer.
+    await api.listen(0, '127.0.0.1');
     vendorLookupsAfterApiBoot = vendorLookups();
 
     const mcpRef = await Test.createTestingModule({ imports: [AppMcpModule] })
@@ -626,7 +629,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     mcpApp.enableCors(mcpCorsOptions);
     mcpApp.useGlobalFilters(new McpExceptionsFilter());
     mcpApp.useGlobalInterceptors(new LoggingInterceptor());
-    await mcpApp.init();
+    await mcpApp.listen(0, '127.0.0.1');
     mcp = mcpApp;
   }, 300_000);
 

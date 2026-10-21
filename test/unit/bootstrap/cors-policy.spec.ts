@@ -123,6 +123,18 @@ describe('API CORS policy (audit P2-1: CDN-cached public reads)', () => {
     expect(preflight.headers['access-control-allow-origin']).toBeUndefined();
   });
 
+  it('lets the browser reuse an allowed preflight for 2 h (Authorization is not safelisted)', async () => {
+    const preflight = await request(app.getHttpServer())
+      .options('/api/v1/buyers/me')
+      .set('Origin', ALLOWED)
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'authorization');
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers['access-control-allow-origin']).toBe(ALLOWED);
+    expect(preflight.headers['access-control-allow-credentials']).toBe('true');
+    expect(preflight.headers['access-control-max-age']).toBe('7200');
+  });
+
   it.each([
     ['GET', '/api/v1/public/not-charged', true],
     ['HEAD', '/api/v1/public/catalogue/tools?x=1', true],

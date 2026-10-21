@@ -6,6 +6,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { GetBalancesResponseDto } from '../dto/get-balances.dto';
 import { BalancesService } from '../services/balances.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * The account's balances, and `withheld` beside them so the
@@ -22,6 +23,7 @@ export class BalancesController {
   constructor(private readonly balances: BalancesService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'], singleFlight: true })
   @ApiOperation({
     summary: "The organization's balances, plus withheld with its reconciliation",
   })

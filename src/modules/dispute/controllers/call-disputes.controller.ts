@@ -13,6 +13,8 @@ import {
   ListCallDisputesQueryDto,
 } from '../dto/call-dispute.dto';
 import { CallDisputeService } from '../services/call-dispute.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * `POST /api/v1/call-disputes`, `GET /api/v1/call-disputes`,
@@ -25,6 +27,8 @@ import { CallDisputeService } from '../services/call-dispute.service';
 @ApiTags('Call disputes')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('call-disputes')
 export class CallDisputesController {
   constructor(private readonly disputes: CallDisputeService) {}
@@ -54,6 +58,7 @@ export class CallDisputesController {
   }
 
   @Get()
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'This organization’s call disputes, newest first' })
   @ApiCursorPage(CallDisputeDto)
   async list(
@@ -64,6 +69,7 @@ export class CallDisputesController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'One call dispute, with its captured evidence' })
   @ApiResponse({ status: 200, type: CallDisputeDetailDto })
   @ApiResponse({ status: 404, description: 'No such dispute in this organization' })

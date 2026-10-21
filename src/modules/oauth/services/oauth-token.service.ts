@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -35,6 +35,7 @@ import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
 import { normaliseScope } from '../domain/scope';
 import { OAUTH_SYSTEM_ACTOR, OAuthGrantWriter } from './oauth-grant.writer';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 
 /** The 200 body of `POST {MCP}/oauth/token` (RFC 6749 §5.1). */
 export interface TokenPair {
@@ -190,6 +191,7 @@ export class OAuthTokenService {
     private readonly credentials: AgentCredentialRepository,
     private readonly cache: CacheService,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   /**
@@ -435,6 +437,9 @@ export class OAuthTokenService {
         .where('id = :id', { id: token.id })
         .andWhere('revoked_at IS NULL')
         .execute();
+      // No access epoch moves for one access token, so its cached session is
+      // evicted here.
+      await this.sessions?.evictOrganization(token.organizationId);
     }
   }
 

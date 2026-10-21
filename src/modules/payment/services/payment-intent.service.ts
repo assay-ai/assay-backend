@@ -53,6 +53,7 @@ import {
   HeldPaymentsPort,
   HeldStatus,
 } from '../ports/held-payments.port';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
   CreatePaymentIntentInput,
@@ -135,7 +136,18 @@ export class PaymentIntentService {
     @Inject(HELD_PAYMENTS)
     private readonly held: HeldPaymentsPort | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
+    @Optional() private readonly epochs: TenantEpochService | null = null,
   ) {}
+
+  /**
+   * What the buyer's money screens and the provider's earnings show moved:
+   * after the stamp that makes a credit count as earned (`holdReleasedAt`,
+   * written after the ledger commit, so the ledger's own bump is too early
+   * for it).
+   */
+  private async settled(buyerOrganizationId: string, providerOrganizationId?: string | null) {
+    await this.epochs?.bump([buyerOrganizationId, providerOrganizationId], 'money', 'provider');
+  }
 
   /**
    * Creates an intent, or returns the one an earlier copy of this request
@@ -664,6 +676,7 @@ export class PaymentIntentService {
       chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
     });
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
+    await this.settled(organizationId, intent.providerId);
 
     return this.findById(organizationId, intentId);
   }
@@ -787,6 +800,7 @@ export class PaymentIntentService {
       chainTxRef,
     });
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
+    await this.settled(organizationId, intent.providerId);
 
     return this.findById(organizationId, intentId);
   }
@@ -809,6 +823,7 @@ export class PaymentIntentService {
       { organizationId: intent.organizationId, id: intent.id },
       { holdReleasedAt: new Date() },
     );
+    await this.settled(intent.organizationId);
 
     return resolution.applied;
   }
@@ -913,6 +928,7 @@ export class PaymentIntentService {
         txRef,
       ),
     );
+    await this.settled(organizationId, intent.providerId);
     return this.findById(organizationId, intentId);
   }
 

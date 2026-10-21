@@ -1,3 +1,4 @@
+# check=skip=CopyIgnoredFile
 # node 24, not 20. `@solana-program/token` declares `engines: node >=24`, and yarn
 # refuses the install outright on 20 — so this image could not be built at all.
 # `engines.node` in package.json is raised to match rather than left saying 18.
@@ -5,14 +6,17 @@ FROM node:24-alpine AS development
 
 WORKDIR /app
 
-COPY package*.json ./
-COPY yarn.lock ./
+COPY package.json yarn.lock ./
 # `packages/*` is a yarn workspace, so its manifest has to exist before
 # `yarn install` — without it yarn resolves `@assay/settlement-client` against the
 # registry, where it does not exist, and the install fails.
 COPY packages/settlement-client/package.json ./packages/settlement-client/
 
-RUN yarn install
+# `--frozen-lockfile`: install exactly what yarn.lock pins and fail if the
+# manifest and the lockfile disagree, rather than resolving anew from the
+# registry (non-reproducible, and a dependency-confusion opening for any name
+# the lockfile does not cover).
+RUN yarn install --frozen-lockfile
 
 COPY . .
 
@@ -27,11 +31,20 @@ ENV NODE_ENV=${NODE_ENV}
 
 WORKDIR /app
 
-COPY package*.json ./
-COPY yarn.lock ./
+COPY package.json yarn.lock ./
 COPY packages/settlement-client/package.json ./packages/settlement-client/
 
-RUN yarn install --production
+# `--ignore-scripts`: no runtime dependency needs its install script — the only
+# ones are a telemetry ping (@scarf/scarf), an opencollective banner
+# (@nestjs/core), and msgpackr-extract's fallback compile, which is a no-op
+# because its prebuilt binary arrives as an optional dependency.
+#
+# The yarn cache (~650 MB) and the dependencies' source maps (~80 MB) are
+# removed in the same layer, otherwise they stay in the image underneath it.
+# Nothing loads a .map at runtime: node is not started with --enable-source-maps.
+RUN yarn install --production --frozen-lockfile --ignore-scripts \
+  && yarn cache clean \
+  && find node_modules -type f \( -name '*.js.map' -o -name '*.cjs.map' -o -name '*.mjs.map' -o -name '*.ts.map' \) -delete
 
 # The workspace symlink in node_modules points at packages/settlement-client, so
 # the runtime image needs that package's build output as well as the app's.

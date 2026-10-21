@@ -6,12 +6,14 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import {
   AgentDelegateBindingDto,
+  AgentDelegateBindingStatusDto,
   AgentDelegateStatusDto,
   BindDelegateBodyDto,
   CreateDelegateChallengeBodyDto,
   DelegateChallengeResponseDto,
 } from '../dto/agent-delegate.dto';
 import { AgentDelegateService } from '../services/agent-delegate.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `/agents/me/delegate` — the calling AGENT credential binds the delegate key
@@ -27,12 +29,22 @@ export class AgentDelegateController {
   constructor(private readonly delegates: AgentDelegateService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['money', 'agents'], singleFlight: true })
   @ApiOperation({
     summary: "This credential's bound delegate key, if any, and its on-chain paid-call status",
   })
   @ApiResponse({ status: 200, type: AgentDelegateStatusDto })
   current(@CurrentSession() session: McpSession): Promise<AgentDelegateStatusDto> {
     return this.delegates.current(session);
+  }
+
+  @Get('status')
+  @ApiOperation({
+    summary: "This credential's bound delegate key, if any — from the database, no chain read",
+  })
+  @ApiResponse({ status: 200, type: AgentDelegateBindingStatusDto })
+  status(@CurrentSession() session: McpSession): Promise<AgentDelegateBindingStatusDto> {
+    return this.delegates.bindingStatus(session);
   }
 
   @Post('challenge')

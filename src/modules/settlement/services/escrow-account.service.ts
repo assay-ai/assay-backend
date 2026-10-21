@@ -226,15 +226,16 @@ export class EscrowAccountService {
     asset: AssetId,
     reading: EscrowChainBalance | null,
   ): Promise<EscrowState> {
-    const [withdrawDelaySeconds, nextSeq, mirror] = await Promise.all([
+    const [withdrawDelaySeconds, mirror] = await Promise.all([
       // The account's own chain. The delay is a per-chain quantity —
       // read off `Config` on Solana, a compile-time constant on eip155 — and a
       // screen showing one chain's countdown for the other is a wrong number a
       // buyer would act on.
       this.builder.withdrawDelaySeconds(chainIdOf(account)),
-      this.escrows.peekNextSeq(organizationId, account),
       this.escrows.findByAccount(organizationId, account),
     ]);
+    // `peekNextSeq` is this same row's `next_seq`; one read serves both.
+    const nextSeq = mirror ? BigInt(mirror.nextSeq) : null;
 
     const now = new Date();
     const nextSeqStr = nextSeq === null ? '0' : nextSeq.toString();
@@ -318,10 +319,8 @@ export class EscrowAccountService {
    * outage is not an unreadable chain and must not be reported as one.
    */
   private async unreadable(organizationId: string, account: AccountId): Promise<EscrowState> {
-    const [nextSeq, mirror] = await Promise.all([
-      this.escrows.peekNextSeq(organizationId, account),
-      this.escrows.findByAccount(organizationId, account),
-    ]);
+    const mirror = await this.escrows.findByAccount(organizationId, account);
+    const nextSeq = mirror ? BigInt(mirror.nextSeq) : null;
 
     const now = new Date();
 

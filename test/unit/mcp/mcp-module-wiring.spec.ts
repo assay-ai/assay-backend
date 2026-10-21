@@ -75,6 +75,12 @@ import { DEMO_RATE_REDIS } from '@modules/mcp/services/redis-demo-rate-limiter.s
 import { SIGNING_RATE_REDIS } from '@modules/verification/signing/signing.constants';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
+import {
+  CachingSessionSource,
+  SESSION_CACHE,
+  SESSION_EVICTIONS_PUBLISHER,
+  SESSION_EVICTIONS_SUBSCRIBER,
+} from '@modules/auth/session-cache';
 
 /**
  * `McpModule` resolves inside a real Nest container.
@@ -489,7 +495,13 @@ describe('toolset, Connect preview and MCP host wiring', () => {
         expect(app.get(token, { strict: false })).toBeInstanceOf(token);
       }
     } finally {
-      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
+      for (const token of [
+        KILL_SWITCH_REDIS,
+        KILL_SWITCH_SUBSCRIBER,
+        SIGNING_RATE_REDIS,
+        SESSION_EVICTIONS_PUBLISHER,
+        SESSION_EVICTIONS_SUBSCRIBER,
+      ]) {
         try {
           app.get<Redis>(token, { strict: false }).disconnect();
         } catch {
@@ -558,16 +570,33 @@ describe('MCP_SESSION_SOURCE wiring (AUTH_SESSION_SOURCE=both)', () => {
       expect(inner).toBeInstanceOf(CompositeMcpSessionSource);
 
       const sources = (inner as unknown as { sources: readonly unknown[] }).sources;
-      expect(sources.map((each) => (each as object).constructor)).toEqual([
-        ConfigMcpSessionSource,
+      // Every source that reads the database is wrapped in the session cache,
+      // inside the blocklist; the in-memory config source is not.
+      expect(sources[0]).toBeInstanceOf(ConfigMcpSessionSource);
+      const wrapped = sources.slice(1) as CachingSessionSource[];
+      for (const each of wrapped) expect(each).toBeInstanceOf(CachingSessionSource);
+      const innerOf = (each: CachingSessionSource) => (each as unknown as { inner: object }).inner;
+      expect(wrapped.map((each) => innerOf(each).constructor)).toEqual([
         DbCredentialMcpSessionSource,
         OAuthAccessTokenMcpSessionSource,
         PrivyMcpSessionSource,
       ]);
       // The same instance `AuthModule` exports, not a second one.
-      expect(sources[2]).toBe(app.get(OAuthAccessTokenMcpSessionSource, { strict: false }));
+      expect(innerOf(wrapped[1])).toBe(
+        app.get(OAuthAccessTokenMcpSessionSource, { strict: false }),
+      );
+      // One cache for the three.
+      const cacheOf = (each: CachingSessionSource) => (each as unknown as { cache: unknown }).cache;
+      expect(new Set(wrapped.map(cacheOf)).size).toBe(1);
+      expect(cacheOf(wrapped[0])).toBe(app.get(SESSION_CACHE, { strict: false }));
     } finally {
-      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
+      for (const token of [
+        KILL_SWITCH_REDIS,
+        KILL_SWITCH_SUBSCRIBER,
+        SIGNING_RATE_REDIS,
+        SESSION_EVICTIONS_PUBLISHER,
+        SESSION_EVICTIONS_SUBSCRIBER,
+      ]) {
         try {
           app.get<Redis>(token, { strict: false }).disconnect();
         } catch {

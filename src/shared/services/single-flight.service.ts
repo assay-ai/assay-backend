@@ -4,7 +4,11 @@ import {
   REDIS_ADAPTER_PUB_CLIENT,
   REDIS_ADAPTER_SUB_CLIENT,
 } from '@shared/cache/redis-adapter/redis-adapter.provider';
-import { SingleFlightOptions } from '@shared/decorators/single-flight.decorator';
+import {
+  SingleFlightOptions,
+  SingleFlightWaitOptions,
+  SingleFlightWaitTimeout,
+} from '@shared/decorators/single-flight.decorator';
 import { delay } from '@shared/utils';
 import Redis from 'ioredis';
 
@@ -158,6 +162,10 @@ export class SingleFlightService {
         return await this.executeAsLeader(key, fn, cacheKey, channel, cache, lockTTLms);
       }
 
+      if (originalOptions.wait) {
+        return await this.follow<T>(key, fn, lockKey, channel, originalOptions);
+      }
+
       try {
         return await this.waitForResult<T>(channel, lockTTLms);
       } catch (error) {
@@ -171,6 +179,74 @@ export class SingleFlightService {
         });
       }
     })();
+  }
+
+  /**
+   * A follower with a bounded wait (`options.wait`).
+   *
+   * Subscribes, then closes the race with a leader that finished before the
+   * subscription existed: a result it left behind (`recheck`) is returned at
+   * once, and a lock no longer held means the leader is gone, so this request
+   * stands for election again (once). Otherwise it waits for the publish, at
+   * most `maxWaitMs`, and then throws {@link SingleFlightWaitTimeout} so the
+   * caller can do the work itself — also when the subscriber connection is
+   * down and the subscription never completes.
+   */
+  private async follow<T>(
+    key: string,
+    fn: () => Promise<T>,
+    lockKey: string,
+    channel: string,
+    options: SingleFlightOptions,
+    reelected = false,
+  ): Promise<T> {
+    const wait = options.wait as SingleFlightWaitOptions;
+    let timer: NodeJS.Timeout | undefined;
+    const published = new Promise<T>((resolve, reject) => {
+      this.waiterPromiseResolvers.set(channel, resolve);
+      this.waiterPromiseRejects.set(channel, reject);
+    });
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new SingleFlightWaitTimeout(key)), wait.maxWaitMs);
+      timer.unref?.();
+    });
+    const settled = async (): Promise<{ value: T } | { leaderGone: true }> => {
+      await this.redisSub.subscribe(channel);
+      const late = await wait.recheck?.();
+      if (late !== undefined) return { value: late as T };
+      if ((await this.redis.exists(lockKey)) === 0) return { leaderGone: true };
+      return { value: await published };
+    };
+    const subscribed = settled();
+    // Whichever loses the race must not become an unhandled rejection.
+    published.catch(() => undefined);
+    subscribed.catch(() => undefined);
+
+    let outcome: { value: T } | { leaderGone: true };
+    try {
+      outcome = await Promise.race([published.then((value) => ({ value })), subscribed, timedOut]);
+    } finally {
+      clearTimeout(timer);
+      this.waiterPromiseResolvers.delete(channel);
+      this.waiterPromiseRejects.delete(channel);
+      this.redisSub.unsubscribe(channel).catch(() => undefined);
+    }
+    if ('value' in outcome) return outcome.value;
+
+    // The leader finished (or died) before we subscribed and left nothing.
+    if (reelected) throw new SingleFlightWaitTimeout(key);
+    const lock = options.lock?.lockTTLms ?? 2000;
+    if ((await this.redis.set(lockKey, '1', 'PX', lock, 'NX')) === 'OK') {
+      return await this.executeAsLeader(
+        key,
+        fn,
+        `cache:${key}`,
+        channel,
+        { setCache: false, cacheTTLInSeconds: 60 },
+        lock,
+      );
+    }
+    return this.follow(key, fn, lockKey, channel, options, true);
   }
 
   private async executeAsLeader<T>(

@@ -1151,13 +1151,16 @@ describe('call disputes, against a real database', () => {
      * compares `sla_due_at` with its own `new Date()`, so writing the
      * database's `now()` here would make the test depend on the two clocks
      * agreeing to the millisecond.
+     *
+     * `dueAgoMs` orders disputes aged one after the other: the sweep takes
+     * the oldest due first, and two calls in the same millisecond would tie.
      */
-    async function age(disputeId: string, hours: number): Promise<void> {
+    async function age(disputeId: string, hours: number, dueAgoMs = 1_000): Promise<void> {
       const now = Date.now();
       await dataSource.query(`UPDATE disputes SET created_at = $2, sla_due_at = $3 WHERE id = $1`, [
         disputeId,
         new Date(now - hours * 3_600_000),
-        new Date(now - 1_000),
+        new Date(now - dueAgoMs),
       ]);
     }
 
@@ -1275,11 +1278,13 @@ describe('call disputes, against a real database', () => {
       const first = await file(await seedHeld());
       const secondCall = await seedHeld();
       const second = await file(secondCall);
-      await age(first.id, 73);
+      // Due first, so the sweep reaches it first and the second one meets the cap.
+      await age(first.id, 73, 2_000);
       await age(second.id, 73);
 
       expect(await sla.sweep()).toMatchObject({ autoUpheld: 1 });
 
+      expect((await disputes.requireAny(first.id)).state).toBe('UPHELD');
       expect((await disputes.requireAny(second.id)).state).toBe('OPEN');
       expect(alerts.map((a) => a.summary)).toEqual(
         expect.arrayContaining([expect.stringMatching(/daily auto-uphold cap/)]),

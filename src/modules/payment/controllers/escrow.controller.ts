@@ -15,6 +15,7 @@ import {
 import { GetNextSeqResponseDto } from '../dto/get-next-seq.dto';
 import { BuyerDebtService } from '../services/buyer-debt.service';
 import { NextSeqService } from '../services/next-seq.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 const DEBT_NOT_FOUND_DESCRIPTION =
   'PAYMENT_DEBT_NOT_FOUND — no debt with this id this session can settle: settled already, ' +
@@ -50,6 +51,7 @@ export class EscrowController {
    * debt that blocks its agents. Open to the person's session and the agent's.
    */
   @Get('debts')
+  @TenantCache({ ttl: 5, vary: 'agent', epochs: ['money'] })
   @ApiOperation({ summary: "The payer's open debts: served calls still to be paid" })
   @ApiResponse({ status: 200, type: GetBuyerDebtsResponseDto })
   async listDebts(@CurrentSession() session: McpSession): Promise<GetBuyerDebtsResponseDto> {

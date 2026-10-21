@@ -279,6 +279,56 @@ describe('relay unset or not configured', () => {
     expect(calls).toHaveLength(0);
     expect(directHits).toEqual(['GET /plain']);
   });
+
+  describe('in production', () => {
+    const nodeEnv = process.env.NODE_ENV;
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+    });
+    afterEach(() => {
+      process.env.NODE_ENV = nodeEnv;
+    });
+
+    it('refuses relay: true with no relay configured, before any lookup or dial', async () => {
+      const error = await expectEgressError(
+        directClient().request({ url: 'http://p.test/plain', policy: RELAYED }),
+      );
+
+      expect(error.kind).toBe(EgressFailureKind.RELAY_UNAVAILABLE);
+      expect(lookup).not.toHaveBeenCalled();
+      expect(directHits).toHaveLength(0);
+    });
+
+    it('refuses an IP-literal host too, without dialling it', async () => {
+      const error = await expectEgressError(
+        directClient().request({ url: 'http://93.184.216.34/plain', policy: RELAYED }),
+      );
+
+      expect(error.kind).toBe(EgressFailureKind.RELAY_UNAVAILABLE);
+      expect(directHits).toHaveLength(0);
+    });
+
+    it('still reports a bad scheme as the URL’s fault, not the relay’s', async () => {
+      const error = await expectEgressError(
+        directClient().request({
+          url: 'http://p.test/plain',
+          policy: { ...RELAYED, allowedProtocols: ['https:'] },
+        }),
+      );
+
+      expect(error.kind).toBe(EgressFailureKind.SCHEME_NOT_ALLOWED);
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it('still goes direct for relay: false', async () => {
+      const response = await directClient().request({
+        url: 'http://p.test/plain',
+        policy: { ...UNTRUSTED_EGRESS_POLICY, relay: false },
+      });
+
+      expect(response.body).toBe('direct');
+    });
+  });
 });
 
 describe('redirects through the relay', () => {

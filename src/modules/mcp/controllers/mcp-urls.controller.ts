@@ -13,6 +13,8 @@ import {
 } from '../dto/mcp-urls.dto';
 import { McpSession } from '../ports/mcp-session.port';
 import { McpUrlPreviewService } from '../services/mcp-url-preview.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { NoEpochBump } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * `POST /mcp-urls/preview` — what an MCP URL would serve an agent, for the
@@ -27,6 +29,7 @@ export class McpUrlsController {
   constructor(private readonly previews: McpUrlPreviewService) {}
 
   @Post('preview')
+  @NoEpochBump()
   @HttpCode(200)
   @ApiOperation({
     summary: 'View ∩ access for an agent, with prices, a token estimate and warnings',
@@ -51,6 +54,12 @@ export class AgentServersController {
   constructor(private readonly previews: McpUrlPreviewService) {}
 
   @Get('servers')
+  @TenantCache({
+    ttl: 10,
+    vary: 'org',
+    epochs: ['agents', 'toolsets', 'shared'],
+    singleFlight: true,
+  })
   @ApiOperation({ summary: 'One row per MCP URL handed out or called through in 30 days' })
   @ApiResponse({ status: 200, type: ServersInUseDto })
   async servers(

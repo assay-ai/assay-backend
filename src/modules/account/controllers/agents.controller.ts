@@ -7,9 +7,11 @@ import { auditActorOf } from '@shared/audit';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import { AgentIdParamDto } from '../dto/agent-id-param.dto';
-import { AgentDto, ListAgentsQueryDto } from '../dto/list-agents.dto';
+import { AgentDto, AgentWithIncludesDto, ListAgentsQueryDto } from '../dto/list-agents.dto';
 import { UpdateAgentBodyDto } from '../dto/update-agent.dto';
+import { AgentListService } from '../services/agent-list.service';
 import { AgentsService } from '../services/agents.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /** The agents in this organization. See `AgentsService`. */
 @ApiTags('Agents')
@@ -17,16 +19,26 @@ import { AgentsService } from '../services/agents.service';
 @UseGuards(SessionAuthGuard)
 @Controller('agents')
 export class AgentsController {
-  constructor(private readonly agents: AgentsService) {}
+  constructor(
+    private readonly agents: AgentsService,
+    private readonly agentList: AgentListService,
+  ) {}
 
+  // `include` nests what `GET /agents/:agentId/credentials` returns, so it is
+  // that route's person-only read; the plain list stays open to an agent.
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
   @ApiOperation({ summary: 'Agents in this organization' })
-  @ApiCursorPage(AgentDto)
+  @ApiCursorPage(AgentWithIncludesDto)
+  @ApiResponse({
+    status: 403,
+    description: 'AUTH_HUMAN_SESSION_REQUIRED — `include` with an agent credential',
+  })
   async list(
     @CurrentSession() session: McpSession,
     @Query() query: ListAgentsQueryDto,
-  ): Promise<CursorPageDto<AgentDto>> {
-    return this.agents.list(session.organizationId, query);
+  ): Promise<CursorPageDto<AgentWithIncludesDto>> {
+    return this.agentList.list(session, query);
   }
 
   // A person's act: an agent's machine credential must not rename the agent

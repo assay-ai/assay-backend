@@ -482,7 +482,10 @@ describe('account blocks, against a real database and Redis', () => {
     const app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     app.useGlobalFilters(new AllExceptionsFilter());
-    await app.init();
+    // Bound once, on 127.0.0.1 exactly: supertest then reuses this address
+    // instead of an ephemeral wildcard listen per request, which another local
+    // process holding the same port on 127.0.0.1 could answer.
+    await app.listen(0, '127.0.0.1');
 
     try {
       const lookup = (token: string) =>

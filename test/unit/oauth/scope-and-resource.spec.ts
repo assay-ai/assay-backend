@@ -1,7 +1,7 @@
 import { normaliseResource } from '@modules/oauth/domain/resource';
 import { normaliseScope } from '@modules/oauth/domain/scope';
 
-const MCP = 'https://mcp.assay.ai';
+const MCP = 'https://mcp.goassay.ai';
 
 describe('normaliseScope', () => {
   it('always grants assay:agent', () => {
@@ -72,22 +72,22 @@ describe('normaliseResource', () => {
     for (const raw of [
       '',
       ' ',
-      'mcp.assay.ai',
+      'mcp.goassay.ai',
       '/c/weather',
-      'http://mcp.assay.ai',
-      'https://mcp.assay.ai:8443',
-      'https://api.assay.ai',
-      'https://assay.ai',
-      'https://mcp.assay.ai.evil.example',
-      'https://evil.example/https://mcp.assay.ai',
-      'https://evil.example?https://mcp.assay.ai',
-      'https://mcp.assay.ai@evil.example',
-      'https://user@mcp.assay.ai/',
-      'https://mcp.assay.ai/#f',
-      'https://mcp.assay.ai/c#',
-      'https://mcp.assay.ai\\@evil.example',
-      ' https://mcp.assay.ai',
-      'https://mcp.assay.ai\n',
+      'http://mcp.goassay.ai',
+      'https://mcp.goassay.ai:8443',
+      'https://api.goassay.ai',
+      'https://goassay.ai',
+      'https://mcp.goassay.ai.evil.example',
+      'https://evil.example/https://mcp.goassay.ai',
+      'https://evil.example?https://mcp.goassay.ai',
+      'https://mcp.goassay.ai@evil.example',
+      'https://user@mcp.goassay.ai/',
+      'https://mcp.goassay.ai/#f',
+      'https://mcp.goassay.ai/c#',
+      'https://mcp.goassay.ai\\@evil.example',
+      ' https://mcp.goassay.ai',
+      'https://mcp.goassay.ai\n',
       'urn:assay:mcp',
     ]) {
       expect(normaliseResource(raw, MCP)).toEqual(bad);
@@ -96,18 +96,18 @@ describe('normaliseResource', () => {
 
   it('requires the exact canonical spelling of the MCP origin', () => {
     for (const raw of [
-      'https:mcp.assay.ai',
-      'https:/mcp.assay.ai',
-      'https:///mcp.assay.ai',
-      'HTTPS://mcp.assay.ai',
-      'https://MCP.assay.ai/c',
-      'https://mcp.assay.ai:443/c/weather',
-      'https://mcp.assay.ai./c',
+      'https:mcp.goassay.ai',
+      'https:/mcp.goassay.ai',
+      'https:///mcp.goassay.ai',
+      'HTTPS://mcp.goassay.ai',
+      'https://MCP.goassay.ai/c',
+      'https://mcp.goassay.ai:443/c/weather',
+      'https://mcp.goassay.ai./c',
       'https://mcp.ass\u00aday.ai/c',
       'https://mcp.\uff41ssay.ai/c',
-      'https://mcp.assay.ai/c\u00e9',
-      'https://mcp.assay.aix',
-      'https://mcp.assay.ai:',
+      'https://mcp.goassay.ai/c\u00e9',
+      'https://mcp.goassay.aix',
+      'https://mcp.goassay.ai:',
     ]) {
       expect(normaliseResource(raw, MCP)).toEqual(bad);
     }

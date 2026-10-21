@@ -79,6 +79,20 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
     const rows = await this.bindings.findByTool(toolId);
     return toServedToolBindings(rows, this.versions);
   }
+
+  /**
+   * The provider's own rows (an organization-scoped read), kept only for tools
+   * the catalogue lists, as {@link findBindings} keeps only rows of a tool
+   * with a contract; then served at the published revision like every other
+   * read here.
+   */
+  async findBindingsOfProvider(providerId: string): Promise<readonly ToolBinding[]> {
+    const listed = new Set((await this.contracts.listContracts()).map((tool) => tool.id));
+    const rows = (await this.bindings.findBy({ organizationId: providerId })).filter((row) =>
+      listed.has(row.toolId),
+    );
+    return toServedToolBindings(rows, this.versions);
+  }
 }
 
 /**

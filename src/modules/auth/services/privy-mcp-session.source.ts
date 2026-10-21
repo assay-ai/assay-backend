@@ -5,6 +5,7 @@ import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 
 import { AuthErrors } from '../errors/auth.errors';
+import { CacheableSession, CacheableSessionSource } from '../session-cache/caching-session.source';
 import { AgentProvisioningService } from './agent-provisioning.service';
 import { PrivyTokenVerifier } from './privy-token.verifier';
 
@@ -49,13 +50,18 @@ const ACTIVE = 'ACTIVE';
  * forever against a problem their token cannot fix.
  */
 @Injectable()
-export class PrivyMcpSessionSource implements McpSessionPort {
+export class PrivyMcpSessionSource implements McpSessionPort, CacheableSessionSource {
   constructor(
     private readonly verifier: PrivyTokenVerifier,
     private readonly provisioning: AgentProvisioningService,
   ) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
+    return (await this.resolveForCache(bearerToken)).session;
+  }
+
+  /** The session, valid until the JWT's `exp` at the latest. */
+  async resolveForCache(bearerToken: string | null): Promise<CacheableSession> {
     if (!bearerToken) {
       throw McpErrors.credentialInvalid();
     }
@@ -79,7 +85,7 @@ export class PrivyMcpSessionSource implements McpSessionPort {
       throw AuthErrors.walletNotLinked();
     }
 
-    return {
+    const session: McpSession = {
       // Privy's session id where the token carries one: it names *which* login
       // is calling without the token itself ever travelling, which is exactly
       // what `credentialId` is for. The DID is the fallback — still an
@@ -93,5 +99,6 @@ export class PrivyMcpSessionSource implements McpSessionPort {
       callerKind: McpCallerKind.HUMAN,
       paymentsAllowed: true,
     };
+    return { session, notAfter: claims.expiresAt };
   }
 }

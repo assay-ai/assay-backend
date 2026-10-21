@@ -39,6 +39,8 @@ import { BindingMappingTesterService } from '../services/binding-mapping-tester.
 import { BindingPauseService } from '../services/binding-pause.service';
 import { BindingPublishService } from '../services/binding-publish.service';
 import { ProviderToolBindingsService } from '../services/provider-tool-bindings.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
+import { NoEpochBump } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * The provider's own bindings — write, test, publish.
@@ -69,6 +71,7 @@ export class ProviderToolBindingsController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: 'The bindings this provider serves' })
   @ApiCursorPage(ToolBindingSummaryDto)
   async list(
@@ -91,6 +94,7 @@ export class ProviderToolBindingsController {
   }
 
   @Post('validate-mapping')
+  @NoEpochBump()
   @ApiOperation({
     summary: 'Check a mapping without saving it — what the editor calls while you type',
   })
@@ -101,6 +105,7 @@ export class ProviderToolBindingsController {
   }
 
   @Get('catalogue')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['provider', 'shared'] })
   @ApiOperation({
     summary:
       'The tools you can bind, with the contract each one has to satisfy, and the asset ' +
@@ -114,6 +119,7 @@ export class ProviderToolBindingsController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 15, vary: 'org', epochs: ['provider'] })
   @ApiOperation({ summary: 'One binding, with its request/response mapping' })
   @ApiResponse({ status: 200, type: ToolBindingDetailDto })
   @ApiResponse({ status: 404, description: 'No binding of yours with this id' })
