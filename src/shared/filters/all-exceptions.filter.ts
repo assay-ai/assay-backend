@@ -123,6 +123,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
+    // body-parser's own refusals (body too large, bad charset, aborted) are
+    // `http-errors`, not HttpException: a client-side 4xx whose message is
+    // marked safe to send (`expose`). Without this they count as our 500s.
+    const clientError = exposedClientError(exception);
+    if (clientError) {
+      return {
+        code: httpErrorCodeForStatus(clientError.status),
+        message: clientError.message,
+        statusCode: clientError.status,
+      };
+    }
+
     return {
       code: HttpErrorCode.INTERNAL_SERVER_ERROR,
       // An unhandled exception's message is written for us, not for the caller,
@@ -198,4 +210,16 @@ function describeMessage(exception: unknown): string {
 
 function stackOf(exception: unknown): string | undefined {
   return exception instanceof Error ? exception.stack : undefined;
+}
+
+/** An `http-errors` 4xx whose message its creator marked safe to send. */
+function exposedClientError(exception: unknown): { status: number; message: string } | null {
+  if (typeof exception !== 'object' || exception === null) return null;
+  const { status, expose, message } = exception as {
+    status?: unknown;
+    expose?: unknown;
+    message?: unknown;
+  };
+  if (expose !== true || typeof status !== 'number' || status < 400 || status > 499) return null;
+  return { status, message: typeof message === 'string' ? message : 'Bad request' };
 }
