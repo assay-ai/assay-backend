@@ -195,15 +195,11 @@ export class EgressHttpClient implements OnModuleDestroy {
     let headers = normalizeHeaders(request.headers);
     let origin: string | null = null;
 
-    // Before any lookup: resolving the name already tells its nameserver
-    // about us.
-    if (policy.relay && !this.relay && this.relayRequired) {
-      throw new EgressError(
-        EgressFailureKind.RELAY_UNAVAILABLE,
-        'this call must go through the egress relay, and none is configured',
-        { url: request.url },
-      );
-    }
+    // A hop that must be relayed when no relay exists still gets the URL
+    // checks (a bad scheme is the provider's fault, not ours), but never a
+    // lookup — resolving the name already tells its nameserver about us — and
+    // never a dial.
+    const unrelayable = policy.relay && !this.relay && this.relayRequired;
 
     for (let hop = 0; hop <= limits.maxRedirects; hop += 1) {
       const remaining = deadline - Date.now();
@@ -221,12 +217,23 @@ export class EgressHttpClient implements OnModuleDestroy {
       // deadline reached it, because every deadline started after it returned.
       // That is the worker-occupancy failure `EgressLimits` exists to prevent,
       // arrived at through the one call that was outside the fence.
+      //
+      // The resolver wraps a failed lookup as DNS_FAILED; the refusal is
+      // passed through as the cause and taken back out here.
+      const refusal = unrelayable ? relayRequired(currentUrl) : null;
       const target = await withDeadline(
-        resolveEgressTarget(currentUrl, hopPolicy(policy, hop), this.dnsLookup),
+        resolveEgressTarget(
+          currentUrl,
+          hopPolicy(policy, hop),
+          refusal ? () => Promise.reject(refusal) : this.dnsLookup,
+        ),
         remaining,
         currentUrl,
         'address resolution',
-      );
+      ).catch((error: unknown) => {
+        throw refusal && error instanceof EgressError && error.cause === refusal ? refusal : error;
+      });
+      if (refusal) throw refusal;
 
       if (origin !== null && target.url.origin !== origin) {
         headers = crossOriginHeaders(headers);
@@ -700,4 +707,13 @@ function resolveLocation(location: string, base: URL): string {
 
 function describe(error: NodeJS.ErrnoException): string {
   return error.code ? `${error.code}: ${error.message}` : error.message;
+}
+
+/** A hop that must go through the relay, with none configured (production). */
+function relayRequired(url: string): EgressError {
+  return new EgressError(
+    EgressFailureKind.RELAY_UNAVAILABLE,
+    'this call must go through the egress relay, and none is configured',
+    { url },
+  );
 }
