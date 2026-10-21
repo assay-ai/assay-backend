@@ -1,4 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
+import { In } from 'typeorm';
 
 import { SlaStrikeEntity } from '@database/postgres/entities/sla-strike.entity';
 import { SlaWindowCallEntity } from '@database/postgres/entities/sla-window-call.entity';
@@ -16,6 +17,7 @@ import { SlaWindowRepository } from '@database/postgres/repositories/sla-window.
 import { SlashCaseReadRepository } from '@database/postgres/repositories/slash-case-read.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
+import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -26,6 +28,7 @@ import { ProviderStakeService } from '@modules/provider/services/provider-stake.
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { Tool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
 import { ResolutionKind } from '../domain/arbitration';
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
@@ -40,6 +43,7 @@ import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   ChangeOverlayDto,
   InactionForecastDto,
+  ListSlashProposalsQueryDto,
   PriorWindowRowDto,
   RestorationRowDto,
   SlashArithmeticRowDto,
@@ -51,6 +55,21 @@ import {
   SlashProposalSource,
 } from '../dto/slash-proposal.dto';
 import { SlashProposalService } from './slash-proposal.service';
+
+/** Chain statuses of a proposal Assay knows that has no on-chain record (yet). */
+const NOT_ON_CHAIN: readonly string[] = [ChainProposalStatus.NONE, ChainProposalStatus.PROPOSING];
+
+const SLASH_PROPOSALS_LIST: ListSpec = {
+  alias: 'proposal',
+  defaultSort: 'createdAt',
+  sortable: {
+    createdAt: {
+      column: 'proposal.created_at',
+      type: 'timestamptz',
+      valueOf: asInstant((row: SlashProposalEntity) => row.createdAt),
+    },
+  },
+};
 
 /**
  * The read side of one slash case — the case screen for the provider and the
@@ -86,7 +105,84 @@ export class SlashCaseService {
     private readonly stakeService: ProviderStakeService,
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Optional() private readonly parts: SlashProposalPartRepository | null = null,
+    // The provider's list (BUG-DEMO-03). Optional for the direct constructions.
+    @Optional() private readonly proposals: SlashProposalRepository | null = null,
   ) {}
+
+  /**
+   * `GET /providers/me/slash-proposals`: the provider's own proposals, newest
+   * first, each in the same shape as the case screen's `proposal`. Includes the
+   * proposals not yet on chain (`onChain=false`: chain status NONE or
+   * PROPOSING), which the chain-read Penalties list cannot see (BUG-DEMO-03).
+   */
+  async listForProvider(
+    organizationId: string,
+    query: ListSlashProposalsQueryDto,
+  ): Promise<CursorPageDto<SlashProposalDto>> {
+    if (!this.proposals) throw new Error('the proposal list needs the slash proposal repository');
+    const qb = this.proposals
+      .createQueryBuilder('proposal')
+      .where('proposal.organizationId = :organizationId', { organizationId });
+    if (query.onChain !== undefined) {
+      qb.andWhere(
+        query.onChain
+          ? 'proposal.chainStatus NOT IN (:...offChain)'
+          : 'proposal.chainStatus IN (:...offChain)',
+        { offChain: NOT_ON_CHAIN },
+      );
+    }
+    if (query.status?.length) {
+      qb.andWhere('proposal.status IN (:...statuses)', { statuses: query.status });
+    }
+    applyTimeWindow(qb, query, SLASH_PROPOSALS_LIST);
+    const page = await paginate(qb, query, SLASH_PROPOSALS_LIST);
+
+    const bindingIds = [...new Set(page.items.map((proposal) => proposal.bindingId))];
+    const windowIds = [
+      ...new Set(page.items.flatMap((proposal) => (proposal.windowId ? [proposal.windowId] : []))),
+    ];
+    const [bindings, windows] = await Promise.all([
+      bindingIds.length
+        ? this.bindings.find({ where: { organizationId, id: In(bindingIds) } })
+        : Promise.resolve([] as ToolBindingEntity[]),
+      windowIds.length
+        ? this.windows.find({ where: { organizationId, id: In(windowIds) } })
+        : Promise.resolve([] as SlaWindowEntity[]),
+    ]);
+    const bindingById = new Map(bindings.map((binding) => [binding.id, binding]));
+    const windowById = new Map(windows.map((window) => [window.id, window]));
+    const toolIds = [...new Set(bindings.map((binding) => binding.toolId))];
+    const tools = new Map(
+      await Promise.all(
+        toolIds.map(async (toolId) => [toolId, await this.catalogue.findTool(toolId)] as const),
+      ),
+    );
+
+    const now = new Date();
+    const rows = await Promise.all(
+      page.items.map(async (proposal) => {
+        const binding = bindingById.get(proposal.bindingId) ?? null;
+        const records = this.parts
+          ? (
+              await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)
+            ).map((part) => ({
+              chainStatus: part.chainStatus,
+              chainDisputedAt: part.chainDisputedAt,
+              chainExecutableAt: part.chainExecutableAt,
+              cancelReason: part.cancelReason ?? null,
+            }))
+          : undefined;
+        return buildProposalDto(
+          proposal,
+          binding,
+          binding ? (tools.get(binding.toolId) ?? null) : null,
+          proposal.windowId ? (windowById.get(proposal.windowId) ?? null) : null,
+          computeClocks(proposal, now, records),
+        );
+      }),
+    );
+    return new CursorPageDto(rows, page.pageInfo.nextCursor);
+  }
 
   /** The case screen and the case brief in one response — see the class comment. */
   async buildCase(organizationId: string, proposalId: string): Promise<SlashProposalCaseDto> {
