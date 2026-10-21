@@ -31,6 +31,8 @@ const POLA = operator('op-pola', [OperatorRole.POLA]);
 const POLA_2 = operator('op-pola-2', [OperatorRole.POLA]);
 const LEAD = operator('op-adjl', [OperatorRole.ADJL]);
 const SRE = operator('op-sre', [OperatorRole.SRE]);
+const CMP = operator('op-cmp', [OperatorRole.CMP]);
+const CMP_2 = operator('op-cmp-2', [OperatorRole.CMP]);
 
 const PAYLOAD = { toolId: 'tool-1', version: 2 };
 
@@ -70,9 +72,14 @@ function build(rows: Record<string, { action: string; requestedBy: string }>) {
       sessionOf: (row: { id: string }) => operator(row.id, [OperatorRole.POL]),
     } as never,
   );
-  const runs = { publish: jest.fn(async () => 'published'), unblock: jest.fn(async () => 'ok') };
+  const runs = {
+    publish: jest.fn(async () => 'published'),
+    unblock: jest.fn(async () => 'ok'),
+    reassign: jest.fn(async () => 'reassigned'),
+  };
   service.register('contract.publish', { code: 'P-10', run: runs.publish });
   service.register('account.unblock', { code: 'A-10', run: runs.unblock });
+  service.register('handle.reassign', { code: 'A-22', run: runs.reassign });
   return { service, runs, markRejected };
 }
 
@@ -218,10 +225,108 @@ describe('approvals routes admit every role a register row names as its approver
     }
   });
 
-  it('lists which named approver roles the approve route still does not admit', () => {
-    // CMP is named on A-22 but not admitted by the route: an owner decision,
-    // recorded in the fix report, not widened here.
-    const missing = [...new Set(named)].filter((role) => !rolesOf('approve').includes(role));
-    expect(missing).toEqual([OperatorRole.CMP]);
+  it('every named approver role passes both route guards (CMP for A-22 included)', () => {
+    const roles = [...new Set(named)];
+    expect(roles).toContain(OperatorRole.CMP);
+    expect(roles.filter((role) => !rolesOf('approve').includes(role))).toEqual([]);
+    expect(roles.filter((role) => !rolesOf('reject').includes(role))).toEqual([]);
+  });
+
+  it('CMP is named as an approver on A-22 only', () => {
+    const rows = Object.values(OVERRIDE_REGISTER)
+      .filter((row) => row.approverRoles?.includes(OperatorRole.CMP))
+      .map((row) => row.code);
+    expect(rows).toEqual(['A-22']);
+  });
+});
+
+describe('approvals — CMP on A-22 (handle reassignment, lot 1 C10)', () => {
+  it('lets CMP approve an A-22 request someone else made', async () => {
+    const { service, runs } = build({
+      h1: { action: 'handle.reassign', requestedBy: LEAD.operatorId },
+    });
+
+    await service.approve('h1', CMP, 'req-1');
+
+    expect(runs.reassign).toHaveBeenCalledTimes(1);
+    const [, approver] = runs.reassign.mock.calls[0] as unknown as [
+      unknown,
+      { operatorId: string },
+    ];
+    expect(approver.operatorId).toBe(CMP.operatorId);
+  });
+
+  it('refuses CMP approving its own A-22 request (self-approval), and runs nothing', async () => {
+    const { service, runs } = build({
+      h1: { action: 'handle.reassign', requestedBy: CMP.operatorId },
+    });
+
+    await expectErrorCodeAsync(
+      () => service.approve('h1', CMP, null),
+      'OPERATOR_SELF_APPROVAL_REFUSED',
+    );
+    expect(runs.reassign).not.toHaveBeenCalled();
+  });
+
+  it('two-person: a second CMP (another person) approves a CMP request', async () => {
+    const { service, runs } = build({
+      h1: { action: 'handle.reassign', requestedBy: CMP.operatorId },
+    });
+
+    await service.approve('h1', CMP_2, null);
+
+    expect(runs.reassign).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses CMP approving anything but A-22', async () => {
+    const { service, runs } = build({
+      a1: { action: 'account.unblock', requestedBy: SRE.operatorId },
+      p1: { action: 'contract.publish', requestedBy: POL.operatorId },
+    });
+
+    await expectErrorCodeAsync(
+      () => service.approve('a1', CMP, null),
+      'OPERATOR_APPROVER_ROLE_REQUIRED',
+    );
+    await expectErrorCodeAsync(
+      () => service.approve('p1', CMP, null),
+      'OPERATOR_APPROVER_ROLE_REQUIRED',
+    );
+    expect(runs.unblock).not.toHaveBeenCalled();
+    expect(runs.publish).not.toHaveBeenCalled();
+  });
+
+  it('lets CMP turn down an A-22 request, and withdraw its own', async () => {
+    const { service, markRejected } = build({
+      h1: { action: 'handle.reassign', requestedBy: LEAD.operatorId },
+      h2: { action: 'handle.reassign', requestedBy: CMP.operatorId },
+    });
+
+    await service.reject('h1', CMP);
+    await service.reject('h2', CMP);
+
+    expect(markRejected).toHaveBeenCalledWith('h1', CMP.operatorId);
+    expect(markRejected).toHaveBeenCalledWith('h2', CMP.operatorId);
+  });
+
+  it('refuses CMP turning down someone else’s non-A-22 request', async () => {
+    const { service, markRejected } = build({
+      a1: { action: 'account.unblock', requestedBy: SRE.operatorId },
+    });
+
+    await expectErrorCodeAsync(() => service.reject('a1', CMP), 'OPERATOR_APPROVER_ROLE_REQUIRED');
+    expect(markRejected).not.toHaveBeenCalled();
+  });
+
+  it('a row naming no approver roles never falls back to CMP', async () => {
+    const { service } = build({ b1: { action: 'calls.bulk', requestedBy: SRE.operatorId } });
+    const run = jest.fn(async () => 'ok');
+    service.register('calls.bulk', { code: 'V-2', run });
+
+    await expectErrorCodeAsync(
+      () => service.approve('b1', CMP, null),
+      'OPERATOR_APPROVER_ROLE_REQUIRED',
+    );
+    expect(run).not.toHaveBeenCalled();
   });
 });
