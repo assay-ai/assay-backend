@@ -27,7 +27,7 @@ describe('CONNECT_CLIENTS', () => {
   const errorsFor = (client: string) =>
     validate(
       plainToInstance(RecordConnectUrlBodyDto, {
-        url: 'https://mcp.assay.ai/',
+        url: 'https://mcp.goassay.ai/',
         client,
       }),
     );

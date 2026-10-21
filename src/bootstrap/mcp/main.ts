@@ -17,7 +17,7 @@ import { McpExceptionsFilter } from './mcp-exceptions.filter';
  * platform through.
  *
  * **No `setGlobalPrefix`, no versioning, no `/mcp`.** The service is its own
- * host (`mcp.assay.ai`, `MCP_PUBLIC_URL`) and every path at its root is an MCP
+ * host (`mcp.goassay.ai`, `MCP_PUBLIC_URL`) and every path at its root is an MCP
  * server: `/` is the whole catalogue, `/my/{slug}` a toolset (design spec
  * §7.4). A URL an operator pastes into an agent's configuration is as short as
  * it can be, and the subdomain already says what the host is for.

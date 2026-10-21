@@ -4,14 +4,14 @@ import {
   protectedResourceMetadataUrl,
 } from '@modules/oauth/domain/metadata';
 
-const MCP = 'https://mcp.assay.ai';
+const MCP = 'https://mcp.goassay.ai';
 const WEB = 'https://app.example.com';
 
 describe('PRM (§6.3.1)', () => {
   it('for path /c/weather has resource === "{MCP}/c/weather"', () => {
     expect(protectedResourceMetadata(MCP, WEB, '/c/weather')).toEqual({
-      resource: 'https://mcp.assay.ai/c/weather',
-      authorization_servers: ['https://mcp.assay.ai'],
+      resource: 'https://mcp.goassay.ai/c/weather',
+      authorization_servers: ['https://mcp.goassay.ai'],
       scopes_supported: ['assay:agent'],
       bearer_methods_supported: ['header'],
       resource_name: 'Assay',
@@ -48,10 +48,10 @@ describe('PRM (§6.3.1)', () => {
 
   it('builds the path-inserted PRM URL (RFC 9728 §3.1)', () => {
     expect(protectedResourceMetadataUrl(MCP, '/c/weather')).toBe(
-      'https://mcp.assay.ai/.well-known/oauth-protected-resource/c/weather',
+      'https://mcp.goassay.ai/.well-known/oauth-protected-resource/c/weather',
     );
     expect(protectedResourceMetadataUrl(MCP, '/')).toBe(
-      'https://mcp.assay.ai/.well-known/oauth-protected-resource',
+      'https://mcp.goassay.ai/.well-known/oauth-protected-resource',
     );
   });
 });
@@ -68,11 +68,11 @@ describe('AS metadata (§6.3.2)', () => {
 
   it('equals the spec document field by field', () => {
     expect(metadata).toEqual({
-      issuer: 'https://mcp.assay.ai',
-      authorization_endpoint: 'https://mcp.assay.ai/oauth/authorize',
-      token_endpoint: 'https://mcp.assay.ai/oauth/token',
-      registration_endpoint: 'https://mcp.assay.ai/oauth/register',
-      revocation_endpoint: 'https://mcp.assay.ai/oauth/revoke',
+      issuer: 'https://mcp.goassay.ai',
+      authorization_endpoint: 'https://mcp.goassay.ai/oauth/authorize',
+      token_endpoint: 'https://mcp.goassay.ai/oauth/token',
+      registration_endpoint: 'https://mcp.goassay.ai/oauth/register',
+      revocation_endpoint: 'https://mcp.goassay.ai/oauth/revoke',
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
