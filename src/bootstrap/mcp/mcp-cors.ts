@@ -30,9 +30,18 @@ import type { Request } from 'express';
  * starting with `/` gets no CORS.
  */
 
+/**
+ * How long a browser may reuse a preflight on this host, in seconds (7200 is
+ * Chromium's cap). A browser-hosted agent sends `Authorization` and the MCP
+ * headers on every call, none of them safelisted, so without it each call
+ * pays an `OPTIONS` round trip; the answers below depend only on the route.
+ */
+export const MCP_PREFLIGHT_MAX_AGE_SECONDS = 7200;
+
 /** The MCP catch-all: a browser-hosted agent may call it. */
 export const MCP_CATCH_ALL_CORS: CorsOptions = Object.freeze({
   origin: '*',
+  maxAge: MCP_PREFLIGHT_MAX_AGE_SECONDS,
   // `Authorization` is not CORS-safelisted, so it is allowed explicitly;
   // `mcp-session-id` / `mcp-protocol-version` are the Streamable HTTP headers
   // and `mcp-method` / `mcp-name` the ones protocol 2026-07-28 adds.
@@ -59,6 +68,7 @@ export const WELL_KNOWN_CORS: CorsOptions = Object.freeze({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'MCP-Protocol-Version'],
   credentials: false,
+  maxAge: MCP_PREFLIGHT_MAX_AGE_SECONDS,
 });
 
 /** Token and revocation: public endpoints a browser client may call. */
@@ -67,6 +77,7 @@ export const OAUTH_PUBLIC_CORS: CorsOptions = Object.freeze({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   credentials: false,
+  maxAge: MCP_PREFLIGHT_MAX_AGE_SECONDS,
 });
 
 /** No CORS headers at all: the `cors` middleware passes the request on untouched. */

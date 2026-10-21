@@ -104,3 +104,18 @@ export class AgentCredentialDto {
   @ApiProperty()
   createdAt: Date;
 }
+
+/**
+ * One agent's credentials as `GET /agents?include=credentials` nests them:
+ * the items of `GET /agents/:agentId/credentials?limit=50`, and whether that
+ * route would have a next page.
+ */
+export class AgentCredentialsPage {
+  @ApiProperty({ type: [AgentCredentialDto] })
+  items: AgentCredentialDto[];
+
+  @ApiProperty({
+    description: 'More credentials exist: read them with `GET /agents/:agentId/credentials`',
+  })
+  hasMore: boolean;
+}

@@ -245,6 +245,63 @@ export class GetReceiptsSummaryResponseDto {
 }
 
 /**
+ * `GET /receipts/summary/daily` — `GET /receipts/summary` once per UTC day of
+ * the window, answered from one query. `from` and `to` must be UTC midnights;
+ * `compareTo` is not offered (no screen compares day by day).
+ */
+export class GetDailyReceiptsSummaryQueryDto {
+  @ApiProperty({
+    description: 'ISO 8601, a UTC midnight — the first day, inclusive',
+    example: '2026-08-10T00:00:00.000Z',
+  })
+  @IsISO8601()
+  from: string;
+
+  @ApiProperty({
+    description: 'ISO 8601, a UTC midnight — the end, exclusive; at most 31 days after `from`',
+    example: '2026-08-17T00:00:00.000Z',
+  })
+  @IsISO8601()
+  to: string;
+
+  @ApiProperty({ enum: ReceiptsSummaryGroupBy, description: 'The grouping inside each day' })
+  @IsEnum(ReceiptsSummaryGroupBy)
+  groupBy: ReceiptsSummaryGroupBy;
+
+  @ApiPropertyOptional({
+    description: 'CAIP-19 asset id — required if a day spans more than one',
+  })
+  @IsOptional()
+  @IsString()
+  asset?: string;
+}
+
+export class DailyReceiptsSummaryDayDto {
+  @ApiProperty({ description: 'The UTC day, `YYYY-MM-DD`', example: '2026-08-10' })
+  key: string;
+
+  @ApiProperty({ description: 'ISO 8601 — the day’s 00:00 UTC, inclusive' })
+  from: string;
+
+  @ApiProperty({ description: 'ISO 8601 — the next day’s 00:00 UTC, exclusive' })
+  to: string;
+
+  @ApiProperty({
+    type: GetReceiptsSummaryResponseDto,
+    description: 'Exactly `GET /receipts/summary?from=<from>&to=<to>&groupBy=…&asset=…`',
+  })
+  summary: GetReceiptsSummaryResponseDto;
+}
+
+export class DailyReceiptsSummaryResponseDto {
+  @ApiProperty({
+    type: [DailyReceiptsSummaryDayDto],
+    description: 'One entry per UTC day of the window, oldest first, empty days included',
+  })
+  days: DailyReceiptsSummaryDayDto[];
+}
+
+/**
  * `from`/`to` stay strings on the DTO (the exact ISO text the caller sent,
  * useful for error messages) and are parsed once, here, into the `Date` pair
  * the repository query actually wants — shared so the service and its tests

@@ -25,7 +25,7 @@ export const CONNECT_CLIENTS = [
 export class PreviewMcpUrlBodyDto {
   @ApiProperty({
     description: 'An MCP URL of this host. Parsed only, never fetched',
-    example: 'https://mcp.assay.ai/my/research?tools=get_weather',
+    example: 'https://mcp.goassay.ai/my/research?tools=get_weather',
   })
   @IsString()
   @MaxLength(2048)

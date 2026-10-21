@@ -1,40 +1,42 @@
-# What must not reach a build context.
+# What may reach a build context — an allowlist, not a denylist.
 #
-# The Dockerfile's development stage runs `COPY . .`, so everything not listed
-# here is in the image layer that stage produces — readable with
+# The Dockerfile's development stage runs `COPY . .`, so anything let through
+# here lands in an image layer that stage produces — readable with
 # `docker history` / `docker save` whether or not the final stage copies it.
+# Ignoring everything and re-including only what `yarn install` and `yarn build`
+# read means a new top-level file or folder (a `.env`, a key, `.claude/`,
+# `.openacp/`, test fixtures, scripts, docs) stays out unless it is added here
+# on purpose.
+*
 
-# Environment files. This repo's own `.env.example` ships
-# `DIAGNOSTICS_ENABLED=true`, and a `.env` copied from it sets it in a container
-# whose NODE_ENV is production — `dotenv` does not override a variable that is
-# already set, but it does set one that is not.
-#
-# A `.env` also holds the facilitator's fee-payer key and the database password,
-# and a secret in an image layer is one
-# that has to be rotated rather than deleted.
-.env
-.env.*
-!.env.example
+# Dependency manifests: the root and the `packages/*` workspace.
+!package.json
+!yarn.lock
+!packages/settlement-client/package.json
 
-# Keys, in every form the repo's .gitignore knows about.
-*.devnet.json
-.keys/
+# Build inputs: `nest build` (src + tsconfig/nest-cli) and the settlement client
+# that `yarn client:build` compiles with its own tsconfig.
+!src
+!nest-cli.json
+!tsconfig.json
+!tsconfig.build.json
+!packages/settlement-client/tsconfig.json
+!packages/settlement-client/src
+
+# Never, even inside an allowed folder: environment files, keys and
+# certificates, and build output or dependencies that would shadow the ones
+# rebuilt inside the image.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/*.devnet.json
 **/*.keypair.json
-
-# Build output — rebuilt inside the image, and stale copies shadow it.
-dist
-packages/*/dist
-node_modules
-packages/*/node_modules
-
-# Local state and tooling that has no meaning in an image.
-.git
-.github
-coverage
-.nyc_output
-*.log
-.DS_Store
-.idea
-.vscode
-docker-compose.yml
-Dockerfile
+**/.keys
+**/dist
+**/node_modules
+**/*.log
+**/.DS_Store

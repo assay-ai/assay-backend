@@ -34,10 +34,12 @@ import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
 import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
 import { OAuthSchedulerModule } from '@modules/oauth/oauth-scheduler.module';
+import { OperatorSchedulerModule } from '@modules/operator/operator-scheduler.module';
 
 // Controllers
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 import { NetworkModule } from '@shared/network/network.module';
+import { LastSeenSchedulerModule } from '@shared/last-seen/last-seen-scheduler.module';
 
 @Module({
   imports: [
@@ -99,6 +101,10 @@ import { NetworkModule } from '@shared/network/network.module';
     ToolsetSchedulerModule,
     // OAuth: dead tokens, codes and unreferenced clients, daily. Never credentials.
     OAuthSchedulerModule,
+    // Operator approvals past their 24h window, stored as EXPIRED every 30 s.
+    OperatorSchedulerModule,
+    // "Last seen" stamps buffered in Redis, written in batches every 30 s.
+    LastSeenSchedulerModule,
     // Starter reference modules — off by default in production
   ],
   controllers: [HealthcheckController],

@@ -6,6 +6,7 @@ import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { digestToken } from '@shared/crypto/token-digest';
 
+import { CacheableSession, CacheableSessionSource } from '../session-cache/caching-session.source';
 import { CredentialSessionResolver } from './credential-session.resolver';
 
 /**
@@ -59,13 +60,18 @@ import { CredentialSessionResolver } from './credential-session.resolver';
  * `ConfigMcpSessionSource`.
  */
 @Injectable()
-export class DbCredentialMcpSessionSource implements McpSessionPort {
+export class DbCredentialMcpSessionSource implements McpSessionPort, CacheableSessionSource {
   constructor(
     private readonly credentials: AgentCredentialRepository,
     private readonly resolver: CredentialSessionResolver,
   ) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
+    return (await this.resolveForCache(bearerToken)).session;
+  }
+
+  /** The session, valid until the key's own `expires_at` at the latest. */
+  async resolveForCache(bearerToken: string | null): Promise<CacheableSession> {
     if (!bearerToken || !isAgentCredentialToken(bearerToken)) {
       throw McpErrors.credentialInvalid();
     }
@@ -75,6 +81,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
-    return this.resolver.sessionFor(credential, { paymentsAllowed: true });
+    const session = await this.resolver.sessionFor(credential, { paymentsAllowed: true });
+    return { session, notAfter: credential.expiresAt ?? null };
   }
 }

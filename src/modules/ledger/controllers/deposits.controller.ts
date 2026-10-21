@@ -1,5 +1,5 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
@@ -7,6 +7,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { DepositDto, ListDepositsQueryDto } from '../dto/list-deposits.dto';
 import { DepositsService } from '../services/deposits.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /api/v1/deposits` — the deposit history behind the funding screen.
@@ -26,6 +27,7 @@ export class DepositsController {
   constructor(private readonly deposits: DepositsService) {}
 
   @Get()
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'] })
   @ApiOperation({ summary: 'Deposit intents, newest first, filterable by status' })
   @ApiCursorPage(DepositDto)
   async list(
@@ -33,5 +35,17 @@ export class DepositsController {
     @Query() query: ListDepositsQueryDto,
   ): Promise<CursorPageDto<DepositDto>> {
     return this.deposits.list(session.organizationId, query);
+  }
+
+  @Get(':depositId')
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'] })
+  @ApiOperation({ summary: 'One deposit intent, in the same shape as the list row' })
+  @ApiResponse({ status: 200, description: 'The deposit', type: DepositDto })
+  @ApiResponse({ status: 404, description: 'PAYMENT_DEPOSIT_NOT_FOUND — not in this organization' })
+  async getOne(
+    @CurrentSession() session: McpSession,
+    @Param('depositId', new ParseUUIDPipe()) depositId: string,
+  ): Promise<DepositDto> {
+    return this.deposits.getOne(session.organizationId, depositId);
   }
 }

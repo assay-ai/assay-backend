@@ -10,7 +10,11 @@ import { Request, Response } from 'express';
 import type { Redis } from 'ioredis';
 import { Observable, from, mergeMap } from 'rxjs';
 
-import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
+import {
+  RateOutcome,
+  SHARED_WINDOW_RETRY_MS,
+  SharedRateWindows,
+} from '@shared/rate-limit/shared-rate-windows';
 
 /** One limit: how many requests, per how long, under which Redis key prefix. */
 export interface AddressRateLimit {
@@ -22,13 +26,8 @@ export interface AddressRateLimit {
   maxAddresses: number;
 }
 
-/** After a Redis failure, how long requests skip it and go straight to the in-process window. */
-export const SHARED_WINDOW_RETRY_MS = 5_000;
-
-export interface RateOutcome {
-  allowed: boolean;
-  retryAfterSeconds: number;
-}
+export { SHARED_WINDOW_RETRY_MS };
+export type { RateOutcome };
 
 /**
  * A per-address fixed window, counted in Redis so every instance shares it.
@@ -66,11 +65,7 @@ export interface RateOutcome {
  * way past). This decides nothing about *who* the caller is, only how often.
  */
 export abstract class AddressRateLimitInterceptor implements NestInterceptor {
-  private readonly logger = new Logger(this.constructor.name);
-  private readonly windows = new Map<string, { startedAt: number; count: number }>();
-  /** When the fallback was last logged; one warning per window, not one per request. */
-  private lastFallbackWarnAt = Number.NEGATIVE_INFINITY;
-  private skipSharedUntil = Number.NEGATIVE_INFINITY;
+  private readonly counter: SharedRateWindows;
 
   /** The clock; a field rather than a constructor parameter so DI has nothing to resolve. */
   now: () => number = Date.now;
@@ -82,7 +77,15 @@ export abstract class AddressRateLimitInterceptor implements NestInterceptor {
   protected constructor(
     private readonly rate: AddressRateLimit,
     private readonly redis?: Redis,
-  ) {}
+  ) {
+    this.counter = new SharedRateWindows({
+      redis,
+      keyPrefix: rate.keyPrefix,
+      maxKeys: rate.maxAddresses,
+      now: () => this.now(),
+      logger: new Logger(this.constructor.name),
+    });
+  }
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const http = context.switchToHttp();
@@ -103,65 +106,15 @@ export abstract class AddressRateLimitInterceptor implements NestInterceptor {
 
   /**
    * Count one request from `client` in the shared window; on a Redis failure,
-   * in the in-process one.
-   *
-   * `INCR` and `PEXPIRE` go in one `MULTI`, and the window index is part of the
-   * key: a counter whose expiry was lost would otherwise outlive its window and
-   * lock the address out for good. With the index in the key, the worst a lost
-   * expiry can do is leave one dead key behind.
+   * in the in-process one (see {@link SharedRateWindows}).
    */
-  async takeShared(client: string): Promise<RateOutcome> {
-    const now = this.now();
-    const index = Math.floor(now / this.rate.windowMs);
-    const key = `${this.rate.keyPrefix}${client}:${index}`;
-    const redis = this.redis as Redis;
-    if (now < this.skipSharedUntil) return this.take(client);
-
-    try {
-      const results = await withRedisTimeout(() =>
-        redis.multi().incr(key).pexpire(key, this.rate.windowMs).exec(),
-      );
-      const [error, count] = results?.[0] ?? [new Error('transaction discarded'), null];
-      if (error) throw error;
-
-      const windowEndsAt = (index + 1) * this.rate.windowMs;
-      return {
-        allowed: Number(count) <= this.rate.limit,
-        retryAfterSeconds: Math.max(1, Math.ceil((windowEndsAt - now) / 1000)),
-      };
-    } catch (error) {
-      this.skipSharedUntil = now + SHARED_WINDOW_RETRY_MS;
-      if (now - this.lastFallbackWarnAt >= this.rate.windowMs) {
-        this.lastFallbackWarnAt = now;
-        this.logger.warn(
-          `shared rate window unavailable, counting per instance: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-      return this.take(client);
-    }
+  takeShared(client: string): Promise<RateOutcome> {
+    return this.counter.take(client, this.rate);
   }
 
   /** Count one request from `client` in process; refused with the seconds until its window resets. */
   take(client: string): RateOutcome {
-    const now = this.now();
-    let window = this.windows.get(client);
-
-    if (!window || now - window.startedAt >= this.rate.windowMs) {
-      // Re-inserted, so the map's insertion order stays oldest-window-first.
-      this.windows.delete(client);
-      if (this.windows.size >= this.rate.maxAddresses) this.evict(now);
-      window = { startedAt: now, count: 0 };
-      this.windows.set(client, window);
-    }
-
-    window.count += 1;
-    const retryAfterSeconds = Math.max(
-      1,
-      Math.ceil((window.startedAt + this.rate.windowMs - now) / 1000),
-    );
-    return { allowed: window.count <= this.rate.limit, retryAfterSeconds };
+    return this.counter.takeLocal(client, this.rate);
   }
 
   private enforce(outcome: RateOutcome, response: Response): void {
@@ -171,17 +124,6 @@ export abstract class AddressRateLimitInterceptor implements NestInterceptor {
       'Too many requests from this address. Try again shortly.',
       HttpStatus.TOO_MANY_REQUESTS,
     );
-  }
-
-  /** Drop expired windows; if still full, drop the oldest until there is room. */
-  private evict(now: number): void {
-    for (const [client, window] of this.windows) {
-      if (now - window.startedAt >= this.rate.windowMs) this.windows.delete(client);
-    }
-    for (const client of this.windows.keys()) {
-      if (this.windows.size < this.rate.maxAddresses) break;
-      this.windows.delete(client);
-    }
   }
 }
 

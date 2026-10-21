@@ -328,6 +328,8 @@ describe('discovery end to end over HTTP', () => {
       expect(response.headers.get('access-control-allow-headers')).toContain('authorization');
       expect(response.headers.get('access-control-expose-headers')).toContain('www-authenticate');
       expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+      // Reused by the browser for 2 h, not the 5 s default.
+      expect(response.headers.get('access-control-max-age')).toBe('7200');
     });
 
     it('the 401 itself exposes www-authenticate to a browser client', async () => {
@@ -357,6 +359,7 @@ describe('discovery end to end over HTTP', () => {
         expect(response.headers.get('access-control-allow-headers')).toBe(
           'Content-Type,MCP-Protocol-Version',
         );
+        expect(response.headers.get('access-control-max-age')).toBe('7200');
         expect(response.headers.get('access-control-allow-credentials')).toBeNull();
         expect(response.headers.get('access-control-expose-headers')).toBeNull();
       },
@@ -370,6 +373,7 @@ describe('discovery end to end over HTTP', () => {
         expect(response.headers.get('access-control-allow-origin')).toBe('*');
         expect(response.headers.get('access-control-allow-methods')).toBe('GET,POST,OPTIONS');
         expect(response.headers.get('access-control-allow-headers')).toBe('Content-Type');
+        expect(response.headers.get('access-control-max-age')).toBe('7200');
         expect(response.headers.get('access-control-allow-credentials')).toBeNull();
         expect(response.headers.get('access-control-expose-headers')).toBeNull();
       },

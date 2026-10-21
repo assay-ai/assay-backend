@@ -96,7 +96,8 @@ export class AgentEntity extends AbstractEntityWithoutSoftDelete {
    * Written on a coarse cadence and never awaited on the refusal path, for the
    * same reason `agent_credentials.last_used_at` is: a row update on the hot
    * path of every authenticated call is a lot of writes to serve a column the
-   * UI renders as "3 minutes ago".
+   * UI renders as "3 minutes ago". Buffered by `LastSeenRecorder`, written in a
+   * batch every 30 s; a reader must overlay `LastSeenRecorder.pending`.
    */
   @Column({ name: 'last_login_at', type: 'timestamptz', nullable: true })
   lastLoginAt: Date | null;

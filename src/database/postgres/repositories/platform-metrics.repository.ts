@@ -36,11 +36,8 @@ export class PlatformMetricsRepository {
    * instant of `now` — two round trips could straddle a clock tick and make a
    * flat rate look like a swing.
    *
-   * `payment_intents` has no index on `created_at` alone (only
-   * `(status, expires_at)` and `(organization_id, agent_id)`), so this is a
-   * bounded sequential scan over roughly the last 61 minutes rather than an
-   * index range scan. Acceptable for a tile polled at dashboard cadence; a
-   * dedicated index would be the fix if this ever needs to run more often.
+   * The `created_at` range is an index range scan over roughly the last 61
+   * minutes (`idx_payment_intents_created_at`).
    */
   async intentRateCounts(now: Date): Promise<{ lastMinute: number; hourAgoMinute: number }> {
     const lastMinuteStart = new Date(now.getTime() - 60_000);

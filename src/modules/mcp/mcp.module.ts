@@ -15,6 +15,9 @@ import { createSessionSource } from '@modules/auth/services/composite-mcp-sessio
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
+import { CachingSessionSource, SESSION_CACHE, SessionCache } from '@modules/auth/session-cache';
+import { LastSeenKind, LastSeenModule, LastSeenRecorder } from '@shared/last-seen';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
 import { VerificationModule } from '@modules/verification/verification.module';
@@ -76,6 +79,8 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
 @Module({
   imports: [
     AuthModule,
+    // `LastSeenRecorder`, for the stamp a cached session replays.
+    LastSeenModule,
     // The blocklist that wraps `MCP_SESSION_SOURCE` below.
     BlocklistModule,
     // `ENABLED_CHAINS` alone: `McpToolCallService` and
@@ -119,18 +124,29 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
         oauthSource: OAuthAccessTokenMcpSessionSource,
         privySource: PrivyMcpSessionSource,
         blocklist: AccountBlocklistService,
-      ) =>
+        cache: SessionCache,
+        resolver: CredentialSessionResolver,
+        lastSeen: LastSeenRecorder,
+      ) => {
+        // A cache hit leaves the stamp a resolve would have left.
+        const credentialUsed = (session: { organizationId: string; credentialId: string }) =>
+          resolver.stampUse({ organizationId: session.organizationId, id: session.credentialId });
         // The blocklist wraps whichever source is selected, so no source has
-        // to remember to check it — see `BlocklistSessionSource`.
-        new BlocklistSessionSource(
+        // to remember to check it — see `BlocklistSessionSource`. The session
+        // cache sits inside it, one per source that reads the database (the
+        // config source is already in memory), so a block applies at once.
+        return new BlocklistSessionSource(
           createSessionSource(parseSessionSourceMode(config.get<string>('auth.sessionSource')), {
             config: configSource,
-            db: dbSource,
-            oauth: oauthSource,
-            privy: privySource,
+            db: new CachingSessionSource('db', dbSource, cache, credentialUsed),
+            oauth: new CachingSessionSource('oauth', oauthSource, cache, credentialUsed),
+            privy: new CachingSessionSource('privy', privySource, cache, (session) =>
+              lastSeen.record(LastSeenKind.AGENT_LOGIN, session.agentId),
+            ),
           }),
           blocklist,
-        ),
+        );
+      },
       inject: [
         ConfigService,
         ConfigMcpSessionSource,
@@ -138,6 +154,9 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
         OAuthAccessTokenMcpSessionSource,
         PrivyMcpSessionSource,
         AccountBlocklistService,
+        SESSION_CACHE,
+        CredentialSessionResolver,
+        LastSeenRecorder,
       ],
     },
 

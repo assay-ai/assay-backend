@@ -55,6 +55,10 @@ export const CIMD_FETCH_LIMITS = Object.freeze({
 const CIMD_POLICY: EgressPolicy = Object.freeze({
   ...withLimits(UNTRUSTED_EGRESS_POLICY, CIMD_FETCH_LIMITS),
   allowedProtocols: Object.freeze(['https:']),
+  // Anyone picks this URL by starting an OAuth flow, so a direct fetch would
+  // hand them this server's address. Through the egress relay they see
+  // Cloudflare's; with no relay configured (local, e2e) it stays direct.
+  relay: true,
 });
 
 /**

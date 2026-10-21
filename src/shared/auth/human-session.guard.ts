@@ -38,3 +38,11 @@ const HUMAN_KINDS: ReadonlySet<McpCallerKind> = new Set([
   McpCallerKind.HUMAN,
   McpCallerKind.CONFIG,
 ]);
+
+/**
+ * The guard's allow-list, for a route that is open to both kinds but returns
+ * more to a person (`GET /agents?include=`): one list, so the two cannot drift.
+ */
+export function isHumanCallerKind(callerKind: McpCallerKind): boolean {
+  return HUMAN_KINDS.has(callerKind);
+}

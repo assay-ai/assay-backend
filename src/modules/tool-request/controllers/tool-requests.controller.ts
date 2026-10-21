@@ -12,6 +12,7 @@ import {
   ToolRequestIdParamsDto,
 } from '../dto/tool-request.dto';
 import { ToolRequestService } from '../services/tool-request.service';
+import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
 
 /**
  * The tool request form and the requester's own view of it.
@@ -32,6 +33,8 @@ import { ToolRequestService } from '../services/tool-request.service';
 @ApiTags('Tool requests')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+// Writes here appear in the operator console's work lists.
+@BumpsOperatorConsole()
 @Controller('tool-requests')
 export class ToolRequestsController {
   constructor(private readonly requests: ToolRequestService) {}

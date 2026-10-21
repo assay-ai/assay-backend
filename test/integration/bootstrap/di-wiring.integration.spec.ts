@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { NestFactory } from '@nestjs/core';
+import { ModulesContainer, NestFactory } from '@nestjs/core';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -9,6 +9,7 @@ import { redisConfig } from '@config/redis.config';
 import { DatabaseModule } from '@database/database.module';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { DisputeModule } from '@modules/dispute/dispute.module';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
 import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
@@ -33,8 +34,7 @@ import { ReconciliationService } from '@modules/settlement/services/reconciliati
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { ALERT_PORT, AlertingModule } from '@shared/alerting';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
-import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
-import type { Redis } from 'ioredis';
+import { Redis } from 'ioredis';
 
 /**
  * Proves `LedgerModule`, `PaymentModule` and `SettlementModule` — including
@@ -90,8 +90,74 @@ import type { Redis } from 'ioredis';
 })
 class DiWiringHarnessModule {}
 
+/**
+ * The chain configuration the module graph refuses to boot without, for a run
+ * that brings none — CI and fresh worktrees have no `.env`, only the
+ * `DATABASE_*` / `REDIS_*` the suite is given.
+ *
+ * Applied only when `ENABLED_CHAINS` itself is unset, and then only to the keys
+ * that are unset: a developer's own `.env` is a coherent chain set, and mixing
+ * a fixture into it would boot a graph neither of them describes. Both
+ * namespaces are enabled, as in `two-chains.integration.spec.ts`, so the
+ * eip155 factories behind `VAULT_PORT`, the escrow hold and the deposit
+ * watcher are composed rather than skipped.
+ *
+ * Nothing reaches a network. The RPC URLs point at the loopback discard port:
+ * the clients are lazy, and the one boot-time read
+ * (`EvmChainStateService.onModuleInit`) fails at once, is logged and is
+ * swallowed — the assertion here is the DI graph, not the chain. The keys are
+ * throwaway scalars that sign nothing.
+ */
+const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
+const LOOPBACK_RPC = 'http://127.0.0.1:9';
+const CHAIN_FIXTURE: Record<string, string> = {
+  ENABLED_CHAINS: `${CHAIN_IDS.SOLANA_DEVNET},${EVM}`,
+  SOLANA_RPC_URL: LOOPBACK_RPC,
+  EVM_RPC_URLS: JSON.stringify({ [EVM]: LOOPBACK_RPC }),
+  EVM_DEPLOYMENTS: JSON.stringify({
+    [EVM]: {
+      config: '0x1111111111111111111111111111111111111111',
+      stake: '0x2222222222222222222222222222222222222222',
+      escrow: '0x3333333333333333333333333333333333333333',
+      // `setup-env.ts` pins `ROBINHOOD_TESTNET_USDG_ADDRESS` to this address.
+      asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
+      escrowImplementation: '0x8888888888888888888888888888888888888888',
+      admin: '0x9999999999999999999999999999999999999999',
+      owner: '0x7777777777777777777777777777777777777777',
+    },
+  }),
+  EVM_RELAYER_GAS_GRANT_MAX_WEI: '2000000000000000',
+  EVM_RELAYER_GAS_GRANT_DAILY_MAX_WEI: '50000000000000000',
+  EVM_RELAYER_FLOAT_LOW_WEI: '10000000000000000',
+  EVM_RELAYER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'11'.repeat(32)}` }]),
+  // A DIFFERENT key: the boot refuses the relayer and redeemer being equal.
+  EVM_REDEEMER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'22'.repeat(32)}` }]),
+};
+
+const isUnset = (key: string) => !process.env[key]?.trim();
+
 describe('DI wiring — the real domain modules resolve the vault, deposit, reconciler and withdrawal providers', () => {
   jest.setTimeout(60_000);
+
+  const saved = new Map<string, string | undefined>();
+
+  beforeAll(() => {
+    if (!isUnset('ENABLED_CHAINS')) return;
+    for (const [key, value] of Object.entries(CHAIN_FIXTURE)) {
+      if (!isUnset(key)) continue;
+      saved.set(key, process.env[key]);
+      process.env[key] = value;
+    }
+  });
+
+  afterAll(() => {
+    // Restores the relayer and redeemer keys too, which the boot deletes from
+    // `process.env` once read.
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
 
   it('resolves every settlement provider from one composed module graph', async () => {
     const app = await NestFactory.createApplicationContext(DiWiringHarnessModule, {
@@ -151,15 +217,24 @@ describe('DI wiring — the real domain modules resolve the vault, deposit, reco
       // `app.close()` leaves the `ioredis` connection open regardless of
       // whether the TypeORM shutdown bug fires first. Both are pre-existing
       // gaps worked around here, not fixed.
+      //
+      // It is not the only one: the account blocklist and the policy kill
+      // switch each hold a client and a subscriber of their own, and the
+      // hooks that would close them are never reached once the TypeORM
+      // shutdown throws. Every `ioredis` instance in the container is dropped
+      // here rather than a list of tokens that goes stale with the next one.
       const dataSource = app.get<DataSource>(getDataSourceToken('postgres'), { strict: false });
-      const redis = app.get<Redis>(REDIS_CACHE_CLIENT, { strict: false });
+      const redisClients = [...app.get(ModulesContainer).values()]
+        .flatMap((module) => [...module.providers.values()])
+        .map((wrapper) => wrapper.instance as unknown)
+        .filter((instance): instance is Redis => instance instanceof Redis);
       await app.close().catch(() => {
         // See comment above — expected, and already worked around below.
       });
       await dataSource?.destroy().catch(() => {
         // Already closed by a successful `app.close()`; destroying twice is a no-op we do not need to see.
       });
-      redis?.disconnect();
+      for (const redis of redisClients) redis.disconnect();
     }
   });
 });

@@ -108,7 +108,8 @@ export class OperatorEntity extends AbstractEntityWithoutSoftDelete {
    * tools are audited too, and "which internal accounts are still being used"
    * is the cheapest possible version of that: an operator who left three months
    * ago and whose token is still resolving is visible here without any further
-   * instrumentation.
+   * instrumentation. Buffered by `LastSeenRecorder` and written in a batch
+   * every 30 s; the directory overlays `LastSeenRecorder.pending`.
    */
   @Column({ name: 'last_seen_at', type: 'timestamptz', nullable: true })
   lastSeenAt: Date | null;

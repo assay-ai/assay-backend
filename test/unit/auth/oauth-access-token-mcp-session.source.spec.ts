@@ -222,6 +222,41 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     });
   });
 
+  describe('how long a session may be reused (B2 session cache)', () => {
+    it('is not kept until first_used_at reads back as written: reuse detection decides on it', async () => {
+      const fx = build('mcp');
+      seedGrant(fx, { token: { firstUsedAt: null } });
+
+      const first = await fx.source.resolveForCache(ACCESS_TOKEN);
+
+      expect(first.cacheable).toBe(false);
+    });
+
+    it('holds until the token expires, or the grant if it ends first', async () => {
+      const fx = build('mcp');
+      const tokenExpiry = new Date(Date.now() + 3_600_000);
+      seedGrant(fx, { token: { firstUsedAt: new Date(), expiresAt: tokenExpiry } });
+      const used = await fx.source.resolveForCache(ACCESS_TOKEN);
+      expect(used.cacheable).toBe(true);
+      expect(used.notAfter).toEqual(tokenExpiry);
+
+      const soon = build('mcp');
+      const grantExpiry = new Date(Date.now() + 60_000);
+      seedGrant(soon, {
+        token: { firstUsedAt: new Date(), expiresAt: tokenExpiry },
+        credential: { expiresAt: grantExpiry },
+      });
+      expect((await soon.source.resolveForCache(ACCESS_TOKEN)).notAfter).toEqual(grantExpiry);
+    });
+
+    it('answers resolve with the same session', async () => {
+      const fx = build('mcp');
+      seedGrant(fx, { token: { firstUsedAt: new Date() } });
+      const { session } = await fx.source.resolveForCache(ACCESS_TOKEN);
+      expect(await fx.source.resolve(ACCESS_TOKEN)).toEqual(session);
+    });
+  });
+
   describe('the token row', () => {
     it('looks the token up by its digest, never by the token itself', async () => {
       const fx = build('mcp');

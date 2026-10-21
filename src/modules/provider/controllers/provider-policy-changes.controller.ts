@@ -6,6 +6,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { PolicyChangeDto } from '../dto/provider-policy-changes.dto';
 import { ProviderPolicyChangesService } from '../services/provider-policy-changes.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `GET /providers/me/policy-changes` (the policy change notice slice only).
@@ -23,6 +24,7 @@ export class ProviderPolicyChangesController {
   constructor(private readonly policyChanges: ProviderPolicyChangesService) {}
 
   @Get()
+  @TenantCache({ ttl: 60, vary: 'org', epochs: ['provider', 'shared'] })
   @ApiOperation({
     summary:
       'Pending (SHADOW) verification policy versions affecting this provider’s bindings, with a ' +

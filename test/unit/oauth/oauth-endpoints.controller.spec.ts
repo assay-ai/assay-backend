@@ -43,7 +43,7 @@ import {
   timed,
 } from './helpers/oauth-fakes';
 
-const WEB = 'https://app.assay.ai';
+const WEB = 'https://app.goassay.ai';
 const BUILTIN_ID = `${MCP}/oauth/clients/assay-mcp`;
 const CIMD_ID = 'https://tools.example.com/client.json';
 const LOOPBACK = 'http://127.0.0.1/callback';

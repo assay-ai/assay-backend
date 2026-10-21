@@ -162,6 +162,8 @@ function buildHarness(
     findOneBy: jest.fn(async ({ id }: { id: string }) => clients.find((c) => c.id === id) ?? null),
   };
 
+  // Nothing buffered unless a test says so: the row's `last_used_at` stands.
+  const lastSeen = { pending: jest.fn(async () => new Map<string, Date>()) };
   const service = new AgentCredentialsService(
     credentials as any,
     agents as any,
@@ -170,9 +172,11 @@ function buildHarness(
     accessEpoch as any,
     oauthClients as any,
     TRUST,
+    lastSeen as any,
   );
   return {
     service,
+    lastSeen,
     fake,
     credentials,
     agents,
@@ -227,6 +231,30 @@ describe('AgentCredentialsService.list', () => {
       'delegateBoundAt',
       'createdAt',
     ]);
+  });
+});
+
+describe('AgentCredentialsService.list — buffered last_used_at (B1)', () => {
+  it('shows the later of the row and the stamp not yet written', async () => {
+    const stored = new Date('2026-10-20T10:00:00.000Z');
+    const buffered = new Date('2026-10-20T10:00:07.000Z');
+    const row = credentialRow({ lastUsedAt: stored });
+    const { service, lastSeen } = buildHarness([row]);
+    lastSeen.pending.mockResolvedValue(new Map([[`${ORGANIZATION_ID}:${row.id}`, buffered]]));
+
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+
+    expect(lastSeen.pending).toHaveBeenCalledWith('credential-use', [
+      `${ORGANIZATION_ID}:${row.id}`,
+    ]);
+    expect(page.items[0].lastUsedAt).toEqual(buffered);
+  });
+
+  it('keeps the row stamp when nothing newer is buffered', async () => {
+    const stored = new Date('2026-10-20T10:00:00.000Z');
+    const { service } = buildHarness([credentialRow({ lastUsedAt: stored })]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+    expect(page.items[0].lastUsedAt).toEqual(stored);
   });
 });
 

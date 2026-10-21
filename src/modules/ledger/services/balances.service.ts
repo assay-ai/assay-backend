@@ -127,10 +127,9 @@ export class BalancesService {
     const assets = scalesByAsset(balances);
 
     const [withheld, pendingByAsset, chainByAccount] = await Promise.all([
-      Promise.all(
-        [...assets].map(([asset, decimals]) =>
-          this.withheld.reconcile(organizationId, asset, decimals),
-        ),
+      this.withheld.reconcileAssets(
+        organizationId,
+        [...assets].map(([asset, decimals]) => ({ asset, decimals })),
       ),
       this.pendingDepositsByAsset(organizationId),
       this.chainFiguresFor(organizationId, balances),
@@ -215,10 +214,10 @@ export class BalancesService {
 
     const balances = ownAccountsOnly(await this.ledger.listBalances(organizationId));
 
-    const withheld = await Promise.all(
-      [...scalesByAsset(balances)].map(([asset, decimals]) =>
-        this.withheld.reconcile(organizationId, asset, decimals, period),
-      ),
+    const withheld = await this.withheld.reconcileAssets(
+      organizationId,
+      [...scalesByAsset(balances)].map(([asset, decimals]) => ({ asset, decimals })),
+      period,
     );
 
     return withheld.map(toReconciliationDto);

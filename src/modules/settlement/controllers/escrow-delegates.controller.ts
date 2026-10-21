@@ -34,6 +34,7 @@ import {
   EscrowDelegationWithUnsettled,
   RelayedDelegationResult,
 } from '../services/escrow-delegation.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `/escrow/delegates` — agent payment delegation (x402-aligned).
@@ -62,6 +63,7 @@ export class EscrowDelegatesController {
 
   /** `GET /escrow/delegates` — the payer's standing delegates, read from the chain. */
   @Get()
+  @TenantCache({ ttl: 5, vary: 'agent', epochs: ['money'], singleFlight: true })
   @ApiOperation({ summary: "List the payer's voucher delegates, from the chain" })
   @ApiResponse({ status: 200, type: ListEscrowDelegatesResponseDto })
   async list(@CurrentSession() session: McpSession): Promise<ListEscrowDelegatesResponseDto> {

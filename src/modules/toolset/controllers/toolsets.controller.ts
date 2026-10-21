@@ -39,6 +39,7 @@ import {
 } from '../dto/toolset-publishing.dto';
 import { ToolsetPublishingService } from '../services/toolset-publishing.service';
 import { ToolsetsService } from '../services/toolsets.service';
+import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
  * `/toolsets` — the organization's own tool sets and their Draft (design
@@ -57,6 +58,7 @@ export class ToolsetsController {
   ) {}
 
   @Get()
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['toolsets', 'shared'] })
   @ApiOperation({ summary: "The organization's tool sets, newest first" })
   @ApiCursorPage(ToolsetSummaryDto)
   async list(
@@ -80,6 +82,7 @@ export class ToolsetsController {
   }
 
   @Get(':id')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['toolsets', 'shared'] })
   @ApiOperation({ summary: 'One tool set with its Draft entries' })
   @ApiResponse({ status: 200, type: ToolsetDto })
   @ApiResponse({ status: 404, description: 'TOOLSET_NOT_FOUND — also for another organization' })
@@ -188,6 +191,7 @@ export class ToolsetsController {
   }
 
   @Get(':id/versions')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['toolsets', 'shared'] })
   @ApiOperation({ summary: 'Published versions, newest first' })
   @ApiResponse({ status: 200, type: [ToolsetVersionSummaryDto] })
   async versions(
@@ -198,6 +202,7 @@ export class ToolsetsController {
   }
 
   @Get(':id/versions/:version')
+  @TenantCache({ ttl: 30, vary: 'org', epochs: ['toolsets', 'shared'] })
   @ApiOperation({ summary: 'One published version: its snapshot' })
   @ApiResponse({ status: 200, type: ToolsetVersionDto })
   async version(

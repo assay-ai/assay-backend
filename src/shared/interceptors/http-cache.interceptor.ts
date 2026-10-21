@@ -1,13 +1,13 @@
 // cache/http-cache.interceptor.ts
 import { Injectable, NestInterceptor, ExecutionContext, CallHandler, Logger } from '@nestjs/common';
-import { Observable, of } from 'rxjs';
+import { Observable, from, lastValueFrom, of } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
-import { SHARED_WINDOW_RETRY_MS } from '@shared/interceptors/address-rate-limit.interceptor';
+import { SHARED_WINDOW_RETRY_MS } from '@shared/rate-limit/shared-rate-windows';
 import {
   HTTP_CACHE_TTL_KEY,
   HTTP_CACHE_KEY_KEY,
@@ -15,6 +15,35 @@ import {
 } from '@shared/decorators/http-cache.decorator';
 import { CACHE_KEYS } from '@constants/cache-keys.constant';
 import { isCredentialed, readCacheTenant } from '@shared/auth/session-request.key';
+import { TENANT_CACHE_KEY, TenantCacheOptions } from '@shared/decorators/tenant-cache.decorator';
+import { TenantEpochService } from '@shared/cache/redis-cache/tenant-epoch.service';
+import {
+  tenantCacheCaller,
+  tenantCacheEtag,
+  tenantCacheKey,
+} from '@shared/cache/http-cache/tenant-cache-key';
+import { SingleFlightService } from '@shared/services/single-flight.service';
+
+/** What a tenant-cached entry holds: its validator and the handler's body. */
+interface TenantCacheEntry {
+  tc: 1;
+  e: string;
+  d: unknown;
+}
+
+function isTenantEntry(value: unknown): value is TenantCacheEntry {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as TenantCacheEntry).tc === 1 &&
+    typeof (value as TenantCacheEntry).e === 'string'
+  );
+}
+
+/** How long the leader's lock lives if it dies without releasing it. */
+const TENANT_SINGLE_FLIGHT_LOCK_MS = 8_000;
+/** How long a single-flight follower waits for the leader before running itself. */
+export const TENANT_SINGLE_FLIGHT_WAIT_MS = 1_500;
 
 type HandlerFunction = (...args: any[]) => any;
 
@@ -29,6 +58,8 @@ export class HttpCacheInterceptor implements NestInterceptor {
     private readonly cacheService: CacheService,
     private readonly reflector: Reflector,
     private readonly configService: ConfigService,
+    private readonly epochs?: TenantEpochService,
+    private readonly singleFlight?: SingleFlightService,
   ) {}
 
   async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<any>> {
@@ -44,6 +75,13 @@ export class HttpCacheInterceptor implements NestInterceptor {
     // Step 1: Check if cache is explicitly disabled
     if (this.isCacheDisabled(handler)) {
       return next.handle();
+    }
+
+    // Signed-in reads cached per tenant, keyed on epochs (`@TenantCache`).
+    const tenantCache = this.reflector.get<TenantCacheOptions>(TENANT_CACHE_KEY, handler);
+    if (tenantCache) {
+      if (!this.isGetRequest(request)) return next.handle();
+      return this.interceptTenant(request, response, tenantCache, next);
     }
 
     // Step 2: Extract cache decorators
@@ -99,6 +137,169 @@ export class HttpCacheInterceptor implements NestInterceptor {
 
     // Step 7: Execute handler and cache the response
     return this.executeAndCache(next, cacheKey, ttl, response);
+  }
+
+  // ==================== Tenant cache (`@TenantCache`) ====================
+
+  /**
+   * A signed-in GET, cached per tenant and keyed on the tenant's epochs.
+   *
+   * Fails toward the handler at every step: no epoch service, a caller that
+   * cannot be attributed, an unreadable epoch or a Redis outage each mean the
+   * handler runs and nothing is stored. A hit sets the entry's `ETag`, so a
+   * matching `If-None-Match` leaves as a `304` (Express compares weakly)
+   * without the handler running; a request that asks `no-cache` gets the
+   * body. With `singleFlight`, concurrent misses for one key run the handler
+   * once, across instances.
+   */
+  private async interceptTenant(
+    request: Request,
+    response: Response,
+    options: TenantCacheOptions,
+    next: CallHandler,
+  ): Promise<Observable<any>> {
+    if (!this.epochs || Date.now() < this.skipRedisUntil) return next.handle();
+
+    const caller = tenantCacheCaller(request, options.vary);
+    if (caller === null) {
+      this.logger.warn(
+        `Not caching ${request.method} ${request.path}: no ${options.vary} caller could be read.`,
+      );
+      return next.handle();
+    }
+    const epochs = await this.epochs.read(caller.organizationId, options.epochs);
+    if (epochs === null) {
+      // Only a Redis failure reads null for an attributed caller.
+      this.skipRedisUntil = Date.now() + SHARED_WINDOW_RETRY_MS;
+      return next.handle();
+    }
+
+    const key = tenantCacheKey({
+      path: this.extractPath(request),
+      query: request.query,
+      caller,
+      epochs,
+      scopes: options.epochs,
+    });
+
+    // `ttl: 0` stores nothing: concurrent requests are only coalesced.
+    if (options.ttl > 0) {
+      const hit = await this.tryGetFromCache(key);
+      if (isTenantEntry(hit)) {
+        response.setHeader('ETag', hit.e);
+        return of(hit.d);
+      }
+    }
+
+    if (options.singleFlight && this.singleFlight) {
+      return from(this.runTenantSingleFlight(key, options, response, next));
+    }
+    return from(this.runTenant(key, options, response, next));
+  }
+
+  /** Run the handler, store a cacheable body and set its `ETag`. */
+  private async runTenant(
+    key: string,
+    options: TenantCacheOptions,
+    response: Response,
+    next: CallHandler,
+  ): Promise<unknown> {
+    const data = await lastValueFrom(next.handle(), { defaultValue: undefined });
+    const etag = await this.storeTenant(key, data, options, response);
+    if (etag) response.setHeader('ETag', etag);
+    return data;
+  }
+
+  private async storeTenant(
+    key: string,
+    data: unknown,
+    options: TenantCacheOptions,
+    response: Response,
+  ): Promise<string | null> {
+    if (options.ttl <= 0) return null;
+    if (!this.shouldCache(data, response.statusCode)) return null;
+    if (response.statusCode !== 200) return null;
+    if (options.cacheIf && !options.cacheIf(data)) return null;
+    const etag = tenantCacheEtag(key, data);
+    const entry: TenantCacheEntry = { tc: 1, e: etag, d: data };
+    await this.setCache(key, entry, options.ttl);
+    return etag;
+  }
+
+  /**
+   * One handler run per key among concurrent misses.
+   *
+   * The leader's own error is rethrown to its own request untouched; a waiter
+   * told the leader failed, or that cannot reach the leader, runs the handler
+   * itself rather than receive an error rebuilt from a pub/sub message (which
+   * would lose its status). A leader re-reads the cache first: a waiter that
+   * subscribed too late and retried finds the entry the first leader stored.
+   */
+  private async runTenantSingleFlight(
+    key: string,
+    options: TenantCacheOptions,
+    response: Response,
+    next: CallHandler,
+  ): Promise<unknown> {
+    type Flight = { ok: true; e: string | null; d: unknown } | { ok: false };
+    let ran = false;
+    let own: { data: unknown; etag: string | null } | null = null;
+    let ownError: { error: unknown } | null = null;
+
+    const fn = async (): Promise<Flight> => {
+      ran = true;
+      const again = options.ttl > 0 ? await this.tryGetFromCache(key) : null;
+      if (isTenantEntry(again)) {
+        own = { data: again.d, etag: again.e };
+        return { ok: true, e: again.e, d: again.d };
+      }
+      try {
+        const data = await lastValueFrom(next.handle(), { defaultValue: undefined });
+        const etag = await this.storeTenant(key, data, options, response);
+        own = { data, etag };
+        return { ok: true, e: etag, d: data };
+      } catch (error) {
+        ownError = { error };
+        return { ok: false };
+      }
+    };
+
+    let flight: Flight | null = null;
+    try {
+      flight = await this.singleFlight!.execute<Flight>({
+        key: `tenant-cache:${key}`,
+        fn,
+        options: {
+          lock: { lockTTLms: TENANT_SINGLE_FLIGHT_LOCK_MS },
+          // A leader that finished before this follower subscribed left its
+          // entry behind: answer from it rather than wait for a publish
+          // that has already gone. Past the wait, run the handler here.
+          wait: {
+            maxWaitMs: TENANT_SINGLE_FLIGHT_WAIT_MS,
+            recheck: async () => {
+              if (options.ttl <= 0) return undefined;
+              const entry = await this.tryGetFromCache(key);
+              return isTenantEntry(entry) ? { ok: true, e: entry.e, d: entry.d } : undefined;
+            },
+          },
+        },
+      });
+    } catch (error) {
+      if (!ran) this.logger.warn(`single flight unavailable for ${key}: ${String(error)}`);
+    }
+
+    if (ownError) throw (ownError as { error: unknown }).error;
+    const mine = own as { data: unknown; etag: string | null } | null;
+    if (mine) {
+      if (mine.etag) response.setHeader('ETag', mine.etag);
+      return mine.data;
+    }
+    if (flight?.ok) {
+      if (flight.e) response.setHeader('ETag', flight.e);
+      return flight.d;
+    }
+    // The leader failed or could not be reached: answer for ourselves.
+    return this.runTenant(key, options, response, next);
   }
 
   // ==================== Cache Control Logic ====================

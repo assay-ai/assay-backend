@@ -98,11 +98,14 @@ interface PaymentRow {
  * it; its first credit never moves, so its position stays put and the rest of
  * the calls simply join the row on the next read.
  *
- * Cost: the redemption query groups the provider's whole credit history in
- * the window on every page (filters on the group run in `HAVING`). A per-entry
- * pre-filter on the cursor instant would cut a transaction that straddles it
- * into a partial row, so there is none; `from` narrows the scan correctly only
- * in `HAVING` too. Linear in paid calls, fine at current volume.
+ * Cost: the filters on a redemption are about its FIRST credit, so they run
+ * in `HAVING` on the group. A plain per-entry `WHERE created_at >= :from`
+ * would cut a transaction that straddles the bound into a partial row. What
+ * is pushed down is a lower bound that keeps or drops whole transactions
+ * ({@link startsNoEarlierThan}): `from`, and an ascending cursor's instant.
+ * The upper bounds (`to`, a descending cursor) stay in `HAVING` only: a
+ * transaction whose first credit is below the bound may have later credits
+ * above it, so no row can be dropped on its own instant there.
  */
 @Injectable()
 export class ProviderPayoutsService {
@@ -168,6 +171,17 @@ export class ProviderPayoutsService {
       Object.assign(havingParams, { afterAt: after.at, afterId: after.id });
     }
     if (having.length > 0) redemptions.having(having.join(' AND '), havingParams);
+    // The same bounds again on the rows, as whole-transaction pre-filters: they
+    // only drop transactions `HAVING` drops anyway, so the scan skips history
+    // below the bound instead of grouping it.
+    if (query.from) {
+      redemptions.andWhere(startsNoEarlierThan('fromBound'), { fromBound: query.from });
+    }
+    if (after && !descending) {
+      redemptions.andWhere(startsNoEarlierThan('afterBound'), {
+        afterBound: after.at,
+      });
+    }
     redemptions.orderBy(groupAt, order).addOrderBy(groupId, order).limit(take);
 
     const rows = await redemptions.getRawMany<PaymentRow>();
@@ -179,6 +193,38 @@ export class ProviderPayoutsService {
       hasMore && last ? encodeCompositeCursor([last.at], last.id, sort.spec) : null;
     return new CursorPageDto(items.map(toPayoutDto), nextCursor);
   }
+}
+
+/** {@link PAYMENT_KEY_SQL} and the redemption predicate, on another alias of `ledger_entries`. */
+function paymentKeyOf(alias: string): string {
+  const ref = `${alias}.chain_tx_ref`;
+  return (
+    `CASE WHEN (starts_with(${ref}, :unobservedPrefix) ` +
+    `OR starts_with(${ref}, :heldCollectedPrefix)) THEN ${alias}.id::text ELSE ${ref} END`
+  );
+}
+
+/**
+ * Rows of the transactions whose every credit is at or after `:param`.
+ *
+ * A row passes when its own instant is at or after the bound and no credit of
+ * the same payment (same key, asset and scale, the `GROUP BY`) is before it.
+ * So a transaction whose first credit is at or after the bound keeps all of
+ * its rows, and one whose first credit is before it keeps none: it is never
+ * cut into a partial row. Every transaction a `MIN(created_at) >= bound`
+ * filter keeps is kept whole, and `HAVING` still decides the rest.
+ */
+function startsNoEarlierThan(param: string): string {
+  return (
+    `entry.created_at >= :${param}::timestamptz AND NOT EXISTS (` +
+    `SELECT 1 FROM ledger_entries earlier ` +
+    `WHERE earlier.organization_id = entry.organization_id ` +
+    `AND earlier.entry_type = :creditType AND earlier.chain_tx_ref IS NOT NULL ` +
+    `AND earlier.chain_tx_ref <> :railARef ` +
+    `AND earlier.asset_id = entry.asset_id AND earlier.decimals = entry.decimals ` +
+    `AND ${paymentKeyOf('earlier')} = ${paymentKeyOf('entry')} ` +
+    `AND earlier.created_at < :${param}::timestamptz)`
+  );
 }
 
 /** A cursor back into `(at, id)`, each part checked: Postgres casts them, so a bad one is a 400 here. */

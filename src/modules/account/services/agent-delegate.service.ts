@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -20,12 +20,14 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import {
   AgentDelegateBindingDto,
+  AgentDelegateBindingStatusDto,
   AgentDelegateStatusDto,
   DelegateChallengeResponseDto,
   PaidCallsDto,
   PaidCallsStatus,
 } from '../dto/agent-delegate.dto';
 import { AccountErrors } from '../errors/account.errors';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 
 /** How long an agent has to sign the challenge it asked for. */
 export const DELEGATE_CHALLENGE_TTL_SECONDS = 300;
@@ -76,6 +78,7 @@ export class AgentDelegateService {
     private readonly chains: ChainAdapterRegistry,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
     private readonly delegations: EscrowDelegationService,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   /**
@@ -114,6 +117,27 @@ export class AgentDelegateService {
       boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
       paidCalls,
       paidCallsUnknown,
+    };
+  }
+
+  /**
+   * The binding as `current` reads it, without `paidCalls`: one row, no chain
+   * read, for a client that polls "is a key bound here yet". Whether the payer
+   * has authorised the key is chain state and stays on `current`.
+   */
+  async bindingStatus(session: McpSession): Promise<AgentDelegateBindingStatusDto> {
+    this.assertAgent(session);
+    const row = await this.credentials.findOneBy({
+      organizationId: session.organizationId,
+      id: session.credentialId,
+    });
+    const delegate = (row?.delegateAccount as AccountId | null | undefined) ?? null;
+    return {
+      credentialId: session.credentialId,
+      agentLabel: session.label ?? null,
+      bound: delegate !== null,
+      delegate,
+      boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
     };
   }
 
@@ -239,6 +263,8 @@ export class AgentDelegateService {
       }
       throw error;
     }
+    // The session carries `delegateAccount`: a cached one would still name none.
+    await this.sessions?.evictOrganization(session.organizationId);
     return {
       credentialId: session.credentialId,
       agentLabel: session.label ?? null,

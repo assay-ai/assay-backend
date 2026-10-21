@@ -14,6 +14,7 @@ import { isPaymentClient } from '@modules/oauth/domain/payment-client';
 import { APP_ROLE, AppRole, resolveAppRole } from '@shared/app-role/app-role';
 
 import { AuthErrors } from '../errors/auth.errors';
+import { CacheableSession, CacheableSessionSource } from '../session-cache/caching-session.source';
 import { CredentialSessionResolver } from './credential-session.resolver';
 
 /**
@@ -32,9 +33,11 @@ import { CredentialSessionResolver } from './credential-session.resolver';
  *    read (R-OA-20). Load-bearing for the same reason as in
  *    `DbCredentialMcpSessionSource`: the composite only moves on after
  *    `MCP_CREDENTIAL_INVALID`, so a Privy JWT must leave here untouched.
- * 2. The token row by its digest, on the primary database, every request
- *    (R-OA-19): missing, expired, revoked, or an audience other than
- *    `MCP_PUBLIC_URL` → `MCP_CREDENTIAL_INVALID` (T15).
+ * 2. The token row by its digest, on the primary database (R-OA-19):
+ *    missing, expired, revoked, or an audience other than `MCP_PUBLIC_URL` →
+ *    `MCP_CREDENTIAL_INVALID` (T15). A resolved session is then reused for
+ *    up to 15 s (`CachingSessionSource`, owner sign-off), never past the
+ *    token's expiry, and evicted at once on a revocation.
  * 3. The credential, scoped to the token's organization and `issued_via
  *    'OAUTH'`, and its client. A missing, revoked or expired credential is
  *    refused here as invalid, before the host check, so a dead grant never
@@ -60,7 +63,7 @@ import { CredentialSessionResolver } from './credential-session.resolver';
  * the API, the strict side.
  */
 @Injectable()
-export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
+export class OAuthAccessTokenMcpSessionSource implements McpSessionPort, CacheableSessionSource {
   private readonly role: AppRole;
 
   constructor(
@@ -75,6 +78,16 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
   }
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
+    return (await this.resolveForCache(bearerToken)).session;
+  }
+
+  /**
+   * The session, valid until the token's or the grant's `expires_at`,
+   * whichever is first. Not kept while `first_used_at` is still unset: the
+   * refresh-reuse check decides on it, so every request goes through the
+   * stamp above until a resolve reads it back as written.
+   */
+  async resolveForCache(bearerToken: string | null): Promise<CacheableSession> {
     if (!isWellFormed(bearerToken, 'assay_at_')) {
       throw McpErrors.credentialInvalid();
     }
@@ -104,7 +117,8 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
       throw AuthErrors.clientNotAllowedHere();
     }
 
-    if (!token.firstUsedAt) {
+    const firstUse = !token.firstUsedAt;
+    if (firstUse) {
       // Fire-and-forget and scoped, like `last_used_at` in the resolver. The
       // `IS NULL` guard keeps the first use when two requests race. Its own
       // autocommit statement, never in a transaction with the credential's
@@ -120,7 +134,12 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
         });
     }
 
-    return this.resolver.sessionFor(credential, { paymentsAllowed });
+    const session = await this.resolver.sessionFor(credential, { paymentsAllowed });
+    const notAfter =
+      credential.expiresAt && credential.expiresAt.getTime() < token.expiresAt.getTime()
+        ? credential.expiresAt
+        : token.expiresAt;
+    return { session, notAfter, cacheable: !firstUse };
   }
 }
 

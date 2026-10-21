@@ -10,12 +10,12 @@ describe('loadMcpHostConfig', () => {
     });
   });
 
-  it('defaults the MCP host to mcp.assay.ai in production, and requires the web app', () => {
+  it('defaults the MCP host to mcp.goassay.ai in production, and requires the web app', () => {
     expect(() => loadMcpHostConfig({ NODE_ENV: 'production' })).toThrow(/WEB_APP_URL/);
     expect(
       loadMcpHostConfig({ NODE_ENV: 'production', WEB_APP_URL: 'https://app.example.com' }),
     ).toEqual({
-      mcpPublicUrl: 'https://mcp.assay.ai',
+      mcpPublicUrl: 'https://mcp.goassay.ai',
       webAppUrl: 'https://app.example.com',
       rootPinnedTools: [],
     });

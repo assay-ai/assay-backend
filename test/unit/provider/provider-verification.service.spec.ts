@@ -9,6 +9,7 @@
  * the column), just not scoped *to the caller*.
  */
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { In } from 'typeorm';
 
@@ -47,10 +48,28 @@ class FakeProviderRepository {
   }
 }
 
+/** `payment_intents` reduced to the (caller org, provider) pairs that have a call. */
+class FakeIntentRepository {
+  readonly calls = new Set<string>();
+
+  seedCall(organizationId: string, providerId: string): void {
+    this.calls.add(`${organizationId}|${providerId}`);
+  }
+
+  async existsBy(where: { organizationId: string; providerId: string }): Promise<boolean> {
+    return this.calls.has(`${where.organizationId}|${where.providerId}`);
+  }
+
+  asRepository(): PaymentIntentRepository {
+    return this as unknown as PaymentIntentRepository;
+  }
+}
+
 function buildHarness() {
   const providers = new FakeProviderRepository();
-  const service = new ProviderVerificationService(providers.asRepository());
-  return { providers, service };
+  const intents = new FakeIntentRepository();
+  const service = new ProviderVerificationService(providers.asRepository(), intents.asRepository());
+  return { providers, intents, service };
 }
 
 describe('a verified provider', () => {
@@ -174,5 +193,51 @@ describe('the batch read', () => {
 
     expect(results.size).toBe(0);
     expect(findBy).not.toHaveBeenCalled();
+  });
+});
+
+describe('the per-id route (getVerificationFor)', () => {
+  const BUYER = 'org-33333333-3333-4333-8333-333333333333';
+
+  it("serves the caller's own provider without looking for a call", async () => {
+    const { providers, intents, service } = buildHarness();
+    providers.seed({ organizationId: VERIFIED_PROVIDER, legalName: 'Own Ltd', verified: false });
+    const existsBy = jest.spyOn(intents, 'existsBy');
+
+    const result = await service.getVerificationFor(VERIFIED_PROVIDER, VERIFIED_PROVIDER);
+
+    expect(result.legalName).toBe('Own Ltd');
+    expect(existsBy).not.toHaveBeenCalled();
+  });
+
+  it('serves a provider the caller has a call with (the receipt page)', async () => {
+    const { providers, intents, service } = buildHarness();
+    providers.seed({ organizationId: VERIFIED_PROVIDER, legalName: 'Paid Ltd', verified: false });
+    intents.seedCall(BUYER, VERIFIED_PROVIDER);
+
+    const result = await service.getVerificationFor(BUYER, VERIFIED_PROVIDER);
+
+    expect(result.providerId).toBe(VERIFIED_PROVIDER);
+    expect(result.legalName).toBe('Paid Ltd');
+  });
+
+  it("404s for another organization's provider the caller never called", async () => {
+    const { providers, intents, service } = buildHarness();
+    providers.seed({ organizationId: VERIFIED_PROVIDER, legalName: 'Other Ltd', verified: true });
+    // A call by someone else does not open it to this caller.
+    intents.seedCall(UNVERIFIED_PROVIDER, VERIFIED_PROVIDER);
+
+    await expectErrorCodeAsync(
+      () => service.getVerificationFor(BUYER, VERIFIED_PROVIDER),
+      ProviderErrorCode.PROVIDER_NOT_FOUND,
+    );
+  });
+
+  it('404s for a missing provider the caller names as its own', async () => {
+    const { service } = buildHarness();
+    await expectErrorCodeAsync(
+      () => service.getVerificationFor(MISSING_PROVIDER, MISSING_PROVIDER),
+      ProviderErrorCode.PROVIDER_NOT_FOUND,
+    );
   });
 });
