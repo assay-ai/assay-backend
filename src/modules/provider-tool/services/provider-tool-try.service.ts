@@ -13,7 +13,7 @@ import { JsonValue } from '@modules/tool/domain/mapping/mapping.types';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { BindingAuthMode, Tool, ToolBinding, ToolTier } from '@modules/tool/ports/tool.types';
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
-import { isBlockedAddress, isIpLiteralHost } from '@shared/network/egress';
+import { isBlockedAddress, isDeniedHost, isIpLiteralHost } from '@shared/network/egress';
 
 import {
   TryParseError,
@@ -179,8 +179,9 @@ function planOf(body: TryProviderToolBodyDto): TryPlan {
 }
 
 /**
- * Defence in depth before the egress client's own checks: `localhost` and an
- * IP literal in a blocked range are refused without a socket. A host name is
+ * Defence in depth before the egress client's own checks: `localhost`, an IP
+ * literal in a blocked range and one of Assay's own hosts are refused without
+ * a socket. A host name is
  * resolved and checked by the egress client, every hop.
  */
 function assertDialable(url: string): void {
@@ -194,6 +195,11 @@ function assertDialable(url: string): void {
       problems: [
         'the endpoint is a private or reserved address; only public endpoints can be tried',
       ],
+    });
+  }
+  if (isDeniedHost(host)) {
+    throw ProviderToolErrors.invalid({
+      problems: ["the endpoint points at one of Assay's own hosts; it cannot be tried"],
     });
   }
 }

@@ -253,6 +253,8 @@ export enum ProviderErrorCode {
   PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
   /** With the egress relay on, an endpoint that is not https, or names an IP address. 400. */
   PROVIDER_ENDPOINT_NOT_RELAYABLE = 'PROVIDER_ENDPOINT_NOT_RELAYABLE',
+  /** The endpoint names one of Assay's own hosts (`EGRESS_DENIED_HOST_SUFFIXES`). 400. */
+  PROVIDER_ENDPOINT_HOST_NOT_ALLOWED = 'PROVIDER_ENDPOINT_HOST_NOT_ALLOWED',
   /** A request mapping declares more headers than a call can carry. 400. */
   PROVIDER_TOO_MANY_MAPPING_HEADERS = 'PROVIDER_TOO_MANY_MAPPING_HEADERS',
 }
@@ -341,6 +343,11 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Port ${context?.port} is not supported. Use 443 or one of: ` +
       `${RELAY_ALLOWED_PORTS.filter((port) => port !== 443).join(', ')}.`,
+  },
+  endpointHostNotAllowed: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_HOST_NOT_ALLOWED,
+    statusCode: 400,
+    message: () => "This endpoint cannot be called: it points at one of Assay's own hosts.",
   },
   endpointNotRelayable: {
     code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
