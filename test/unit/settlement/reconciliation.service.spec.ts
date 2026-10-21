@@ -1026,3 +1026,182 @@ describe('ReconciliationService — held payments (G3.B1, redeem into hold)', ()
     expect(drift?.details).toMatchObject({ totalHeld: '3000000', mirroredHeld: '1000000' });
   });
 });
+
+describe('ReconciliationService — names what the drift is made of (A2)', () => {
+  const ORPHAN_PROVIDER = '0x00000000000000000000000000000000000000aa';
+
+  function buildNamed(options: {
+    escrows: readonly EscrowFixture[];
+    totalHeld?: bigint | null;
+    mirroredHeld?: bigint;
+    gaps?: Record<string, string[]>;
+    heldRecords?: Record<string, { status: string; amount: bigint } | null>;
+    deposits?: Record<string, { txHash: string; amount: bigint; blockNumber: bigint }[]>;
+    credited?: string[];
+  }) {
+    const alerts = new RecordingAlertSink();
+    const escrowReader = fakeEscrowReader(options.escrows);
+    const escrowRepository = fakeEscrowRepository(options.escrows);
+    const intents = {
+      sumHeldOnChain: jest.fn(async () => options.mirroredHeld ?? 0n),
+      sumHeldOnChainByAccounts: jest.fn(async () => new Map<string, bigint>()),
+      voucherSeqGaps: jest.fn(
+        async (_asset: string, account: string) => options.gaps?.[account] ?? [],
+      ),
+    };
+    const held = {
+      totalHeld: jest.fn(async () => (options.totalHeld === undefined ? null : options.totalHeld)),
+      readHeld: jest.fn(async (_asset: string, key: { payer: string; seq: string }) => {
+        const record = options.heldRecords?.[`${key.payer}#${key.seq}`];
+        return record
+          ? {
+              status: record.status,
+              provider: ORPHAN_PROVIDER,
+              amount: record.amount,
+              takeRateBps: 1000,
+              collectableAt: new Date('2026-10-20T17:53:01.000Z'),
+            }
+          : null;
+      }),
+    };
+    const depositLogs = {
+      depositsTo: jest.fn(
+        async (_asset: string, account: string) => options.deposits?.[account] ?? [],
+      ),
+    };
+    const deposits = {
+      findCreditedTxRefs: jest.fn(async () => new Set(options.credited ?? [])),
+    };
+    const vaultBalance = options.escrows.reduce((sum, escrow) => sum + escrow.chain, 0n);
+    const service = new ReconciliationService(
+      fakeVault(vaultBalance),
+      alerts,
+      fakeEntries({}),
+      fakeBalances(0n, 0n, 0n, options.escrows),
+      fakeRuns(),
+      escrowReader,
+      escrowRepository,
+      intents as never,
+      held as never,
+      deposits as never,
+      depositLogs as never,
+    );
+    return { service, alerts, intents, held, depositLogs, deposits, escrowRepository };
+  }
+
+  it('names each orphan hold (payer, seq, amount) once the held drift outlives a pass', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 0n, seqHigh: 40n, nextSeq: 41n }],
+      totalHeld: 30_000n,
+      mirroredHeld: 10_000n,
+      gaps: { [BUYER_A]: ['39', '38'] },
+      heldRecords: {
+        [`${BUYER_A}#39`]: { status: 'HELD', amount: 10_000n },
+        [`${BUYER_A}#38`]: { status: 'HELD', amount: 10_000n },
+      },
+    });
+
+    // First pass: the drift may be a booking in flight; nothing is read from the chain.
+    const first = await named.service.reconcile(USDC);
+    expect(first.findings.map((f) => f.code)).not.toContain(ReconciliationFindingCode.HELD_ORPHAN);
+    expect(named.held.readHeld).not.toHaveBeenCalled();
+
+    const second = await named.service.reconcile(USDC);
+    const orphans = second.findings.filter((f) => f.code === ReconciliationFindingCode.HELD_ORPHAN);
+    expect(orphans.map((f) => f.details)).toEqual([
+      expect.objectContaining({ account: BUYER_A, seq: '39', amount: '10000' }),
+      expect.objectContaining({ account: BUYER_A, seq: '38', amount: '10000' }),
+    ]);
+    expect(orphans[0].severity).toBe(ReconciliationSeverity.WARN);
+    expect(named.intents.voucherSeqGaps).toHaveBeenCalledWith(USDC, BUYER_A, 40n, 256);
+    // One alert per hold, not one per payer.
+    const keys = named.alerts.emitted
+      .filter((alert) => alert.name === 'held_orphan')
+      .map((alert) => alert.dedupeKey);
+    expect(new Set(keys).size).toBe(2);
+
+    // Third pass, same figures: the answer is reused, the chain is not read again.
+    named.held.readHeld.mockClear();
+    const third = await named.service.reconcile(USDC);
+    expect(
+      third.findings.filter((f) => f.code === ReconciliationFindingCode.HELD_ORPHAN),
+    ).toHaveLength(2);
+    expect(named.held.readHeld).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing when the escrow holds no more than the mirror', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 0n, seqHigh: 40n, nextSeq: 41n }],
+      totalHeld: 10_000n,
+      mirroredHeld: 10_000n,
+    });
+    await named.service.reconcile(USDC);
+    await named.service.reconcile(USDC);
+    expect(named.intents.voucherSeqGaps).not.toHaveBeenCalled();
+  });
+
+  it('names each on-chain deposit no intent credited (tx hash, amount)', async () => {
+    const named = buildNamed({
+      // The chain holds 5.00 the mirror does not.
+      escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n, seqHigh: 0n }],
+      deposits: {
+        [BUYER_A]: [
+          { txHash: '0xcredited', amount: 20_000_000n, blockNumber: 10n },
+          { txHash: '0x473e1319', amount: 5_000_000n, blockNumber: 12n },
+        ],
+      },
+      credited: ['0xcredited'],
+    });
+
+    await named.service.reconcile(USDC);
+    expect(named.depositLogs.depositsTo).not.toHaveBeenCalled();
+    const report = await named.service.reconcile(USDC);
+
+    const uncredited = report.findings.filter(
+      (f) => f.code === ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT,
+    );
+    expect(uncredited).toHaveLength(1);
+    expect(uncredited[0].details).toEqual({
+      asset: USDC,
+      account: BUYER_A,
+      txHash: '0x473e1319',
+      amount: '5000000',
+      blockNumber: '12',
+    });
+    expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(['0xcredited', '0x473e1319']);
+    expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_uncredited_deposit');
+  });
+
+  it('a scan that fails is logged, never fails the pass', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 5_000_000n, mirror: 0n }],
+    });
+    named.depositLogs.depositsTo.mockRejectedValue(new Error('rpc down'));
+    await named.service.reconcile(USDC);
+    const report = await named.service.reconcile(USDC);
+    expect(report.findings.map((f) => f.code)).not.toContain(
+      ReconciliationFindingCode.RECONCILIATION_FAILED,
+    );
+    expect(report.findings.map((f) => f.code)).toContain(
+      ReconciliationFindingCode.ESCROW_MIRROR_DRIFT,
+    );
+  });
+
+  it('alerts when realignSeq fires: another signer or redeemer used the escrow', async () => {
+    const named = buildNamed({
+      escrows: [{ account: BUYER_A, chain: 1n, mirror: 1n, seqHigh: 39n, nextSeq: 36n }],
+    });
+
+    const report = await named.service.reconcile(USDC);
+
+    const realigned = report.findings.find(
+      (f) => f.code === ReconciliationFindingCode.ESCROW_SEQ_REALIGNED,
+    );
+    expect(realigned).toMatchObject({
+      severity: ReconciliationSeverity.WARN,
+      details: { asset: USDC, account: BUYER_A, nextSeq: '36', seqHigh: '39', target: '40' },
+    });
+    expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_seq_realigned');
+    expect(named.escrowRepository.bumpNextSeqTo).toHaveBeenCalledWith('org-1', BUYER_A, 40n);
+  });
+});

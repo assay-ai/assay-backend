@@ -90,4 +90,17 @@ export const RECONCILIATION_ALERTS = {
   RECONCILIATION_BLIND: 'reconciliation_blind',
   ESCROW_SHORTFALL: 'escrow_shortfall',
   ESCROW_MIRROR_DRIFT: 'escrow_mirror_drift',
+  HELD_ORPHAN: 'held_orphan',
+  ESCROW_UNCREDITED_DEPOSIT: 'escrow_uncredited_deposit',
+  ESCROW_SEQ_REALIGNED: 'escrow_seq_realigned',
 } as const;
+
+/**
+ * Most `held(payer, seq)` reads one pass spends naming orphan holds (A2), and
+ * only while the escrow holds more than the mirror. The highest seqs with no
+ * intent are read first.
+ */
+export const RECONCILIATION_HELD_ORPHAN_SCAN_MAX = 256;
+
+/** Most escrows one pass scans for uncredited deposits (A2); the rest wait a pass. */
+export const RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS = 20;

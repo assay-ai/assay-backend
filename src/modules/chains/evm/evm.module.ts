@@ -42,6 +42,10 @@ import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmHeldPayments, parseHoldLiveChains } from './evm-held-payments.service';
+import {
+  EvmEscrowDepositLogs,
+  parseDepositLookbackBlocks,
+} from './evm-escrow-deposit-logs.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import { EvmMinimumStakeReader } from './evm-minimum-stake-reader.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
@@ -358,6 +362,17 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ConfigService],
     },
     {
+      // A2: the reconciler names a deposit no intent credited. Read-only.
+      provide: EvmEscrowDepositLogs,
+      useFactory: (clients: never, deployments: never, config: ConfigService) =>
+        new EvmEscrowDepositLogs(
+          clients,
+          deployments,
+          parseDepositLookbackBlocks(config.get<string>('RECONCILIATION_DEPOSIT_LOOKBACK_BLOCKS')),
+        ),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ConfigService],
+    },
+    {
       provide: EvmVoucherRedeemer,
       useFactory: (
         clients: never,
@@ -528,6 +543,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
     EvmHeldPayments,
+    EvmEscrowDepositLogs,
     EvmTightenDelayProbe,
     EvmMinimumStakeReader,
     EvmSlashExecutor,
