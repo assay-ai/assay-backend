@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { EvmModule } from '@modules/chains/evm/evm.module';
 import { DisputeModule } from '@modules/dispute/dispute.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
@@ -78,6 +79,10 @@ import { LastSeenModule } from '@shared/last-seen';
     SlashModule,
     ProviderModule,
     ChainsModule,
+    // `EVM_RPC_CLIENTS` / `EVM_DEPLOYMENTS`, so the economics panel reads the
+    // minimum stake from the settlement contract's `params()` (the same
+    // instance `ChainsModule` already imports).
+    EvmModule,
     BlocklistModule,
     ToolModule,
     ToolsetModule,
