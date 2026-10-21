@@ -143,11 +143,17 @@ export class ReceiptsSummaryFigures {
   inProgressCalls: number;
 
   /**
-   * Calls listed at zero (free tier), counted in `calls`. A count of calls,
-   * not of groups: a tool that served both free and paid calls counts its
-   * free ones here whatever the grouping.
+   * Free-tier calls served in the window. A free call has no payment intent
+   * (it is a `tool_call_records` row), so it is in no other figure: not in
+   * `calls`, not in any amount, and no `asset` filter applies to it. A key
+   * with free calls only is a group of its own, every other figure zero. A
+   * count of calls, not of groups: the total is the same whatever the grouping.
    */
-  @ApiProperty({ description: 'Calls listed at zero (free tier), counted in calls' })
+  @ApiProperty({
+    description:
+      'Free-tier calls served (no payment record): not in calls or any amount; a key with free ' +
+      'calls only is a group whose other figures are zero',
+  })
   freeCalls: number;
 
   /**

@@ -26,6 +26,7 @@ import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hol
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { AgentsController } from '@modules/account/controllers/agents.controller';
 import { NotificationsController } from '@modules/account/controllers/notifications.controller';
@@ -333,7 +334,13 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
           },
         },
         { provide: BalancesService, useValue: balances },
-        { provide: ReceiptSummaryService, useValue: new ReceiptSummaryService(paymentIntents) },
+        {
+          provide: ReceiptSummaryService,
+          useValue: new ReceiptSummaryService(
+            paymentIntents,
+            new ToolCallRecordRepository(dataSource),
+          ),
+        },
         { provide: ReceiptService, useValue: {} },
         { provide: NotificationsService, useValue: notifications },
         {
