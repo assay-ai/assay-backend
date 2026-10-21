@@ -130,7 +130,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (clientError) {
       return {
         code: httpErrorCodeForStatus(clientError.status),
-        message: clientError.message,
+        message: clientError.status === 413 ? PAYLOAD_TOO_LARGE_MESSAGE : clientError.message,
         statusCode: clientError.status,
       };
     }
@@ -157,6 +157,12 @@ const JSON_PARSE_MESSAGE = /is not valid JSON|JSON at position \d+|end of JSON i
 
 /** The fixed text for a body the JSON parser refused. */
 export const MALFORMED_BODY_MESSAGE = 'Malformed request body';
+
+/**
+ * The fixed text for a body over the parser's limit (413 `PAYLOAD_TOO_LARGE`,
+ * on the API and the MCP host alike). body-parser's own text is jargon.
+ */
+export const PAYLOAD_TOO_LARGE_MESSAGE = 'The request body is too large.';
 
 /**
  * Express's `URIError` for a path param it cannot decode, which Nest turns
