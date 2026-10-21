@@ -2,7 +2,11 @@ import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { DEFAULT_CALL_DISPUTE_CONFIG } from '@modules/dispute/constants/call-dispute.config';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
-import { NotificationEvent } from '@modules/notification/ports/notification.port';
+import { NOTIFICATION_CATALOGUE } from '@modules/notification/constants/notification-catalogue';
+import {
+  NotificationAggregation,
+  NotificationEvent,
+} from '@modules/notification/ports/notification.port';
 
 /**
  * BUG-OPS-CASES-05: an upheld dispute's refund landing tells the buyer
@@ -159,5 +163,45 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
     await service.settleRefund('dispute-1', { chain: true });
 
     expect(notified).toEqual([]);
+  });
+
+  it('announces the decision under one key per side, the same at the decision and at the refund (BUG-RETEST-R5a-01)', async () => {
+    const { service, notified } = build({ intents: [HELD_INTENT] });
+
+    await service.announceDecision(dispute('PENDING'));
+    await service.announceDecision(dispute('REFUNDED'));
+
+    const keys = notified.map((n) => [n.organizationId, n.event, n.dedupeKey]);
+    expect(keys).toEqual([
+      [
+        'buyer-org',
+        NotificationEvent.CALL_DISPUTE_DECIDED,
+        'call_dispute.decided:dispute-1:buyer-org:buyer',
+      ],
+      [
+        'provider-org',
+        NotificationEvent.CALL_DISPUTE_DECIDED,
+        'call_dispute.decided:dispute-1:provider-org:provider',
+      ],
+      [
+        'buyer-org',
+        NotificationEvent.CALL_DISPUTE_DECIDED,
+        'call_dispute.decided:dispute-1:buyer-org:buyer',
+      ],
+      [
+        'provider-org',
+        NotificationEvent.CALL_DISPUTE_DECIDED,
+        'call_dispute.decided:dispute-1:provider-org:provider',
+      ],
+    ]);
+  });
+
+  it('keeps call_dispute.decided a once-per-key notice in the catalogue', () => {
+    expect(NOTIFICATION_CATALOGUE[NotificationEvent.CALL_DISPUTE_DECIDED].aggregation).toBe(
+      NotificationAggregation.ONCE,
+    );
+    expect(NOTIFICATION_CATALOGUE[NotificationEvent.CALL_DISPUTE_REFUNDED].aggregation).toBe(
+      NotificationAggregation.ONCE,
+    );
   });
 });
