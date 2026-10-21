@@ -35,20 +35,20 @@ export class SpendPolicyController {
     description:
       "Another agent of the caller's own organization, read by a person (the consent card's " +
       'agent select). An agent credential, or an id that is not one of the organization’s ' +
-      "agents, reads the session's own agent.",
+      "agents, reads the session's own agent: `subjectAgentId` names the agent read and " +
+      '`requestedAgentIgnored` is true.',
   })
   @ApiResponse({ status: 200, description: 'The live policy', type: SpendPolicyDto })
   async get(
     @CurrentSession() session: McpSession,
-    @Query('agentId') agentId?: string,
+    @Query('agentId') agentId?: unknown,
   ): Promise<SpendPolicyDto> {
-    const readAgentId = await this.spendPolicy.readableAgentId(
+    return this.spendPolicy.getForRequest(
       session.organizationId,
       session.agentId,
-      typeof agentId === 'string' ? agentId : undefined,
+      agentId,
       isHumanCallerKind(session.callerKind),
     );
-    return this.spendPolicy.get(session.organizationId, readAgentId);
   }
 
   // The agent's own credential may READ its limits (it needs them to plan),
