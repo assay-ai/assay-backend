@@ -30,6 +30,7 @@ const CALL = {
   supportsInputFields: [],
 };
 const OFFER = {
+  authMode: 'NONE',
   pricingMode: PricingMode.FREE,
   priceAmount: '0',
   assetId: ASSET_IDS.USDC_SOLANA_DEVNET as string,
@@ -136,6 +137,66 @@ describe('evaluatePublishGate with same-call revisions', () => {
   });
 });
 
+describe('evaluatePublishGate — the auth mode is part of the tested call (review)', () => {
+  const base = { payoutByChain: new Map(), stakeByChain: new Map() };
+  const run = (mappingVersion: number, authMode: string | null) => ({
+    mappingVersion,
+    authMode,
+    outcome: BindingTestOutcome.PASSED,
+    failedLayer: null,
+    ranAt: new Date(0),
+  });
+  const met = (check: ReturnType<typeof evaluatePublishGate>) =>
+    check.requirements
+      .filter(
+        (r) =>
+          r.requirement === PublishRequirement.TESTER_RUN ||
+          r.requirement === PublishRequirement.TESTER_PASSED,
+      )
+      .map((r) => [r.requirement, r.met, r.code]);
+
+  it('voids a passing run made with another auth mode, at the same revision too', () => {
+    for (const latestRun of [run(6, 'NONE'), run(5, 'NONE')]) {
+      const check = evaluatePublishGate({
+        ...base,
+        mappingVersion: 6,
+        sameCallRevisions: [5],
+        authMode: 'API_KEY',
+        latestRun,
+      });
+      expect(met(check)).toEqual([
+        [PublishRequirement.TESTER_RUN, false, 'tester_run_is_stale'],
+        [PublishRequirement.TESTER_PASSED, false, 'tester_never_run'],
+      ]);
+      expect(check.requirements[0].detail).toContain('authentication setting');
+    }
+  });
+
+  it('keeps a passing run made with the same auth mode', () => {
+    const check = evaluatePublishGate({
+      ...base,
+      mappingVersion: 6,
+      sameCallRevisions: [5],
+      authMode: 'API_KEY',
+      latestRun: run(5, 'API_KEY'),
+    });
+    expect(met(check).every(([, ok]) => ok)).toBe(true);
+  });
+
+  it('counts a run that did not record its mode only at its own revision', () => {
+    const at = (revision: number) =>
+      evaluatePublishGate({
+        ...base,
+        mappingVersion: 6,
+        sameCallRevisions: [5],
+        authMode: 'NONE',
+        latestRun: run(revision, null),
+      }).requirements[0].met;
+    expect(at(6)).toBe(true);
+    expect(at(5)).toBe(false);
+  });
+});
+
 describe('BindingPublishService.check — the price edit at Go live (BUG-PRV-CATALOG-02)', () => {
   const ORG = 'org-1';
   const BINDING = 'binding-1';
@@ -165,6 +226,7 @@ describe('BindingPublishService.check — the price edit at Go live (BUG-PRV-CAT
 
     const passed = {
       mappingVersion: 5,
+      authMode: 'NONE',
       outcome: 'PASSED',
       failedLayer: null,
       createdAt: new Date(),
@@ -246,6 +308,7 @@ describe('BindingPublishService.check — the price edit at Go live (BUG-PRV-CAT
     ['the endpoint', { endpoint: 'https://provider.example.com/v2' }],
     ['the response mapping', { responseMapping: { lat: { $path: '$.latitude' } } }],
     ['the timeout', { timeoutMs: 9_000 }],
+    ['the auth mode', { authMode: 'SIGNATURE' }],
   ])('asks for a new test when %s changed', async (_name, change) => {
     expect(await testerMet({ priceAmount: '260000', ...change } as never)).toBe(false);
   });

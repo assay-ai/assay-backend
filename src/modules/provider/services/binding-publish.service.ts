@@ -271,6 +271,7 @@ export class BindingPublishService {
       credentials: { required, origin, present },
       mappingVersion: row.mappingVersion,
       sameCallRevisions: revisions.filter((revision) => revision !== row.mappingVersion),
+      authMode: row.authMode,
       latestRun,
       payoutByChain,
       stakeByChain,
@@ -313,6 +314,7 @@ export class BindingPublishService {
       if (major === undefined || byMajor.get(major)) continue;
       byMajor.set(major, {
         mappingVersion: run.mappingVersion,
+        authMode: run.authMode ?? null,
         outcome: run.outcome as BindingTestOutcome,
         failedLayer: run.failedLayer as BindingTestLayer | null,
         ranAt: run.createdAt,
@@ -349,6 +351,7 @@ export class BindingPublishService {
 
     return {
       mappingVersion: run.mappingVersion,
+      authMode: run.authMode ?? null,
       outcome: run.outcome as BindingTestOutcome,
       failedLayer: run.failedLayer as BindingTestLayer | null,
       ranAt: run.createdAt,
