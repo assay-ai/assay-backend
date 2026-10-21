@@ -43,6 +43,14 @@ export class BindingTestRunEntity extends OrganizationScopedEntityWithoutSoftDel
   @Column({ name: 'tool_version', type: 'int', nullable: true })
   toolVersion: number | null;
 
+  /**
+   * The binding's `auth_mode` when the run was made. A run counts only for
+   * that mode (the mode changes the call); `null` on a run recorded before
+   * the column, which then counts only at its own revision.
+   */
+  @Column({ name: 'auth_mode', type: 'varchar', length: 16, nullable: true })
+  authMode: string | null;
+
   /** The id sent upstream as `X-Assay-Call-Id`. Unique platform-wide. */
   @Column({ name: 'call_id', type: 'uuid' })
   callId: string;

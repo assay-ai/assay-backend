@@ -67,7 +67,10 @@ describe('connect url server name migration', () => {
 
   it('reverts to 9 characters and applies again', async () => {
     // Later migrations sit on top of this one and touch none of its objects.
-    for (const later of ['PaymentIntentsCreatedIndex1762400000040']) {
+    for (const later of [
+      'BindingTestRunAuthMode1762400000050',
+      'PaymentIntentsCreatedIndex1762400000040',
+    ]) {
       const [top] = (await dataSource.query(
         `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
       )) as { name: string }[];

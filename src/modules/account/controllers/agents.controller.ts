@@ -24,16 +24,14 @@ export class AgentsController {
     private readonly agentList: AgentListService,
   ) {}
 
-  // `include` nests what `GET /agents/:agentId/credentials` returns, so it is
-  // that route's person-only read; the plain list stays open to an agent.
+  // `include` nests what `GET /agents/:agentId/credentials` returns, with that
+  // route's rule: a person gets every agent's, an agent its own key only
+  // (BUG-DEMO-02). The body then depends on the calling key, so the entry
+  // varies by credential: one key's page must never answer another token.
   @Get()
-  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
+  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['agents'] })
   @ApiOperation({ summary: 'Agents in this organization' })
   @ApiCursorPage(AgentWithIncludesDto)
-  @ApiResponse({
-    status: 403,
-    description: 'AUTH_HUMAN_SESSION_REQUIRED — `include` with an agent credential',
-  })
   async list(
     @CurrentSession() session: McpSession,
     @Query() query: ListAgentsQueryDto,

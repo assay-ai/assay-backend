@@ -764,10 +764,31 @@ export class CallDisputeService {
     );
   }
 
-  /** Tell both sides. Best-effort: the decision stands whether or not this lands. */
-  async announceDecision(dispute: DisputeEntity): Promise<void> {
+  /**
+   * Tell both sides. Best-effort: the decision stands whether or not this lands.
+   *
+   * Once per side per refund state (BUG-RETEST-R5a-01): the notice at the
+   * decision, and — when a pending refund later ends — one more with how it
+   * ended. `afterRefundRetry` marks that later call: it says nothing when the
+   * refund went back to the buyer's held payment, because
+   * `call_dispute.refunded` already told the buyer that, and nothing while the
+   * refund is still pending.
+   */
+  async announceDecision(
+    dispute: DisputeEntity,
+    options: { readonly afterRefundRetry?: boolean } = {},
+  ): Promise<void> {
+    if (options.afterRefundRetry) {
+      if (dispute.refundState === RefundState.PENDING) return;
+      if (dispute.refundState === RefundState.REFUNDED && (await this.refundNoticeSent(dispute))) {
+        return;
+      }
+    }
     const upheld = dispute.state === DisputeState.UPHELD;
     const refund = describeRefund(dispute.refundState);
+    const dedupeKey = (organizationId: string, role: CallDisputeRole) =>
+      `${NotificationEvent.CALL_DISPUTE_DECIDED}:${dispute.id}:${organizationId}:${role}:` +
+      `${dispute.refundState ?? 'NONE'}`;
     await this.notify(
       dispute.organizationId,
       'buyer',
@@ -782,6 +803,7 @@ export class CallDisputeService {
                 ? ' The call was refunded anyway: its provider was blocked.'
                 : ''
             }`,
+        dedupeKey: dedupeKey(dispute.organizationId, 'buyer'),
       },
     );
     await this.notify(
@@ -797,8 +819,28 @@ export class CallDisputeService {
           ? 'A buyer’s dispute over a call you served was upheld; it counts against the ' +
             `tool’s quality. ${refund}`
           : 'A buyer’s dispute over a call you served was rejected.',
+        dedupeKey: dedupeKey(dispute.respondentProviderId as string, 'provider'),
       },
     );
+  }
+
+  /**
+   * Whether `settleRefund` told the buyer `call_dispute.refunded`: it does so
+   * exactly when the held payment itself went back (`held_status REFUNDED`). A
+   * refund booked another way (a voided debt) has no such notice, so the
+   * decision notice carries it. Unreadable: answer no, so the outcome is told.
+   */
+  private async refundNoticeSent(dispute: DisputeEntity): Promise<boolean> {
+    if (!dispute.intentId) return false;
+    try {
+      const intent = await this.paymentIntents.findOneBy({
+        organizationId: dispute.organizationId,
+        id: dispute.intentId,
+      });
+      return intent?.heldStatus === 'REFUNDED';
+    } catch {
+      return false;
+    }
   }
 
   // ── Internals ───────────────────────────────────────────────────────────

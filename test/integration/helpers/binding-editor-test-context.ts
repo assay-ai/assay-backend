@@ -425,6 +425,7 @@ export async function createBindingEditorTestContext(
     catalogue,
     vault,
     new AuditLogWriter(dataSource),
+    versions,
   );
 
   const context: BindingEditorTestContext = {

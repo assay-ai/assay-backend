@@ -2,7 +2,11 @@ import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { DEFAULT_CALL_DISPUTE_CONFIG } from '@modules/dispute/constants/call-dispute.config';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
-import { NotificationEvent } from '@modules/notification/ports/notification.port';
+import { NOTIFICATION_CATALOGUE } from '@modules/notification/constants/notification-catalogue';
+import {
+  NotificationAggregation,
+  NotificationEvent,
+} from '@modules/notification/ports/notification.port';
 
 /**
  * BUG-OPS-CASES-05: an upheld dispute's refund landing tells the buyer
@@ -159,5 +163,70 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
     await service.settleRefund('dispute-1', { chain: true });
 
     expect(notified).toEqual([]);
+  });
+
+  describe('call_dispute.decided after a pending refund ends (BUG-RETEST-R5a-01)', () => {
+    const key = (org: string, role: string, state: string) =>
+      `call_dispute.decided:dispute-1:${org}:${role}:${state}`;
+    const decidedKeys = (notified: Array<Record<string, unknown>>) =>
+      notified
+        .filter((n) => n.event === NotificationEvent.CALL_DISPUTE_DECIDED)
+        .map((n) => n.dedupeKey);
+
+    it('the decision notice carries the refund state, one key per side', async () => {
+      const { service, notified } = build({ intents: [HELD_INTENT] });
+      await service.announceDecision(dispute('PENDING'));
+      expect(decidedKeys(notified)).toEqual([
+        key('buyer-org', 'buyer', 'PENDING'),
+        key('provider-org', 'provider', 'PENDING'),
+      ]);
+    });
+
+    it.each(['NOT_REFUNDABLE', 'NOT_CHARGED'])(
+      'tells both sides once more when the refund ends %s',
+      async (state) => {
+        const { service, notified } = build({ intents: [HELD_INTENT] });
+        await service.announceDecision(dispute('PENDING'));
+        await service.announceDecision(dispute(state), { afterRefundRetry: true });
+        expect(decidedKeys(notified)).toEqual([
+          key('buyer-org', 'buyer', 'PENDING'),
+          key('provider-org', 'provider', 'PENDING'),
+          key('buyer-org', 'buyer', state),
+          key('provider-org', 'provider', state),
+        ]);
+      },
+    );
+
+    it('tells both sides when the refund was booked as a voided debt (no refunded notice)', async () => {
+      const voided = { ...HELD_INTENT, heldStatus: null } as unknown as PaymentIntentEntity;
+      const { service, notified } = build({ intents: [voided] });
+      await service.announceDecision(dispute('REFUNDED'), { afterRefundRetry: true });
+      expect(decidedKeys(notified)).toEqual([
+        key('buyer-org', 'buyer', 'REFUNDED'),
+        key('provider-org', 'provider', 'REFUNDED'),
+      ]);
+    });
+
+    it('says nothing more when call_dispute.refunded already told the refund of the held payment', async () => {
+      const refunded = { ...HELD_INTENT, heldStatus: 'REFUNDED' } as unknown as PaymentIntentEntity;
+      const { service, notified } = build({ intents: [refunded] });
+      await service.announceDecision(dispute('REFUNDED'), { afterRefundRetry: true });
+      expect(decidedKeys(notified)).toEqual([]);
+    });
+
+    it('says nothing on a retry that is still pending', async () => {
+      const { service, notified } = build({ intents: [HELD_INTENT] });
+      await service.announceDecision(dispute('PENDING'), { afterRefundRetry: true });
+      expect(notified).toEqual([]);
+    });
+  });
+
+  it('keeps call_dispute.decided a once-per-key notice in the catalogue', () => {
+    expect(NOTIFICATION_CATALOGUE[NotificationEvent.CALL_DISPUTE_DECIDED].aggregation).toBe(
+      NotificationAggregation.ONCE,
+    );
+    expect(NOTIFICATION_CATALOGUE[NotificationEvent.CALL_DISPUTE_REFUNDED].aggregation).toBe(
+      NotificationAggregation.ONCE,
+    );
   });
 });

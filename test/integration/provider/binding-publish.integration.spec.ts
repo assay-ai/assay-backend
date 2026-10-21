@@ -392,6 +392,23 @@ describe('binding editor → mapping tester → publish gate', () => {
     expect(next.version).toBe(3);
   });
 
+  it('a price-only edit after a green run keeps it (BUG-PRV-CATALOG-02)', async () => {
+    const binding = await context.editor.create(context.organizationId, SUBJECT, body());
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'x' });
+
+    const repriced = await context.editor.update(context.organizationId, SUBJECT, binding.id, {
+      priceAmount: String(BigInt(body().priceAmount) + 10_000n),
+    });
+    // Still a new revision to publish — only the test carries over.
+    expect(repriced.version).toBe(2);
+
+    const check = await context.publisher.check(context.organizationId, binding.id);
+    expect(check.mappingVersion).toBe(2);
+    for (const requirement of [PublishRequirement.TESTER_RUN, PublishRequirement.TESTER_PASSED]) {
+      expect(check.requirements.find((r) => r.requirement === requirement)?.met).toBe(true);
+    }
+  });
+
   it('an edit after a green run invalidates it — the gate keys on the revision', async () => {
     const binding = await context.editor.create(context.organizationId, SUBJECT, body());
     await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'x' });

@@ -96,6 +96,9 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     query: ListAgentCredentialsQueryDto,
+    // An agent credential reads its own row only (BUG-DEMO-02): never its
+    // sibling keys' names, scopes, use or delegates.
+    only?: { readonly credentialId: string },
   ): Promise<CursorPageDto<AgentCredentialDto>> {
     // An agent of another organization, or none at all, is a 404 like
     // `/agents/:agentId/access`, not an empty page: a client must be able to
@@ -106,6 +109,7 @@ export class AgentCredentialsService {
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
       .andWhere('credential.agentId = :agentId', { agentId });
+    if (only) qb.andWhere('credential.id = :credentialId', { credentialId: only.credentialId });
 
     applyTimeWindow(qb, query, CREDENTIALS_LIST);
 
