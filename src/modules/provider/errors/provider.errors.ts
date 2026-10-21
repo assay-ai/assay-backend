@@ -167,6 +167,13 @@ export enum ProviderErrorCode {
    * without reading `Config.stake_mint` would be a transfer of a guessed token.
    */
   PROVIDER_STAKE_CHAIN_UNAVAILABLE = 'PROVIDER_STAKE_CHAIN_UNAVAILABLE',
+  /** An unstake for more than the bonded stake: `request_unstake` would revert. */
+  PROVIDER_STAKE_INSUFFICIENT_BONDED = 'PROVIDER_STAKE_INSUFFICIENT_BONDED',
+  /**
+   * A withdrawal while nothing is withdrawable: nothing unstaked, or its
+   * unbonding period not over yet. `withdraw_stake` would revert.
+   */
+  PROVIDER_STAKE_NOTHING_WITHDRAWABLE = 'PROVIDER_STAKE_NOTHING_WITHDRAWABLE',
   PROVIDER_PUBLISH_CHECKS_FAILED = 'PROVIDER_PUBLISH_CHECKS_FAILED',
   /** `GET /providers/me/tool-bindings/:id` — no binding by this id belongs to the caller. */
   PROVIDER_BINDING_NOT_FOUND = 'PROVIDER_BINDING_NOT_FOUND',
@@ -579,6 +586,22 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
       `. This fails closed on purpose — a preflight built without the chain would quote balances` +
       ` nobody verified, and a transaction built without reading the stake mint would move a` +
       ` token you did not choose. Nothing was signed or submitted; retry.`,
+  },
+  stakeInsufficientBonded: {
+    code: ProviderErrorCode.PROVIDER_STAKE_INSUFFICIENT_BONDED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `You cannot unstake more than your bonded stake` +
+      `${context?.bonded ? ` (${context.bonded} atomic units)` : ''}` +
+      `. Nothing was built.`,
+    publicContext: ['bonded'],
+  },
+  stakeNothingWithdrawable: {
+    code: ProviderErrorCode.PROVIDER_STAKE_NOTHING_WITHDRAWABLE,
+    statusCode: 409,
+    message: () =>
+      'Nothing is withdrawable yet: unstake first, then wait for the unbonding period to end.' +
+      ' Nothing was built.',
   },
   publishChecksFailed: {
     code: ProviderErrorCode.PROVIDER_PUBLISH_CHECKS_FAILED,
