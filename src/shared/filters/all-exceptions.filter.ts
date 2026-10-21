@@ -116,9 +116,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
         };
       }
 
+      const message = messageFromHttpPayload(payload, exception.message);
+      // Nest's `Parse*Pipe` refusals (`ParseUUIDPipe` on a path param) are a
+      // validation failure like any DTO's, so they get the same code.
+      if (statusCode === 400 && PARSE_PIPE_MESSAGE.test(message)) {
+        return { code: HttpErrorCode.VALIDATION_FAILED, message, statusCode };
+      }
+
       return {
         code: httpErrorCodeForStatus(statusCode),
-        message: messageFromHttpPayload(payload, exception.message),
+        message,
         statusCode,
       };
     }
@@ -154,6 +161,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
  * (`RoutesResolver.mapExternalException`), so this is a piece of the body.
  */
 const JSON_PARSE_MESSAGE = /is not valid JSON|JSON at position \d+|end of JSON input|after JSON/;
+
+/**
+ * The message of Nest's built-in `Parse*Pipe`s, e.g. `Validation failed (uuid
+ * is expected)` from `ParseUUIDPipe`.
+ */
+const PARSE_PIPE_MESSAGE = /^Validation failed \(.+ is expected\)$/;
 
 /** The fixed text for a body the JSON parser refused. */
 export const MALFORMED_BODY_MESSAGE = 'Malformed request body';
