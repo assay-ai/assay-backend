@@ -532,3 +532,82 @@ describe('EscrowAccountService lifetime totals (B7)', () => {
     ).toBeNull();
   });
 });
+
+describe('EscrowAccountService — uncreditedOnChain and withdrawalsFrozen (A3, D16)', () => {
+  function withLedger(options: {
+    row?: { available: string; held: string; pending: string } | null;
+    heldOnChain?: bigint;
+    frozen?: boolean | Error;
+    reading?: EscrowChainBalance | null;
+  }) {
+    const base = buildService({ reading: options.reading });
+    const balances = { findOneRow: jest.fn().mockResolvedValue(options.row ?? null) };
+    const intents = {
+      sumHeldOnChainByAccounts: jest
+        .fn()
+        .mockResolvedValue(new Map([[ACCOUNT, options.heldOnChain ?? 0n]])),
+    };
+    const reconciliation = {
+      isFrozen:
+        options.frozen instanceof Error
+          ? jest.fn().mockRejectedValue(options.frozen)
+          : jest.fn().mockResolvedValue(options.frozen ?? false),
+    };
+    const service = new EscrowAccountService(
+      base.reader as never,
+      base.holds as never,
+      base.escrows as never,
+      base.builder as never,
+      balances as never,
+      intents as never,
+      reconciliation as never,
+    );
+    return { service, balances, intents, reconciliation };
+  }
+
+  it('reports what the chain holds beyond the ledger mirror, as the reconciler compares', async () => {
+    // chain 10.00; ledger available 4.00 + held 0.03 (0.01 of it already in the escrow hold) + pending 0.
+    const { service, balances } = withLedger({
+      row: { available: '4000000', held: '30000', pending: '0' },
+      heldOnChain: 10_000n,
+    });
+
+    const state = await service.getForConsole(ORG, ACCOUNT);
+
+    expect(balances.findOneRow).toHaveBeenCalledWith(ORG, ACCOUNT, USDC);
+    expect(state.uncreditedOnChain).toEqual(MoneyUtil.of(5_980_000n, USDC, 6));
+    expect(state.withdrawalsFrozen).toBe(false);
+  });
+
+  it('floors at zero when the ledger mirrors more than the chain holds', async () => {
+    const { service } = withLedger({ row: { available: '20000000', held: '0', pending: '0' } });
+    const state = await service.getForConsole(ORG, ACCOUNT);
+    expect(state.uncreditedOnChain).toEqual(MoneyUtil.of(0n, USDC, 6));
+  });
+
+  it('says frozen when the last reconciliation froze withdrawals, null when unknown', async () => {
+    const frozen = await withLedger({ frozen: true }).service.getForConsole(ORG, ACCOUNT);
+    expect(frozen.withdrawalsFrozen).toBe(true);
+
+    const unknown = await withLedger({ frozen: new Error('db down') }).service.getForConsole(
+      ORG,
+      ACCOUNT,
+    );
+    expect(unknown.withdrawalsFrozen).toBeNull();
+  });
+
+  it('is null for both without a reading, and null without the ledger wired', async () => {
+    const unreadable = buildService({ readerThrows: new Error('rpc down') });
+    const state = await unreadable.service.getForConsole(ORG, ACCOUNT);
+    expect(state.uncreditedOnChain).toBeNull();
+    expect(state.withdrawalsFrozen).toBeNull();
+
+    const bare = await buildService().service.getForConsole(ORG, ACCOUNT);
+    expect(bare.uncreditedOnChain).toBeNull();
+    expect(bare.withdrawalsFrozen).toBeNull();
+
+    const none = await withLedger({ reading: null }).service.getForConsole(ORG, ACCOUNT);
+    expect(none.uncreditedOnChain).toBeNull();
+    expect(none.withdrawalsFrozen).toBe(false);
+  });
+});

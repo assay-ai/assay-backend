@@ -489,6 +489,8 @@ function toGetEscrowResponseDto(state: EscrowState): GetEscrowResponseDto {
     nextSeq: state.nextSeq,
     observedAt: state.observedAt,
     lifetime: state.lifetime,
+    uncreditedOnChain: state.uncreditedOnChain,
+    withdrawalsFrozen: state.withdrawalsFrozen,
   };
 }
 
