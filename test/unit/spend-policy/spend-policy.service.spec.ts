@@ -720,4 +720,19 @@ describe('SpendPolicyService.dropAgentPolicy — "Use account default" (BUG-BUY-
     await service.patch(ORG, AGENT_ID, { dailyCap: '2000000' }, ACTOR);
     expect(tx.insertValues).toMatchObject({ agentId: AGENT_ID, policyVersion: 5 });
   });
+
+  it('compares access as sets: the same toolsets in another order are not a difference', async () => {
+    const { service, dataSource } = withAgent(true, [
+      own({ allowedToolIds: ['b', 'a'], ruleMaxPrice: '1000' }),
+      policyRow({
+        id: 'policy-org',
+        agentId: null,
+        policyVersion: 7,
+        allowedToolIds: ['a', 'b'],
+        ruleMaxPrice: '1000',
+      }),
+    ]);
+    await service.dropAgentPolicy(ORG, AGENT_ID, ACTOR);
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+  });
 });
