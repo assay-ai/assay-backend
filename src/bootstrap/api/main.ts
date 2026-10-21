@@ -6,10 +6,9 @@ import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/sw
 import { Reflector } from '@nestjs/core';
 import { assertTrustProxyHopsConfigured, parseCorsAllowedOrigins } from '@config/app.config';
 import { applyHttpSecurity } from '@shared/security/security-headers';
-import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
 import { AppApiModule } from './app.module';
 import { buildGlobalPrefixOptions } from './global-prefix';
-import { applyRouteBodyLimits } from './route-body-limits';
+import { applyApiCorsAndRouteBodyLimits } from './route-body-limits';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
@@ -93,13 +92,11 @@ async function bootstrapApi() {
   // `src/bootstrap/mcp/main.ts` sets its own list for the Streamable HTTP
   // session headers; the two services expose different things and neither list
   // is the other's.
-  app.enableCors(buildApiCorsOptionsDelegate(parseCorsAllowedOrigins()));
-
-  // A larger JSON body for the few routes that need one, before Nest's
+  //
+  // Then a larger JSON body for the few routes that need one, before Nest's
   // default 100 KB parser (`route-body-limits.ts`). After CORS, so a body
-  // this parser refuses (413) still carries the CORS headers and a browser
-  // can read the error instead of failing the fetch.
-  applyRouteBodyLimits(app);
+  // that parser refuses (413) still carries the CORS headers.
+  applyApiCorsAndRouteBodyLimits(app, parseCorsAllowedOrigins());
 
   // Validation
   app.useGlobalPipes(
