@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { AuthErrors } from '@modules/auth/errors/auth.errors';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { CursorPageDto } from '@shared/api';
 import { isHumanCallerKind } from '@shared/auth';
 
@@ -21,9 +21,12 @@ import { AgentsService } from './agents.service';
  * once (`AgentCredentialsService.firstPagesFor`) rather than one
  * `GET /agents/:agentId/credentials` per agent.
  *
- * Without `include` it is `AgentsService.list`, unchanged. With it, it is a
- * person's read: it nests what the credentials route returns, and that route
- * is `HumanSessionGuard`'s, so a machine credential is refused the same way.
+ * Without `include` it is `AgentsService.list`, unchanged. With it, it nests
+ * what the credentials route returns, under that route's rule
+ * (`HumanOrOwnAgentGuard`): a person gets every agent's credentials and
+ * health; a machine credential gets them for its own agent only, and the
+ * other agents of the page come without either field (BUG-DEMO-02). Nothing
+ * of another agent is read for it.
  */
 @Injectable()
 export class AgentListService {
@@ -37,20 +40,25 @@ export class AgentListService {
     query: ListAgentsQueryDto,
   ): Promise<CursorPageDto<AgentWithIncludesDto>> {
     const include = new Set(query.include ?? []);
-    if (include.size > 0 && !isHumanCallerKind(session.callerKind)) {
+    const person = isHumanCallerKind(session.callerKind);
+    if (include.size > 0 && !person && session.callerKind !== McpCallerKind.AGENT) {
       throw AuthErrors.humanSessionRequired();
     }
 
     const page = await this.agents.list(session.organizationId, query);
     if (include.size === 0) return page;
 
+    // Whose credentials this caller may read: every agent's for a person, its
+    // own for an agent (and none when its agent is not on this page).
+    const readable = (agentId: string) => person || agentId === session.agentId;
     const credentials = await this.credentials.firstPagesFor(
       session.organizationId,
-      page.items.map((agent) => agent.agentId),
+      page.items.map((agent) => agent.agentId).filter(readable),
       AGENT_LIST_CREDENTIALS_LIMIT,
     );
     const now = new Date();
     return page.map((agent) => {
+      if (!readable(agent.agentId)) return agent;
       const own = credentials.get(agent.agentId) ?? { items: [], hasMore: false };
       return {
         ...agent,

@@ -950,11 +950,12 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       expect(onlyHealth.items.every((a: any) => a.health && !('credentials' in a))).toBe(true);
     });
 
-    it('refuses include to an agent credential, as the credentials route does', async () => {
-      const res = await get('/agents', { include: 'health' }, 'machine');
-      expect(res.status).toBe(403);
-      expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
-      expect((await get(`/agents/${agentId}/credentials`, {}, 'machine')).status).toBe(403);
+    it('gives an agent credential its own agent only, as the credentials route does', async () => {
+      // BUG-DEMO-02: an agent reads its own agent's credential metadata.
+      const page = await data('/agents', { include: 'health' }, 'machine');
+      expect(page.items.length).toBeGreaterThan(0);
+      for (const row of page.items) expect('health' in row).toBe(row.agentId === agentId);
+      expect((await get(`/agents/${agentId}/credentials`, {}, 'machine')).status).toBe(200);
       // Without include the list is open to it, as before.
       expect((await get('/agents', {}, 'machine')).status).toBe(200);
       expect((await get('/agents', { include: 'secrets' })).status).toBe(400);
