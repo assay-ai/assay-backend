@@ -338,6 +338,13 @@ export class ToolsetEntryDto {
       'A PRIVATE one keeps the set from being shared by link; an unlisted one from the catalogue',
   })
   toolVisibility: string;
+
+  @ApiProperty({
+    description:
+      'The tool was taken down (its own takedown or its handle’s, or removed): agents no ' +
+      'longer see it, so the entry reads "removed" rather than "No provider yet"',
+  })
+  takenDown: boolean;
 }
 
 export class ToolsetUrlsDto {
