@@ -397,7 +397,8 @@ export class ToolsetModerationService {
       where: { id: toOrganizationId },
       lock: { mode: 'pessimistic_write' },
     });
-    if (!to) throw ToolsetErrors.handleReassignRefused({ reason: 'unknown organization' });
+    // The same 404 the pre-queue check gives, on the approved and the direct path alike.
+    if (!to) throw ToolsetErrors.organizationNotFound();
     if (to.handleLockedAt || to.handleStatus === HandleStatus.FROZEN) {
       throw ToolsetErrors.handleReassignRefused({
         reason: 'the organization already has a public name in use',

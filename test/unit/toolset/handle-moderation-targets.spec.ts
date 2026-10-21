@@ -67,3 +67,34 @@ describe('ToolsetModerationService.assertHandleTargetsExist', () => {
     await expect(service.assertHandleTargetsExist('acme', OTHER)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Review M2: the approved (and the direct-approver) write answers the same 404
+ * as the pre-queue check when the receiving organization is gone.
+ */
+describe('ToolsetModerationService.reassignHandle, unknown organization', () => {
+  it('answers TOOLSET_ORGANIZATION_NOT_FOUND, not the reassign refusal', async () => {
+    const manager = {
+      query: async () => [],
+      createQueryBuilder: () => {
+        const qb = {
+          where: () => qb,
+          getOne: async () => ({ id: ORG, handle: 'acme', handleStatus: 'FROZEN' }),
+        };
+        return qb;
+      },
+      findOne: async () => null,
+    };
+    const service = new ToolsetModerationService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expectErrorCodeAsync(
+      () => service.reassignHandle(manager as never, 'acme', OTHER),
+      ToolsetErrorCode.TOOLSET_ORGANIZATION_NOT_FOUND,
+    );
+  });
+});
