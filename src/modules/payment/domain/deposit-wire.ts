@@ -1,5 +1,7 @@
 import { ChainId, isChainId } from '@modules/chains/ports/caip.types';
 import { PaymentRequirements } from '@modules/chains/ports/x402.types';
+import { EVM_PAYMENT_SCHEME } from '@modules/chains/evm/evm-chain.adapter';
+import { SOLANA_PAYMENT_SCHEME } from '@modules/chains/solana/solana.constants';
 
 import { PaymentErrors } from '../errors/payment.errors';
 
@@ -58,19 +60,23 @@ export function asPayloadChainId(network: string): ChainId {
 }
 
 /**
- * The x402 scheme every deposit is quoted in — `SOLANA_PAYMENT_SCHEME` and
- * `EVM_PAYMENT_SCHEME` alike.
+ * The x402 schemes a deposit is quoted in: the adapters' own constants, so a
+ * chain that quotes another scheme is added here by adding its constant, never
+ * refused by a copy of the word.
  */
-export const DEPOSIT_PAYMENT_SCHEME = 'exact';
+export const DEPOSIT_PAYMENT_SCHEMES: ReadonlySet<string> = new Set([
+  SOLANA_PAYMENT_SCHEME,
+  EVM_PAYMENT_SCHEME,
+]);
 
 /**
  * Refuse a settle body in another scheme before its payload is decoded, so
  * the caller is told the scheme is wrong rather than that the bytes are.
  */
 export function assertDepositScheme(scheme: string): void {
-  if (scheme !== DEPOSIT_PAYMENT_SCHEME) {
+  if (!DEPOSIT_PAYMENT_SCHEMES.has(scheme)) {
     throw PaymentErrors.unsupportedScheme({
-      reason: `deposits are settled in the ${DEPOSIT_PAYMENT_SCHEME} scheme, not ${scheme}`,
+      reason: `deposits are settled in the ${[...DEPOSIT_PAYMENT_SCHEMES].join(' or ')} scheme, not ${scheme}`,
     });
   }
 }

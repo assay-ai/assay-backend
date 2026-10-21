@@ -1,4 +1,4 @@
-import { DEPOSIT_PAYMENT_SCHEME } from '@modules/payment/domain/deposit-wire';
+import { DEPOSIT_PAYMENT_SCHEMES } from '@modules/payment/domain/deposit-wire';
 import { EVM_PAYMENT_SCHEME } from '@modules/chains/evm/evm-chain.adapter';
 import { SOLANA_PAYMENT_SCHEME } from '@modules/chains/solana/solana.constants';
 import { TxRef } from '@modules/chains/ports/x402.types';
@@ -1056,9 +1056,11 @@ function dummyPayload() {
   };
 }
 
-describe('DEPOSIT_PAYMENT_SCHEME', () => {
-  it('is the scheme every deposit adapter quotes', () => {
-    expect(DEPOSIT_PAYMENT_SCHEME).toBe(SOLANA_PAYMENT_SCHEME);
-    expect(DEPOSIT_PAYMENT_SCHEME).toBe(EVM_PAYMENT_SCHEME);
+describe('DEPOSIT_PAYMENT_SCHEMES', () => {
+  it('is the schemes the deposit adapters quote, and nothing else', () => {
+    expect([...DEPOSIT_PAYMENT_SCHEMES].sort()).toEqual(
+      [...new Set([SOLANA_PAYMENT_SCHEME, EVM_PAYMENT_SCHEME])].sort(),
+    );
+    expect(DEPOSIT_PAYMENT_SCHEMES.has('upto')).toBe(false);
   });
 });
