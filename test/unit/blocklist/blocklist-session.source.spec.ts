@@ -63,6 +63,7 @@ describe('BlocklistSessionSource', () => {
         errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
         statusCode: 403,
         message: 'Your account is blocked by Assay; contact support',
+        publicContext: { role: BlockedRole.ORGANIZATION },
       });
     },
   );

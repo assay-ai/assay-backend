@@ -119,8 +119,11 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
    * "Your account is blocked by Assay", on the API and the MCP host).
    *
    * 403: the request is well formed and re-authenticating will not help. The
-   * context names the role (`PAYER`, `PAYEE`, …) and never the reason, which is
-   * the platform's internal note.
+   * response's `error.context.role` names the role (`ORGANIZATION` for the
+   * caller's own organization, else `PAYER`, `PAYEE`, `PROVIDER`, `DELEGATE`,
+   * `STAKE_AUTHORITY`), so a client tells its own block from another party's
+   * without reading the message. Never the reason, which is the platform's
+   * internal note, and never the subject kind.
    */
   accountBlocked: {
     code: AccountErrorCode.ACCOUNT_BLOCKED,
@@ -130,5 +133,6 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
         ? 'Your account is blocked by Assay; contact support'
         : `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
           'contact support',
+    publicContext: ['role'],
   },
 });
