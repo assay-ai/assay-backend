@@ -44,6 +44,7 @@ import {
   PROVIDER_MINIMUM_STAKE_BY_CHAIN,
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
   ProviderStakeService,
+  liveMinimumStakeParameters,
   loadMinimumStakeParameters,
 } from './services/provider-stake.service';
 import { ProviderSlaWindowsService } from './services/provider-sla-windows.service';
@@ -155,9 +156,12 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     BindingPauseService,
     ProviderSlaWindowsService,
     {
+      // The Capital screen's requirement: the effective routing floor of the
+      // platform stake chain, never below config (review M-8).
       provide: PROVIDER_MINIMUM_STAKE_PARAMETERS,
-      useFactory: loadMinimumStakeParameters,
-      inject: [ConfigService],
+      useFactory: (config: ConfigService, floors: ContractMinimumStakeFloors) =>
+        liveMinimumStakeParameters(loadMinimumStakeParameters(config), floors.byChain),
+      inject: [ConfigService, ContractMinimumStakeFloors],
     },
     {
       // The same floor the router gates on, keyed by chain — the very map

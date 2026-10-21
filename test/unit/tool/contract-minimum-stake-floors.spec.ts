@@ -3,6 +3,7 @@ import {
   MinimumStakeReaderPort,
   MinimumStakeReading,
 } from '@modules/chains/ports/minimum-stake-reader.port';
+import { liveMinimumStakeParameters } from '@modules/provider/services/provider-stake.service';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import {
   CONTRACT_MINIMUM_STAKE_READ_TIMEOUT_MS,
@@ -132,5 +133,28 @@ describe('ContractMinimumStakeFloors — routing follows the contract minimum', 
     release([read(100)]);
     await Promise.all([first, second]);
     expect(readMinimumStakes).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('liveMinimumStakeParameters — the Capital screen and stake monitor floor (review M-8)', () => {
+  it('follows the effective routing floor when it is stricter, at every read', async () => {
+    const subject = floors(reader([read(100)]));
+    const parameters = liveMinimumStakeParameters(CONFIGURED, subject.byChain);
+    expect(parameters.floor).toEqual(usd(50));
+    await subject.refresh();
+    expect(parameters.floor).toEqual(usd(100));
+    expect(parameters.priceMultiple).toBe(1000);
+  });
+
+  it('never shows less than the configured floor', () => {
+    const parameters = liveMinimumStakeParameters(
+      CONFIGURED,
+      new Map([[CHAIN, { floor: usd(10), priceMultiple: 1000 }]]),
+    );
+    expect(parameters.floor).toEqual(usd(50));
+  });
+
+  it('shows the configured floor when the chain has no entry', () => {
+    expect(liveMinimumStakeParameters(CONFIGURED, new Map()).floor).toEqual(usd(50));
   });
 });

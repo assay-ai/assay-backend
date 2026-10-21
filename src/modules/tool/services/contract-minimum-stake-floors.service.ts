@@ -1,10 +1,15 @@
 import { Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 
+import { ConfigService } from '@nestjs/config';
+
+import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import {
+  MINIMUM_STAKE_READER,
   MinimumStakeReaderPort,
   MinimumStakeReading,
 } from '@modules/chains/ports/minimum-stake-reader.port';
+import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { MinimumStakeByChain, MinimumStakeParameters } from '../domain/routing/routing.types';
@@ -130,3 +135,19 @@ export class ContractMinimumStakeFloors implements OnModuleInit, OnModuleDestroy
     this.live.set(reading.chainId, { ...configured, floor });
   }
 }
+
+/**
+ * The Nest provider for {@link ContractMinimumStakeFloors}: config floors per
+ * enabled chain, raised by the contract reader when one is wired. Used by
+ * `ToolModule` (routing, the binding gates) and by the scheduler's stake
+ * monitor module, which does not import `ToolModule`.
+ */
+export const CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER = {
+  provide: ContractMinimumStakeFloors,
+  useFactory: (
+    config: ConfigService,
+    enabled: readonly ChainId[],
+    reader: MinimumStakeReaderPort | null,
+  ) => new ContractMinimumStakeFloors(loadMinimumStakeByChain(config, enabled), reader ?? null),
+  inject: [ConfigService, ENABLED_CHAINS, { token: MINIMUM_STAKE_READER, optional: true }],
+};
