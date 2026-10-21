@@ -60,6 +60,12 @@ describe('redactOAuthUrl', () => {
     );
   });
 
+  it('replaces the value of every query key outside the safe list', () => {
+    expect(redactOAuthUrl('/api/v1/tools?q=weather&email=a@example.com&limit=20')).toBe(
+      `/api/v1/tools?q=${REDACTED}&email=${REDACTED}&limit=20`,
+    );
+  });
+
   it('leaves an ordinary URL unchanged', () => {
     for (const url of [
       '/api/v1/payments/abc-123',
