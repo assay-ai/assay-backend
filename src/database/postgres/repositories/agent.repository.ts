@@ -100,7 +100,10 @@ export class AgentRepository extends AbstractRepository<AgentEntity> {
     });
     // Narrowed in SQL, so the page, its cursor and `hasMore` describe the
     // narrowed list and nothing of the organization's other agents.
-    if (onlyAgentId) qb.andWhere('agent.id = :onlyAgentId', { onlyAgentId });
+    if (onlyAgentId !== undefined) {
+      // An empty id narrows to nothing rather than falling back to the whole list.
+      qb.andWhere(onlyAgentId ? 'agent.id = :onlyAgentId' : '1 = 0', { onlyAgentId });
+    }
 
     applyTimeWindow(qb, query, AGENTS_LIST);
     return paginate(qb, query, AGENTS_LIST);
