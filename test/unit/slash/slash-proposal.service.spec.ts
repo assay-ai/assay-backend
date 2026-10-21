@@ -69,6 +69,8 @@ describe('SlashProposalService', () => {
       // `NOTIFIED` too: the notification is delivered
       // synchronously on `IN_APP` and the clock starts in the same call.
       expect(events.kinds()).toEqual(['PROPOSED', 'NOTIFIED']);
+      // In words: no minor units, no binding id (BUG-OPS-CASES-03).
+      expect(events.rows[0].summary).toBe('Penalty of $10.27 proposed');
       expect(notifications.sent).toHaveLength(1);
       expect(notifications.sent[0].event).toBe(NotificationEvent.PROVIDER_SLASH_PROPOSED);
       // Dollars, not minor units, and no ISO timestamp in the provider's words.
