@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull } from 'typeorm';
 
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { assertOrganizationScopedValues } from '@database/postgres/organization-scope';
@@ -55,6 +56,9 @@ const POLICY_HISTORY_LIST: ListSpec = {
  * `spend_policy.updated`, the changed fields before and after) in the same
  * transaction as the version it describes — see `writeVersion`.
  */
+/** A uuid, checked before it reaches a `uuid` column (an invalid one would be a 500). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 @Injectable()
 export class SpendPolicyService {
   private readonly logger = new Logger(SpendPolicyService.name);
@@ -81,6 +85,29 @@ export class SpendPolicyService {
    * with `usage` attached when both optional collaborators are
    * wired and computing it does not fail.
    */
+  /**
+   * Which agent `GET /spend-policy?agentId=` reads (BUG-BUY-CONNECT-05): the
+   * named agent only when a person asks and the agent belongs to the
+   * caller's own organization. Anything else — no `agentId`, an agent
+   * credential asking about another agent, a malformed id, an agent of
+   * another organization or none at all — reads the session's own agent, as
+   * the route did before the parameter existed, so a foreign id learns
+   * nothing about that agent.
+   */
+  async readableAgentId(
+    organizationId: string,
+    sessionAgentId: string,
+    requestedAgentId: string | undefined,
+    human: boolean,
+  ): Promise<string> {
+    if (!requestedAgentId || requestedAgentId === sessionAgentId || !human) return sessionAgentId;
+    if (!UUID_PATTERN.test(requestedAgentId)) return sessionAgentId;
+    const own = await this.dataSource
+      .getRepository(AgentEntity)
+      .exists({ where: { id: requestedAgentId, organizationId } });
+    return own ? requestedAgentId : sessionAgentId;
+  }
+
   async get(organizationId: string, agentId: string): Promise<SpendPolicyDto> {
     const row = await this.policies.findLive(organizationId, agentId);
     if (!row) {

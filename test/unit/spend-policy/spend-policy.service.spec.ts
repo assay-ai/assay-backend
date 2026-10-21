@@ -553,3 +553,38 @@ describe('SpendPolicyService.history', () => {
     expect(page.items[0].scope).toBe(SpendPolicyScope.ORGANIZATION);
   });
 });
+
+describe('SpendPolicyService.readableAgentId (BUG-BUY-CONNECT-05)', () => {
+  const OTHER = '6f1c2d3e-4b5a-4c6d-8e7f-901234567890';
+
+  function withAgents(owned: boolean) {
+    const exists = jest.fn().mockResolvedValue(owned);
+    const { service, dataSource } = build({});
+    (dataSource as unknown as { getRepository: jest.Mock }).getRepository = jest
+      .fn()
+      .mockReturnValue({ exists });
+    return { service, exists };
+  }
+
+  it("reads another agent of the caller's own organization for a person", async () => {
+    const { service, exists } = withAgents(true);
+
+    expect(await service.readableAgentId(ORG, AGENT, OTHER, true)).toBe(OTHER);
+    expect(exists).toHaveBeenCalledWith({ where: { id: OTHER, organizationId: ORG } });
+  });
+
+  it("reads the session's own agent for an agent of another organization", async () => {
+    const { service } = withAgents(false);
+
+    expect(await service.readableAgentId(ORG, AGENT, OTHER, true)).toBe(AGENT);
+  });
+
+  it('never lets an agent credential read another agent, nor queries a malformed id', async () => {
+    const { service, exists } = withAgents(true);
+
+    expect(await service.readableAgentId(ORG, AGENT, OTHER, false)).toBe(AGENT);
+    expect(await service.readableAgentId(ORG, AGENT, 'not-a-uuid', true)).toBe(AGENT);
+    expect(await service.readableAgentId(ORG, AGENT, undefined, true)).toBe(AGENT);
+    expect(exists).not.toHaveBeenCalled();
+  });
+});
