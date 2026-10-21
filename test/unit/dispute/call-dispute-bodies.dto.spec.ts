@@ -34,7 +34,13 @@ describe('RespondCallDisputeBodyDto', () => {
     expect(message).toContain('The reply must be at least 3 characters');
   });
 
-  it.each(['', '   ', 'x'.repeat(1001)])('still refuses %p', async (response) => {
+  it.each(['', '   '])('refuses %p with the one message', async (response) => {
+    expect(await messageOf(parse(RespondCallDisputeBodyDto, { response }))).toBe(
+      'The reply must be at least 3 characters',
+    );
+  });
+
+  it.each([123, 'x'.repeat(1001)])('still refuses %p', async (response) => {
     await expect(parse(RespondCallDisputeBodyDto, { response })).rejects.toBeDefined();
   });
 });
