@@ -3,6 +3,7 @@ import {
   BadRequestException,
   HttpException,
   NotFoundException,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -91,7 +92,27 @@ describe('AllExceptionsFilter', () => {
 
     expectTheOneShape(body);
     expect(body.error.statusCode).toBe(413);
-    expect(body.error.message).toBe('request entity too large');
+    expect(body.error.code).toBe('PAYLOAD_TOO_LARGE');
+    expect(body.error.message).toBe('The request body is too large.');
+  });
+
+  it('answers a ParseUUIDPipe refusal with VALIDATION_FAILED, like a DTO (BUG-OPS-CASES-04)', async () => {
+    let refusal: unknown;
+    try {
+      await new ParseUUIDPipe().transform('abc', { type: 'param', data: 'proposalId' });
+    } catch (error) {
+      refusal = error;
+    }
+    const body = capture(refusal);
+
+    expect(body.error.statusCode).toBe(400);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.message).toMatch(/^Validation failed \(.*uuid.* is expected\)$/);
+  });
+
+  it('keeps any other plain 400 a BAD_REQUEST', () => {
+    const body = capture(new BadRequestException('Something else'));
+    expect(body.error.code).toBe('BAD_REQUEST');
   });
 
   it('still answers 500 for an error that is not marked safe to expose', () => {
@@ -149,6 +170,18 @@ describe('AllExceptionsFilter', () => {
   });
 
   describe('error.context, only where the definition declares it safe', () => {
+    it('puts ACCOUNT_BLOCKED role on the wire, so a client tells its own block from another party', () => {
+      const own = capture(
+        AccountErrors.accountBlocked({ role: 'ORGANIZATION', subjectKind: 'ORGANIZATION' }),
+      );
+      expect(own.error).toMatchObject({
+        code: 'ACCOUNT_BLOCKED',
+        statusCode: 403,
+        message: 'Your account is blocked by Assay; contact support',
+        context: { role: 'ORGANIZATION' },
+      });
+    });
+
     it('puts SLASH_CHAIN_BATCH_REFUSED refusals[] on the wire', () => {
       const refusals = [
         { requestId: 'ab'.repeat(32), reason: 'SlashNotPending', detail: 'the record is EXECUTED' },
@@ -168,8 +201,10 @@ describe('AllExceptionsFilter', () => {
           note: 'internal: key leaked in a public repo',
         } as never),
       );
-      expectTheOneShape(blocked);
+      // Only the declared `role`: never the note, never the subject kind.
+      expect(blocked.error.context).toEqual({ role: 'PAYER' });
       expect(JSON.stringify(blocked)).not.toContain('leaked');
+      expect(JSON.stringify(blocked)).not.toContain('WALLET');
 
       const notFound = capture(PaymentErrors.paymentIntentNotFound({ id: 'abc-123' }));
       expectTheOneShape(notFound);

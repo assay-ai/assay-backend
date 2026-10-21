@@ -780,7 +780,7 @@ describe('OAuth consent API — real database and Redis', () => {
       await deny(rid, token),
     ]) {
       expect(response.status).toBe(403);
-      expect(response.body.error.code).toBe('AUTH_ORGANIZATION_SUSPENDED');
+      expect(response.body.error.code).toBe('ACCOUNT_BLOCKED');
     }
     expect((await store.take(rid))?.approval).toBeNull();
   });

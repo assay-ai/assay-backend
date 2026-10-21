@@ -78,4 +78,26 @@ describe('McpExceptionsFilter', () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({ success: false, error: { statusCode: 400 } });
   });
+
+  it('an oversized JSON body elsewhere → 413 PAYLOAD_TOO_LARGE, not 500 (BUG-NF-01)', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/elsewhere')
+      .send({ a: 'x'.repeat(200_000) });
+    expect(response.status).toBe(413);
+    expect(response.body).toMatchObject({
+      success: false,
+      error: {
+        code: 'PAYLOAD_TOO_LARGE',
+        statusCode: 413,
+        message: 'The request body is too large.',
+      },
+    });
+  });
+
+  it('a body under the limit elsewhere is still accepted', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/elsewhere')
+      .send({ a: 'x'.repeat(50_000) });
+    expect(response.status).toBe(201);
+  });
 });

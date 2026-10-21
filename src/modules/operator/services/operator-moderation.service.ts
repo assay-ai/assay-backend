@@ -406,6 +406,7 @@ export class OperatorModerationService {
       return { handle: body.newHandle, aliasUntil: aliasUntil.toISOString() };
     };
     if (approver) return attempt();
+    await this.moderation.assertHandleTargetsExist(handle);
     return this.approvals.orQueue(
       {
         action: RENAME_HANDLE_APPROVAL_ACTION,
@@ -458,6 +459,7 @@ export class OperatorModerationService {
       return { handle, organizationId: body.toOrganizationId };
     };
     if (approver) return attempt();
+    await this.moderation.assertHandleTargetsExist(handle, body.toOrganizationId);
     return this.approvals.orQueue(
       {
         action: REASSIGN_HANDLE_APPROVAL_ACTION,

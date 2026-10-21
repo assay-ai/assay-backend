@@ -26,8 +26,8 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
  *    leaves the dashboard's reads open so the account holder can see that, and
  *    why, they are blocked.
  *
- * The refusal still reuses the existing codes: a blocked organization's session
- * is `AUTH_ORGANIZATION_SUSPENDED`, the code the frontend already handles.
+ * A blocked organization's session is refused with `ACCOUNT_BLOCKED` ("Your
+ * account is blocked by Assay"), not the suspension code.
  *
  * ## Lifting does not delete
  *
