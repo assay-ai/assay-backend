@@ -272,6 +272,7 @@ export class OperatorModerationService {
     requestId: string | null,
   ): Promise<ModerationCutoffDto> {
     const existing = await this.requireCutoff(cutoffId);
+    const target = await this.cutoffTargetOf(existing);
     const cutoff = await this.overrides.perform<ModerationCutoffEntity>(
       {
         code: 'A-18',
@@ -290,7 +291,11 @@ export class OperatorModerationService {
           existing.id,
           operator.operatorId,
         );
-        return { value: row, before: { confirmed: false }, after: { confirmed: true } };
+        return {
+          value: row,
+          before: { confirmed: false },
+          after: { confirmed: true, ...target },
+        };
       },
     );
     return cutoffDtoOf(cutoff);
@@ -308,6 +313,7 @@ export class OperatorModerationService {
     approver: OperatorApprover | null = null,
   ): Promise<ModerationCutoffDto | ApprovalQueuedDto> {
     const existing = await this.requireCutoff(cutoffId);
+    const target = await this.cutoffTargetOf(existing);
     const confirmed = existing.confirmedAt !== null;
     const attempt = async () => {
       const cutoff = await this.overrides.perform<ModerationCutoffEntity>(
@@ -331,7 +337,11 @@ export class OperatorModerationService {
             operator.operatorId,
             confirmed ? CutoffRevertReason.LIFTED : CutoffRevertReason.REJECTED,
           );
-          return { value: row, before: { reverted: false }, after: { reverted: true } };
+          return {
+            value: row,
+            before: { reverted: false },
+            after: { reverted: true, ...target },
+          };
         },
       );
       await this.moderation.afterCommit(await this.ownersOf(existing));
@@ -540,6 +550,23 @@ export class OperatorModerationService {
     for (const toolset of toolsets) names.set(`TOOLSET:${toolset.id}`, toolset.name);
     for (const handle of ids('HANDLE')) names.set(`HANDLE:${handle}`, handle);
     return names;
+  }
+
+  /**
+   * What a cutoff took down, for the register entry of its confirm (`A-18`)
+   * or revert (`A-19`): their `targetType` is `moderation_cutoff`, so without
+   * this the Activity line cannot name the tool (BUG-OPS-MARKET-04). `name`
+   * matches the `after.name` a tool entry already carries.
+   */
+  private async cutoffTargetOf(
+    cutoff: ModerationCutoffEntity,
+  ): Promise<{ cutoffTargetType: string; cutoffTargetId: string; name: string | null }> {
+    const names = await this.targetNames([cutoff]);
+    return {
+      cutoffTargetType: cutoff.targetType,
+      cutoffTargetId: cutoff.targetId,
+      name: names.get(`${cutoff.targetType}:${cutoff.targetId}`) ?? null,
+    };
   }
 
   async listReports(query: ListModerationQueryDto): Promise<OperatorReportDto[]> {
