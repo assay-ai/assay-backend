@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
 
 import { AuthErrors } from '@modules/auth/errors/auth.errors';
-import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import {
+  McpCallerKind,
+  McpSession,
+  storedCredentialIdOf,
+} from '@modules/mcp/ports/mcp-session.port';
 import { CursorPageDto } from '@shared/api';
 import { isHumanCallerKind } from '@shared/auth';
 
@@ -12,6 +16,10 @@ import {
   AgentWithIncludesDto,
   ListAgentsQueryDto,
 } from '../dto/list-agents.dto';
+import {
+  AgentCredentialsPage,
+  ListAgentCredentialsQueryDto,
+} from '../dto/list-agent-credentials.dto';
 import { AgentCredentialsService } from './agent-credentials.service';
 import { AgentsService } from './agents.service';
 
@@ -24,9 +32,9 @@ import { AgentsService } from './agents.service';
  * Without `include` it is `AgentsService.list`, unchanged. With it, it nests
  * what the credentials route returns, under that route's rule
  * (`HumanOrOwnAgentGuard`): a person gets every agent's credentials and
- * health; a machine credential gets them for its own agent only, and the
- * other agents of the page come without either field (BUG-DEMO-02). Nothing
- * of another agent is read for it.
+ * health; a machine credential gets them for its own agent only, built from
+ * its own key alone, and the other agents of the page come without either
+ * field (BUG-DEMO-02). Nothing of another agent or another key is read for it.
  */
 @Injectable()
 export class AgentListService {
@@ -48,14 +56,20 @@ export class AgentListService {
     const page = await this.agents.list(session.organizationId, query);
     if (include.size === 0) return page;
 
-    // Whose credentials this caller may read: every agent's for a person, its
-    // own for an agent (and none when its agent is not on this page).
+    // Whose credentials this caller may read: every agent's for a person; for
+    // an agent, its own key on its own agent only (and nothing when its agent
+    // is not on this page, or it has no stored key).
     const readable = (agentId: string) => person || agentId === session.agentId;
-    const credentials = await this.credentials.firstPagesFor(
-      session.organizationId,
-      page.items.map((agent) => agent.agentId).filter(readable),
-      AGENT_LIST_CREDENTIALS_LIMIT,
-    );
+    const credentials = person
+      ? await this.credentials.firstPagesFor(
+          session.organizationId,
+          page.items.map((agent) => agent.agentId),
+          AGENT_LIST_CREDENTIALS_LIMIT,
+        )
+      : await this.ownKey(
+          session,
+          page.items.some((agent) => agent.agentId === session.agentId),
+        );
     const now = new Date();
     return page.map((agent) => {
       if (!readable(agent.agentId)) return agent;
@@ -66,5 +80,21 @@ export class AgentListService {
         ...(include.has(AgentListInclude.HEALTH) ? { health: agentHealth(own.items, now) } : {}),
       };
     });
+  }
+
+  /** An agent caller's own key, as the one-entry page `include` nests for its agent. */
+  private async ownKey(
+    session: McpSession,
+    onPage: boolean,
+  ): Promise<Map<string, AgentCredentialsPage>> {
+    const credentialId = storedCredentialIdOf(session);
+    if (!onPage || !credentialId) return new Map();
+    const page = await this.credentials.list(
+      session.organizationId,
+      session.agentId,
+      Object.assign(new ListAgentCredentialsQueryDto(), { limit: 1 }),
+      { credentialId },
+    );
+    return new Map([[session.agentId, { items: page.items, hasMore: false }]]);
   }
 }
