@@ -60,6 +60,8 @@ function escrowState(): EscrowState {
     exists: true,
     chainReadable: true,
     lifetime: null,
+    uncreditedOnChain: null,
+    withdrawalsFrozen: null,
     account: BUYER,
     escrowPda: null,
     escrowTokenAccount: null,

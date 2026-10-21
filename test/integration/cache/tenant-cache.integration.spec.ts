@@ -672,9 +672,16 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
     });
 
     it("an agent token never gets a person's cached `include` answer", async () => {
+      const spy = jest.spyOn(agentsService, 'list');
       await get('/agents?include=health', 'personA').expect(200);
       await get('/agents?include=health', 'personA').expect(200);
-      await get('/agents?include=health', 'machineA').expect(403);
+      expect(spy).toHaveBeenCalledTimes(1);
+      // An agent token is allowed the route (BUG-DEMO-02) but is a different
+      // cache entry: the handler runs for it, and it sees its own agent only.
+      const machine = await get('/agents?include=health', 'machineA').expect(200);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(machine.body.data.items.map((a: { agentId: string }) => a.agentId)).toEqual([agentA]);
+      expect(machine.body.data.items[0]).not.toHaveProperty('credentials');
     });
   });
 

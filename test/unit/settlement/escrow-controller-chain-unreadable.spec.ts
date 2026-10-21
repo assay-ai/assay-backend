@@ -94,6 +94,8 @@ function unreadableState(): EscrowState {
     observedAt: null,
     chainReadable: false,
     lifetime: null,
+    uncreditedOnChain: null,
+    withdrawalsFrozen: null,
   };
 }
 
