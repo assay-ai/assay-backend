@@ -228,6 +228,35 @@ describe('EvmChainStateIndexer', () => {
     expect(state()).toMatchObject({ cursorBlock: '20488' });
   });
 
+  it('counts reaching the safe head as caught up, and a capped range as not', async () => {
+    const reached = build({
+      head: 20_500n,
+      confirmations: 12,
+      state: {
+        cursorBlock: '19999',
+        caughtUpAt: new Date(NOW - 60 * 60_000),
+        reconciledAt: new Date(NOW),
+      },
+    });
+    await reached.indexer.tick();
+    expect(reached.state()).toMatchObject({ cursorBlock: '20488', caughtUpAt: new Date(NOW) });
+
+    const capped = build({
+      head: 50_000n,
+      confirmations: 12,
+      state: {
+        cursorBlock: '19999',
+        caughtUpAt: new Date(NOW - 60 * 60_000),
+        reconciledAt: new Date(NOW),
+      },
+    });
+    await capped.indexer.tick();
+    expect(capped.state()).toMatchObject({
+      cursorBlock: '29999',
+      caughtUpAt: new Date(NOW - 60 * 60_000),
+    });
+  });
+
   it('AUDIT E-11: never moves the cursor past the safe head while it waits for confirmations', async () => {
     const { indexer, ranges, state } = build({
       head: 20_500n,
