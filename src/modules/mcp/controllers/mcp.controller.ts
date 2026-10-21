@@ -30,7 +30,7 @@ import { McpServerFactory } from '../services/mcp-server.factory';
 
 /**
  * The Streamable HTTP transport, on every path of the MCP host
- * (`mcp.assay.ai`, design spec §7.4).
+ * (`mcp.goassay.ai`, design spec §7.4).
  *
  * Each URL is its own MCP server: `/` serves the whole catalogue and
  * `/my/{slug}` the organization's own toolset; the forms later phases serve

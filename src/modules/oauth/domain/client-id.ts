@@ -92,7 +92,7 @@ function isCanonical(raw: string, url: URL): boolean {
   return raw === `https://${url.hostname}:443${url.pathname}${url.search}`;
 }
 
-/** Same registrable domain as the MCP origin (`api.assay.ai`, `assay.ai`, …). */
+/** Same registrable domain as the MCP origin (`api.goassay.ai`, `goassay.ai`, …). */
 function ownSite(url: URL, mcpPublicUrl: string): boolean {
   let mcpHost: string;
   try {
