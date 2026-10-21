@@ -39,6 +39,85 @@ export interface EgressTarget {
 
 const DEFAULT_PORT: Readonly<Record<string, number>> = { 'http:': 80, 'https:': 443 };
 
+/** How long a checked answer may stand in for a lookup that failed transiently. */
+export const LAST_GOOD_DNS_MAX_AGE_MS = 10 * 60 * 1000;
+
+/** The pause before the one retry of a transient lookup failure. */
+export const DNS_RETRY_DELAY_MS = 100;
+
+/**
+ * Lookup errors that say "the resolver could not answer now", not "the name
+ * has no address". `ENOTFOUND` is in the list on purpose: it is how Node
+ * reports `EAI_NONAME`, which macOS and glibc also return when the system
+ * resolver itself is unreachable — the failure the e2e run hit (BUG-X-04).
+ * A real NXDOMAIN reads the same, so a name deleted on purpose keeps its last
+ * checked address for at most {@link LAST_GOOD_DNS_MAX_AGE_MS}; a name never
+ * resolved before (`nonexistent.invalid`) has no entry and still fails.
+ */
+const TRANSIENT_DNS_CODES: ReadonlySet<string> = new Set([
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'ENOTFOUND',
+  'ESERVFAIL',
+  'ETIMEOUT',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+]);
+
+function isTransientDnsFailure(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && TRANSIENT_DNS_CODES.has(code);
+}
+
+/**
+ * The last answer per host that **passed the address check**, for a lookup
+ * that fails transiently (BUG-X-04).
+ *
+ * Not a DNS cache: every call still resolves, and a fresh answer always wins.
+ * Only when the lookup failed transiently twice is the last stored answer
+ * used, and only within {@link LAST_GOOD_DNS_MAX_AGE_MS} of when it was
+ * resolved. Entries are keyed by host AND trust level, are written only after
+ * the answer passed that policy's address check, and are checked again on
+ * reuse — so a cached answer can never let a request reach an address its own
+ * policy refuses, and nothing new (let alone a new private address) is ever
+ * accepted through it. Pinning and relaying are unchanged: the reused address
+ * is what the socket (or the relay) is given, exactly as a fresh one would be.
+ */
+export class LastGoodDnsAnswers {
+  private readonly entries = new Map<
+    string,
+    { readonly records: readonly LookupAddress[]; readonly at: number }
+  >();
+
+  constructor(
+    private readonly maxAgeMs: number = LAST_GOOD_DNS_MAX_AGE_MS,
+    private readonly now: () => number = () => Date.now(),
+    private readonly maxEntries = 1000,
+  ) {}
+
+  remember(key: string, records: readonly LookupAddress[]): void {
+    this.entries.delete(key);
+    this.entries.set(key, { records: records.map((r) => ({ ...r })), at: this.now() });
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string;
+      this.entries.delete(oldest);
+    }
+  }
+
+  /** The stored answer and its age, or `null` when there is none young enough. */
+  recall(key: string): { records: LookupAddress[]; ageMs: number } | null {
+    const entry = this.entries.get(key);
+    if (!entry) return null;
+    const ageMs = this.now() - entry.at;
+    if (ageMs < 0 || ageMs > this.maxAgeMs) {
+      this.entries.delete(key);
+      return null;
+    }
+    return { records: entry.records.map((r) => ({ ...r })), ageMs };
+  }
+}
+
 /**
  * Parse, check the scheme, resolve once, and check every answer.
  *
@@ -60,6 +139,7 @@ export async function resolveEgressTarget(
   rawUrl: string,
   policy: EgressPolicy,
   lookup: EgressDnsLookup = defaultLookup,
+  lastGood?: LastGoodDnsAnswers,
 ): Promise<EgressTarget> {
   const url = parseUrl(rawUrl);
 
@@ -76,7 +156,11 @@ export async function resolveEgressTarget(
     throw new EgressError(EgressFailureKind.URL_INVALID, 'URL has no host', { url: rawUrl });
   }
 
-  const records = isIP(hostname) ? [literal(hostname)] : await resolve(hostname, url.href, lookup);
+  const cacheKey = `${policy.trust}|${hostname.toLowerCase()}`;
+  const resolved = isIP(hostname)
+    ? { records: [literal(hostname)], fresh: false }
+    : await resolve(hostname, url.href, lookup, lastGood?.recall.bind(lastGood, cacheKey));
+  const records = resolved.records;
 
   if (policy.trust === EgressTrust.PUBLIC_ONLY) {
     for (const record of records) {
@@ -95,6 +179,10 @@ export async function resolveEgressTarget(
       }
     }
   }
+
+  // Only an answer that has just passed the check above is kept for a later
+  // transient failure (never a literal, never a reused one re-stored).
+  if (resolved.fresh && lastGood) lastGood.remember(cacheKey, records);
 
   const chosen = records[0];
 
@@ -131,12 +219,24 @@ async function resolve(
   hostname: string,
   href: string,
   lookup: EgressDnsLookup,
-): Promise<LookupAddress[]> {
+  recallLastGood?: () => { records: LookupAddress[]; ageMs: number } | null,
+): Promise<{ records: LookupAddress[]; fresh: boolean }> {
   let records: LookupAddress[];
 
   try {
-    records = await lookup(hostname);
+    records = await lookupWithOneRetry(hostname, lookup);
   } catch (error) {
+    // Two transient failures in a row: the last answer that passed the check,
+    // if it is recent enough. Anything else (a refusal the caller injected, a
+    // resolver error that is not transient) fails as before.
+    const lastGood = isTransientDnsFailure(error) ? recallLastGood?.() : null;
+    if (lastGood) {
+      logger.warn(
+        `${hostname} did not resolve (${(error as { code?: string }).code}); using its last ` +
+          `checked answer from ${Math.round(lastGood.ageMs / 1000)}s ago`,
+      );
+      return { records: lastGood.records, fresh: false };
+    }
     throw new EgressError(
       EgressFailureKind.DNS_FAILED,
       `${hostname} did not resolve: ${error instanceof Error ? error.message : String(error)}`,
@@ -150,5 +250,19 @@ async function resolve(
     });
   }
 
-  return records;
+  return { records, fresh: true };
+}
+
+/** One lookup, and one more after {@link DNS_RETRY_DELAY_MS} when the first failed transiently. */
+async function lookupWithOneRetry(
+  hostname: string,
+  lookup: EgressDnsLookup,
+): Promise<LookupAddress[]> {
+  try {
+    return await lookup(hostname);
+  } catch (error) {
+    if (!isTransientDnsFailure(error)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, DNS_RETRY_DELAY_MS));
+    return lookup(hostname);
+  }
 }
