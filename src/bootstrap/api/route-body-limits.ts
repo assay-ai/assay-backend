@@ -1,6 +1,8 @@
 import { json } from 'express';
 import type { RequestHandler } from 'express';
 
+import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
+
 /**
  * Routes whose JSON body may exceed the default 100 KB, and their limit.
  *
@@ -22,4 +24,21 @@ export function applyRouteBodyLimits(app: {
       parse(req, res, next);
     });
   }
+}
+
+/**
+ * The API's CORS policy, then the route-scoped parsers — in that order, and
+ * in one place so the order cannot drift. A body a route parser refuses (413)
+ * then still carries the CORS headers, and the page can read the error
+ * instead of failing the fetch.
+ */
+export function applyApiCorsAndRouteBodyLimits(
+  app: {
+    enableCors(options: ReturnType<typeof buildApiCorsOptionsDelegate>): void;
+    use(path: string, handler: RequestHandler): unknown;
+  },
+  allowedOrigins: readonly string[],
+): void {
+  app.enableCors(buildApiCorsOptionsDelegate(allowedOrigins));
+  applyRouteBodyLimits(app);
 }

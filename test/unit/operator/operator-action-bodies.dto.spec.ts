@@ -1,5 +1,6 @@
 import { Type, ValidationPipe } from '@nestjs/common';
 
+import { AddOperatorBodyDto } from '@modules/operator/dto/operator-directory.dto';
 import {
   CompensatedBodyDto,
   ManualCaseActionBodyDto,
@@ -78,6 +79,27 @@ describe('operator action bodies', () => {
           ticketRef: ' ',
         }),
       ).resolves.toMatchObject({ ticketRef: undefined });
+    });
+  });
+
+  describe('add operator (BUG-OPS-CORE-04)', () => {
+    const valid = {
+      displayName: 'New Operator',
+      subject: 'new-op@',
+      walletAddress: '0x00000000000000000000000000000000e2e0c0b1',
+      roles: ['SRE'],
+      authorityLimitMinor: '0',
+      reasonCode: 'JOINING',
+      note: 'joining the on-call rota',
+    };
+
+    it('accepts one role or more', async () => {
+      await expect(parse(AddOperatorBodyDto, valid)).resolves.toMatchObject({ roles: ['SRE'] });
+    });
+
+    it('refuses an empty roles list with a plain message', async () => {
+      const message = await messageOf(parse(AddOperatorBodyDto, { ...valid, roles: [] }));
+      expect(message).toBe('Choose at least one role');
     });
   });
 });

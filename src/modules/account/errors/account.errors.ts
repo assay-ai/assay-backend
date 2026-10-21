@@ -5,8 +5,8 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * audit log, agents, and agent credentials.
  *
  * The audit log has no write endpoint (it is append-only, read through this
- * module only). Listing under an unrecognised `agentId` is a filter that
- * matches nothing; minting a credential for one is a 404.
+ * module only). Listing or minting credentials under an unrecognised
+ * `agentId` is a 404.
  */
 export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',
@@ -115,19 +115,24 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
   /**
    * A party to this request is on the account blocklist: a wallet that is the
    * payer, payee, delegate or stake authority, or the provider serving the
-   * call. A blocked *organization's own* session is refused with
-   * `AUTH_ORGANIZATION_SUSPENDED` instead, the code the dashboard already
-   * handles.
+   * call, or the organization behind the session itself (`ORGANIZATION`:
+   * "Your account is blocked by Assay", on the API and the MCP host).
    *
    * 403: the request is well formed and re-authenticating will not help. The
-   * context names the role (`PAYER`, `PAYEE`, …) and never the reason, which is
-   * the platform's internal note.
+   * response's `error.context.role` names the role (`ORGANIZATION` for the
+   * caller's own organization, else `PAYER`, `PAYEE`, `PROVIDER`, `DELEGATE`,
+   * `STAKE_AUTHORITY`), so a client tells its own block from another party's
+   * without reading the message. Never the reason, which is the platform's
+   * internal note, and never the subject kind.
    */
   accountBlocked: {
     code: AccountErrorCode.ACCOUNT_BLOCKED,
     statusCode: 403,
     message: (context?: Record<string, any>) =>
-      `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
-      'contact support',
+      context?.role === 'ORGANIZATION'
+        ? 'Your account is blocked by Assay; contact support'
+        : `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
+          'contact support',
+    publicContext: ['role'],
   },
 });

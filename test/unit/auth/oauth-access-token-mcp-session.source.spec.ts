@@ -557,11 +557,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     }
 
     it.each([
-      [
-        'organization',
-        { kind: BlockSubjectKind.ORGANIZATION, subject: ORG },
-        'AUTH_ORGANIZATION_SUSPENDED',
-      ],
+      ['organization', { kind: BlockSubjectKind.ORGANIZATION, subject: ORG }, 'ACCOUNT_BLOCKED'],
       ['payer wallet', { kind: BlockSubjectKind.WALLET, subject: ACCOUNT }, 'ACCOUNT_BLOCKED'],
       ['delegate wallet', { kind: BlockSubjectKind.WALLET, subject: DELEGATE }, 'ACCOUNT_BLOCKED'],
     ])(
