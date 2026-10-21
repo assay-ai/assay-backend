@@ -44,7 +44,7 @@ export class EvmMinimumStakeReader implements MinimumStakeReaderPort {
       timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
     });
     try {
-      const outcome = await Promise.race([this.fetch(deployment), timeout]);
+      const outcome = await Promise.race([this.readParams(deployment), timeout]);
       if (outcome === TIMED_OUT) {
         this.logger.warn(`minimum stake read on ${chainId}: no answer within ${timeoutMs} ms`);
         return { chainId, minimumStake: null, failure: 'TIMEOUT' };
@@ -60,7 +60,7 @@ export class EvmMinimumStakeReader implements MinimumStakeReaderPort {
     }
   }
 
-  private async fetch(deployment: EvmDeployment): Promise<Money> {
+  private async readParams(deployment: EvmDeployment): Promise<Money> {
     const params = (await this.clients.get(deployment.chainId)!.readContract({
       address: getAddress(deployment.config),
       abi: ASSAY_CONFIG_ABI,
