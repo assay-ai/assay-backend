@@ -96,11 +96,15 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     query: ListAgentCredentialsQueryDto,
+    // An agent credential reads its own row only (BUG-DEMO-02): never its
+    // sibling keys' names, scopes, use or delegates.
+    only?: { readonly credentialId: string },
   ): Promise<CursorPageDto<AgentCredentialDto>> {
     const qb = this.credentials
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
       .andWhere('credential.agentId = :agentId', { agentId });
+    if (only) qb.andWhere('credential.id = :credentialId', { credentialId: only.credentialId });
 
     applyTimeWindow(qb, query, CREDENTIALS_LIST);
 
