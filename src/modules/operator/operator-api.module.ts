@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
-import { EvmModule } from '@modules/chains/evm/evm.module';
 import { DisputeModule } from '@modules/dispute/dispute.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
@@ -63,6 +62,9 @@ import { LastSeenModule } from '@shared/last-seen';
   // uses, and the alternative here would be re-exporting a stake port from the
   // slash domain, which has no business owning one.
   //
+  // `ChainsModule` also supplies `MINIMUM_STAKE_READER`, so the economics
+  // panel's minimum stake is the contract's own, as on the Contracts page.
+  //
   // `ChainsModule` supplies `VERIFIER_REGISTRY` for the read-only verifier
   // panel — the on-chain allowlist is the only authority on which keys the
   // settlement program will accept, so the panel reads it rather than the
@@ -79,10 +81,6 @@ import { LastSeenModule } from '@shared/last-seen';
     SlashModule,
     ProviderModule,
     ChainsModule,
-    // `EVM_RPC_CLIENTS` / `EVM_DEPLOYMENTS`, so the economics panel reads the
-    // minimum stake from the settlement contract's `params()` (the same
-    // instance `ChainsModule` already imports).
-    EvmModule,
     BlocklistModule,
     ToolModule,
     ToolsetModule,
