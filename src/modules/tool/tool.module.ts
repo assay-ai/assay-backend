@@ -3,20 +3,16 @@ import { ConfigService } from '@nestjs/config';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
-import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { ChainId } from '@modules/chains/ports/caip.types';
-import {
-  MINIMUM_STAKE_READER,
-  MinimumStakeReaderPort,
-} from '@modules/chains/ports/minimum-stake-reader.port';
 import { ProviderModule } from '@modules/provider/provider.module';
-import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
 
 import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from './services/binding-call-counter.service';
 import { BindingCeilingService } from './services/binding-ceiling.service';
-import { ContractMinimumStakeFloors } from './services/contract-minimum-stake-floors.service';
+import {
+  CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
+  ContractMinimumStakeFloors,
+} from './services/contract-minimum-stake-floors.service';
 import { loadToolCatalogue } from './services/catalogue-seed';
 import { TOOL_CATALOGUE } from './ports/tool-catalogue.port';
 import { DatabaseToolCatalogue } from './services/database-tool-catalogue';
@@ -124,13 +120,7 @@ import {
       // 2 s; an unreadable chain keeps its last reading or the configured
       // floor. One instance, shared with the binding editor's and the
       // publish gate's `PROVIDER_MINIMUM_STAKE_BY_CHAIN`.
-      provide: ContractMinimumStakeFloors,
-      useFactory: (
-        config: ConfigService,
-        enabled: readonly ChainId[],
-        reader: MinimumStakeReaderPort | null,
-      ) => new ContractMinimumStakeFloors(loadMinimumStakeByChain(config, enabled), reader ?? null),
-      inject: [ConfigService, ENABLED_CHAINS, { token: MINIMUM_STAKE_READER, optional: true }],
+      ...CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
     },
     {
       provide: ROUTER_CONFIG,
