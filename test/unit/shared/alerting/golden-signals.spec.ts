@@ -4,6 +4,7 @@ import {
   evaluateGoldenSignal,
   evaluateReserveHealth,
 } from '@shared/alerting';
+import { formatDurationMs } from '@shared/alerting/golden-signals';
 
 /**
  * `evaluateGoldenSignal` / `evaluateReserveHealth` transcribe the golden-signal
@@ -126,5 +127,23 @@ describe('evaluateReserveHealth', () => {
     const alert = evaluateReserveHealth(-500n, { assetId: 'usdc' });
 
     expect(alert?.details).toEqual({ surplusAtomic: '-500', assetId: 'usdc' });
+  });
+});
+
+describe('formatDurationMs (BUG-OPS-CORE-05)', () => {
+  it('writes a duration in words, without float noise', () => {
+    expect(formatDurationMs(25)).toBe('25 ms');
+    expect(formatDurationMs(25.37)).toBe('25.3 ms');
+    expect(formatDurationMs(2_345)).toBe('2.3 s');
+    expect(formatDurationMs(60_000)).toBe('1 min');
+    expect(formatDurationMs(65_000)).toBe('1 min 5 s');
+    expect(formatDurationMs(3_600_000)).toBe('1 h');
+    expect(formatDurationMs(66_913_636.010000005)).toBe('18 h 35 min');
+    expect(formatDurationMs(2 * 86_400_000 + 3 * 3_600_000)).toBe('2 d 3 h');
+  });
+
+  it('puts the readable age and threshold in the open-hold summary', () => {
+    const alert = evaluateGoldenSignal(GoldenSignal.OPEN_HOLD_AGE_MS, 66_913_636.010000005);
+    expect(alert?.summary).toBe('Oldest open hold is 18 h 35 min (critical threshold > 1 h)');
   });
 });

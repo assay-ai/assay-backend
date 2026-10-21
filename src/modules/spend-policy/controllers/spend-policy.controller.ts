@@ -1,7 +1,12 @@
 import { Body, Controller, Get, Patch, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  CurrentSession,
+  HumanSessionGuard,
+  SessionAuthGuard,
+  isHumanCallerKind,
+} from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { auditActorOf } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -24,9 +29,26 @@ export class SpendPolicyController {
 
   @Get()
   @ApiOperation({ summary: "The session's agent policy, falling back to the organization default" })
+  @ApiQuery({
+    name: 'agentId',
+    required: false,
+    description:
+      "Another agent of the caller's own organization, read by a person (the consent card's " +
+      'agent select). An agent credential, or an id that is not one of the organization’s ' +
+      "agents, reads the session's own agent: `subjectAgentId` names the agent read and " +
+      '`requestedAgentIgnored` is true.',
+  })
   @ApiResponse({ status: 200, description: 'The live policy', type: SpendPolicyDto })
-  async get(@CurrentSession() session: McpSession): Promise<SpendPolicyDto> {
-    return this.spendPolicy.get(session.organizationId, session.agentId);
+  async get(
+    @CurrentSession() session: McpSession,
+    @Query('agentId') agentId?: unknown,
+  ): Promise<SpendPolicyDto> {
+    return this.spendPolicy.getForRequest(
+      session.organizationId,
+      session.agentId,
+      agentId,
+      isHumanCallerKind(session.callerKind),
+    );
   }
 
   // The agent's own credential may READ its limits (it needs them to plan),

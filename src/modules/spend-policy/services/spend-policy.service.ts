@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull } from 'typeorm';
 
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { assertOrganizationScopedValues } from '@database/postgres/organization-scope';
@@ -33,6 +34,9 @@ const POLICY_HISTORY_LIST: ListSpec = {
     },
   },
 };
+
+/** A uuid, checked before it reaches a `uuid` column (an invalid one would be a 500). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The live spend policy, its edit path, and its version history.
@@ -75,6 +79,57 @@ export class SpendPolicyService {
     @Optional() private readonly usage?: SpendUsageService,
     @Optional() private readonly velocity?: SpendPolicyVelocityService,
   ) {}
+
+  /**
+   * Which agent `GET /spend-policy?agentId=` reads (BUG-BUY-CONNECT-05): the
+   * named agent only when a person asks and the agent belongs to the
+   * caller's own organization. Anything else — an agent credential asking
+   * about another agent, a malformed or repeated id, an agent of another
+   * organization or none at all — reads the session's own agent, as the route
+   * did before the parameter existed, so a foreign id learns nothing about
+   * that agent. `ignored` says so, for the response.
+   */
+  async readableAgentId(
+    organizationId: string,
+    sessionAgentId: string,
+    requestedAgentId: unknown,
+    human: boolean,
+  ): Promise<{ agentId: string; ignored: boolean }> {
+    if (requestedAgentId === undefined || requestedAgentId === sessionAgentId) {
+      return { agentId: sessionAgentId, ignored: false };
+    }
+    const own = { agentId: sessionAgentId, ignored: true };
+    if (!human || typeof requestedAgentId !== 'string' || !UUID_PATTERN.test(requestedAgentId)) {
+      return own;
+    }
+    const exists = await this.dataSource
+      .getRepository(AgentEntity)
+      .exists({ where: { id: requestedAgentId, organizationId } });
+    return exists ? { agentId: requestedAgentId, ignored: false } : own;
+  }
+
+  /**
+   * `GET /spend-policy`: {@link get} for the agent {@link readableAgentId}
+   * picks, saying which agent that was (`subjectAgentId`) and whether a
+   * requested `agentId` was not read (`requestedAgentIgnored`).
+   */
+  async getForRequest(
+    organizationId: string,
+    sessionAgentId: string,
+    requestedAgentId: unknown,
+    human: boolean,
+  ): Promise<SpendPolicyDto> {
+    const subject = await this.readableAgentId(
+      organizationId,
+      sessionAgentId,
+      requestedAgentId,
+      human,
+    );
+    const dto = await this.get(organizationId, subject.agentId);
+    dto.subjectAgentId = subject.agentId;
+    dto.requestedAgentIgnored = subject.ignored;
+    return dto;
+  }
 
   /**
    * The live policy for `agentId`, falling back to the organization default,

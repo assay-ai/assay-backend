@@ -277,8 +277,10 @@ export class ProviderToolSummaryDto {
   handle: string;
 
   @ApiProperty({
-    example: 'mcp__acme__acme__search_posts',
-    description: 'The name as a model sees it behind a client prefix, for a 4-letter server name',
+    example: 'mcp__assay-acme__acme__search_posts',
+    description:
+      'The name as a model sees it behind a client prefix, with the server name the Connect ' +
+      'sheet suggests (`assay-{handle}`, shortened to fit 64 characters, else `assay`)',
   })
   preview: string;
 
