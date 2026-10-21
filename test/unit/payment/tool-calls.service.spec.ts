@@ -149,6 +149,24 @@ describe('ToolCallsService.list', () => {
     expect(page.items[0].price).toEqual({ amount: '1000000', asset: USDC, decimals: 6 });
     expect(page.items[0].charged).toEqual({ amount: '0', asset: USDC, decimals: 6 });
   });
+  it('withholds what the receipt withholds: nothing for an EXPIRED call that never reserved (BUG-BUY-SPEND-01)', async () => {
+    const { service } = buildHarness([
+      intentRow({ id: 'never-held', status: PaymentIntentStatus.EXPIRED, holdId: null }),
+      intentRow({ id: 'held', status: PaymentIntentStatus.EXPIRED, holdId: 'hold-1' }),
+      intentRow({ id: 'refunded', status: PaymentIntentStatus.REFUNDED, holdId: 'hold-2' }),
+      intentRow({ id: 'settled', holdId: 'hold-3' }),
+    ]);
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery());
+
+    expect(page.items.map((item) => [item.intentId, item.withheld.amount])).toEqual([
+      ['never-held', '0'],
+      ['held', '1000000'],
+      ['refunded', '1000000'],
+      ['settled', '0'],
+    ]);
+  });
+
   it('M4: a SETTLED call the provider forfeited is not charged, and says so — as on the receipt', async () => {
     const { service } = buildHarness([
       intentRow({ redemptionLastError: 'provider_forfeit:PayeeBlocked' }),
