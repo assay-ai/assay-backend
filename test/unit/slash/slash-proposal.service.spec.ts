@@ -156,6 +156,9 @@ describe('SlashProposalService', () => {
       expect(proposal.resolutionKind).toBe(ResolutionKind.AUTO_DE_MINIMIS);
       expect(notifications.sent).toHaveLength(0);
       expect(events.kinds()).toEqual(['WAIVED']);
+      expect(events.rows[0].summary).toBe(
+        'Penalty of $5.00 is below the de-minimis floor; recorded, not levied',
+      );
     });
   });
 

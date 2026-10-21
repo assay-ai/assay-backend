@@ -174,9 +174,8 @@ export class SlashProposalService {
     proposal.chainRequestId = deriveChainRequestId(proposal);
 
     const saved = await this.proposals.save(proposal);
-    // Words, not minor units and a binding id: the operator console prints the
-    // summary as is on the case History (BUG-OPS-CASES-03). The WAIVED line is
-    // left as it was: the provider console rewrites it by pattern.
+    // Dollars, not minor units, and no binding id: the operator console prints
+    // the summary as is on the case History (BUG-OPS-CASES-03).
     const penalty = formatDollars({
       amount: saved.penaltyAmount,
       decimals: saved.decimals,
@@ -191,7 +190,7 @@ export class SlashProposalService {
       actorType: 'system',
       actorId: null,
       summary: belowFloor
-        ? `Penalty of ${saved.penaltyAmount} is below the de-minimis floor; recorded, not levied`
+        ? `Penalty of ${penalty} is below the de-minimis floor; recorded, not levied`
         : `Penalty of ${penalty} proposed`,
       detail,
     });
