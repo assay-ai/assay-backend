@@ -177,9 +177,10 @@ export class GetReceiptResponseDto {
 
   @ApiProperty({
     description:
-      'SETTLED, and refunded because the buyer reported a bad result and the report was ' +
-      'upheld: not charged (`chargedPrice` is zero, `debt` is `VOIDED`), although no payment ' +
-      'ever lapsed. The same flag as the call list row',
+      'SETTLED, and an upheld report cancelled the charge: either a held payment refunded to ' +
+      'the buyer, or a lapsed debt voided (nothing refunded). Not charged either way ' +
+      '(`chargedPrice` is zero, `debt` is `VOIDED`, `chargeNote` `voided:DISPUTE_UPHELD`). ' +
+      'The same flag as the call list row',
   })
   refundedByReport: boolean;
 
