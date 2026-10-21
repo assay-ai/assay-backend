@@ -110,8 +110,11 @@ export function declaredFailureRateOf(value: string | number | null | undefined)
  * The MCP server name the Connect sheet suggests for a maker's tools,
  * `assay-{handle}`, cut back word by word until `mcp__{server}__{tool}` fits
  * the 64-character name most clients allow (7 characters of `mcp__` and
- * `__`), else `assay`. Mirrors the console's `defaultServerNameFor`, so the
- * preview is the name a model actually sees (BUG-PRV-SETUP-07).
+ * `__`), else `assay`. Mirrors the console's `defaultServerNameFor` and
+ * `fitsServerName` (assay-frontend `src/features/connect/mcp-url.ts`: budget
+ * 64, overhead 7, at most 56 characters), so the preview is the name a model
+ * actually sees (BUG-PRV-SETUP-07). Change both together; the cases in
+ * `provider-tool-preview.spec.ts` are the frontend's `modelSeenName` ones.
  */
 export function previewServerNameFor(handle: string, fullToolName: string): string {
   const words = handle.toLowerCase().split('-');
