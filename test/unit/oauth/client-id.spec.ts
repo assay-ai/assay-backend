@@ -1,6 +1,6 @@
 import { builtinClientId, classify } from '@modules/oauth/domain/client-id';
 
-const MCP = 'https://mcp.assay.ai';
+const MCP = 'https://mcp.goassay.ai';
 const STRICT = { mcpPublicUrl: MCP, allowHttpLoopback: false };
 const LOOSE = { mcpPublicUrl: MCP, allowHttpLoopback: true };
 
@@ -9,7 +9,7 @@ const kind = (clientId: unknown, options = STRICT) => classify(clientId as strin
 describe('client identification (§6.3.6, §6.3.7)', () => {
   describe('BUILTIN', () => {
     it('{MCP}/oauth/clients/assay-mcp → BUILTIN', () => {
-      expect(builtinClientId(MCP)).toBe('https://mcp.assay.ai/oauth/clients/assay-mcp');
+      expect(builtinClientId(MCP)).toBe('https://mcp.goassay.ai/oauth/clients/assay-mcp');
       expect(kind(`${MCP}/oauth/clients/assay-mcp`)).toBe('BUILTIN');
     });
 
@@ -26,8 +26,8 @@ describe('client identification (§6.3.6, §6.3.7)', () => {
         `${MCP}/oauth/clients/Assay-mcp`,
         `${MCP}/oauth/clients/assay-mcp%20`,
         `${MCP}/oauth/clients/./assay-mcp`,
-        'https://MCP.assay.ai/oauth/clients/assay-mcp',
-        'https://mcp.assay.ai:443/oauth/clients/assay-mcp',
+        'https://MCP.goassay.ai/oauth/clients/assay-mcp',
+        'https://mcp.goassay.ai:443/oauth/clients/assay-mcp',
         'https://other.example.com/oauth/clients/assay-mcp',
       ]) {
         expect(kind(id)).not.toBe('BUILTIN');
@@ -180,15 +180,15 @@ describe('client identification (§6.3.6, §6.3.7)', () => {
 
     it("refuses Assay's own registrable domain (we never fetch ourselves)", () => {
       for (const id of [
-        'https://api.assay.ai/c',
-        'https://assay.ai/c',
-        'https://app.assay.ai/client.json',
-        'https://x.mcp.assay.ai/c',
+        'https://api.goassay.ai/c',
+        'https://goassay.ai/c',
+        'https://app.goassay.ai/client.json',
+        'https://x.mcp.goassay.ai/c',
       ]) {
         expect(kind(id)).toBe('UNKNOWN');
       }
       expect(kind('https://assay.example.com/c')).toBe('CIMD');
-      expect(kind('https://notassay.ai/c')).toBe('CIMD');
+      expect(kind('https://notgoassay.ai/c')).toBe('CIMD');
     });
 
     it('refuses invalid percent-escapes and %00', () => {

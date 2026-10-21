@@ -452,7 +452,7 @@ export class ProviderToolBindingRefDto {
 export class ProviderToolMcpUrlsDto {
   @ApiProperty({
     nullable: true,
-    example: 'https://mcp.assay.ai/@acme',
+    example: 'https://mcp.goassay.ai/@acme',
     description: 'Serves every LISTED tool of your public name; null until one is LISTED',
   })
   handle: string | null;

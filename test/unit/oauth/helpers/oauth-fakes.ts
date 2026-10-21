@@ -123,13 +123,13 @@ export class FakeOAuthClientRepository {
   }
 }
 
-export const MCP = 'https://mcp.assay.ai';
+export const MCP = 'https://mcp.goassay.ai';
 export const CHATGPT_REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
 
 export function oauthConfig(overrides: Partial<OAuthConfig> = {}): OAuthConfig {
   return {
     issuer: MCP,
-    webAppUrl: 'https://app.assay.ai',
+    webAppUrl: 'https://app.goassay.ai',
     verifiedClients: [],
     redirectAllowlist: [
       { uri: CHATGPT_REDIRECT, review: false },
