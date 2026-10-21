@@ -689,6 +689,23 @@ export class ToolsetModerationService {
     return cutoff;
   }
 
+  /**
+   * The lookups a rename or reassign makes before it is queued for a second
+   * operator, so a request naming a handle (or, for a reassign, an
+   * organization) that does not exist is a 404 and never an approval. The
+   * write re-checks everything under its locks once approved.
+   */
+  async assertHandleTargetsExist(
+    rawHandle: string,
+    toOrganizationId: string | null = null,
+  ): Promise<void> {
+    const manager = this.dataSource.manager;
+    await this.requireHandleOwner(manager, normalizeHandle(rawHandle));
+    if (toOrganizationId === null) return;
+    const exists = await manager.exists(OrganizationEntity, { where: { id: toOrganizationId } });
+    if (!exists) throw ToolsetErrors.organizationNotFound();
+  }
+
   private async requireHandleOwner(
     manager: EntityManager,
     handle: string,
