@@ -11,6 +11,7 @@ import { PaymentIntentRepository } from '@database/postgres/repositories/payment
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
+import { isWithheldIntent } from '@modules/ledger/domain/withheld';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
 import {
   CursorPageDto,
@@ -27,6 +28,7 @@ import {
   collectionStateOf,
   debtStateOf,
   isChargedWhenSettled,
+  isNotCollected,
   isRefundedByReport,
 } from '../domain/collection';
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
@@ -259,6 +261,18 @@ export class ToolCallsService {
       status: intent.status as PaymentIntentStatus,
       price: toMoneyDto(listedPrice),
       charged: toMoneyDto(chargedPrice),
+      // The receipt's own figure (`ReceiptService`), so a list row, its
+      // receipt and `GET /withheld` agree: zero for a call that never reserved
+      // anything, such as an unfunded call that expired (BUG-BUY-SPEND-01).
+      withheld: toMoneyDto(
+        isWithheldIntent({
+          status: intent.status,
+          holdId: intent.holdId ?? null,
+          notCollected: isNotCollected(intent),
+        })
+          ? listedPrice
+          : MoneyUtil.zero(asset, intent.decimals),
+      ),
       forfeited: settled && collectionStateOf(intent) === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
       refundedByReport: settled && isRefundedByReport(intent),
