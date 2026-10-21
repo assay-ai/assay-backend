@@ -31,11 +31,12 @@ describe('OperatorModerationService', () => {
     },
   ) {
     const performed: { code: string; escalate?: boolean; organizationId: string | null }[] = [];
+    const afters: { code: string; after: unknown }[] = [];
     const overrides = {
       perform: jest.fn(
         async (
           context: Record<string, unknown>,
-          mutation: (runner: unknown) => Promise<{ value: unknown }>,
+          mutation: (runner: unknown) => Promise<{ value: unknown; after?: unknown }>,
         ) => {
           // The register refuses a two-person occurrence without an approver.
           if (
@@ -49,7 +50,9 @@ describe('OperatorModerationService', () => {
             escalate: context.escalateToTwoPerson as boolean | undefined,
             organizationId: context.organizationId as string | null,
           });
-          return (await mutation({ manager: {} })).value;
+          const result = await mutation({ manager: {} });
+          afters.push({ code: context.code as string, after: result.after });
+          return result.value;
         },
       ),
     };
@@ -100,10 +103,18 @@ describe('OperatorModerationService', () => {
       {
         findAnyById: async () => ({ id: 't1', ownerOrgId: 'org-1', visibility: 'PUBLIC' }),
       } as never,
-      { findOneBy: async () => cutoff } as never,
+      {
+        findOneBy: async () => cutoff,
+        manager: {
+          find: async (entity: { name: string }) =>
+            entity.name === 'ToolEntity'
+              ? [{ id: 'tool-1', name: 'acme__search_posts' }]
+              : [{ id: 't1', name: 'Acme kit' }],
+        },
+      } as never,
       { findOneBy: async () => null } as never,
     );
-    return { service, performed, queued, moderation, approvals };
+    return { service, performed, afters, queued, moderation, approvals };
   }
 
   it('registers its three two-person actions with the approvals queue', () => {
@@ -164,6 +175,27 @@ describe('OperatorModerationService', () => {
     expect(result).toMatchObject({ status: 'PENDING' });
     expect(confirmed.queued).toEqual([LIFT_CUTOFF_APPROVAL_ACTION]);
     expect(confirmed.moderation.revert).not.toHaveBeenCalled();
+  });
+
+  it('names what the cutoff took down on the confirm and revert entries (BUG-OPS-MARKET-04)', async () => {
+    const { service, afters } = build({
+      id: 'c1',
+      confirmedAt: null,
+      targetType: 'TOOL',
+      targetId: 'tool-1',
+    });
+    (service as unknown as { cutoffs: { query: unknown } }).cutoffs.query = async () => [];
+    await service.confirmCutoff(OPERATOR, 'c1', BODY, null);
+    await service.revertCutoff(OPERATOR, 'c1', BODY, null);
+    const target = {
+      cutoffTargetType: 'TOOL',
+      cutoffTargetId: 'tool-1',
+      name: 'acme__search_posts',
+    };
+    expect(afters).toEqual([
+      { code: 'A-18', after: { confirmed: true, ...target } },
+      { code: 'A-19', after: { reverted: true, ...target } },
+    ]);
   });
 
   it('lists cutoffs with each target’s name, filtered by targetType', async () => {

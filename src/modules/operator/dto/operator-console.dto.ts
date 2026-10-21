@@ -281,7 +281,9 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
   ticketRef?: string;
 
   @ApiPropertyOptional({
-    description: 'Full-text search over the reason — the field an incident review actually greps',
+    description:
+      'Full-text search over the reason, plus a literal contains match on the ticket and on ' +
+      "the actor's or approver's display name or email",
   })
   @IsOptional()
   @IsString()

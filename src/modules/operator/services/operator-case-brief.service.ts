@@ -42,6 +42,11 @@ export class OperatorCaseBriefService {
       // `chainStatus: PENDING` and a non-zero count the case is partly
       // disputed: the other parts keep executing.
       chainDisputedParts: proposal?.chainDisputedParts ?? 0,
+      // Why the last chain attempt failed (`chain_last_error`): a program error
+      // name, a local refusal code such as `PROVIDER_STAKE_AUTHORITY_UNPROVEN`,
+      // or `transport`. Null when the last attempt did not fail, so the console
+      // can tell a stuck proposal from a healthy wait.
+      chainLastError: proposal?.chainLastError ?? null,
       // C4: the provider's slash cases upheld or executed in the last 30 days,
       // so an operator knows when to ban a repeat offender with the blocklist.
       upheldViolations30d: proposal

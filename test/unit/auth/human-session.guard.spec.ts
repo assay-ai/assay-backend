@@ -70,7 +70,12 @@ describe('human-only control writes', () => {
     },
   };
 
-  const spendPolicy = { get: jest.fn(async () => ({})), patch: jest.fn(), history: jest.fn() };
+  const spendPolicy = {
+    get: jest.fn(async () => ({})),
+    getForRequest: jest.fn(async () => ({})),
+    patch: jest.fn(),
+    history: jest.fn(),
+  };
   const credentials = { list: jest.fn(async () => ({})), create: jest.fn(), revoke: jest.fn() };
   const notifications = {
     listChannels: jest.fn(async () => []),

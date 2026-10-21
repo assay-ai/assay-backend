@@ -8,15 +8,23 @@ import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state'
  * a closed case waiting for the settlement admin reads `CANCELLED`.
  */
 describe('OperatorCaseBriefService.brief', () => {
-  function build(chainStatus: ChainProposalStatus | null, chainExecutableAt: Date | null = null) {
+  function build(
+    chainStatus: ChainProposalStatus | null,
+    chainExecutableAt: Date | null = null,
+    chainLastError: string | null = null,
+  ) {
     const proposals = {
-      findOneScoped: jest
-        .fn()
-        .mockResolvedValue(
-          chainStatus === null
-            ? null
-            : { chainStatus, chainExecutableAt, providerId: 'provider-1', chainDisputedParts: 0 },
-        ),
+      findOneScoped: jest.fn().mockResolvedValue(
+        chainStatus === null
+          ? null
+          : {
+              chainStatus,
+              chainExecutableAt,
+              chainLastError,
+              providerId: 'provider-1',
+              chainDisputedParts: 0,
+            },
+      ),
       countUpheldViolationsByProvider: jest.fn().mockResolvedValue(new Map([['provider-1', 3]])),
     };
     const cases = {
@@ -62,6 +70,17 @@ describe('OperatorCaseBriefService.brief', () => {
       (await build(ChainProposalStatus.NONE).service.brief('org_1', 'p1')).chainExecutableAt,
     ).toBeNull();
     expect((await build(null).service.brief('org_1', 'p1')).chainExecutableAt).toBeNull();
+  });
+
+  it('carries why the last chain attempt failed (BUG-OPS-CASES-02)', async () => {
+    const stuck = build(ChainProposalStatus.PROPOSING, null, 'PROVIDER_STAKE_AUTHORITY_UNPROVEN');
+    expect((await stuck.service.brief('org_1', 'p1')).chainLastError).toBe(
+      'PROVIDER_STAKE_AUTHORITY_UNPROVEN',
+    );
+    expect(
+      (await build(ChainProposalStatus.PENDING).service.brief('org_1', 'p1')).chainLastError,
+    ).toBeNull();
+    expect((await build(null).service.brief('org_1', 'p1')).chainLastError).toBeNull();
   });
 
   it('C4: carries the provider’s upheld violations of the last 30 days', async () => {

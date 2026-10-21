@@ -228,6 +228,20 @@ describe('EvmChainStateIndexer', () => {
     expect(state()).toMatchObject({ cursorBlock: '20488' });
   });
 
+  it('counts a read up to the safe head as caught up, so the lag does not grow while the head moves', async () => {
+    const { indexer, state } = build({
+      head: 20_500n,
+      confirmations: 12,
+      state: {
+        cursorBlock: '20480',
+        caughtUpAt: new Date(NOW - 60 * 60_000),
+        reconciledAt: new Date(NOW),
+      },
+    });
+    await indexer.tick();
+    expect(state()).toMatchObject({ cursorBlock: '20488', caughtUpAt: new Date(NOW) });
+  });
+
   it('AUDIT E-11: never moves the cursor past the safe head while it waits for confirmations', async () => {
     const { indexer, ranges, state } = build({
       head: 20_500n,
