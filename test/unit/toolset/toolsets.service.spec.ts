@@ -4,6 +4,7 @@ import {
   ToolsetsService,
   inferCategory,
   slugify,
+  toEntryDto,
 } from '@modules/toolset/services/toolsets.service';
 import { ProviderMode } from '@modules/tool/domain/routing';
 
@@ -178,5 +179,43 @@ describe('ToolsetsService — slugs and categories', () => {
     expect(inferCategory([entry('maps'), entry('weather'), entry('weather')])).toBe('weather');
     expect(inferCategory([entry('maps'), entry('weather')])).toBe('maps');
     expect(inferCategory([])).toBeNull();
+  });
+});
+
+describe('toEntryDto — a taken-down tool (BUG-X-05)', () => {
+  const entry = {
+    position: 0,
+    toolId: 'tool-1',
+    providerMode: 'ANY',
+    providerIds: [],
+    minTier: null,
+    maxPriceAmount: null,
+    maxPriceAssetId: null,
+    maxPriceDecimals: null,
+    minQuality: null,
+    onEmpty: 'FAIL',
+    toolVersionRange: null,
+    requireOutputFields: [],
+  } as never;
+  const tool = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'tool-1',
+      name: 'acme__rate',
+      category: 'finance',
+      kind: 'PROVIDER',
+      status: 'ACTIVE',
+      visibility: 'LISTED',
+      approvedVersion: 1,
+      takenDownAt: null,
+      handleRemovedAt: null,
+      ...overrides,
+    }) as never;
+
+  it('flags the entry when the tool, or its handle, was taken down', () => {
+    expect(toEntryDto(entry, tool()).takenDown).toBe(false);
+    expect(toEntryDto(entry, tool({ takenDownAt: new Date() })).takenDown).toBe(true);
+    expect(toEntryDto(entry, tool({ handleRemovedAt: new Date() })).takenDown).toBe(true);
+    expect(toEntryDto(entry, tool({ status: 'REMOVED' })).takenDown).toBe(true);
+    expect(toEntryDto(entry, undefined).takenDown).toBe(false);
   });
 });
