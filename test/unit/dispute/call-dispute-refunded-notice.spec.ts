@@ -48,8 +48,16 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
       findOneBy: jest.fn(async () => (intents.length > 1 ? intents.shift() : intents[0])),
       recordHeldFailure: jest.fn(),
     };
+    // The `refund_state = 'PENDING'` compare-and-swap: only the first UPDATE
+    // moves the row (`RETURNING "id"`); every read after it sees REFUNDED.
+    let pending = true;
+    const query = jest.fn(async () => {
+      if (!pending) return [[], 0];
+      pending = false;
+      return [[{ id: 'dispute-1' }], 1];
+    });
     const service = new CallDisputeService(
-      { query: jest.fn().mockResolvedValue([[], 1]) } as never,
+      { query } as never,
       {} as never,
       paymentIntents as never,
       {} as never,
@@ -63,11 +71,10 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
       DEFAULT_CALL_DISPUTE_CONFIG,
       {} as never,
     );
-    const states = [dispute('PENDING'), dispute('REFUNDED')];
     jest
       .spyOn(service, 'requireAny')
-      .mockImplementation(async () => (states.length > 1 ? states.shift() : states[0])!);
-    return { service, notified };
+      .mockImplementation(async () => dispute(pending ? 'PENDING' : 'REFUNDED'));
+    return { service, notified, query };
   }
 
   it('tells the buyer once refundHeld has refunded the held payment', async () => {
@@ -118,6 +125,39 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
     const after = await service.settleRefund('dispute-1', { chain: true });
 
     expect(after.refundState).toBe('PENDING');
+    expect(notified).toEqual([]);
+  });
+
+  it('sends one notice when two runs settle the same dispute at once (review I1)', async () => {
+    const refunded = {
+      ...HELD_INTENT,
+      heldStatus: 'REFUNDED',
+      redemptionLastError: 'voided:DISPUTE_UPHELD',
+    } as unknown as PaymentIntentEntity;
+    const { service, notified, query } = build({ intents: [refunded] });
+
+    // The operator's decision and the refund job, both reading PENDING.
+    const [a, b] = await Promise.all([
+      service.settleRefund('dispute-1'),
+      service.settleRefund('dispute-1', { chain: true }),
+    ]);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect([a.refundState, b.refundState]).toEqual(['REFUNDED', 'REFUNDED']);
+    expect(notified).toHaveLength(1);
+  });
+
+  it('says nothing when its UPDATE moved no row (another run booked it)', async () => {
+    const refunded = {
+      ...HELD_INTENT,
+      heldStatus: 'REFUNDED',
+      redemptionLastError: 'voided:DISPUTE_UPHELD',
+    } as unknown as PaymentIntentEntity;
+    const { service, notified, query } = build({ intents: [refunded] });
+    query.mockResolvedValueOnce([[], 0]);
+
+    await service.settleRefund('dispute-1', { chain: true });
+
     expect(notified).toEqual([]);
   });
 });
