@@ -19,8 +19,11 @@ const logger = new Logger('EgressGuard');
 /** The DNS surface this module needs, so a test can supply an answer. */
 export type EgressDnsLookup = (hostname: string) => Promise<LookupAddress[]>;
 
-const defaultLookup: EgressDnsLookup = (hostname) =>
+/** The host's system resolver (`getaddrinfo`), the default when `DNS_SERVERS` is unset. */
+export const systemEgressLookup: EgressDnsLookup = (hostname) =>
   lookupAll(hostname, { all: true, verbatim: true });
+
+const defaultLookup = systemEgressLookup;
 
 /**
  * A destination that has been checked and is now **pinned**.
@@ -56,7 +59,8 @@ export const DNS_RETRY_DELAY_MS = 100;
  * — with the binding's credential headers — at once, not keep its old address
  * for ten minutes in case the IP has been reassigned. The cost: on macOS,
  * whose resolver also answers `ENOTFOUND` when it cannot be reached (the e2e
- * run of BUG-X-04), the fallback does not apply.
+ * run of BUG-X-04), the fallback does not apply — except on the `CONFIG`
+ * tier below, for the hosts the server's own configuration names.
  */
 const TRANSIENT_DNS_CODES: ReadonlySet<string> = new Set([
   'EAI_AGAIN',
@@ -65,9 +69,40 @@ const TRANSIENT_DNS_CODES: ReadonlySet<string> = new Set([
   'ETIMEDOUT',
 ]);
 
-function isTransientDnsFailure(error: unknown): boolean {
+/**
+ * The trust tier of a lookup (BUG-X-04, lot 1 B7).
+ *
+ * - `STRICT`: every host a provider or other third party chose. Only the
+ *   transient codes above retry and reuse; `ENOTFOUND` fails at once.
+ * - `CONFIG`: a host named by server configuration (`EGRESS_CONFIG_HOSTS`:
+ *   chain RPC, facilitator, Kora), called under `INTERNAL_ALLOWED` on hop 0.
+ *   `ENOTFOUND` is treated as transient too, because for a name the operator
+ *   chose and controls it is far more often the resolver than a deleted
+ *   record (the macOS `ENOTFOUND` of the run).
+ */
+type DnsTier = 'STRICT' | 'CONFIG';
+
+function isTransientDnsFailure(error: unknown, tier: DnsTier): boolean {
   const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && TRANSIENT_DNS_CODES.has(code);
+  if (typeof code !== 'string') return false;
+  return TRANSIENT_DNS_CODES.has(code) || (tier === 'CONFIG' && code === 'ENOTFOUND');
+}
+
+/**
+ * The tier is decided only by the policy the call site declared and by the
+ * host list read from configuration at boot — never by anything the request
+ * carries. A redirect hop is already `PUBLIC_ONLY` (`hopPolicy`), so a far
+ * end cannot move itself onto the config tier with a `Location` header.
+ */
+function dnsTier(
+  policy: EgressPolicy,
+  hostname: string,
+  configHosts: ReadonlySet<string> | undefined,
+): DnsTier {
+  return policy.trust === EgressTrust.INTERNAL_ALLOWED &&
+    configHosts?.has(hostname.toLowerCase()) === true
+    ? 'CONFIG'
+    : 'STRICT';
 }
 
 /**
@@ -142,6 +177,7 @@ export async function resolveEgressTarget(
   policy: EgressPolicy,
   lookup: EgressDnsLookup = defaultLookup,
   lastGood?: LastGoodDnsAnswers,
+  configHosts?: ReadonlySet<string>,
 ): Promise<EgressTarget> {
   const url = parseUrl(rawUrl);
 
@@ -169,7 +205,13 @@ export async function resolveEgressTarget(
   const cacheKey = `${policy.trust}|${hostname.toLowerCase()}`;
   const resolved = isIP(hostname)
     ? { records: [literal(hostname)], fresh: false }
-    : await resolve(hostname, url.href, lookup, lastGood?.recall.bind(lastGood, cacheKey));
+    : await resolve(
+        hostname,
+        url.href,
+        lookup,
+        dnsTier(policy, hostname, configHosts),
+        lastGood?.recall.bind(lastGood, cacheKey),
+      );
   const records = resolved.records;
 
   if (policy.trust === EgressTrust.PUBLIC_ONLY) {
@@ -229,17 +271,18 @@ async function resolve(
   hostname: string,
   href: string,
   lookup: EgressDnsLookup,
+  tier: DnsTier,
   recallLastGood?: () => { records: LookupAddress[]; ageMs: number } | null,
 ): Promise<{ records: LookupAddress[]; fresh: boolean }> {
   let records: LookupAddress[];
 
   try {
-    records = await lookupWithOneRetry(hostname, lookup);
+    records = await lookupWithOneRetry(hostname, lookup, tier);
   } catch (error) {
     // Two transient failures in a row: the last answer that passed the check,
     // if it is recent enough. Anything else (a refusal the caller injected, a
     // resolver error that is not transient) fails as before.
-    const lastGood = isTransientDnsFailure(error) ? recallLastGood?.() : null;
+    const lastGood = isTransientDnsFailure(error, tier) ? recallLastGood?.() : null;
     if (lastGood) {
       logger.warn(
         `${hostname} did not resolve (${(error as { code?: string }).code}); using its last ` +
@@ -267,11 +310,12 @@ async function resolve(
 async function lookupWithOneRetry(
   hostname: string,
   lookup: EgressDnsLookup,
+  tier: DnsTier,
 ): Promise<LookupAddress[]> {
   try {
     return await lookup(hostname);
   } catch (error) {
-    if (!isTransientDnsFailure(error)) throw error;
+    if (!isTransientDnsFailure(error, tier)) throw error;
     await new Promise((resolve) => setTimeout(resolve, DNS_RETRY_DELAY_MS));
     return lookup(hostname);
   }

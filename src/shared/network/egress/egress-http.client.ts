@@ -45,6 +45,7 @@ import { EgressLimits, EgressPolicy, EgressTrust, UNTRUSTED_EGRESS_POLICY } from
 import { withSanctionedEgress } from './egress-lockdown';
 import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from './egress-relay.config';
 import { EgressRelayTransport } from './egress-relay.transport';
+import { EGRESS_CONFIG_HOSTS } from './egress-config-hosts';
 import {
   EgressDnsLookup,
   EgressTarget,
@@ -179,6 +180,13 @@ export class EgressHttpClient implements OnModuleDestroy {
     @Inject(EGRESS_CONNECT_OVERRIDE)
     private readonly connectOverride?: EgressConnectOverride,
     @Optional() @Inject(EGRESS_RELAY_CONFIG) relayConfig?: EgressRelayConfig | null,
+    /**
+     * Hosts named by server configuration (chain RPC, facilitator, Kora),
+     * read at boot. See `EGRESS_CONFIG_HOSTS` and the `CONFIG` DNS tier.
+     */
+    @Optional()
+    @Inject(EGRESS_CONFIG_HOSTS)
+    private readonly configHosts?: ReadonlySet<string>,
   ) {
     this.relay = relayConfig ? new EgressRelayTransport(relayConfig) : null;
   }
@@ -239,6 +247,7 @@ export class EgressHttpClient implements OnModuleDestroy {
           refusal ? () => Promise.reject(refusal) : this.dnsLookup,
           // Never for a hop that must not be resolved at all.
           refusal ? undefined : this.lastGoodDns,
+          this.configHosts,
         ),
         remaining,
         currentUrl,
