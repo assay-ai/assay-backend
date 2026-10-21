@@ -1,5 +1,4 @@
 import { AccountErrors } from '@modules/account/errors/account.errors';
-import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import {
   McpCallerKind,
   McpSession,
@@ -34,8 +33,9 @@ const READ_WHILE_BLOCKED: ReadonlySet<McpCallerKind> = new Set([
  *   the MCP endpoint refuses it outright. That keeps the dashboard able to show
  *   the account's own data and the block itself (`GET /account/block-status`).
  *
- * The refusal for the organization is `AUTH_ORGANIZATION_SUSPENDED`, the code a
- * `SUSPENDED` organization already gets; for a wallet it is `ACCOUNT_BLOCKED`.
+ * The refusal is `ACCOUNT_BLOCKED` on the API and the MCP host alike: for the
+ * organization with "Your account is blocked by Assay", for a wallet naming
+ * its role.
  */
 export class BlocklistSessionSource implements McpSessionPort {
   constructor(
@@ -71,7 +71,5 @@ export class BlocklistSessionSource implements McpSessionPort {
 
 /** The refusal for a blocked session — see the class comment for which code is which. */
 export function sessionBlockedError(block: SessionBlock): BaseError {
-  return block.role === BlockedRole.ORGANIZATION
-    ? AuthErrors.organizationSuspended()
-    : AccountErrors.accountBlocked({ role: block.role, subjectKind: block.subjectKind });
+  return AccountErrors.accountBlocked({ role: block.role, subjectKind: block.subjectKind });
 }
