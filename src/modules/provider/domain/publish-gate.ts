@@ -113,6 +113,8 @@ export interface PublishCheck {
 /** The tester run the gate reads, reduced to what it decides on. */
 export interface PublishGateTestRun {
   readonly mappingVersion: number;
+  /** The auth mode the run was made with; `null`/absent on a run from before it was kept. */
+  readonly authMode?: string | null;
   readonly outcome: BindingTestOutcome;
   readonly failedLayer: BindingTestLayer | null;
   readonly ranAt: Date;
@@ -128,6 +130,12 @@ export interface PublishGateInput {
    * (BUG-PRV-CATALOG-02). Absent or empty: only `mappingVersion` counts.
    */
   readonly sameCallRevisions?: readonly number[];
+  /**
+   * The binding's auth mode now. When given, a run counts only if it was made
+   * with this mode (it changes the call); a run that did not record its mode
+   * counts only at {@link mappingVersion} itself, as before.
+   */
+  readonly authMode?: string;
   /**
    * The newest run **for that revision**, or `null` when there is none.
    *
@@ -218,9 +226,15 @@ function perMajor(
     });
 }
 
-/** Whether a run at `revision` vouches for the revision that would go live. */
-function countsFor(input: PublishGateInput, revision: number): boolean {
-  return revision === input.mappingVersion || (input.sameCallRevisions ?? []).includes(revision);
+/** Whether `run` vouches for the revision that would go live, with its auth mode. */
+function countsFor(input: PublishGateInput, run: PublishGateTestRun): boolean {
+  const atThisRevision = run.mappingVersion === input.mappingVersion;
+  if (!atThisRevision && !(input.sameCallRevisions ?? []).includes(run.mappingVersion)) {
+    return false;
+  }
+  if (input.authMode === undefined) return true;
+  if (run.authMode == null) return atThisRevision;
+  return run.authMode === input.authMode;
 }
 
 function testerRunRequirement(input: PublishGateInput): PublishRequirementResult {
@@ -235,14 +249,17 @@ function testerRunRequirement(input: PublishGateInput): PublishRequirementResult
     };
   }
 
-  if (!countsFor(input, latestRun.mappingVersion)) {
+  if (!countsFor(input, latestRun)) {
     return {
       requirement: PublishRequirement.TESTER_RUN,
       met: false,
       code: 'tester_run_is_stale',
       detail:
-        `The newest tester run is for revision ${latestRun.mappingVersion}, ` +
-        `and revision ${mappingVersion} is what would go live. Run the tester again.`,
+        latestRun.mappingVersion === mappingVersion ||
+        (input.sameCallRevisions ?? []).includes(latestRun.mappingVersion)
+          ? 'The newest tester run used another authentication setting. Run the tester again.'
+          : `The newest tester run is for revision ${latestRun.mappingVersion}, ` +
+            `and revision ${mappingVersion} is what would go live. Run the tester again.`,
     };
   }
 
@@ -259,7 +276,7 @@ function testerRunRequirement(input: PublishGateInput): PublishRequirementResult
 function testerPassedRequirement(input: PublishGateInput): PublishRequirementResult {
   const { latestRun, mappingVersion } = input;
 
-  if (!latestRun || !countsFor(input, latestRun.mappingVersion)) {
+  if (!latestRun || !countsFor(input, latestRun)) {
     return {
       requirement: PublishRequirement.TESTER_PASSED,
       met: false,
