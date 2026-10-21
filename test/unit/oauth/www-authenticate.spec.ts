@@ -1,17 +1,17 @@
 import { challengeHeader } from '@modules/oauth/domain/www-authenticate';
 
-const MCP = 'https://mcp.assay.ai';
+const MCP = 'https://mcp.goassay.ai';
 
 describe('WWW-Authenticate challenge (§6.3.3)', () => {
   it('equals the spec header for /c/weather without a token', () => {
     expect(challengeHeader(MCP, '/c/weather', false)).toBe(
-      'Bearer resource_metadata="https://mcp.assay.ai/.well-known/oauth-protected-resource/c/weather", scope="assay:agent"',
+      'Bearer resource_metadata="https://mcp.goassay.ai/.well-known/oauth-protected-resource/c/weather", scope="assay:agent"',
     );
   });
 
   it('appends error="invalid_token" only when a token was presented', () => {
     expect(challengeHeader(MCP, '/c/weather', true)).toBe(
-      'Bearer resource_metadata="https://mcp.assay.ai/.well-known/oauth-protected-resource/c/weather", scope="assay:agent", error="invalid_token"',
+      'Bearer resource_metadata="https://mcp.goassay.ai/.well-known/oauth-protected-resource/c/weather", scope="assay:agent", error="invalid_token"',
     );
     expect(challengeHeader(MCP, '/c/weather', false)).not.toContain('error');
   });
@@ -25,16 +25,16 @@ describe('WWW-Authenticate challenge (§6.3.3)', () => {
 
   it('points the root at the bare PRM', () => {
     expect(challengeHeader(MCP, '/', false)).toBe(
-      'Bearer resource_metadata="https://mcp.assay.ai/.well-known/oauth-protected-resource", scope="assay:agent"',
+      'Bearer resource_metadata="https://mcp.goassay.ai/.well-known/oauth-protected-resource", scope="assay:agent"',
     );
     expect(challengeHeader(MCP, '', false)).toContain(
-      'resource_metadata="https://mcp.assay.ai/.well-known/oauth-protected-resource"',
+      'resource_metadata="https://mcp.goassay.ai/.well-known/oauth-protected-resource"',
     );
   });
 
   it("maps a URL with a query to the path's PRM", () => {
     expect(challengeHeader(MCP, '/?tools=a,b', false)).toContain(
-      'resource_metadata="https://mcp.assay.ai/.well-known/oauth-protected-resource"',
+      'resource_metadata="https://mcp.goassay.ai/.well-known/oauth-protected-resource"',
     );
     expect(challengeHeader(MCP, '/c/weather?free=1', false)).toContain(
       '/.well-known/oauth-protected-resource/c/weather"',
@@ -55,7 +55,7 @@ describe('WWW-Authenticate challenge (§6.3.3)', () => {
       expect(header).not.toContain('\\');
       expect(header.split('"')).toHaveLength(5);
       expect(header).toMatch(
-        /^Bearer resource_metadata="https:\/\/mcp\.assay\.ai\/\.well-known\/oauth-protected-resource\/[^"]+", scope="assay:agent"$/,
+        /^Bearer resource_metadata="https:\/\/mcp\.goassay\.ai\/\.well-known\/oauth-protected-resource\/[^"]+", scope="assay:agent"$/,
       );
     }
   });

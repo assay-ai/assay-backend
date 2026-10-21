@@ -1,5 +1,5 @@
 /**
- * MCP server URLs on the MCP host (`mcp.assay.ai`): parsing, the canonical
+ * MCP server URLs on the MCP host (`mcp.goassay.ai`): parsing, the canonical
  * form, the browser check and the web page a browser is sent to (design spec
  * §7.4).
  *

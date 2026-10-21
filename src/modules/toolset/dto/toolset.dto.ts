@@ -408,7 +408,7 @@ export class ToolsetSummaryDto {
   @ApiProperty({
     description:
       'The MCP URL that serves the live Draft (`/my/{slug}`): edits reach connected agents at once',
-    example: 'https://mcp.assay.ai/my/research',
+    example: 'https://mcp.goassay.ai/my/research',
   })
   mcpUrl: string;
 
