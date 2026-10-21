@@ -13,7 +13,9 @@ describe('OverrideLogEntryRepository.feedQueryBuilder search', () => {
         return qb;
       }),
     };
-    const repository = Object.create(OverrideLogEntryRepository.prototype) as OverrideLogEntryRepository;
+    const repository = Object.create(
+      OverrideLogEntryRepository.prototype,
+    ) as OverrideLogEntryRepository;
     (repository as unknown as { createQueryBuilder: () => unknown }).createQueryBuilder = () => qb;
 
     repository.feedQueryBuilder({ search });
