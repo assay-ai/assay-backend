@@ -64,7 +64,15 @@ jobs:
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        # This repository is public: no build record artifact or job summary
+        # (they carry the event payload, timestamps and runner addresses), and
+        # only minimal buildx provenance. The signed provenance the deploy
+        # checks comes from attest-build-provenance below.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
+          provenance: mode=min
           context: .
           target: production
           push: true
