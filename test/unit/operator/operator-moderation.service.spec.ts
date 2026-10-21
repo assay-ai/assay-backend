@@ -8,6 +8,7 @@ import {
   RENAME_HANDLE_APPROVAL_ACTION,
 } from '@modules/operator/services/operator-moderation.service';
 import { TakedownReasonCode } from '@modules/toolset/domain/takedown-reason';
+import { ToolsetErrors } from '@modules/toolset/errors/toolset.errors';
 import { CutoffAction } from '@modules/toolset/services/toolset-moderation.service';
 
 const OPERATOR: OperatorSession = {
@@ -90,6 +91,7 @@ describe('OperatorModerationService', () => {
       revert: jest.fn(async () => row),
       renameHandle: jest.fn(async () => ({ organizationId: 'org-1', aliasUntil: new Date() })),
       reassignHandle: jest.fn(async () => ({ fromOrganizationId: 'org-1' })),
+      assertHandleTargetsExist: jest.fn(async () => undefined),
       resolveReport: jest.fn(),
       relist: jest.fn(),
       afterCommit: jest.fn(async () => undefined),
@@ -158,6 +160,48 @@ describe('OperatorModerationService', () => {
       approvalId: 'a1',
     });
     expect(moderation.renameHandle).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['rename', ToolsetErrors.handleNotFound()],
+    ['reassign', ToolsetErrors.handleNotFound()],
+    ['reassign', ToolsetErrors.organizationNotFound()],
+  ] as const)(
+    'refuses a %s naming a target that does not exist before queueing (BUG-OPS-MARKET-02)',
+    async (kind, refusal) => {
+      const { service, queued, moderation } = build();
+      moderation.assertHandleTargetsExist.mockRejectedValueOnce(refusal);
+      const attempt =
+        kind === 'rename'
+          ? service.renameHandle(OPERATOR, 'no-such-handle', { ...BODY, newHandle: 'x-y' }, null)
+          : service.reassignHandle(
+              OPERATOR,
+              'no-such-handle',
+              { ...BODY, toOrganizationId: '00000000-0000-4000-8000-000000000000' },
+              null,
+            );
+      await expect(attempt).rejects.toMatchObject({
+        errorCode: refusal.errorCode,
+        statusCode: 404,
+      });
+      expect(queued).toEqual([]);
+    },
+  );
+
+  it('checks the handle and the target organization of a reassign, then queues it', async () => {
+    const { service, queued, moderation } = build();
+    const result = await service.reassignHandle(
+      OPERATOR,
+      'acme',
+      { ...BODY, toOrganizationId: '00000000-0000-4000-8000-000000000001' },
+      null,
+    );
+    expect(moderation.assertHandleTargetsExist).toHaveBeenCalledWith(
+      'acme',
+      '00000000-0000-4000-8000-000000000001',
+    );
+    expect(result).toMatchObject({ status: 'PENDING' });
+    expect(queued).toEqual(['handle.reassign']);
   });
 
   it('rejects a pending cutoff with one operator, but lifting a confirmed one waits for two', async () => {
