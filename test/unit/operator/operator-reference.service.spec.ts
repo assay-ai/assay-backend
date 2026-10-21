@@ -1,4 +1,5 @@
 import { OperatorReferenceService } from '@modules/operator/services/operator-reference.service';
+import { ChainId } from '@modules/chains/ports/caip.types';
 import { OVERRIDE_CODES } from '@modules/operator/domain/override-register';
 import { SigningKeyState } from '@modules/verification/signing/domain/key-lifecycle';
 import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/verifier-registry.port';
@@ -22,8 +23,38 @@ function build(
     providerIds?: readonly string[];
     providerRegistry?: ReturnType<typeof fakeProviderRegistry>;
     config?: Readonly<Record<string, string>>;
+    evm?: { minimumStake?: bigint; fail?: Error };
   } = {},
 ): OperatorReferenceService {
+  const evm = options.evm;
+  const clients = evm
+    ? new Map([
+        [
+          EVM_CHAIN,
+          {
+            readContract: jest.fn(async (args: { functionName: string }) => {
+              if (evm.fail) throw evm.fail;
+              expect(args.functionName).toBe('params');
+              return { minimumStake: evm.minimumStake ?? 0n };
+            }),
+          },
+        ],
+      ])
+    : null;
+  const deployments = evm
+    ? new Map([
+        [
+          EVM_CHAIN,
+          {
+            chainId: EVM_CHAIN,
+            config: '0x00000000000000000000000000000000000000c0',
+            stake: '0x00000000000000000000000000000000000000c1',
+            escrow: '0x00000000000000000000000000000000000000c2',
+            asset: EVM_ASSET,
+          },
+        ],
+      ])
+    : null;
   return new OperatorReferenceService(
     fakePolicyRepository(options.policies ?? []),
     fakeVerifierKeyRepository(options.verifierKeys ?? []),
@@ -31,8 +62,13 @@ function build(
     fakeProviderRepositoryFor(options.providerIds ?? []),
     options.providerRegistry ?? fakeProviderRegistry(),
     fakeConfigService(options.config ?? {}),
+    clients as never,
+    deployments as never,
   );
 }
+
+const EVM_CHAIN = 'eip155:46630' as ChainId;
+const EVM_ASSET = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
 
 describe('OperatorReferenceService — policy lifecycle', () => {
   it('returns an empty list against an empty database', async () => {
@@ -238,6 +274,36 @@ describe('OperatorReferenceService — economic parameters', () => {
     const minimumStake = rows.find((row) => row.key === 'minimumStake');
 
     expect(minimumStake?.overrideCount).toBe(1);
+  });
+
+  it('reads the minimum stake from the settlement contract, as the Contracts page does (BUG-OPS-CORE-02)', async () => {
+    const service = build({ evm: { minimumStake: 100_000_000n } });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$100.00');
+    expect(row?.source).toBe('chain');
+    expect(row?.note).toContain('$50.00');
+  });
+
+  it('leaves the note empty when the chain agrees with the configured floor', async () => {
+    const service = build({ evm: { minimumStake: 50_000_000n } });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$50.00');
+    expect(row?.source).toBe('chain');
+    expect(row?.note).toBeNull();
+  });
+
+  it('shows the configured floor, saying why, when the chain cannot be read', async () => {
+    const service = build({ evm: { fail: new Error('rpc down') } });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$50.00');
+    expect(row?.source).toBe('config');
+    expect(row?.note).toContain('rpc down');
   });
 
   it('respects a custom take rate and penalty split from config', async () => {
