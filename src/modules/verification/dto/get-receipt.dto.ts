@@ -175,6 +175,14 @@ export class GetReceiptResponseDto {
   })
   debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
+  @ApiProperty({
+    description:
+      'SETTLED, and refunded because the buyer reported a bad result and the report was ' +
+      'upheld: not charged (`chargedPrice` is zero, `debt` is `VOIDED`), although no payment ' +
+      'ever lapsed. The same flag as the call list row',
+  })
+  refundedByReport: boolean;
+
   @ApiPropertyOptional({
     nullable: true,
     type: String,
