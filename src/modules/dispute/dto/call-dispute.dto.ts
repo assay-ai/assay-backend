@@ -3,7 +3,6 @@ import {
   IsBoolean,
   IsEnum,
   IsIn,
-  IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
@@ -74,7 +73,7 @@ export class RespondCallDisputeBodyDto {
   })
   @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
-  @IsNotEmpty()
+  // One message for an empty or short reply: `MinLength` covers empty too.
   @MinLength(3, { message: 'The reply must be at least 3 characters' })
   @MaxLength(1000)
   response: string;
