@@ -131,7 +131,7 @@ describe('NotificationService — aggregation rules', () => {
       request({
         organizationId,
         event: NotificationEvent.CALL_DISPUTE_DECIDED,
-        dedupeKey: `${NotificationEvent.CALL_DISPUTE_DECIDED}:dispute-1:${organizationId}:${role}`,
+        dedupeKey: `${NotificationEvent.CALL_DISPUTE_DECIDED}:dispute-1:${organizationId}:${role}:PENDING`,
       });
 
     // At the decision, then again when the refund lands.

@@ -203,7 +203,7 @@ export class CallDisputeSlaService {
         const after = await this.disputes.settleRefund(row.id, { chain: true });
         if (after.refundState !== 'PENDING') {
           refunded += 1;
-          await this.disputes.announceDecision(after);
+          await this.disputes.announceDecision(after, { afterRefundRetry: true });
         }
       } catch (error) {
         this.logger.warn(
