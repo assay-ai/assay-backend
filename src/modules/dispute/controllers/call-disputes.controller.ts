@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -81,8 +81,10 @@ export class CallDisputesController {
   }
 
   @Post(':id/withdraw')
+  // A state change of an existing report, not a creation.
+  @HttpCode(200)
   @ApiOperation({ summary: 'Withdraw an open call dispute' })
-  @ApiResponse({ status: 201, type: CallDisputeDto })
+  @ApiResponse({ status: 200, type: CallDisputeDto })
   @ApiResponse({ status: 404, description: 'No such dispute in this organization' })
   @ApiResponse({ status: 409, description: 'Already decided or withdrawn' })
   async withdraw(
