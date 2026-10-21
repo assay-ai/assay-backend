@@ -374,14 +374,17 @@ describe('CredentialRedactor — linear time', () => {
     ['a…ab', 'a'.repeat(4095) + 'b'],
     ['b…a', 'b' + 'a'.repeat(4095)],
     ['a…ba…a', 'a'.repeat(2047) + 'b' + 'a'.repeat(2048)],
-  ])('scans a 5 MiB all-a body against a 4 KiB %s near-match in < 500 ms', (_label, needle) => {
+  ])('scans a 5 MiB all-a body against a 4 KiB %s near-match in < 3 s', (_label, needle) => {
     const near = new CredentialRedactor([needle], generous);
     const body = 'a'.repeat(FIVE_MIB);
     const started = Date.now();
     const out = near.string(body);
     const elapsed = Date.now() - started;
     expect(out).toBe(body);
-    expect(elapsed).toBeLessThan(500);
+    // ~0.2 s locally, up to ~0.7 s on a shared CI runner. A quadratic scan of
+    // these inputs is ~2e10 comparisons, minutes rather than seconds, so 3 s
+    // still tells the two apart without failing on a slow runner.
+    expect(elapsed).toBeLessThan(3000);
   });
 
   it('scans a 5 MiB random body against 10 random 4 KiB credentials in < 1 s', () => {
