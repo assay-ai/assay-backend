@@ -141,9 +141,9 @@ export class ReceiptService {
       withheld: toMoneyDto(withheld),
       forfeited: settled && collection === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
-      // The call list's flag (BUG-X-01): a held payment refunded by an upheld
-      // report is `debt: VOIDED` like a late-verdict debt, but it was never a
-      // debt, and the receipt tells it apart without parsing `chargeNote`.
+      // The call list's flag (BUG-X-01): an upheld report cancelled the charge
+      // (a held payment refunded, or a lapsed debt voided). Both read
+      // `debt: VOIDED` like a late-verdict void; this tells them apart from it.
       refundedByReport: settled && isRefundedByReport(intent),
       chargeNote:
         settled && collection !== CollectionState.NORMAL ? intent.redemptionLastError : null,
