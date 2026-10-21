@@ -470,7 +470,8 @@ export class ReconciliationService {
   /**
    * A2: for each escrow holding more than its mirror for two passes running,
    * the `Deposited` events no
-   * deposit intent credited (`SETTLING` / `SETTLED`), by transaction. At most
+   * deposit intent credited (`SETTLING` / `SETTLED`), by transaction, plus one
+   * `ESCROW_SURPLUS_UNEXPLAINED` for the part of the surplus those do not explain. At most
    * {@link RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS} escrows per pass; an escrow
    * whose figures did not move is not scanned again. Never throws.
    */
@@ -502,27 +503,53 @@ export class ReconciliationService {
       }
       if (deadline.expired) return findings;
       try {
-        const logs = await this.depositLogs.depositsTo(asset, account);
-        if (logs === null || deadline.expired) continue;
+        const scan = await this.depositLogs.depositsTo(asset, account);
+        if (scan === null || deadline.expired) continue;
+        const { logs } = scan;
         const credited = await this.deposits.findCreditedTxRefs(logs.map((log) => log.txHash));
-        const named: ReconciliationFinding[] = logs
-          .filter((log) => !credited.has(log.txHash.toLowerCase()))
-          .map((log) => ({
-            code: ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT,
+        const uncredited = logs.filter((log) => !credited.has(log.txHash.toLowerCase()));
+        const named: ReconciliationFinding[] = uncredited.map((log) => ({
+          code: ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT,
+          severity: ReconciliationSeverity.WARN,
+          summary:
+            `Uncredited deposit on ${asset}: transaction ${log.txHash} put ` +
+            `${format(log.amount, decimals)} into ${account}'s escrow (block ` +
+            `${log.blockNumber}) and no deposit intent credited it. Agents cannot spend it; ` +
+            `the buyer can still withdraw it. Never credit it by hand.`,
+          details: {
+            asset,
+            account,
+            txHash: log.txHash,
+            amount: log.amount.toString(),
+            blockNumber: log.blockNumber.toString(),
+          },
+        }));
+        // The surplus is `chain - mirrored`, and `mirrored` already nets out
+        // payments held on chain (`walkEscrows` takes `inHold` off the ledger
+        // held and pending is included), so held amounts are not part of it.
+        // What the named deposits do not explain is an older deposit (outside
+        // the scanned window) or a direct transfer. Read and report only.
+        const unexplained =
+          chain - mirrored - uncredited.reduce((sum, log) => sum + log.amount, 0n);
+        if (unexplained > 0n) {
+          named.push({
+            code: ReconciliationFindingCode.ESCROW_SURPLUS_UNEXPLAINED,
             severity: ReconciliationSeverity.WARN,
             summary:
-              `Uncredited deposit on ${asset}: transaction ${log.txHash} put ` +
-              `${format(log.amount, decimals)} into ${account}'s escrow (block ` +
-              `${log.blockNumber}) and no deposit intent credited it. Agents cannot spend it; ` +
-              `the buyer can still withdraw it. Never credit it by hand.`,
+              `${format(unexplained, decimals)} of the extra balance in ${account}'s escrow on ` +
+              `${asset} matches no deposit in the last ${scan.toBlock - scan.fromBlock + 1n} ` +
+              `blocks scanned. An older deposit or a direct transfer may explain it; raise ` +
+              `RECONCILIATION_DEPOSIT_LOOKBACK_BLOCKS to look further back. Never credit it by hand.`,
             details: {
               asset,
               account,
-              txHash: log.txHash,
-              amount: log.amount.toString(),
-              blockNumber: log.blockNumber.toString(),
+              amount: unexplained.toString(),
+              lookbackBlocks: (scan.toBlock - scan.fromBlock + 1n).toString(),
+              fromBlock: scan.fromBlock.toString(),
+              toBlock: scan.toBlock.toString(),
             },
-          }));
+          });
+        }
         if (deadline.expired) return findings;
         this.depositScans.set(scanKey, { key, findings: named });
         findings.push(...named);
@@ -1259,6 +1286,8 @@ function alertNameOf(code: ReconciliationFindingCode): string {
       return RECONCILIATION_ALERTS.HELD_ORPHAN;
     case ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT:
       return RECONCILIATION_ALERTS.ESCROW_UNCREDITED_DEPOSIT;
+    case ReconciliationFindingCode.ESCROW_SURPLUS_UNEXPLAINED:
+      return RECONCILIATION_ALERTS.ESCROW_SURPLUS_UNEXPLAINED;
     case ReconciliationFindingCode.ESCROW_SEQ_REALIGNED:
       return RECONCILIATION_ALERTS.ESCROW_SEQ_REALIGNED;
     case ReconciliationFindingCode.RECONCILIATION_SCAN_TIMEOUT:
