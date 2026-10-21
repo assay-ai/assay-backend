@@ -255,6 +255,8 @@ export class ToolCallsService {
       qb.andWhere('call.providerId = :providerId', { providerId: query.providerId });
     }
     if (query.verdict?.length) {
+      // `verdict[]` takes VerdictStatus values only, so an unsampled free call
+      // (verdict NULL) matches no verdict filter, as an unjudged paid call does not.
       qb.andWhere('call.verdict IN (:...verdicts)', { verdicts: query.verdict });
     }
     if (query.search) {

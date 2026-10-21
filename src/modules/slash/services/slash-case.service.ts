@@ -158,29 +158,36 @@ export class SlashCaseService {
       ),
     );
 
+    // Every row's parts in one query (review M8), each kept at its own epoch.
+    const parts =
+      this.parts && page.items.length
+        ? await this.parts.find({
+            where: { organizationId, proposalId: In(page.items.map((proposal) => proposal.id)) },
+            order: { agentAccount: 'ASC' },
+          })
+        : null;
     const now = new Date();
-    const rows = await Promise.all(
-      page.items.map(async (proposal) => {
-        const binding = bindingById.get(proposal.bindingId) ?? null;
-        const records = this.parts
-          ? (
-              await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)
-            ).map((part) => ({
-              chainStatus: part.chainStatus,
-              chainDisputedAt: part.chainDisputedAt,
-              chainExecutableAt: part.chainExecutableAt,
-              cancelReason: part.cancelReason ?? null,
-            }))
-          : undefined;
-        return buildProposalDto(
-          proposal,
-          binding,
-          binding ? (tools.get(binding.toolId) ?? null) : null,
-          proposal.windowId ? (windowById.get(proposal.windowId) ?? null) : null,
-          computeClocks(proposal, now, records),
-        );
-      }),
-    );
+    const rows = page.items.map((proposal) => {
+      const binding = bindingById.get(proposal.bindingId) ?? null;
+      const records = parts
+        ?.filter(
+          (part) =>
+            part.proposalId === proposal.id && part.chainEpoch === (proposal.chainEpoch ?? 0),
+        )
+        .map((part) => ({
+          chainStatus: part.chainStatus,
+          chainDisputedAt: part.chainDisputedAt,
+          chainExecutableAt: part.chainExecutableAt,
+          cancelReason: part.cancelReason ?? null,
+        }));
+      return buildProposalDto(
+        proposal,
+        binding,
+        binding ? (tools.get(binding.toolId) ?? null) : null,
+        proposal.windowId ? (windowById.get(proposal.windowId) ?? null) : null,
+        computeClocks(proposal, now, records),
+      );
+    });
     return new CursorPageDto(rows, page.pageInfo.nextCursor);
   }
 

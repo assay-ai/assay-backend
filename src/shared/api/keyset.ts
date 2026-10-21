@@ -300,8 +300,13 @@ export function mergeKeysetPages<T extends { readonly id: string }>(
     throw ApiErrors.unknownSortField({ field: sort.key, allowed: [spec.defaultSort] });
   }
   const descending = sort.direction === SortDirection.DESC;
+  // A millisecond fallback (`toISOString()`) is widened to the microsecond
+  // form, so every key compares at one width (review M6).
   const keyed = sources.flatMap((source) =>
-    source.rows.map((row) => ({ row, key: source.sortValueOf(row) })),
+    source.rows.map((row) => ({
+      row,
+      key: source.sortValueOf(row).replace(/\.(\d{3})Z$/, '.$1000Z'),
+    })),
   );
   keyed.sort((a, b) => {
     const order =
