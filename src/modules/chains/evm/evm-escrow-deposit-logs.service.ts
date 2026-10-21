@@ -9,7 +9,11 @@ import {
   namespaceOf,
   parseAccountId,
 } from '../ports/caip.types';
-import { EscrowDepositLog, EscrowDepositLogsPort } from '../ports/escrow-deposit-logs.port';
+import {
+  EscrowDepositLog,
+  EscrowDepositLogsPort,
+  EscrowDepositScan,
+} from '../ports/escrow-deposit-logs.port';
 import { ASSAY_ESCROW_DEPOSIT_EVENTS_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 
@@ -41,7 +45,8 @@ export interface EvmDepositLogsClient {
  * `Deposited(buyer = this escrow's owner)` over the last `lookbackBlocks`
  * blocks of the escrow contract, in {@link DEPOSIT_LOG_CHUNK}-block calls.
  * Read-only on chain (`eth_blockNumber`, `eth_getLogs`). A deposit older than
- * the window is not seen; the reconciler says so in its finding.
+ * the window is not seen. The scan returns the range it read, so the reconciler
+ * can say how much of an escrow's surplus no deposit in that range explains.
  */
 export class EvmEscrowDepositLogs implements EscrowDepositLogsPort {
   constructor(
@@ -50,7 +55,7 @@ export class EvmEscrowDepositLogs implements EscrowDepositLogsPort {
     private readonly lookbackBlocks: bigint = DEFAULT_DEPOSIT_LOOKBACK_BLOCKS,
   ) {}
 
-  async depositsTo(asset: AssetId, buyer: AccountId): Promise<readonly EscrowDepositLog[] | null> {
+  async depositsTo(asset: AssetId, buyer: AccountId): Promise<EscrowDepositScan | null> {
     if (namespaceOf(asset) !== ChainNamespace.EIP155) return null;
     const chainId = chainIdOf(asset);
     const client = this.clients.get(chainId);
@@ -82,7 +87,7 @@ export class EvmEscrowDepositLogs implements EscrowDepositLogsPort {
         });
       }
     }
-    return found;
+    return { logs: found, fromBlock: start, toBlock: head };
   }
 }
 
