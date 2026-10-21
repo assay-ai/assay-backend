@@ -731,7 +731,27 @@ export class CallDisputeService {
       ],
     );
     await this.touched(null, dispute.organizationId, dispute.respondentProviderId);
-    return this.requireAny(disputeId);
+    const after = await this.requireAny(disputeId);
+    // The held payment went back to the buyer (`refundHeld`, or rail A's
+    // withheld credit released): the refund has landed, not only been decided.
+    if (after.refundState === RefundState.REFUNDED && intent.heldStatus === 'REFUNDED') {
+      await this.notify(
+        after.organizationId,
+        'buyer',
+        NotificationEvent.CALL_DISPUTE_REFUNDED,
+        after,
+        {
+          title: 'Your disputed call was refunded',
+          body:
+            'Your dispute over a call was upheld, and its payment went back to your balance. ' +
+            'The provider was not paid for the call.',
+          // The key `HeldCollectionService` uses for a blocked provider's
+          // refund: one refunded notice per dispute, whichever path booked it.
+          dedupeKey: `${NotificationEvent.CALL_DISPUTE_REFUNDED}:${after.id}`,
+        },
+      );
+    }
+    return after;
   }
 
   /** Tell both sides. Best-effort: the decision stands whether or not this lands. */
@@ -1010,7 +1030,12 @@ export class CallDisputeService {
     role: CallDisputeRole,
     event: NotificationEvent,
     dispute: DisputeEntity,
-    message: { title: string; body: string; payload?: Record<string, unknown> },
+    message: {
+      title: string;
+      body: string;
+      payload?: Record<string, unknown>;
+      dedupeKey?: string;
+    },
   ): Promise<void> {
     try {
       await this.notifications.notify({
@@ -1020,7 +1045,7 @@ export class CallDisputeService {
         body: message.body,
         subjectType: CALL_DISPUTE_TARGET,
         subjectId: dispute.id,
-        dedupeKey: `${event}:${dispute.id}:${organizationId}:${role}`,
+        dedupeKey: message.dedupeKey ?? `${event}:${dispute.id}:${organizationId}:${role}`,
         payload: {
           disputeId: dispute.id,
           intentId: dispute.intentId,
