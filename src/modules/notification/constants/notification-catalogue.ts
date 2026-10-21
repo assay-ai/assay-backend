@@ -298,7 +298,10 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
     [NotificationEvent.CALL_DISPUTE_DECIDED]: {
       severity: NotificationSeverity.INFO,
       channels: IN_APP_EMAIL,
-      aggregation: NotificationAggregation.PER_EVENT,
+      // One per side per dispute (the producer's `…:<dispute>:<org>:<role>`
+      // key): the refund landing later re-runs the announcement, and the
+      // refund itself is told by `call_dispute.refunded` (BUG-RETEST-R5a-01).
+      aggregation: NotificationAggregation.ONCE,
       nonSuppressible: false,
     },
     [NotificationEvent.CALL_DISPUTE_REFUNDED]: {
