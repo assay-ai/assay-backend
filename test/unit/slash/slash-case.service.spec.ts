@@ -703,7 +703,10 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
 });
 
 describe('SlashCaseService.listForProvider (BUG-DEMO-03)', () => {
-  function buildList(rows: ReturnType<typeof buildProposal>[]) {
+  function buildList(
+    rows: ReturnType<typeof buildProposal>[],
+    parts: { find: jest.Mock } | null = null,
+  ) {
     const fake = fakeQueryBuilder(rows);
     const proposalsRepo = { createQueryBuilder: jest.fn().mockReturnValue(fake.qb) };
     const binding = buildBinding({ id: TEST_BINDING_ID, organizationId: ORG });
@@ -723,7 +726,7 @@ describe('SlashCaseService.listForProvider (BUG-DEMO-03)', () => {
       {} as never,
       {} as never,
       catalogue as never,
-      null as never,
+      parts as never,
       proposalsRepo as never,
     );
     return { service, fake, bindings, catalogue };
@@ -770,5 +773,29 @@ describe('SlashCaseService.listForProvider (BUG-DEMO-03)', () => {
       params: { offChain: ['NONE', 'PROPOSING'] },
     });
     expect(page.items).toEqual([]);
+  });
+
+  it("reads every row's on-chain parts in one query, each at its own epoch", async () => {
+    const proposals = [
+      buildProposal({ id: 'p1', organizationId: ORG, chainStatus: 'PENDING', chainEpoch: 1 }),
+      buildProposal({ id: 'p2', organizationId: ORG, chainStatus: 'PENDING' }),
+    ];
+    const part = (proposalId: string, chainEpoch: number) => ({
+      proposalId,
+      chainEpoch,
+      chainStatus: 'PENDING',
+      chainDisputedAt: null,
+      chainExecutableAt: null,
+      cancelReason: null,
+    });
+    const parts = {
+      find: jest.fn().mockResolvedValue([part('p1', 0), part('p1', 1), part('p2', 0)]),
+    };
+    const { service } = buildList(proposals, parts);
+
+    const page = await service.listForProvider(ORG, { limit: 20 } as never);
+
+    expect(parts.find).toHaveBeenCalledTimes(1);
+    expect(page.items.map((item) => item.clocks.chainRecords)).toEqual([1, 1]);
   });
 });

@@ -476,7 +476,8 @@ describe('ToolCallsService.list — include=free (BUG-AGT-01)', () => {
     );
     expect(decoded).toEqual({
       v: 1,
-      k: '2026-08-10T11:00:00.000Z',
+      // Widened to the microsecond form every merged key compares at.
+      k: '2026-08-10T11:00:00.000000Z',
       i: FREE_ID,
       s: 'createdAt:desc',
     });
