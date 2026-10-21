@@ -35,6 +35,10 @@ import { AgentsService } from './agents.service';
  * health; a machine credential gets them for its own agent only, built from
  * its own key alone, and the other agents of the page come without either
  * field (BUG-DEMO-02). Nothing of another agent or another key is read for it.
+ *
+ * A machine credential's list is its own agent alone, with or without
+ * `include`: the narrowing is in the query, so counts and cursors never show
+ * the organization's other agents.
  */
 @Injectable()
 export class AgentListService {
@@ -53,7 +57,12 @@ export class AgentListService {
       throw AuthErrors.humanSessionRequired();
     }
 
-    const page = await this.agents.list(session.organizationId, query);
+    // An agent token lists its own agent only; a person lists the organization's.
+    const page = await this.agents.list(
+      session.organizationId,
+      query,
+      person ? undefined : session.agentId,
+    );
     if (include.size === 0) return page;
 
     // Whose credentials this caller may read: every agent's for a person; for

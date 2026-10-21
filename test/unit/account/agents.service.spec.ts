@@ -61,7 +61,16 @@ describe('AgentsService.list', () => {
 
     await service.list(ORGANIZATION_ID, query);
 
-    expect(agents.list).toHaveBeenCalledWith(ORGANIZATION_ID, query);
+    expect(agents.list).toHaveBeenCalledWith(ORGANIZATION_ID, query, undefined);
+  });
+
+  it('hands an agent-token narrowing down to the repository', async () => {
+    const { service, agents } = buildHarness([]);
+    const query = baseQuery();
+
+    await service.list(ORGANIZATION_ID, query, AGENT_ID);
+
+    expect(agents.list).toHaveBeenCalledWith(ORGANIZATION_ID, query, AGENT_ID);
   });
 
   it('an agent with a linked wallet returns its real agentAccount and chainId', async () => {
