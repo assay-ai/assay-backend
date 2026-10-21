@@ -300,7 +300,9 @@ export class EvmChainStateIndexer {
       chainId,
       cursorBlock: end,
       headBlock: head,
-      caughtUp: end === head,
+      // The index stops `confirmations` behind the head, so reaching the safe
+      // head is caught up; `end === head` never held with confirmations on.
+      caughtUp: end === safeHead,
       now,
       ...(paused !== undefined ? { paused } : {}),
       ...(arbiter !== undefined ? { arbiter } : {}),
