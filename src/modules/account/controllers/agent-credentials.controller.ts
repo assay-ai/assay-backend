@@ -11,13 +11,15 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpSession, storedCredentialIdOf } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { auditActorOf } from '@shared/audit';
 import {
   AllowedWhileBlocked,
   CurrentSession,
+  HumanOrOwnAgentGuard,
   HumanSessionGuard,
+  isHumanCallerKind,
   SessionAuthGuard,
 } from '@shared/auth';
 
@@ -50,13 +52,15 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 export class AgentCredentialsController {
   constructor(private readonly credentials: AgentCredentialsService) {}
 
-  // A person's read too: the list names every sibling credential, its prefix,
-  // its bound delegate key and its expiry, which a leaked machine token must
-  // not be able to enumerate. An agent reads its own binding through
-  // `GET /agents/me/delegate`.
+  // A person's read of every key of the agent. An agent credential reads
+  // ITS OWN key only (BUG-DEMO-02): `HumanOrOwnAgentGuard` refuses any
+  // `:agentId` that is not its own, before the cache can answer, and the list
+  // is narrowed to the caller's own row — never a sibling key, never a secret
+  // (`AgentCredentialDto` has no hash). The cache entry varies by credential,
+  // so one key's row never answers another key of the same agent.
   @Get()
-  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
-  @UseGuards(HumanSessionGuard)
+  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['agents'] })
+  @UseGuards(HumanOrOwnAgentGuard)
   @ApiOperation({ summary: 'Credentials for one agent, newest first' })
   @ApiCursorPage(AgentCredentialDto)
   async list(
@@ -64,7 +68,15 @@ export class AgentCredentialsController {
     @Param() params: AgentIdParamDto,
     @Query() query: ListAgentCredentialsQueryDto,
   ): Promise<CursorPageDto<AgentCredentialDto>> {
-    return this.credentials.list(session.organizationId, params.agentId, query);
+    if (isHumanCallerKind(session.callerKind)) {
+      return this.credentials.list(session.organizationId, params.agentId, query);
+    }
+    const own = storedCredentialIdOf(session);
+    // A config-file machine token has no stored row: nothing of its own to show.
+    if (!own) return CursorPageDto.empty();
+    return this.credentials.list(session.organizationId, params.agentId, query, {
+      credentialId: own,
+    });
   }
 
   // Minting and revoking machine tokens is a person's act: an agent that

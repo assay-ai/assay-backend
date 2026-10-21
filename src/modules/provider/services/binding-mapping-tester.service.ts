@@ -484,6 +484,7 @@ export class BindingMappingTesterService {
     entity.bindingId = row.id;
     entity.mappingVersion = row.mappingVersion;
     entity.toolVersion = toolVersion;
+    entity.authMode = row.authMode ?? null;
     entity.callId = report.callId;
     entity.outcome = report.outcome;
     entity.failedLayer = report.failedLayer;

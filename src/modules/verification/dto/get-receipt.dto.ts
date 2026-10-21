@@ -175,6 +175,15 @@ export class GetReceiptResponseDto {
   })
   debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
+  @ApiProperty({
+    description:
+      'SETTLED, and an upheld report cancelled the charge: either a held payment refunded to ' +
+      'the buyer, or a lapsed debt voided (nothing refunded). Not charged either way ' +
+      '(`chargedPrice` is zero, `debt` is `VOIDED`, `chargeNote` `voided:DISPUTE_UPHELD`). ' +
+      'The same flag as the call list row',
+  })
+  refundedByReport: boolean;
+
   @ApiPropertyOptional({
     nullable: true,
     type: String,

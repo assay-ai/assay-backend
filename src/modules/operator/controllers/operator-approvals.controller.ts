@@ -33,7 +33,8 @@ import { OperatorApprovalService } from '../services/operator-approval.service';
  * exempt from the register rather than writing a second entry for one act.
  * Which roles may approve a given row is that row's register code's
  * `approverRoles`, checked by the service; the route-level roles below are
- * only the union of them.
+ * only the union of them (plus, for reject, the requester roles that may
+ * withdraw their own request).
  */
 @ApiTags('Operator')
 @ApiBearerAuth()
@@ -64,7 +65,15 @@ export class OperatorApprovalsController {
     'Re-runs the queued action, which writes its own register entry naming both the requester ' +
       'and this approver',
   )
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.TRE, OperatorRole.OPS_ADMIN)
+  @RequireRoles(
+    OperatorRole.ADJ,
+    OperatorRole.ADJL,
+    OperatorRole.TRE,
+    OperatorRole.OPS_ADMIN,
+    // The approver of the policy rows (P-10, P-11) and of nothing else: the
+    // service checks the row's own `approverRoles` (BUG-OPS-CORE-01).
+    OperatorRole.POLA,
+  )
   @ApiOperation({ summary: 'Approve, as a second operator: runs the action now' })
   @ApiResponse({ status: 200, type: ApprovalDecisionDto })
   @ApiResponse({ status: 403, description: 'Approver role or limit insufficient' })
@@ -85,6 +94,10 @@ export class OperatorApprovalsController {
     OperatorRole.SRE,
     OperatorRole.TRE,
     OperatorRole.OPS_ADMIN,
+    // POL withdraws its own policy request; POLA also turns down someone
+    // else's. The service allows only that (BUG-OPS-CORE-01).
+    OperatorRole.POL,
+    OperatorRole.POLA,
   )
   @ApiOperation({ summary: 'Reject (or, as the requester, withdraw) a queued action' })
   @ApiResponse({ status: 200, type: ApprovalDecisionDto })

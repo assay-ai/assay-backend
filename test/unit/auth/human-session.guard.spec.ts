@@ -70,7 +70,12 @@ describe('human-only control writes', () => {
     },
   };
 
-  const spendPolicy = { get: jest.fn(async () => ({})), patch: jest.fn(), history: jest.fn() };
+  const spendPolicy = {
+    get: jest.fn(async () => ({})),
+    getForRequest: jest.fn(async () => ({})),
+    patch: jest.fn(),
+    history: jest.fn(),
+  };
   const credentials = { list: jest.fn(async () => ({})), create: jest.fn(), revoke: jest.fn() };
   const notifications = {
     listChannels: jest.fn(async () => []),
@@ -225,19 +230,25 @@ describe('human-only control writes', () => {
     expect(res.status).toBe(200);
   });
 
-  // Review A-5: the list names every sibling credential, its prefix, its bound
-  // delegate key and its expiry — reconnaissance a leaked machine token must
-  // not get. An agent reads its own binding through `GET /agents/me/delegate`.
-  it('GET /agents/:agentId/credentials refuses an agent credential', async () => {
+  // Review A-5, narrowed by BUG-DEMO-02: a machine token must not enumerate
+  // another agent's credentials (prefixes, delegate keys, expiries); it may
+  // read its own agent's metadata, which never carries a secret.
+  it('GET /agents/:agentId/credentials refuses an agent credential for another agent', async () => {
+    const OTHER = '33333333-3333-4333-8333-333333333333';
     const agent = await request(app.getHttpServer())
-      .get(`/agents/${AGENT_ID}/credentials`)
+      .get(`/agents/${OTHER}/credentials`)
       .set('Authorization', 'Bearer token-agent');
     expect(agent.status).toBe(403);
     expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
     expect(credentials.list).not.toHaveBeenCalled();
 
-    const human = await request(app.getHttpServer())
+    const own = await request(app.getHttpServer())
       .get(`/agents/${AGENT_ID}/credentials`)
+      .set('Authorization', 'Bearer token-agent');
+    expect(own.status).toBe(200);
+
+    const human = await request(app.getHttpServer())
+      .get(`/agents/${OTHER}/credentials`)
       .set('Authorization', 'Bearer token-human');
     expect(human.status).toBe(200);
   });

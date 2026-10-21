@@ -96,6 +96,8 @@ import {
 import { buildNamespaceVaultPort } from './multiplex/namespace-vault.port';
 import { NamespaceVoucherRedeemer } from './multiplex/namespace-voucher-redeemer';
 import { EvmModule } from './evm/evm.module';
+import { EvmMinimumStakeReader } from './evm/evm-minimum-stake-reader.service';
+import { MINIMUM_STAKE_READER } from './ports/minimum-stake-reader.port';
 import { EvmChainAdapter } from './evm/evm-chain.adapter';
 import { EvmEscrowBalanceReader } from './evm/evm-escrow-balance-reader.service';
 import { EvmEscrowIntentBuilder } from './evm/evm-escrow-intent-builder.service';
@@ -485,6 +487,12 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
       provide: TIGHTEN_DELAY,
       useExisting: EvmTightenDelayProbe,
     },
+    // Read-only: the minimum stake each EVM settlement contract enforces, for
+    // the operator economics panel. EVM only today; a Solana build has none.
+    {
+      provide: MINIMUM_STAKE_READER,
+      useExisting: EvmMinimumStakeReader,
+    },
 
     {
       /**
@@ -610,6 +618,7 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
     ESCROW_DELEGATION,
     RELAYED_ESCROW_INTENT,
     TIGHTEN_DELAY,
+    MINIMUM_STAKE_READER,
     WITHDRAW_GAS_GRANT,
     DEPOSIT_REQUIREMENTS_BUILDER,
   ],

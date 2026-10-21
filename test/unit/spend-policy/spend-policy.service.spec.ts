@@ -553,3 +553,65 @@ describe('SpendPolicyService.history', () => {
     expect(page.items[0].scope).toBe(SpendPolicyScope.ORGANIZATION);
   });
 });
+
+describe('SpendPolicyService.getForRequest — ?agentId= (BUG-BUY-CONNECT-05)', () => {
+  const OTHER = '6f1c2d3e-4b5a-4c6d-8e7f-901234567890';
+
+  function withAgents(owned: boolean) {
+    const exists = jest.fn().mockResolvedValue(owned);
+    const findLive = jest.fn(async (_org: string, agentId: string) => policyRow({ agentId }));
+    const { service, dataSource } = build({ findLive });
+    (dataSource as unknown as { getRepository: jest.Mock }).getRepository = jest
+      .fn()
+      .mockReturnValue({ exists });
+    return { service, exists, findLive };
+  }
+
+  it("reads another agent of the caller's own organization for a person", async () => {
+    const { service, exists, findLive } = withAgents(true);
+
+    const dto = await service.getForRequest(ORG, AGENT, OTHER, true);
+
+    expect(exists).toHaveBeenCalledWith({ where: { id: OTHER, organizationId: ORG } });
+    expect(findLive).toHaveBeenCalledWith(ORG, OTHER);
+    expect(dto.subjectAgentId).toBe(OTHER);
+    expect(dto.requestedAgentIgnored).toBe(false);
+  });
+
+  it('reads the own agent, not ignored, when the own agent is asked for or nothing is', async () => {
+    const { service, exists } = withAgents(true);
+
+    for (const requested of [AGENT, undefined]) {
+      const dto = await service.getForRequest(ORG, AGENT, requested, true);
+      expect(dto.subjectAgentId).toBe(AGENT);
+      expect(dto.requestedAgentIgnored).toBe(false);
+    }
+    expect(exists).not.toHaveBeenCalled();
+  });
+
+  it("reads the session's own agent, and says so, for an agent of another organization or an unknown one", async () => {
+    // `exists` scoped to the caller's organization is false for both.
+    const { service, findLive } = withAgents(false);
+
+    const dto = await service.getForRequest(ORG, AGENT, OTHER, true);
+
+    expect(findLive).toHaveBeenCalledWith(ORG, AGENT);
+    expect(dto.subjectAgentId).toBe(AGENT);
+    expect(dto.requestedAgentIgnored).toBe(true);
+  });
+
+  it('never lets an agent credential read another agent, nor queries a malformed or repeated id', async () => {
+    const { service, exists } = withAgents(true);
+
+    for (const [requested, human] of [
+      [OTHER, false],
+      ['not-a-uuid', true],
+      [[OTHER, AGENT], true],
+    ] as const) {
+      const dto = await service.getForRequest(ORG, AGENT, requested, human);
+      expect(dto.subjectAgentId).toBe(AGENT);
+      expect(dto.requestedAgentIgnored).toBe(true);
+    }
+    expect(exists).not.toHaveBeenCalled();
+  });
+});

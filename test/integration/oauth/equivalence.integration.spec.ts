@@ -731,7 +731,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       ],
       [
         'organization blocked',
-        'AUTH_ORGANIZATION_SUSPENDED',
+        'ACCOUNT_BLOCKED',
         (world) => block('ORGANIZATION', world.organizationId),
       ],
       ['payer wallet blocked', 'ACCOUNT_BLOCKED', (world) => block('WALLET', world.wallet)],

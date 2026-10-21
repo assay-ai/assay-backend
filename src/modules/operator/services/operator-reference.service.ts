@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
@@ -7,6 +7,10 @@ import { VerificationPolicyRepository } from '@database/postgres/repositories/ve
 import { VerifierSigningKeyEntity } from '@database/postgres/entities/verifier-signing-key.entity';
 import { VerifierSigningKeyRepository } from '@database/postgres/repositories/verifier-signing-key.repository';
 import { ChainId } from '@modules/chains/ports/caip.types';
+import {
+  MINIMUM_STAKE_READER,
+  MinimumStakeReaderPort,
+} from '@modules/chains/ports/minimum-stake-reader.port';
 import { Money } from '@modules/chains/ports/money.types';
 import { PolicyLifecycle } from '@modules/verification/domain/aggregation/decision-policy.types';
 import {
@@ -30,6 +34,9 @@ import {
   VerifierRegistryRowDto,
 } from '../dto/operator-reference.dto';
 
+/** The economics panel waits this long per chain for `minimumStake`, then shows the configured floor. */
+export const MINIMUM_STAKE_READ_TIMEOUT_MS = 2_000;
+
 /**
  * The three read-only reference panels behind `GET /operator/policies`,
  * `/verifiers`, `/economics` and `/override-register`.
@@ -50,6 +57,12 @@ export class OperatorReferenceService {
     private readonly providers: ProviderRepository,
     @Inject(PROVIDER_REGISTRY) private readonly providerRegistry: ProviderRegistryPort,
     private readonly config: ConfigService,
+    // The settlement contracts' own minimum stake — the value the operator
+    // Contracts page reads. Optional so a process (or a test) without it
+    // still lists the panel from config.
+    @Optional()
+    @Inject(MINIMUM_STAKE_READER)
+    private readonly minimumStakes: MinimumStakeReaderPort | null = null,
   ) {}
 
   // ── Policy lifecycle ─────────────────────────────────────────────────────
@@ -139,7 +152,8 @@ export class OperatorReferenceService {
         verifierId: row.keyId,
         truncatedKey,
         state: null,
-        unreadableReason: `chain unreadable: ${reason}`,
+        // Fixed text: the error can carry an internal RPC address; the log has it.
+        unreadableReason: 'chain unreadable',
         expiresAt: null,
       };
     }
@@ -150,7 +164,10 @@ export class OperatorReferenceService {
   /**
    * The six economic parameters, read from the same configuration
    * `loadProviderTerms`/`loadMinimumStakeParameters` already read — never a
-   * second, independently-typed copy of the same numbers.
+   * second, independently-typed copy of the same numbers. The minimum stake
+   * is the exception: it is read from the settlement contract's own
+   * `params()`, the value the Contracts page shows and the stake contract
+   * enforces (see {@link minimumStakeRow}).
    */
   async listEconomicParameters(): Promise<EconomicParameterRowDto[]> {
     // `PLATFORM_FEE_BPS`, the rate a call is charged at (R17-R-03).
@@ -170,14 +187,7 @@ export class OperatorReferenceService {
         overrideCount: null,
         note: null,
       },
-      {
-        key: 'minimumStake',
-        label: 'Minimum stake',
-        value: toDisplayAmount(stakeParameters.floor),
-        source: 'config',
-        overrideCount: minimumStakeOverrideCount,
-        note: null,
-      },
+      await this.minimumStakeRow(toDisplayAmount(stakeParameters.floor), minimumStakeOverrideCount),
       {
         key: 'penaltySize',
         label: 'Penalty size',
@@ -195,6 +205,78 @@ export class OperatorReferenceService {
       splitRow('splitPlatform', 'Split — platform', split?.platform ?? null, split === null),
       splitRow('splitProvider', 'Split — provider', split?.provider ?? null, split === null),
     ];
+  }
+
+  /**
+   * The minimum stake of every settlement deployment (EVM `params()`), read live.
+   * One value when the chains agree, one `chain value` pair per chain when
+   * they do not. When the configured routing floor
+   * (`PROVIDER_MINIMUM_STAKE_FLOOR`) differs, `note` names it so the panel
+   * does not hide the gap. Each chain is read within
+   * {@link MINIMUM_STAKE_READ_TIMEOUT_MS}; a chain that does not answer shows
+   * the configured floor, and with no answer at all the row is the configured
+   * floor, the note saying which chains and why (a short code, never the
+   * error text).
+   */
+  private async minimumStakeRow(
+    configured: string,
+    overrideCount: number,
+  ): Promise<EconomicParameterRowDto> {
+    const configRow = (note: string | null): EconomicParameterRowDto => ({
+      key: 'minimumStake',
+      label: 'Minimum stake',
+      value: configured,
+      source: 'config',
+      overrideCount,
+      note,
+    });
+
+    if (!this.minimumStakes) return configRow(null);
+
+    const readings = await this.minimumStakes.readMinimumStakes({
+      timeoutMs: MINIMUM_STAKE_READ_TIMEOUT_MS,
+    });
+    if (readings.length === 0) return configRow(null);
+
+    const answered = readings.filter((reading) => reading.minimumStake !== null);
+    const failed = readings.filter((reading) => reading.failure !== null);
+    // A fixed sentence and a short code, never the error itself: an RPC
+    // error can carry an internal node address (the reader logs the detail).
+    const failedNote =
+      failed.length > 0
+        ? `No answer from the settlement contract on ${failed
+            .map((reading) => `${reading.chainId} (${reading.failure})`)
+            .join(', ')}; the configured floor is shown for it.`
+        : null;
+    if (answered.length === 0) return configRow(failedNote);
+
+    // A chain that did not answer shows the configured floor, labelled in the note.
+    const perChain = readings.map((reading) => ({
+      chainId: reading.chainId,
+      value: reading.minimumStake ? toDisplayAmount(reading.minimumStake) : configured,
+    }));
+    const distinct = new Set(perChain.map((entry) => entry.value));
+    const value =
+      distinct.size === 1
+        ? perChain[0].value
+        : perChain.map((entry) => `${entry.chainId} ${entry.value}`).join(' · ');
+    const differs = answered.some(
+      (reading) => toDisplayAmount(reading.minimumStake!) !== configured,
+    );
+    const notes = [
+      differs
+        ? `The configured routing floor (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}.`
+        : null,
+      failedNote,
+    ].filter((note): note is string => note !== null);
+    return {
+      key: 'minimumStake',
+      label: 'Minimum stake',
+      value,
+      source: 'chain',
+      overrideCount,
+      note: notes.length > 0 ? notes.join(' ') : null,
+    };
   }
 
   /**

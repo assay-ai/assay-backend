@@ -3,7 +3,6 @@ import {
   IsBoolean,
   IsEnum,
   IsIn,
-  IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
@@ -67,9 +66,15 @@ export class CreateCallDisputeBodyDto {
 
 /** `POST /providers/me/call-disputes/:id/respond`. */
 export class RespondCallDisputeBodyDto {
-  @ApiProperty({ description: 'The provider’s one reply, before the decision', maxLength: 1000 })
+  @ApiProperty({
+    description: 'The provider’s one reply, before the decision (trimmed)',
+    minLength: 3,
+    maxLength: 1000,
+  })
+  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
-  @IsNotEmpty()
+  // One message for an empty or short reply: `MinLength` covers empty too.
+  @MinLength(3, { message: 'The reply must be at least 3 characters' })
   @MaxLength(1000)
   response: string;
 }

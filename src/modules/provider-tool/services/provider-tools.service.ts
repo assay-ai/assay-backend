@@ -106,8 +106,32 @@ export function declaredFailureRateOf(value: string | number | null | undefined)
   return Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : DEFAULT_DECLARED_FAILURE_RATE;
 }
 
-/** The name preview uses a 4-letter server name, as the Connect sheet suggests (§7.10). */
-const PREVIEW_SERVER = 'acme';
+/**
+ * The MCP server name the Connect sheet suggests for a maker's tools,
+ * `assay-{handle}`, cut back word by word until `mcp__{server}__{tool}` fits
+ * the 64-character name most clients allow (7 characters of `mcp__` and
+ * `__`), else `assay`. Mirrors the console's `defaultServerNameFor` and
+ * `fitsServerName` (assay-frontend `src/features/connect/mcp-url.ts`: budget
+ * 64, overhead 7, at most 56 characters), so the preview is the name a model
+ * actually sees (BUG-PRV-SETUP-07). Change both together; the cases in
+ * `provider-tool-preview.spec.ts` are the frontend's `modelSeenName` ones.
+ */
+export function previewServerNameFor(handle: string, fullToolName: string): string {
+  const words = handle.toLowerCase().split('-');
+  if (words.some((word) => !/^[a-z0-9]+$/.test(word))) return 'assay';
+  while (words.length > 0) {
+    const candidate = `assay-${words.join('-')}`;
+    if (
+      /^[a-z][a-z0-9-]*$/.test(candidate) &&
+      candidate.length <= 56 &&
+      7 + candidate.length + fullToolName.length <= 64
+    ) {
+      return candidate;
+    }
+    words.pop();
+  }
+  return 'assay';
+}
 
 /**
  * A provider's own tools (design spec §7.6, phase T4): `{handle}__{tool}`,
@@ -1326,7 +1350,7 @@ export function summaryOf(
     name: row.name,
     localName: parsed?.local ?? row.name,
     handle: parsed?.handle ?? '',
-    preview: `mcp__${PREVIEW_SERVER}__${row.name}`,
+    preview: `mcp__${parsed ? previewServerNameFor(parsed.handle, row.name) : 'assay'}__${row.name}`,
     category: row.category,
     tags: [...(row.tags ?? [])],
     visibility: row.visibility,

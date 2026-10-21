@@ -96,11 +96,20 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     query: ListAgentCredentialsQueryDto,
+    // An agent credential reads its own row only (BUG-DEMO-02): never its
+    // sibling keys' names, scopes, use or delegates.
+    only?: { readonly credentialId: string },
   ): Promise<CursorPageDto<AgentCredentialDto>> {
+    // An agent of another organization, or none at all, is a 404 like
+    // `/agents/:agentId/access`, not an empty page: a client must be able to
+    // tell "no keys" from "no such agent".
+    await this.assertAgentOf(organizationId, agentId);
+
     const qb = this.credentials
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
       .andWhere('credential.agentId = :agentId', { agentId });
+    if (only) qb.andWhere('credential.id = :credentialId', { credentialId: only.credentialId });
 
     applyTimeWindow(qb, query, CREDENTIALS_LIST);
 
@@ -177,6 +186,14 @@ export class AgentCredentialsService {
     return pages;
   }
 
+  /** `ACCOUNT_AGENT_NOT_FOUND` unless the agent exists in this organization. */
+  private async assertAgentOf(organizationId: string, agentId: string): Promise<void> {
+    const agent = await this.agents.findById(agentId);
+    if (!agent || agent.organizationId !== organizationId) {
+      throw AccountErrors.agentNotFound({ agentId });
+    }
+  }
+
   /**
    * The one place rows read for {@link firstPagesFor} get their `lastUsedAt`:
    * the latest of the column and the stamp `LastSeenRecorder` has not written
@@ -212,10 +229,7 @@ export class AgentCredentialsService {
     body: CreateAgentCredentialBodyDto,
     actor: AuditActor,
   ): Promise<CreateAgentCredentialResponseDto> {
-    const agent = await this.agents.findById(agentId);
-    if (!agent || agent.organizationId !== organizationId) {
-      throw AccountErrors.agentNotFound({ agentId });
-    }
+    await this.assertAgentOf(organizationId, agentId);
 
     const token = generateToken();
 
