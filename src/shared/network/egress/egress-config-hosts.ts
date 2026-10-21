@@ -29,7 +29,8 @@ export const CONFIG_ORIGIN_URL_MAP_ENVS: readonly string[] = Object.freeze(['EVM
  * Lenient on purpose: the modules that own each variable validate it and fail
  * the boot themselves. A value that does not parse simply adds no host, which
  * keeps that host on the strict tier. IP literals are left out: they are never
- * resolved, so there is nothing to reuse.
+ * resolved, so there is nothing to reuse. `localhost` and `*.localhost` are
+ * left out too.
  */
 export function configOriginEgressHosts(
   read: (name: string) => string | undefined,
@@ -74,5 +75,8 @@ function hostOf(raw: string): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (host.length === 0 || isIP(host) !== 0) return null;
+  // Loopback names are never on the config tier (review M-2): the e2e-only
+  // loopback CIMD fetch is INTERNAL_ALLOWED too, and a stranger picks its URL.
+  if (host === 'localhost' || host.endsWith('.localhost')) return null;
   return host;
 }

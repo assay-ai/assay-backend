@@ -20,7 +20,9 @@ import {
   LAST_GOOD_DNS_MAX_AGE_MS,
   LastGoodDnsAnswers,
 } from '@shared/network/egress/resolve-target';
-import { NetworkModule } from '@shared/network/network.module';
+import { NetworkModule, singleLabelConfigHosts } from '@shared/network/network.module';
+import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 
 /**
  * Egress DNS trust tiers (BUG-X-04, lot 1 B7).
@@ -291,6 +293,14 @@ describe('configOriginEgressHosts', () => {
     expect(hosts.size).toBe(0);
   });
 
+  it('leaves loopback names out (review M-2)', () => {
+    const hosts = from({
+      FACILITATOR_URL: 'http://localhost:3100',
+      KORA_RPC_URL: 'http://kora.localhost:8080',
+    });
+    expect(hosts.size).toBe(0);
+  });
+
   it('reads no other variable (a provider or alert URL never becomes a config host)', () => {
     const hosts = from({
       ALERT_WEBHOOK_URL: 'https://hooks.example.test/x',
@@ -386,7 +396,17 @@ describe('EgressHttpClient — tiers end to end', () => {
   let port: number;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => res.end('{"ok":true}'));
+    server = http.createServer((req, res) => {
+      // `/start?to=<url>` answers a redirect; everything else is a plain 200.
+      const to = new URL(req.url ?? '/', 'http://local').searchParams.get('to');
+      if (to) {
+        res.statusCode = 302;
+        res.setHeader('location', to);
+        res.end();
+        return;
+      }
+      res.end('{"ok":true}');
+    });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as AddressInfo).port;
   });
@@ -425,6 +445,38 @@ describe('EgressHttpClient — tiers end to end', () => {
     const error = await refusal(client.request(provider));
     expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
   });
+
+  it.each([
+    ['another config host', 'http://facilitator.internal.example.test/ok'],
+    ['a provider host', 'http://api.provider.example.test/ok'],
+  ])(
+    'a redirect from a config host to %s is strict: ENOTFOUND on hop 1 is DNS_FAILED (review M-1)',
+    async (_what, target) => {
+      const { client, state } = flakyClient(
+        new Set(['rpc.chain.example.test', 'facilitator.internal.example.test']),
+      );
+      // Both hosts resolved before, under both trust levels, so a stored answer
+      // exists for hop 1 whichever key it would look under.
+      await client.request({ url: target, policy: INTERNAL_EGRESS_POLICY });
+      await client.request({ url: target, policy: UNTRUSTED_EGRESS_POLICY });
+      const start = {
+        url: `http://rpc.chain.example.test/start?to=${encodeURIComponent(target)}`,
+        policy: INTERNAL_EGRESS_POLICY,
+      };
+      await expect(client.request(start)).resolves.toMatchObject({ status: 200, redirects: 1 });
+
+      state.down = true;
+
+      // Hop 0 (the config host, INTERNAL_ALLOWED) may reuse; hop 1 is PUBLIC_ONLY
+      // and must not, whatever host the Location names.
+      await expect(
+        client.request({ url: 'http://rpc.chain.example.test/ok', policy: INTERNAL_EGRESS_POLICY }),
+      ).resolves.toMatchObject({ status: 200 });
+      const error = await refusal(client.request(start));
+      expect(error.kind).toBe(EgressFailureKind.DNS_FAILED);
+      expect(error.message).toContain(new URL(target).hostname);
+    },
+  );
 });
 
 describe('NetworkModule wiring', () => {
@@ -446,6 +498,30 @@ describe('NetworkModule wiring', () => {
     ]);
     expect(moduleRef.get(EGRESS_DNS_LOOKUP)).toBeUndefined();
     await moduleRef.close();
+  });
+
+  it('DNS_SERVERS set: warns at boot about a config host with no dot (review M-3)', async () => {
+    process.env.DNS_SERVERS = '1.1.1.1';
+    process.env.KORA_RPC_URL = 'http://kora:8080';
+    process.env.FACILITATOR_URL = 'https://facilitator.internal.example.test';
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const moduleRef = await Test.createTestingModule({ imports: [NetworkModule] }).compile();
+      const warnings = warn.mock.calls.map(([message]) => String(message));
+      expect(warnings.some((m) => m.includes('"kora"') && m.includes('DNS_SERVERS'))).toBe(true);
+      expect(warnings.some((m) => m.includes('facilitator.internal'))).toBe(false);
+      await moduleRef.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('singleLabelConfigHosts names only the hosts without a dot', () => {
+    const config = new ConfigService({
+      EVM_RPC_URLS: JSON.stringify({ 'eip155:46630': 'http://anvil:8545' }),
+      FACILITATOR_URL: 'https://facilitator.example.test',
+    });
+    expect(singleLabelConfigHosts(config)).toEqual(['anvil']);
   });
 
   it('DNS_SERVERS set: the lookup is a function; malformed: the boot fails', async () => {
