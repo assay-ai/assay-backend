@@ -89,6 +89,8 @@ interface ChainState {
   pendingOwner: string;
   redeemer: string;
   throwOnCall?: Error;
+  /** The next N `eth_call`s fail, as from a node that does not have the block yet. */
+  failCalls?: number;
 }
 
 interface Call {
@@ -123,6 +125,10 @@ function chain(overrides: Partial<ChainState> = {}): {
     }
     if (method === 'eth_call') {
       if (state.throwOnCall) throw state.throwOnCall;
+      if (state.failCalls) {
+        state.failCalls -= 1;
+        throw new Error('header not found');
+      }
       const { data } = params[0] as { to: string; data: string };
       const selector = data.slice(0, 10);
       if (selector === SELECTOR.admin) return pad(state.admin as `0x${string}`, { size: 32 });
@@ -203,6 +209,25 @@ function vaultWith(
 }
 
 describe('EvmVaultService', () => {
+  it('retries an anchored balance read once, at the SAME block', async () => {
+    const { vault, calls } = vaultWith({ failCalls: 1 });
+
+    const { balance, slot } = await vault.getVaultBalanceAt(USDG);
+
+    expect(balance).toEqual(MoneyUtil.of(12_500_000n, USDG, 6));
+    expect(slot).toBe(116_313_808n);
+    const reads = calls.filter((c) => c.method === 'eth_call');
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    for (const read of reads) expect(read.params[1]).toBe(toHex(116_313_808n));
+    expect(calls.filter((c) => c.method === 'eth_blockNumber')).toHaveLength(1);
+  });
+
+  it('gives up when the retry fails too', async () => {
+    const { vault } = vaultWith({ failCalls: 1_000 });
+
+    await expect(vault.getVaultBalanceAt(USDG)).rejects.toThrow();
+  });
+
   it('names the escrow PROXY as the vault, for both the owner and the account', async () => {
     // On EVM the pool and its owner are the same address. There is no ATA, no
     // authority PDA and no multisig — `AssayEscrow` holds the USDG and is
