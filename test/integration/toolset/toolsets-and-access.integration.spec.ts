@@ -377,8 +377,8 @@ describe('toolsets and access, against a real database and Redis', () => {
       const s = services();
       const credentialId = randomUUID();
       await dataSource.query(
-        `INSERT INTO agent_credentials (id, organization_id, agent_id, name, prefix, token_hash)
-         VALUES ($1, $2, $3, 'ci', 'assay_sk_li', $4)`,
+        `INSERT INTO agent_credentials (id, organization_id, agent_id, name, token_last4, token_hash)
+         VALUES ($1, $2, $3, 'ci', '2fds', $4)`,
         [credentialId, orgA, agentA, `hash-${credentialId}`],
       );
       await s.access.patch(orgA, agentA, { accessMode: AccessMode.ALL }, ACTOR);
@@ -438,9 +438,9 @@ describe('toolsets and access, against a real database and Redis', () => {
         const credentialId = randomUUID();
         await dataSource.query(
           `INSERT INTO agent_credentials
-             (id, organization_id, agent_id, name, prefix, token_hash, revoked_at, revoked_by,
+             (id, organization_id, agent_id, name, token_last4, token_hash, revoked_at, revoked_by,
               expires_at)
-           VALUES ($1, $2, $3, 'ci', 'assay_sk_li', $4, $5, $6, $7)`,
+           VALUES ($1, $2, $3, 'ci', '2fds', $4, $5, $6, $7)`,
           [
             credentialId,
             orgA,
@@ -470,8 +470,8 @@ describe('toolsets and access, against a real database and Redis', () => {
       const s = services();
       const credentialId = randomUUID();
       await dataSource.query(
-        `INSERT INTO agent_credentials (id, organization_id, agent_id, name, prefix, token_hash)
-         VALUES ($1, $2, $3, 'ci', 'assay_sk_li', $4)`,
+        `INSERT INTO agent_credentials (id, organization_id, agent_id, name, token_last4, token_hash)
+         VALUES ($1, $2, $3, 'ci', '2fds', $4)`,
         [credentialId, orgA, agentA, `hash-${credentialId}`],
       );
 

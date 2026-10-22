@@ -2732,13 +2732,13 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
         `(${agentId})`,
     );
   }
-  // `prefix` is stored in clear for disambiguation and must be the leading
-  // characters of the secret it disambiguates. A prefix that does not match
+  // `hint` (`assay_sk_live_…2fds`) is the only part of the key kept in clear and
+  // must end with the secret's last 4 characters. A hint that does not match
   // would make the credential list point at the wrong row on the one screen an
   // operator uses to revoke one.
-  if (!credential.token.startsWith(credential.prefix)) {
+  if (credential.hint !== `assay_sk_live_…${credential.token.slice(-4)}`) {
     throw new Error(
-      `the stored prefix "${credential.prefix}" is not the start of the secret this call ` +
+      `the hint "${credential.hint}" does not end with the secret this call ` +
         `returned — the list view would then name a different credential than the one revoked`,
     );
   }
@@ -2871,7 +2871,7 @@ async function runStep6(ctx: SuiteContext): Promise<string> {
   };
 
   return (
-    `credential=${credential.id} (prefix ${credential.prefix}, expiresAt=` +
+    `credential=${credential.id} (${credential.hint}, expiresAt=` +
     `${credential.expiresAt ? new Date(credential.expiresAt).toISOString() : 'never'}) minted over ` +
     `HTTP; the agent now holds ${listed.items.length} credential(s), the first being the ` +
     `identity mint's; MCP at ${mcpUrl()} listed ${listedCount} tool(s) and ` +

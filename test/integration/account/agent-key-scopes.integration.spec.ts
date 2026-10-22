@@ -228,6 +228,30 @@ describe('agent key scopes — over HTTP, with real keys', () => {
       expect(row.expires_at).not.toBeNull();
     });
 
+    it('returns the full key once with its hint; the list and the row hold the last 4 only', async () => {
+      const response = await createKey({ name: 'hinted' });
+      expect(response.status).toBe(201);
+      const { id, token, hint } = response.body.data as { id: string; token: string; hint: string };
+      expect(hint).toBe(`assay_sk_live_…${token.slice(-4)}`);
+
+      const list = await http().get(`/agents/${agentId}/credentials`).set(as(PERSON_TOKEN));
+      expect(list.status).toBe(200);
+      const listed = (list.body.data.items as Record<string, unknown>[]).find((i) => i.id === id);
+      expect(listed).toMatchObject({ hint });
+      expect(listed).not.toHaveProperty('token');
+      expect(listed).not.toHaveProperty('prefix');
+      expect(JSON.stringify(list.body)).not.toContain(token.slice(14, -4));
+
+      const [row] = (await dataSource.query(
+        `SELECT to_jsonb(c) - 'token_hash' AS "row" FROM "agent_credentials" c WHERE "id" = $1`,
+        [id],
+      )) as { row: Record<string, unknown> }[];
+      expect(row.row.token_last4).toBe(token.slice(-4));
+      expect(row.row).not.toHaveProperty('prefix');
+      // No column besides the hash holds any of the key's random body beyond the last 4.
+      expect(JSON.stringify(row.row)).not.toContain(token.slice(14, 20));
+    });
+
     it.each([
       ['an unknown scope', { scopes: ['tools:call', 'admin'] }, 'VALIDATION_FAILED'],
       ['an empty scope list', { scopes: [] }, 'VALIDATION_FAILED'],
@@ -457,9 +481,9 @@ describe('agent key scopes — over HTTP, with real keys', () => {
       };
       await dataSource.query(
         `INSERT INTO "agent_credentials"
-           ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes", "expires_at")
-         VALUES ($1, $3, $4, 'never', 'assay_sk_live_m1', $5, '{tools:call}', NULL),
-                ($2, $3, $4, 'far', 'assay_sk_live_m2', $6, '{}', now() + interval '1000 days')`,
+           ("id", "organization_id", "agent_id", "name", "token_last4", "token_hash", "scopes", "expires_at")
+         VALUES ($1, $3, $4, 'never', 'nev1', $5, '{tools:call}', NULL),
+                ($2, $3, $4, 'far', 'far2', $6, '{}', now() + interval '1000 days')`,
         [ids.never, ids.far, organizationId, agentId, `hash-${ids.never}`, `hash-${ids.far}`],
       );
       await dataSource.query(

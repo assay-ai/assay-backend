@@ -170,7 +170,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       id: 'grant-1',
       issuedVia: CredentialIssuedVia.OAUTH,
       oauthClientId: options.clientRowId ?? 'client-builtin',
-      prefix: null,
+      tokenLast4: null,
       tokenHash: null,
       name: 'Example app',
       delegateAccount: DELEGATE,

@@ -1150,7 +1150,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     try {
       await writer.query(
         `INSERT INTO "agent_credentials"
-           ("organization_id", "agent_id", "name", "prefix", "token_hash", "issued_via",
+           ("organization_id", "agent_id", "name", "token_last4", "token_hash", "issued_via",
             "oauth_client_id", "expires_at")
          VALUES ($1, $2, 'Prune race', NULL, NULL, 'OAUTH', $3, now() + interval '30 days')`,
         [ORG, AGENT, client.id],

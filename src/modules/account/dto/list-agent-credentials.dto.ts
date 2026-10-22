@@ -67,9 +67,12 @@ export class AgentCredentialDto {
   @ApiProperty({
     nullable: true,
     type: String,
-    description: 'Clear-text leading characters, for disambiguation only; null for an OAuth grant',
+    example: 'assay_sk_live_…2fds',
+    description:
+      'Recognises the key without revealing it: the fixed `assay_sk_live_` part, `…`, and the last 4 characters. ' +
+      'The only part of the key we keep. Null for an OAuth grant.',
   })
-  prefix: string | null;
+  hint: string | null;
 
   @ApiProperty({
     type: [String],

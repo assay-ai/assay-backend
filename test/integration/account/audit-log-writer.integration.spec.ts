@@ -198,7 +198,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
     expect(await entries()).toHaveLength(1);
   });
 
-  it('credentials: created and revoked, with no token, prefix or hash in any entry', async () => {
+  it('credentials: created and revoked, with no token, hint or hash in any entry', async () => {
     const created = await credentials.create(
       organizationId,
       agentId,
@@ -234,7 +234,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       ]),
     );
     expect(stored).not.toContain(created.token);
-    expect(stored).not.toContain(created.prefix);
+    expect(stored).not.toContain(created.hint);
     expect(stored).not.toContain(digestToken(created.token));
   });
 

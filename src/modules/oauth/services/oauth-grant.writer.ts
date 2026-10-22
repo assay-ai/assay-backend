@@ -219,7 +219,7 @@ export class OAuthGrantWriter {
         name: code.credentialName,
         issuedVia: CredentialIssuedVia.OAUTH,
         oauthClientId: client.id,
-        prefix: null,
+        tokenLast4: null,
         tokenHash: null,
         scopes,
         expiresAt: refreshExpiresAt,

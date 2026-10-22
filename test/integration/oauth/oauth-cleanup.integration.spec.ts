@@ -124,7 +124,7 @@ describe('OAuth cleanup — real database and Redis', () => {
   ): Promise<string> {
     const [inserted] = (await dataSource.query(
       `INSERT INTO "agent_credentials"
-         ("organization_id", "agent_id", "name", "prefix", "token_hash", "issued_via",
+         ("organization_id", "agent_id", "name", "token_last4", "token_hash", "issued_via",
           "oauth_client_id", "expires_at", "revoked_at", "revoked_by", "deleted_at")
        VALUES ($1, $2, 'Example grant', NULL, NULL, 'OAUTH', $3, $4, $5, $6, $7)
        RETURNING "id"`,

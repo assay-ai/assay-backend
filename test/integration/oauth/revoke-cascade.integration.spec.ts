@@ -593,7 +593,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     expect(page.items[0]).toMatchObject({
       id: g.credentialId,
       issuedVia: 'OAUTH',
-      prefix: null,
+      hint: null,
       revokedAt: expect.any(Date),
       oauthClient: {
         clientId: builtin.clientId,

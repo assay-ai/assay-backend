@@ -5,7 +5,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AgentCredentialEntity, CredentialIssuedVia } from '../entities/agent-credential.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
-/** Machine tokens, by prefix and by agent. */
+/** Machine tokens, by token digest and by agent. */
 @Injectable()
 export class AgentCredentialRepository extends OrganizationScopedRepository<AgentCredentialEntity> {
   constructor(@InjectDataSource('postgres') dataSource: DataSource) {

@@ -69,8 +69,13 @@ export class CreateAgentCredentialResponseDto {
   @ApiProperty()
   name: string;
 
-  @ApiProperty({ description: 'Clear-text leading characters, for disambiguation only' })
-  prefix: string;
+  @ApiProperty({
+    example: 'assay_sk_live_…2fds',
+    description:
+      'Recognises the key later without revealing it: `assay_sk_live_…` and the last 4 characters of `token`. ' +
+      'Key lists show the same value.',
+  })
+  hint: string;
 
   @ApiProperty({
     description:
