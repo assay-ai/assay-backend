@@ -141,7 +141,7 @@ describe('DcrService (§6.3.8)', () => {
       body({ client_name: undefined }),
       body({ client_name: '' }),
       body({ client_name: 'x'.repeat(65) }),
-      body({ client_name: '‮​' }),
+      body({ client_name: '\u202e\u200b' }),
       body({ grant_types: ['implicit'] }),
       body({ response_types: ['token'] }),
       body({ client_uri: 'javascript:alert(1)' }),

@@ -100,10 +100,10 @@ describe('schema screen', () => {
   });
 
   it('refuses invisible and direction-changing characters', () => {
-    expect(codes({ ...clean(), summary: 'Search posts​ quickly' })).toContain(
+    expect(codes({ ...clean(), summary: 'Search posts\u200b quickly' })).toContain(
       ScreenFindingCode.HIDDEN_CHARACTERS,
     );
-    expect(codes({ ...clean(), description: 'abc ‮ cba' })).toContain(
+    expect(codes({ ...clean(), description: 'abc \u202e cba' })).toContain(
       ScreenFindingCode.HIDDEN_CHARACTERS,
     );
   });
