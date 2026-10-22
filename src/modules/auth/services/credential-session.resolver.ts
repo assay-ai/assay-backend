@@ -6,6 +6,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AgentScope, agentScopesOf } from '@shared/auth/agent-scope';
 import { LastSeenKind, LastSeenRecorder, credentialKey } from '@shared/last-seen';
 
 import { AuthErrors } from '../errors/auth.errors';
@@ -20,6 +21,11 @@ const ACTIVE = 'ACTIVE';
  * here, so the two cannot drift: the same row yields the same session through
  * the same checks. The only input a source chooses is `paymentsAllowed`
  * (spec §6.3.13). Nothing here reads how the row was issued.
+ *
+ * The session's `scopes` are the row's (`agentScopesOf`: a value outside the
+ * vocabulary grants nothing), and a row without `payments` is free-only
+ * whatever its source allows: `paymentsAllowed` is the source's answer AND
+ * the scope.
  *
  * Callers must pass only a row they found by authenticating a presented
  * secret (an API key's hash, an OAuth access token), never one looked up by
@@ -94,6 +100,7 @@ export class CredentialSessionResolver {
     }
 
     this.stampUse(credential);
+    const scopes = agentScopesOf(credential.scopes);
 
     return {
       credentialId: credential.id,
@@ -105,7 +112,8 @@ export class CredentialSessionResolver {
       label: agent.label,
       callerKind: McpCallerKind.AGENT,
       delegateAccount: (credential.delegateAccount as AccountId | null) ?? null,
-      paymentsAllowed: opts.paymentsAllowed,
+      paymentsAllowed: opts.paymentsAllowed && scopes.includes(AgentScope.PAYMENTS),
+      scopes,
     };
   }
 

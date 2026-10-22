@@ -21,6 +21,7 @@ import { sweepRevokedCredentialTokens } from '@modules/oauth/services/oauth-gran
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
+import { AgentScope, DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import {
@@ -37,6 +38,11 @@ import {
   AgentCredentialsPage,
   ListAgentCredentialsQueryDto,
 } from '../dto/list-agent-credentials.dto';
+import {
+  CREDENTIAL_DEFAULT_LIFETIME_DAYS,
+  CREDENTIAL_MAX_LIFETIME_DAYS,
+  ONE_DAY_MS,
+} from '../constants/credential-expiry.constants';
 import { AccountErrors } from '../errors/account.errors';
 import { LastSeenKind, LastSeenRecorder, credentialKey } from '@shared/last-seen';
 
@@ -96,9 +102,6 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     query: ListAgentCredentialsQueryDto,
-    // An agent credential reads its own row only (BUG-DEMO-02): never its
-    // sibling keys' names, scopes, use or delegates.
-    only?: { readonly credentialId: string },
   ): Promise<CursorPageDto<AgentCredentialDto>> {
     // An agent of another organization, or none at all, is a 404 like
     // `/agents/:agentId/access`, not an empty page: a client must be able to
@@ -109,7 +112,6 @@ export class AgentCredentialsService {
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
       .andWhere('credential.agentId = :agentId', { agentId });
-    if (only) qb.andWhere('credential.id = :credentialId', { credentialId: only.credentialId });
 
     applyTimeWindow(qb, query, CREDENTIALS_LIST);
 
@@ -229,6 +231,8 @@ export class AgentCredentialsService {
     body: CreateAgentCredentialBodyDto,
     actor: AuditActor,
   ): Promise<CreateAgentCredentialResponseDto> {
+    const scopes = scopesFor(body.scopes);
+    const expiresAt = expiryFor(body.expiresAt, new Date());
     await this.assertAgentOf(organizationId, agentId);
 
     const token = generateToken();
@@ -239,8 +243,8 @@ export class AgentCredentialsService {
       name: body.name,
       prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
       tokenHash: digestToken(token),
-      scopes: body.scopes ?? [],
-      expiresAt: body.expiresAt ?? null,
+      scopes,
+      expiresAt,
     });
 
     const saved = await this.dataSource.transaction(async (manager) => {
@@ -416,6 +420,8 @@ export class AgentCredentialsService {
       rotatedFromId: entity.rotatedFromId,
       delegateAccount: entity.delegateAccount ?? null,
       delegateBoundAt: entity.delegateBoundAt ?? null,
+      pendingDelegateAccount: entity.pendingDelegateAccount ?? null,
+      pendingDelegateRequestedAt: entity.pendingDelegateRequestedAt ?? null,
       createdAt: entity.createdAt,
     };
   }
@@ -423,4 +429,31 @@ export class AgentCredentialsService {
 
 function generateToken(): string {
   return `${AGENT_CREDENTIAL_TOKEN_PREFIX}${randomBytes(24).toString('base64url')}`;
+}
+
+/**
+ * The scopes a new key gets: the default (`tools:call payments activity:read`)
+ * when none are named, else exactly those named (the DTO has already refused
+ * an unknown or repeated one). `payments` without `tools:call` is refused.
+ */
+function scopesFor(requested: readonly AgentScope[] | undefined): AgentScope[] {
+  const scopes = [...(requested ?? DEFAULT_AGENT_SCOPES)];
+  if (scopes.includes(AgentScope.PAYMENTS) && !scopes.includes(AgentScope.TOOLS_CALL)) {
+    throw AccountErrors.credentialScopesInvalid();
+  }
+  return scopes;
+}
+
+/**
+ * When a new key expires: `CREDENTIAL_DEFAULT_LIFETIME_DAYS` from `now` when
+ * none is named; a named one must be in the future and no further than
+ * `CREDENTIAL_MAX_LIFETIME_DAYS` away. A key always expires.
+ */
+function expiryFor(requested: Date | undefined, now: Date): Date {
+  if (!requested) return new Date(now.getTime() + CREDENTIAL_DEFAULT_LIFETIME_DAYS * ONE_DAY_MS);
+  const latest = now.getTime() + CREDENTIAL_MAX_LIFETIME_DAYS * ONE_DAY_MS;
+  if (requested.getTime() <= now.getTime() || requested.getTime() > latest) {
+    throw AccountErrors.credentialExpiryInvalid({ maxDays: CREDENTIAL_MAX_LIFETIME_DAYS });
+  }
+  return requested;
 }

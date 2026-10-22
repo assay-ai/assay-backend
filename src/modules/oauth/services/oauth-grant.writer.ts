@@ -16,6 +16,7 @@ import {
 import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
+import type { AgentScope } from '@shared/auth/agent-scope';
 
 import {
   OAUTH_ACCESS_TOKEN_TTL_SECONDS,
@@ -158,6 +159,8 @@ export class OAuthGrantWriter {
     readonly code: OAuthAuthorizationCodeEntity;
     readonly client: OAuthClientEntity;
     readonly audience: string;
+    /** The grant's scopes (`oauthGrantScopes`), fixed for its life. */
+    readonly scopes: readonly AgentScope[];
   }): Promise<CreateGrantResult> {
     const { code, client, audience } = input;
     const { organizationId, agentId } = code;
@@ -209,7 +212,7 @@ export class OAuthGrantWriter {
         sweep = replaced.id;
       }
 
-      const scopes: string[] = [];
+      const scopes = [...input.scopes];
       const credentialId = await insertReturningId(manager, AgentCredentialEntity, {
         organizationId,
         agentId,

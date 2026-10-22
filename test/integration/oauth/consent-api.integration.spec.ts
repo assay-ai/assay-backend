@@ -598,6 +598,8 @@ describe('OAuth consent API — real database and Redis', () => {
       },
       returnTo: { kind: 'LOCAL_APP', display: 'an app on this computer' },
       scope: ['assay:agent', 'offline_access'],
+      // A third-party client's grant: free tool calls only (H2).
+      grantedScopes: ['tools:call'],
       agents: [
         {
           id: PERSON_A,

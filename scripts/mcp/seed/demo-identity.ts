@@ -56,6 +56,7 @@ import {
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { AppMcpModule } from '@bootstrap/mcp/app.module';
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 /** Stable across runs, so `.env` does not need editing on a re-seed. */
@@ -162,7 +163,7 @@ async function main(): Promise<void> {
       name: DEMO_CREDENTIAL_NAME,
       prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
       tokenHash: digestToken(token),
-      scopes: [],
+      scopes: [...DEFAULT_AGENT_SCOPES],
     });
     await credentials.save(credential);
 

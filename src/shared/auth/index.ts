@@ -9,3 +9,4 @@ export * from './current-operator.decorator';
 export * from './require-roles.decorator';
 export * from './operator-roles.guard';
 export * from './human-session.guard';
+export * from './agent-scope';

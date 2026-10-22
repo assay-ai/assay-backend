@@ -44,7 +44,7 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
 
   /**
    * The OTHER credentials — in any tenant — that hold `delegate` as their bound
-   * key and are neither revoked nor deleted (expired ones included; the caller
+   * key, or as a pending one, and are neither revoked nor deleted (expired ones included; the caller
    * decides what an expired holder means). A deliberate cross-tenant read, like
    * {@link findByTokenHash}: a delegate key is one key platform-wide, and
    * `uq_agent_credentials_delegate_live` enforces it across tenants, so the
@@ -57,7 +57,11 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
   ): Promise<AgentCredentialEntity[]> {
     return this.manager
       .createQueryBuilder(AgentCredentialEntity, 'credential')
-      .where('lower(credential.delegate_account) = lower(:delegate)', { delegate })
+      .where(
+        '(lower(credential.delegate_account) = lower(:delegate) ' +
+          'OR lower(credential.pending_delegate_account) = lower(:delegate))',
+        { delegate },
+      )
       .andWhere('credential.id <> :exceptCredentialId', { exceptCredentialId })
       .andWhere('credential.revoked_at IS NULL')
       .andWhere('credential.deleted_at IS NULL')
@@ -73,16 +77,56 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
    * {@link findOtherDelegateHolders}.
    */
   async releaseDelegateFromExpired(delegate: string, exceptCredentialId: string): Promise<void> {
-    await this.manager
+    for (const [column, set] of [
+      ['delegate_account', { delegateAccount: null, delegateBoundAt: null }],
+      [
+        'pending_delegate_account',
+        { pendingDelegateAccount: null, pendingDelegateRequestedAt: null },
+      ],
+    ] as const) {
+      await this.manager
+        .createQueryBuilder()
+        .update(AgentCredentialEntity)
+        .set(set)
+        .where(`lower(${column}) = lower(:delegate)`, { delegate })
+        .andWhere('id <> :exceptCredentialId', { exceptCredentialId })
+        .andWhere('revoked_at IS NULL')
+        .andWhere('deleted_at IS NULL')
+        .andWhere('expires_at IS NOT NULL AND expires_at <= now()')
+        .execute();
+    }
+  }
+
+  /**
+   * The payer approved `delegate` on chain: every live credential of this
+   * organization's `agentId` that waits with it as its PENDING key gets it as
+   * its bound key, in one UPDATE (the old key stops signing for it at the
+   * same instant). Returns the promoted credential ids; none when no
+   * credential waits with that key.
+   */
+  async promotePendingDelegate(
+    organizationId: string,
+    agentId: string,
+    delegate: string,
+  ): Promise<string[]> {
+    const result = await this.manager
       .createQueryBuilder()
       .update(AgentCredentialEntity)
-      .set({ delegateAccount: null, delegateBoundAt: null })
-      .where('lower(delegate_account) = lower(:delegate)', { delegate })
-      .andWhere('id <> :exceptCredentialId', { exceptCredentialId })
+      .set({
+        delegateAccount: () => 'pending_delegate_account',
+        delegateBoundAt: () => 'now()',
+        pendingDelegateAccount: null,
+        pendingDelegateRequestedAt: null,
+      })
+      .where('organization_id = :organizationId', { organizationId })
+      .andWhere('agent_id = :agentId', { agentId })
+      .andWhere('lower(pending_delegate_account) = lower(:delegate)', { delegate })
       .andWhere('revoked_at IS NULL')
       .andWhere('deleted_at IS NULL')
-      .andWhere('expires_at IS NOT NULL AND expires_at <= now()')
+      .andWhere('(expires_at IS NULL OR expires_at > now())')
+      .returning(['id'])
       .execute();
+    return ((result.raw ?? []) as { id: string }[]).map((row) => row.id);
   }
 
   /**

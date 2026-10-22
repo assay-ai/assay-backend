@@ -1,4 +1,6 @@
 import { AuditLogWriter } from '@shared/audit';
+import { AGENT_SCOPES } from '@shared/auth/agent-scope';
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -66,6 +68,8 @@ describe('human-only control writes', () => {
         label: null,
         callerKind,
         paymentsAllowed: true,
+        // Every scope: what is refused here is refused whatever a key holds.
+        scopes: AGENT_SCOPES,
       };
       return session;
     },
@@ -132,6 +136,10 @@ describe('human-only control writes', () => {
         { provide: EscrowDelegationService, useValue: delegation },
         { provide: AuditLogWriter, useValue: { recordAfterCommit: jest.fn() } },
         { provide: AccessEpochService, useValue: { bump: jest.fn() } },
+        {
+          provide: AgentCredentialRepository,
+          useValue: { promotePendingDelegate: jest.fn(async () => []) },
+        },
       ],
     }).compile();
 
@@ -220,37 +228,45 @@ describe('human-only control writes', () => {
     },
   );
 
+  it.each(['/spend-policy', '/escrow'])(
+    'GET %s still answers an agent credential with activity:read',
+    async (path) => {
+      const res = await request(app.getHttpServer())
+        .get(path)
+        .set('Authorization', 'Bearer token-agent');
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  // Owner decision: notification routing and the inbox are a person's, for
+  // every key (the Slack webhook URL is itself a secret).
   it.each([
-    '/spend-policy',
     '/notification-channels',
     '/notification-preferences',
     '/notifications',
     '/notifications/unread-count',
-    '/escrow',
-  ])('GET %s still answers an agent credential', async (path) => {
+  ])('GET %s refuses an agent credential, whatever its scopes', async (path) => {
     const res = await request(app.getHttpServer())
       .get(path)
       .set('Authorization', 'Bearer token-agent');
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
   });
 
-  // Review A-5, narrowed by BUG-DEMO-02: a machine token must not enumerate
-  // another agent's credentials (prefixes, delegate keys, expiries); it may
-  // read its own agent's metadata, which never carries a secret.
-  it('GET /agents/:agentId/credentials refuses an agent credential for another agent', async () => {
+  // Key metadata is the owner's: an agent credential reads no agent's keys,
+  // its own included.
+  it('GET /agents/:agentId/credentials refuses an agent credential, for any agent', async () => {
     const OTHER = '33333333-3333-4333-8333-333333333333';
-    const agent = await request(app.getHttpServer())
-      .get(`/agents/${OTHER}/credentials`)
-      .set('Authorization', 'Bearer token-agent');
-    expect(agent.status).toBe(403);
-    expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    for (const agentId of [OTHER, AGENT_ID]) {
+      const agent = await request(app.getHttpServer())
+        .get(`/agents/${agentId}/credentials`)
+        .set('Authorization', 'Bearer token-agent');
+      expect(agent.status).toBe(403);
+      expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    }
     expect(credentials.list).not.toHaveBeenCalled();
-
-    const own = await request(app.getHttpServer())
-      .get(`/agents/${AGENT_ID}/credentials`)
-      .set('Authorization', 'Bearer token-agent');
-    expect(own.status).toBe(200);
 
     const human = await request(app.getHttpServer())
       .get(`/agents/${OTHER}/credentials`)

@@ -159,14 +159,14 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     storedCredential: true,
   });
 
-  async function sign(typedData: Record<string, unknown>) {
+  async function sign(typedData: Record<string, unknown>, signer = delegateKey) {
     const typed = typedData as {
       domain: { name: string; version: string; chainId: string; verifyingContract: `0x${string}` };
       types: Record<string, { name: string; type: string }[]>;
       primaryType: string;
       message: Record<string, string>;
     };
-    return delegateKey.signTypedData({
+    return signer.signTypedData({
       domain: { ...typed.domain, chainId: Number(typed.domain.chainId) },
       types: typed.types,
       primaryType: typed.primaryType,
@@ -207,6 +207,8 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       agentLabel: 'research bot',
       delegate: null,
       boundAt: null,
+      pendingDelegate: null,
+      pendingSince: null,
       paidCalls: null,
       paidCallsUnknown: false,
     });
@@ -450,6 +452,110 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       await dataSource.query(`DELETE FROM "agents" WHERE "id" = $1`, [oauthAgentId]);
       await dataSource.query(`DELETE FROM "organizations" WHERE "id" = $1`, [orgId]);
     }
+  });
+
+  /**
+   * D3: a new key never silently replaces a bound one. It waits as PENDING,
+   * the bound key keeps working, and the payer's approval of the new key
+   * (`POST /escrow/delegates`, `promotePendingDelegate`) swaps them in one
+   * UPDATE.
+   */
+  describe('rebinding a payment key waits for the payer’s approval', () => {
+    async function bindKey(credentialId: string, key = delegateKey) {
+      const challenge = await service.challenge(session(credentialId), key.address);
+      return service.bind(
+        session(credentialId),
+        challenge.challengeId,
+        await sign(challenge.typedData, key),
+      );
+    }
+
+    it('keeps the bound key, stores the new one as pending, and promotes it on approval', async () => {
+      const id = await credential();
+      const first = privateKeyToAccount(generatePrivateKey());
+      const second = privateKeyToAccount(generatePrivateKey());
+      expect(await bindKey(id, first)).toMatchObject({ status: 'ACTIVE' });
+
+      const pending = await bindKey(id, second);
+      expect(pending).toMatchObject({
+        status: 'PENDING_APPROVAL',
+        delegate: `${CHAIN}:${first.address}`,
+        pendingDelegate: `${CHAIN}:${second.address}`,
+      });
+      const [waiting] = await dataSource.query(
+        `SELECT "delegate_account", "pending_delegate_account", "pending_delegate_requested_at" ` +
+          `FROM "agent_credentials" WHERE "id" = $1`,
+        [id],
+      );
+      expect(waiting.delegate_account).toBe(`${CHAIN}:${first.address}`);
+      expect(waiting.pending_delegate_account).toBe(`${CHAIN}:${second.address}`);
+      expect(waiting.pending_delegate_requested_at).not.toBeNull();
+
+      // Another agent's approval of the same key promotes nothing here.
+      expect(
+        await credentials.promotePendingDelegate(organizationId, randomUUID(), second.address),
+      ).toEqual([]);
+
+      // The payer approves the new key: it replaces the old one at once.
+      const promoted = await credentials.promotePendingDelegate(
+        organizationId,
+        agentId,
+        `${CHAIN}:${second.address.toLowerCase()}`,
+      );
+      expect(promoted).toEqual([id]);
+      const [after] = await dataSource.query(
+        `SELECT "delegate_account", "delegate_bound_at", "pending_delegate_account", ` +
+          `"pending_delegate_requested_at" FROM "agent_credentials" WHERE "id" = $1`,
+        [id],
+      );
+      expect(after).toMatchObject({
+        delegate_account: `${CHAIN}:${second.address}`,
+        pending_delegate_account: null,
+        pending_delegate_requested_at: null,
+      });
+      expect(after.delegate_bound_at).not.toBeNull();
+    });
+
+    it('never promotes a pending key of a revoked credential', async () => {
+      const id = await credential();
+      const first = privateKeyToAccount(generatePrivateKey());
+      const second = privateKeyToAccount(generatePrivateKey());
+      await bindKey(id, first);
+      await bindKey(id, second);
+      await dataSource.query(
+        `UPDATE "agent_credentials" SET "revoked_at" = now(), "revoked_by" = 'test' WHERE "id" = $1`,
+        [id],
+      );
+
+      expect(
+        await credentials.promotePendingDelegate(
+          organizationId,
+          agentId,
+          `${CHAIN}:${second.address}`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('refuses a pending key another live credential holds, bound or pending', async () => {
+      const holder = await credential();
+      const waiter = await credential();
+      const contested = privateKeyToAccount(generatePrivateKey());
+      await bindKey(holder, privateKeyToAccount(generatePrivateKey()));
+      await bindKey(holder, contested);
+      await bindKey(waiter, privateKeyToAccount(generatePrivateKey()));
+
+      await expect(bindKey(waiter, contested)).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+      });
+      // The index enforces it too, should the check ever be raced.
+      await expect(
+        dataSource.query(
+          `UPDATE "agent_credentials" SET "pending_delegate_account" = $2, ` +
+            `"pending_delegate_requested_at" = now() WHERE "id" = $1`,
+          [waiter, `${CHAIN}:${contested.address.toLowerCase()}`],
+        ),
+      ).rejects.toMatchObject({ constraint: 'uq_agent_credentials_pending_delegate_live' });
+    });
   });
 
   it('keeps the account and the instant together, by CHECK', async () => {

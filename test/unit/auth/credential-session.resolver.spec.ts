@@ -117,6 +117,7 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
       callerKind: McpCallerKind.AGENT,
       delegateAccount: null,
       paymentsAllowed,
+      scopes: ['tools:call', 'payments', 'activity:read'],
     });
   });
 
@@ -161,6 +162,54 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
       callerKind: McpCallerKind.AGENT,
       delegateAccount: null,
       paymentsAllowed: true,
+      scopes: ['tools:call', 'payments', 'activity:read'],
+    });
+  });
+
+  describe('scopes', () => {
+    it("carries the row's scopes, dropping any value outside the vocabulary", async () => {
+      const { resolver, agents } = build();
+      seedLinkedAgent(agents);
+
+      const session = await resolver.sessionFor(
+        buildCredential({ scopes: ['activity:read', 'admin', 'reports:write'] }),
+        { paymentsAllowed: true },
+      );
+
+      expect(session.scopes).toEqual(['activity:read', 'reports:write']);
+    });
+
+    it('a row without payments is free-only, whatever the source allows', async () => {
+      const { resolver, agents } = build();
+      seedLinkedAgent(agents);
+
+      const session = await resolver.sessionFor(buildCredential({ scopes: ['tools:call'] }), {
+        paymentsAllowed: true,
+      });
+
+      expect(session.paymentsAllowed).toBe(false);
+      expect(session.scopes).toEqual(['tools:call']);
+    });
+
+    it('payments does not lift a source that refuses payments (third-party OAuth)', async () => {
+      const { resolver, agents } = build();
+      seedLinkedAgent(agents);
+
+      const session = await resolver.sessionFor(buildCredential(), { paymentsAllowed: false });
+
+      expect(session.paymentsAllowed).toBe(false);
+    });
+
+    it('a row with no scopes may do nothing', async () => {
+      const { resolver, agents } = build();
+      seedLinkedAgent(agents);
+
+      const session = await resolver.sessionFor(buildCredential({ scopes: [] }), {
+        paymentsAllowed: true,
+      });
+
+      expect(session.scopes).toEqual([]);
+      expect(session.paymentsAllowed).toBe(false);
     });
   });
 });

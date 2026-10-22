@@ -98,7 +98,7 @@ describe('OAuth code exchange — real migrations', () => {
       writer,
       audit,
       epoch,
-      { issuer: MCP },
+      { issuer: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       new AgentCredentialRepository(dataSource),
@@ -513,7 +513,7 @@ describe('OAuth code exchange — real migrations', () => {
     expectPair(await exchange(minted, { resource: `${MCP}/c/weather` }));
   });
 
-  it('creates exactly one agent_credentials row, issued_via OAUTH, scopes {}, expires_at = refresh expires_at', async () => {
+  it('creates exactly one agent_credentials row, issued_via OAUTH, scopes {tools:call} for a third-party client, expires_at = refresh expires_at', async () => {
     const minted = await mint();
     const pair = expectPair(await exchange(minted));
 
@@ -530,7 +530,8 @@ describe('OAuth code exchange — real migrations', () => {
     const [credential] = rows;
     expect(credential.issuedVia).toBe('OAUTH');
     expect(credential.oauthClientId).toBe(client.id);
-    expect(credential.scopes).toEqual([]);
+    // A third-party client's grant: free tool calls only (H2).
+    expect(credential.scopes).toEqual(['tools:call']);
     expect(credential.name).toBe('Example app');
     expect(credential.prefix).toBeNull();
     expect(credential.tokenHash).toBeNull();
@@ -570,7 +571,7 @@ describe('OAuth code exchange — real migrations', () => {
     expect(created[0].after).toEqual({
       agentId: minted.agentId,
       name: 'Example app',
-      scopes: [],
+      scopes: ['tools:call'],
       // The rolling refresh expiry at creation (R-OA-13).
       expiresAt: credential.expiresAt!.toISOString(),
       issuedVia: 'OAUTH',
@@ -579,6 +580,14 @@ describe('OAuth code exchange — real migrations', () => {
     });
     // No narrowing copied: nothing to invalidate.
     expect(bumps).toHaveLength(0);
+  });
+
+  it("a grant of the built-in assay-mcp client gets a new API key's scopes", async () => {
+    const minted = await mint({ oauthClient: builtin });
+    expectPair(await exchange(minted, {}, builtin));
+
+    const [credential] = await credentialsOf(minted.agentId);
+    expect(credential.scopes).toEqual(['tools:call', 'payments', 'activity:read']);
   });
 
   it('replaces copies narrowing and revokes the old live row', async () => {

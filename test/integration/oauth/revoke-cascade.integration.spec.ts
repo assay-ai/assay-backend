@@ -135,7 +135,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       new OAuthGrantWriter(dataSource, credentialRepository, realAudit),
       realAudit,
       epoch,
-      { issuer: MCP },
+      { issuer: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentialRepository,

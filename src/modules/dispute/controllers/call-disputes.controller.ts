@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 
 import {
   CallDisputeDetailDto,
@@ -33,6 +33,7 @@ import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator'
 export class CallDisputesController {
   constructor(private readonly disputes: CallDisputeService) {}
 
+  @RequireAgentScope(AgentScope.REPORTS_WRITE)
   @Post()
   @ApiOperation({
     summary: 'Dispute a paid call (by payment intent or verdict id)',
@@ -57,6 +58,7 @@ export class CallDisputesController {
     return this.disputes.file(session, body);
   }
 
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get()
   @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'This organization’s call disputes, newest first' })
@@ -68,6 +70,7 @@ export class CallDisputesController {
     return this.disputes.listForBuyer(session.organizationId, query);
   }
 
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get(':id')
   @TenantCache({ ttl: 10, vary: 'org', epochs: ['disputes'] })
   @ApiOperation({ summary: 'One call dispute, with its captured evidence' })
@@ -80,6 +83,7 @@ export class CallDisputesController {
     return this.disputes.getForBuyer(session.organizationId, params.id);
   }
 
+  @RequireAgentScope(AgentScope.REPORTS_WRITE)
   @Post(':id/withdraw')
   // A state change of an existing report, not a creation.
   @HttpCode(200)

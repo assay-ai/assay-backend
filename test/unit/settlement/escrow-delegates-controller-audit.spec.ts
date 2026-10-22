@@ -1,3 +1,5 @@
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { EscrowDelegatesController } from '@modules/settlement/controllers/escrow-delegates.controller';
@@ -28,11 +30,15 @@ function build() {
     delegates: null,
   }));
   const recordAfterCommit = jest.fn(async () => undefined);
+  const promotePendingDelegate = jest.fn(async (): Promise<string[]> => []);
+  const evictOrganization = jest.fn(async () => undefined);
   const controller = new EscrowDelegatesController(
     { submit } as unknown as EscrowDelegationService,
     { recordAfterCommit } as unknown as AuditLogWriter,
+    { promotePendingDelegate } as unknown as AgentCredentialRepository,
+    { evictOrganization } as unknown as SessionEvictions,
   );
-  return { controller, submit, recordAfterCommit };
+  return { controller, submit, recordAfterCommit, promotePendingDelegate, evictOrganization };
 }
 
 const SIGNED = { payer: PAYER_ADDRESS, delegate: DELEGATE, nonce: '0', deadline: '1789139970' };
@@ -92,5 +98,51 @@ describe('EscrowDelegatesController — audit log', () => {
       'refused',
     );
     expect(recordAfterCommit).not.toHaveBeenCalled();
+  });
+});
+
+/** D3: the payer's approval of a credential's PENDING key is what makes it the bound key. */
+describe('EscrowDelegatesController — approving a pending payment key', () => {
+  const AUTHORIZE = {
+    ...SIGNED,
+    maxVoucherAmount: '2500000',
+    maxPerWindow: '9000000',
+    validUntil: '1789139970',
+    signature: SIGNATURE,
+  };
+
+  it('promotes the key for this organization and agent after the grant landed, and evicts sessions', async () => {
+    const { controller, promotePendingDelegate, evictOrganization } = build();
+    promotePendingDelegate.mockResolvedValueOnce(['cred-1']);
+
+    await controller.authorize(SESSION, AUTHORIZE);
+
+    expect(promotePendingDelegate).toHaveBeenCalledWith('org-1', 'agent-1', `${CHAIN}:${DELEGATE}`);
+    expect(evictOrganization).toHaveBeenCalledWith('org-1');
+  });
+
+  it('evicts nothing when no credential waited with the key', async () => {
+    const { controller, evictOrganization } = build();
+
+    await controller.authorize(SESSION, AUTHORIZE);
+
+    expect(evictOrganization).not.toHaveBeenCalled();
+  });
+
+  it('promotes nothing when the relay refused', async () => {
+    const { controller, submit, promotePendingDelegate } = build();
+    submit.mockRejectedValueOnce(new Error('refused'));
+
+    await expect(controller.authorize(SESSION, AUTHORIZE)).rejects.toThrow('refused');
+    expect(promotePendingDelegate).not.toHaveBeenCalled();
+  });
+
+  it('still answers the approval when the promotion fails (the old binding stays)', async () => {
+    const { controller, promotePendingDelegate } = build();
+    promotePendingDelegate.mockRejectedValueOnce(new Error('db down'));
+
+    await expect(controller.authorize(SESSION, AUTHORIZE)).resolves.toMatchObject({
+      transactionHash: TX,
+    });
   });
 });

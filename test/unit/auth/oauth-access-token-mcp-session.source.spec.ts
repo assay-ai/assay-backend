@@ -2,6 +2,7 @@ import {
   AgentCredentialEntity,
   CredentialIssuedVia,
 } from '@database/postgres/entities/agent-credential.entity';
+import { AgentScope } from '@shared/auth/agent-scope';
 import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import {
   OAuthClientEntity,
@@ -510,6 +511,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
         callerKind: McpCallerKind.AGENT,
         delegateAccount: DELEGATE,
         paymentsAllowed: true,
+        scopes: [AgentScope.TOOLS_CALL, AgentScope.PAYMENTS, AgentScope.ACTIVITY_READ],
       } satisfies McpSession);
     });
 

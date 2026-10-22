@@ -10,7 +10,8 @@ export function buildCredential(
     name: 'CI deploy',
     prefix: 'assay_sk_live_abcd1234',
     tokenHash: 'digest-placeholder',
-    scopes: [],
+    // A new key's default scopes (`DEFAULT_AGENT_SCOPES`).
+    scopes: ['tools:call', 'payments', 'activity:read'],
     lastUsedAt: null,
     expiresAt: null,
     revokedAt: null,

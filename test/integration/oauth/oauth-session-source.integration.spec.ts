@@ -100,7 +100,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
       new OAuthGrantWriter(dataSource, credentials, audit),
       audit,
       epoch,
-      { issuer: MCP },
+      { issuer: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentials,
@@ -199,7 +199,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
     const token = `assay_sk_live_${randomBytes(24).toString('base64url')}`;
     const [row] = (await dataSource.query(
       `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "prefix", "token_hash", "scopes")
-       VALUES ($1, $2, 'CI deploy', $3, $4, '{}') RETURNING "id"`,
+       VALUES ($1, $2, 'CI deploy', $3, $4, '{tools:call,payments,activity:read}') RETURNING "id"`,
       [ORGANIZATION, agentId, token.slice(0, 22), digestToken(token)],
     )) as { id: string }[];
     return { token, id: row.id };
@@ -258,7 +258,13 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
 
     const viaGrant = await source('mcp').resolve(pair.access_token);
     const viaKey = await apiKeys().resolve(key.token);
-    expect(viaGrant).toStrictEqual({ ...viaKey, credentialId, paymentsAllowed: false });
+    // A third-party grant holds `tools:call` alone (H2).
+    expect(viaGrant).toStrictEqual({
+      ...viaKey,
+      credentialId,
+      paymentsAllowed: false,
+      scopes: ['tools:call'],
+    });
 
     await expect(source('api').resolve(pair.access_token)).rejects.toMatchObject({
       errorCode: 'AUTH_CLIENT_NOT_ALLOWED_HERE',

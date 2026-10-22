@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
+import { AgentScope } from '@shared/auth/agent-scope';
 import {
   ConfigMcpSessionSource,
   McpCredentialSnapshot,
@@ -56,9 +57,27 @@ describe('ConfigMcpSessionSource — the token decides whose balance is spent', 
       // Review A-2: a config token is a machine unless its record says a
       // person uses it, so an agent process handed one is not a person.
       callerKind: McpCallerKind.AGENT,
-      // unchanged behaviour: only third-party OAuth grants are refused paid calls
+      // A machine token without `scopes` gets a new API key's default.
       paymentsAllowed: true,
+      scopes: ['tools:call', 'payments', 'activity:read'],
     });
+  });
+
+  it("a machine token's own scopes decide, and without payments it is free-only", async () => {
+    const scoped = new ConfigMcpSessionSource({
+      tok_live_reader: { ...SNAPSHOT.tok_live_abc, scopes: [AgentScope.ACTIVITY_READ] },
+    });
+    const session = await scoped.resolve('tok_live_reader');
+
+    expect(session.scopes).toEqual(['activity:read']);
+    expect(session.paymentsAllowed).toBe(false);
+  });
+
+  it("a person's token carries no scopes (a person is not limited by them)", async () => {
+    const session = await source.resolve('tok_live_person');
+
+    expect(session.scopes).toBeUndefined();
+    expect(session.paymentsAllowed).toBe(true);
   });
 
   it('resolves a record marked "kind": "human" as a person', async () => {
@@ -132,6 +151,15 @@ describe('loadMcpCredentials — what a credentials file may hold, and where', (
     expect(Object.keys(loadMcpCredentials(file({ short_demo_token: RECORD }), env))).toEqual([
       'short_demo_token',
     ]);
+  });
+
+  it('refuses a scope outside the vocabulary', () => {
+    expect(() =>
+      loadMcpCredentials(
+        file({ [STRONG]: { ...RECORD, scopes: ['tools:call', 'admin'] } }),
+        'test',
+      ),
+    ).toThrow(/scopes/);
   });
 
   it('refuses a kind other than "human", rather than reading a typo as a machine', () => {

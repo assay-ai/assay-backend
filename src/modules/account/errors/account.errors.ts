@@ -19,6 +19,8 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
   ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
   ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED = 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+  ACCOUNT_CREDENTIAL_SCOPES_INVALID = 'ACCOUNT_CREDENTIAL_SCOPES_INVALID',
+  ACCOUNT_CREDENTIAL_EXPIRY_INVALID = 'ACCOUNT_CREDENTIAL_EXPIRY_INVALID',
   // ── The account blocklist ──
   ACCOUNT_BLOCKED = 'ACCOUNT_BLOCKED',
 }
@@ -86,6 +88,20 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
       `The signature was not made by the delegate key${
         context?.delegate ? ` ${context.delegate}` : ''
       }; nothing was bound`,
+  },
+  /** `payments` without `tools:call`: a key that may pay must be able to call. */
+  credentialScopesInvalid: {
+    code: AccountErrorCode.ACCOUNT_CREDENTIAL_SCOPES_INVALID,
+    statusCode: 400,
+    message: () => 'The payments scope needs the tools:call scope too; nothing was created',
+  },
+  /** `expiresAt` in the past, or more than the maximum lifetime away. */
+  credentialExpiryInvalid: {
+    code: AccountErrorCode.ACCOUNT_CREDENTIAL_EXPIRY_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `expiresAt must be in the future and at most ${context?.maxDays ?? 365} days from now; ` +
+      'nothing was created',
   },
   /**
    * The key is already bound to ANOTHER live agent credential (in any

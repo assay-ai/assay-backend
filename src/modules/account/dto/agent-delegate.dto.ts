@@ -64,6 +64,39 @@ export class AgentDelegateBindingDto {
 
   @ApiPropertyOptional({ nullable: true })
   boundAt: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'CAIP-10 of a key this credential proved it holds while another key was bound: it ' +
+      'waits for the payer to approve it on the enable-paid page, and only then replaces ' +
+      '`delegate`. Until then `delegate` keeps signing. Null when none waits.',
+  })
+  pendingDelegate: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'ISO-8601. When the pending key was proved.',
+  })
+  pendingSince: string | null;
+}
+
+/** Whether `POST /agents/me/delegate` bound the key, or left it waiting for approval. */
+export enum DelegateBindStatus {
+  /** No other key was bound (or it was this one): the key is `delegate` now. */
+  ACTIVE = 'ACTIVE',
+  /**
+   * Another key is bound and stays bound: the proved key is `pendingDelegate`
+   * until the payer approves it on chain (enable-paid), which replaces the old
+   * one in one step. A new binding never silently replaces a live one.
+   */
+  PENDING_APPROVAL = 'PENDING_APPROVAL',
+}
+
+/** `POST /agents/me/delegate` */
+export class AgentDelegateBindResultDto extends AgentDelegateBindingDto {
+  @ApiProperty({ enum: DelegateBindStatus })
+  status: DelegateBindStatus;
 }
 
 /**
