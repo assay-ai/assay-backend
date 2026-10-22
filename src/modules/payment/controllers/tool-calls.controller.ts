@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 
 import { GetToolCallParamsDto } from '../dto/get-tool-call.dto';
@@ -26,6 +26,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('ToolCalls')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.ACTIVITY_READ)
 @Controller('tool-calls')
 export class ToolCallsController {
   constructor(

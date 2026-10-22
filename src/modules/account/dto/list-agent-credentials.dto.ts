@@ -71,7 +71,10 @@ export class AgentCredentialDto {
   })
   prefix: string | null;
 
-  @ApiProperty({ type: [String] })
+  @ApiProperty({
+    type: [String],
+    description: 'What the key may do: `tools:call`, `payments`, `activity:read`, `reports:write`',
+  })
   scopes: string[];
 
   @ApiPropertyOptional({ nullable: true })
@@ -100,6 +103,18 @@ export class AgentCredentialDto {
 
   @ApiPropertyOptional({ nullable: true })
   delegateBoundAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'CAIP-10 of a key the agent proved while `delegateAccount` was bound. It waits for the ' +
+      "payer's approval on enable-paid (`POST /escrow/delegates` for this key), which makes it " +
+      '`delegateAccount` in one step; until then the bound key keeps signing.',
+  })
+  pendingDelegateAccount: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  pendingDelegateRequestedAt: Date | null;
 
   @ApiProperty()
   createdAt: Date;

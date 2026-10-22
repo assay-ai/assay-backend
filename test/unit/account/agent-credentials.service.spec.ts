@@ -11,6 +11,7 @@ import { digestToken } from '@shared/crypto/token-digest';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
+import { AgentScope } from '@shared/auth/agent-scope';
 
 const ORGANIZATION_ID = '11111111-1111-1111-1111-111111111111';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
@@ -229,6 +230,8 @@ describe('AgentCredentialsService.list', () => {
       // Agent payment delegation: the delegate key this credential proved it holds.
       'delegateAccount',
       'delegateBoundAt',
+      'pendingDelegateAccount',
+      'pendingDelegateRequestedAt',
       'createdAt',
     ]);
   });
@@ -451,6 +454,8 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
   });
 });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 describe('AgentCredentialsService.create', () => {
   it('refuses an agent that does not exist, before minting anything', async () => {
     const { service, credentials } = buildHarness();
@@ -492,12 +497,101 @@ describe('AgentCredentialsService.create', () => {
     expect(created).not.toHaveProperty('token');
   });
 
-  it('defaults scopes to an empty array and expiresAt to null', async () => {
-    const { service } = buildHarness();
-    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'no scopes' }, ACTOR);
+  it('defaults to tools:call payments activity:read and a 90-day expiry', async () => {
+    const { service, credentials } = buildHarness();
+    const before = Date.now();
+    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'default' }, ACTOR);
 
-    expect(response.scopes).toEqual([]);
-    expect(response.expiresAt).toBeNull();
+    expect(response.scopes).toEqual(['tools:call', 'payments', 'activity:read']);
+    expect(credentials.create.mock.calls[0][0].scopes).toEqual([
+      'tools:call',
+      'payments',
+      'activity:read',
+    ]);
+    const lifetime = (response.expiresAt as Date).getTime() - before;
+    expect(lifetime).toBeGreaterThanOrEqual(90 * DAY_MS - 5_000);
+    expect(lifetime).toBeLessThanOrEqual(90 * DAY_MS + 5_000);
+  });
+
+  it('keeps exactly the scopes asked for (reports:write only when named)', async () => {
+    const { service } = buildHarness();
+
+    const ci = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'free only', scopes: [AgentScope.TOOLS_CALL] },
+      ACTOR,
+    );
+    expect(ci.scopes).toEqual(['tools:call']);
+
+    const reporter = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      {
+        name: 'sdk',
+        scopes: [AgentScope.TOOLS_CALL, AgentScope.PAYMENTS, AgentScope.REPORTS_WRITE],
+      },
+      ACTOR,
+    );
+    expect(reporter.scopes).toEqual(['tools:call', 'payments', 'reports:write']);
+
+    const reader = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'read only', scopes: [AgentScope.ACTIVITY_READ] },
+      ACTOR,
+    );
+    expect(reader.scopes).toEqual(['activity:read']);
+  });
+
+  it('refuses payments without tools:call, before minting anything', async () => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          ORGANIZATION_ID,
+          AGENT_ID,
+          { name: 'pay only', scopes: [AgentScope.PAYMENTS, AgentScope.ACTIVITY_READ] },
+          ACTOR,
+        ),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_SCOPES_INVALID,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
+  });
+
+  it('accepts an expiry up to 365 days away', async () => {
+    const { service } = buildHarness();
+    const expiresAt = new Date(Date.now() + 365 * DAY_MS - 60_000);
+
+    const response = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'a year', expiresAt },
+      ACTOR,
+    );
+
+    expect(response.expiresAt).toEqual(expiresAt);
+  });
+
+  it.each([
+    ['in the past', -60_000],
+    ['now', 0],
+    ['more than 365 days away', 365 * DAY_MS + 60_000],
+  ])('refuses an expiry %s (ACCOUNT_CREDENTIAL_EXPIRY_INVALID)', async (_label, offset) => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          ORGANIZATION_ID,
+          AGENT_ID,
+          { name: 'bad expiry', expiresAt: new Date(Date.now() + offset) },
+          ACTOR,
+        ),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_EXPIRY_INVALID,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
   });
 
   it('two credentials for the same agent get different tokens and different hashes', async () => {
@@ -728,7 +822,7 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
     const response = await service.create(
       ORGANIZATION_ID,
       AGENT_ID,
-      { name: 'CI deploy', scopes: ['tools:call'] },
+      { name: 'CI deploy', scopes: [AgentScope.TOOLS_CALL] },
       ACTOR,
     );
 
@@ -745,7 +839,7 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
         agentId: AGENT_ID,
         name: 'CI deploy',
         scopes: ['tools:call'],
-        expiresAt: null,
+        expiresAt: expect.any(String),
         issuedVia: 'API_KEY',
         clientId: null,
         replaces: null,

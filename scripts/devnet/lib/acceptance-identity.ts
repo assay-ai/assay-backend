@@ -37,6 +37,7 @@ import {
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { loadMcpCredentials } from '@modules/mcp/services/config-mcp-session.source';
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 @Module({
@@ -158,7 +159,7 @@ export async function borrowOrganizationCredential(
       name: `devnet-acceptance-${label}`,
       prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
       tokenHash: digestToken(token),
-      scopes: [],
+      scopes: [...DEFAULT_AGENT_SCOPES],
       // A backstop for the one path `release()` cannot cover. `release()` is
       // called from a `finally`, and a `finally` does not run on SIGINT —
       // Ctrl-C during a slow HTTP call is an ordinary way to end an operator
@@ -254,7 +255,7 @@ export async function mintScriptIdentity(
       name: `devnet-acceptance-${label}`,
       prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
       tokenHash: digestToken(token),
-      scopes: [],
+      scopes: [...DEFAULT_AGENT_SCOPES],
       expiresAt: null,
     }),
   );

@@ -80,7 +80,9 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
   tokenHash: string | null;
 
   /**
-   * What this credential may do, as an array rather than a bitmask or a CSV.
+   * What this credential may do (`AgentScope`, enforced by
+   * `SessionAuthGuard` and the MCP host), as an array rather than a bitmask or
+   * a CSV. Fixed at creation; a value outside the vocabulary grants nothing.
    *
    * Postgres can index and query `text[]` containment directly, and a scope
    * added later does not renumber the ones already issued — which a bitmask
@@ -125,6 +127,18 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
 
   @Column({ name: 'delegate_bound_at', type: 'timestamptz', nullable: true })
   delegateBoundAt: Date | null;
+
+  /**
+   * A DELEGATE key the agent proved it holds while {@link delegateAccount} was
+   * already bound (CAIP-10). It signs nothing yet: it replaces the bound key
+   * only when the payer approves it on chain (`POST /escrow/delegates`), in
+   * one UPDATE. A new binding never silently replaces a live one.
+   */
+  @Column({ name: 'pending_delegate_account', type: 'varchar', length: 256, nullable: true })
+  pendingDelegateAccount: string | null;
+
+  @Column({ name: 'pending_delegate_requested_at', type: 'timestamptz', nullable: true })
+  pendingDelegateRequestedAt: Date | null;
 
   /**
    * Per-key narrowing of the agent's access (API only, design spec §7.7).

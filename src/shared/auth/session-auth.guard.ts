@@ -2,12 +2,16 @@ import { CanActivate, ExecutionContext, Inject, Injectable } from '@nestjs/commo
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 
+import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import {
   MCP_SESSION_SOURCE,
+  McpCallerKind,
   McpSession,
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
+
+import { AGENT_SCOPE_METADATA, AgentScope } from './agent-scope';
 
 import { extractBearerToken } from './bearer-token';
 import {
@@ -75,6 +79,15 @@ export interface RequestWithSession extends Request {
  * `@AllowedWhileBlocked()` (a write that only revokes authority). A
  * read that hands out something spendable (`GET /escrow/next-seq` issues a
  * voucher seq) refuses again where it does so.
+ *
+ * **An agent credential is refused unless the route names its scope.** A
+ * person's session (`HUMAN`, or a `CONFIG` token marked as a person's) passes
+ * on every route. Any other session passes only on a route marked
+ * `@RequireAgentScope(scope)` and only when it holds that scope: a route
+ * without the mark is `AUTH_HUMAN_SESSION_REQUIRED` for every key, and a key
+ * without the scope is `AUTH_SCOPE_MISSING` naming it. Deny by default: a new
+ * route is a person's until someone opens it on purpose. The check runs in
+ * this guard, before the tenant cache can answer.
  */
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
@@ -86,6 +99,7 @@ export class SessionAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithSession>();
     const session = await this.sessions.resolve(extractBearerToken(request));
+    this.assertAgentScope(context, session);
     if (
       session.blocked &&
       !READ_METHODS.has(request.method.toUpperCase()) &&
@@ -95,6 +109,18 @@ export class SessionAuthGuard implements CanActivate {
     }
     request[SESSION_REQUEST_KEY] = session;
     return true;
+  }
+
+  private assertAgentScope(context: ExecutionContext, session: McpSession): void {
+    if (PERSON_KINDS.has(session.callerKind)) return;
+    const required = this.reflector.getAllAndOverride<AgentScope | undefined>(
+      AGENT_SCOPE_METADATA,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!required) throw AuthErrors.humanSessionRequired();
+    if (!(session.scopes ?? []).includes(required)) {
+      throw AuthErrors.scopeMissing({ requiredScope: required });
+    }
   }
 
   private isReadOnlyRoute(context: ExecutionContext): boolean {
@@ -107,6 +133,12 @@ export class SessionAuthGuard implements CanActivate {
     );
   }
 }
+
+/** Sessions no scope limits: the same allow-list as `HumanSessionGuard`. */
+const PERSON_KINDS: ReadonlySet<McpCallerKind> = new Set([
+  McpCallerKind.HUMAN,
+  McpCallerKind.CONFIG,
+]);
 
 /** The methods a blocked person's session may still use. */
 const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);

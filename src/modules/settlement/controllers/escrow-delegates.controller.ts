@@ -1,10 +1,12 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Optional, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiExtraModels, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import {
   UNSIGNED_CHAIN_TRANSACTION_EXTRA_MODELS,
   toUnsignedChainTransactionDto,
 } from '@modules/chains/dto/unsigned-chain-transaction.dto';
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -49,6 +51,9 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
  * its agent may spend; the agent's own credential must not be able to build,
  * relay or even list it — the same line `HumanSessionGuard` draws for the
  * escrow limits and the spend policy.
+ *
+ * Authorising a key an agent credential holds as PENDING (a rebinding) is
+ * also the approval that makes it that credential's bound key.
  */
 @ApiTags('Escrow')
 @ApiBearerAuth()
@@ -56,9 +61,13 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiExtraModels(...UNSIGNED_CHAIN_TRANSACTION_EXTRA_MODELS)
 @Controller('escrow/delegates')
 export class EscrowDelegatesController {
+  private readonly logger = new Logger(EscrowDelegatesController.name);
+
   constructor(
     private readonly delegation: EscrowDelegationService,
     private readonly audit: AuditLogWriter,
+    private readonly credentials: AgentCredentialRepository,
+    @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
   /** `GET /escrow/delegates` — the payer's standing delegates, read from the chain. */
@@ -152,6 +161,7 @@ export class EscrowDelegatesController {
       validUntil: new Date(Number(body.validUntil) * 1000).toISOString(),
       transactionHash: result.submission.transactionHash,
     });
+    await this.promotePending(session, delegateOn(session.agentAccount, body.delegate));
     return toRelayedDto(EscrowDelegationKind.AUTHORIZE_DELEGATE, session.agentAccount, result);
   }
 
@@ -207,6 +217,31 @@ export class EscrowDelegatesController {
       transactionHash: result.submission.transactionHash,
     });
     return toRelayedDto(EscrowDelegationKind.REVOKE_DELEGATE, session.agentAccount, result);
+  }
+
+  /**
+   * The payer's approval of a key an agent credential holds as PENDING (it
+   * proved the key while another was bound) is what makes it the bound key:
+   * one UPDATE, after the authorisation landed on chain. The old key's grant
+   * stays on chain until the payer revokes it, but no credential signs with
+   * it any more. A failure leaves the old binding in place and is logged: the
+   * approval itself succeeded and must still be answered.
+   */
+  private async promotePending(session: McpSession, delegate: AccountId): Promise<void> {
+    try {
+      const promoted = await this.credentials.promotePendingDelegate(
+        session.organizationId,
+        session.agentId,
+        delegate,
+      );
+      if (promoted.length === 0) return;
+      // The session carries `delegateAccount`: a cached one would still name the old key.
+      await this.sessions?.evictOrganization(session.organizationId);
+    } catch (error) {
+      this.logger.warn(
+        `pending delegate not promoted: ${(error as Error)?.message ?? String(error)}`,
+      );
+    }
   }
 
   /**

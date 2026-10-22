@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { Inject, Injectable } from '@nestjs/common';
 
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import { AgentScope, DEFAULT_AGENT_SCOPES, isAgentScope } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import { McpErrors } from '../errors/mcp.errors';
@@ -37,6 +38,12 @@ export interface McpCredentialRecord {
    * trusted as little as possible (review A-2).
    */
   readonly kind?: 'human';
+  /**
+   * A machine token's scopes (`AgentScope`), as an API key's. Omitted: the
+   * new-key default (`tools:call payments activity:read`). Not read for a
+   * person's token.
+   */
+  readonly scopes?: readonly AgentScope[];
 }
 
 /** `token → credential`. Empty by default: no token is valid until one is configured. */
@@ -111,6 +118,18 @@ export function loadMcpCredentials(
     );
   }
 
+  const badScopes = records.find(([, record]) => {
+    const scopes = (record as { scopes?: unknown } | null)?.scopes;
+    return scopes !== undefined && !(Array.isArray(scopes) && scopes.every(isAgentScope));
+  });
+  if (badScopes) {
+    throw new Error(
+      `MCP_CREDENTIALS_FILE (${path}): credential ${JSON.stringify(
+        (badScopes[1] as { credentialId?: unknown }).credentialId ?? null,
+      )} has scopes outside the vocabulary`,
+    );
+  }
+
   return Object.freeze(parsed as McpCredentialSnapshot);
 }
 
@@ -143,6 +162,7 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
+    const scopes = record.kind === 'human' ? undefined : (record.scopes ?? DEFAULT_AGENT_SCOPES);
     return Promise.resolve({
       credentialId: record.credentialId,
       organizationId: record.organizationId,
@@ -152,7 +172,8 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       label: record.label ?? null,
       // A person only when the record says so — see `McpCredentialRecord.kind`.
       callerKind: record.kind === 'human' ? McpCallerKind.CONFIG : McpCallerKind.AGENT,
-      paymentsAllowed: true,
+      paymentsAllowed: scopes === undefined || scopes.includes(AgentScope.PAYMENTS),
+      ...(scopes ? { scopes } : {}),
     });
   }
 

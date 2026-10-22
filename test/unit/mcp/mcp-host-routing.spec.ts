@@ -11,19 +11,29 @@ import { OAuthDiscoveryModule } from '@modules/oauth/oauth-discovery.module';
 import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
-import { MCP_SESSION_SOURCE, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { MCP_SESSION_SOURCE, McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
 import { MCP_HOST_CONFIG } from '@modules/toolset/config/mcp-host.config';
 import { ALLOW_ALL } from '@modules/toolset/domain/access';
 import { McpPathKind } from '@modules/toolset/domain/mcp-url';
 import { AccessResolver } from '@modules/toolset/services/access.resolver';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
+import { AgentScope } from '@shared/auth/agent-scope';
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 import { SESSION } from './helpers/mcp-harness';
 
 const TOKEN = 'test-agent-token';
+/** Agent keys: one may call tools, one may only read its activity. */
+const CALLER_KEY = 'test-agent-key-tools';
+const READER_KEY = 'test-agent-key-reader';
+const agentSession = (scopes: AgentScope[]): McpSession => ({
+  ...SESSION,
+  callerKind: McpCallerKind.AGENT,
+  storedCredential: true,
+  scopes,
+});
 const WEB = 'https://app.example.com';
 const HOST = 'https://mcp.example.com';
 
@@ -45,6 +55,8 @@ describe('the MCP host — routing', () => {
           provide: MCP_SESSION_SOURCE,
           useValue: {
             resolve: async (token: string | null) => {
+              if (token === CALLER_KEY) return agentSession([AgentScope.TOOLS_CALL]);
+              if (token === READER_KEY) return agentSession([AgentScope.ACTIVITY_READ]);
               if (token !== TOKEN) throw McpErrors.credentialInvalid();
               return SESSION;
             },
@@ -258,6 +270,28 @@ describe('the MCP host — routing', () => {
     expect(response.status).toBe(404);
     expect(response.body).toMatchObject({ error: { code: 'MCP_URL_NOT_FOUND' } });
     expect(created).toHaveLength(0);
+  });
+
+  it('an agent key needs tools:call: 403 AUTH_SCOPE_MISSING without it, before any URL or server', async () => {
+    const call = (token: string) =>
+      request(app.getHttpServer())
+        .post('/')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Accept', 'application/json, text/event-stream')
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+
+    const refused = await call(READER_KEY);
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({
+      error: { code: 'AUTH_SCOPE_MISSING', context: { requiredScope: 'tools:call' } },
+    });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(created).toHaveLength(0);
+
+    const served = await call(CALLER_KEY);
+    expect(served.status).toBe(200);
+    expect(created).toHaveLength(1);
   });
 
   it('normalises an encoded @ before resolving', async () => {

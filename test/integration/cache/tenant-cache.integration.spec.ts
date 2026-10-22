@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import {
   Controller,
   INestApplication,
@@ -194,6 +195,7 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
           agentId: agentA,
           agentAccount: payerA,
           callerKind: McpCallerKind.AGENT,
+          scopes: DEFAULT_AGENT_SCOPES,
         } as McpSession;
       case 'personB':
         return {
@@ -672,7 +674,7 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
       );
     });
 
-    it("an agent token never gets a person's cached `include` answer", async () => {
+    it("an agent token never gets a person's cached `include` answer: it is refused first", async () => {
       // A second agent in the same organization: the person sees both, the
       // agent token only itself, and neither list answers the other.
       const sibling = await dataSource.getRepository(AgentEntity).save(
@@ -694,13 +696,10 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
       await get('/agents?include=health', 'personA').expect(200);
       expect(spy).toHaveBeenCalledTimes(1);
       expect(ids(person)).toEqual(expect.arrayContaining([agentA, sibling.id]));
-      // An agent token is allowed the route (BUG-DEMO-02) but is a different
-      // cache entry: the handler runs for it, and it sees its own agent only.
-      const machine = await get('/agents?include=health', 'machineA').expect(200);
-      expect(spy).toHaveBeenCalledTimes(2);
-      expect(ids(machine)).toEqual([agentA]);
-      expect(machine.body.data.items[0]).not.toHaveProperty('credentials');
-      // And the other way round: the agent's list never answers the person.
+      // An agent token is refused the route before the cache can answer it.
+      const machine = await get('/agents?include=health', 'machineA').expect(403);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(machine.body)).not.toContain(sibling.id);
       const personAgain = await get('/agents?include=health', 'personA').expect(200);
       expect(ids(personAgain)).toEqual(expect.arrayContaining([agentA, sibling.id]));
     });

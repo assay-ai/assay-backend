@@ -10,7 +10,13 @@ import { AccountId, toAccountId } from '@modules/chains/ports/caip.types';
 import { EscrowLimits } from '@modules/chains/ports/escrow.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AgentScope,
+  CurrentSession,
+  HumanSessionGuard,
+  RequireAgentScope,
+  SessionAuthGuard,
+} from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -129,6 +135,7 @@ export class EscrowController {
    * numbers and the others *build a transaction naming the escrow's mint*,
    * which cannot be guessed. See `EscrowAccountService`.
    */
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get()
   @ApiOperation({
     summary: "Read this buyer's escrow: balance, limits, window meter and any pending withdrawal",
