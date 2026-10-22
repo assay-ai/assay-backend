@@ -78,6 +78,15 @@ export interface McpSession {
   readonly paymentsAllowed: boolean;
 
   /**
+   * True when the source would let this agent credential pay but its own
+   * scopes lack `payments` (a free-calls-only key). The paid-call path refuses
+   * it `AUTH_SCOPE_MISSING` naming `payments`, so the agent is told the key
+   * cannot pay instead of being asked for a voucher. Absent otherwise; a
+   * third-party grant (the source never lets it pay) keeps its own answer.
+   */
+  readonly paymentsScopeMissing?: boolean;
+
+  /**
    * What an {@link McpCallerKind.AGENT} session may do (`AgentScope`), from
    * the credential row, or the config record. `SessionAuthGuard` admits an
    * agent session only on a route that names a scope it holds, and the MCP

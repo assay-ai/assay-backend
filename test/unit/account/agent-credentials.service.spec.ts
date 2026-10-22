@@ -94,6 +94,7 @@ function buildHarness(
     })),
     findOneBy: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
+    clearPendingDelegate: jest.fn(async (): Promise<boolean> => false),
   };
 
   const agents = {
@@ -152,7 +153,10 @@ function buildHarness(
       return result;
     }),
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordAfterCommit: jest.fn().mockResolvedValue(undefined),
+  };
   const accessEpoch = {
     bump: jest.fn(async (organizationId: string) => {
       events.push(`bump:${organizationId}`);
@@ -611,6 +615,50 @@ describe('AgentCredentialsService.create', () => {
     const created = credentials.create.mock.calls[0][0];
     expect(created.organizationId).toBe(ORGANIZATION_ID);
     expect(created.agentId).toBe(AGENT_ID);
+  });
+});
+
+/** M3: the owner discards the payment key a credential waits with. */
+describe('AgentCredentialsService.discardPendingDelegate', () => {
+  const PENDING = 'eip155:46630:0x00000000000000000000000000000000000000d2';
+
+  it('returns ACCOUNT_CREDENTIAL_NOT_FOUND for another agent, and clears nothing', async () => {
+    const { service, credentials } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow({ agentId: OTHER_AGENT_ID }));
+
+    await expectErrorCodeAsync(
+      () => service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_NOT_FOUND,
+    );
+    expect(credentials.clearPendingDelegate).not.toHaveBeenCalled();
+  });
+
+  it('clears the pending key in its own organization and records who discarded which key', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow({ pendingDelegateAccount: PENDING }));
+    credentials.clearPendingDelegate.mockResolvedValueOnce(true);
+
+    await service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(credentials.clearPendingDelegate).toHaveBeenCalledWith(ORGANIZATION_ID, CREDENTIAL_ID);
+    expect(audit.recordAfterCommit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: ORGANIZATION_ID,
+        action: 'credential.pending_delegate_discarded',
+        resourceId: CREDENTIAL_ID,
+        before: { pendingDelegateAccount: PENDING },
+        after: { pendingDelegateAccount: null },
+      }),
+    );
+  });
+
+  it('is idempotent: nothing pending, nothing recorded', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow());
+
+    await service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(audit.recordAfterCommit).not.toHaveBeenCalled();
   });
 });
 

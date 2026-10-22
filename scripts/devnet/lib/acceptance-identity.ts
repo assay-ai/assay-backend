@@ -217,6 +217,9 @@ export async function borrowOrganizationCredential(
  *    Nothing in the acceptance suite reads this address back and
  *    expects it to match a funded signer's address.
  */
+/** How long a key {@link mintScriptIdentity} mints stays valid: one run, with margin. */
+export const SCRIPT_IDENTITY_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 export async function mintScriptIdentity(
   app: INestApplicationContext,
   label: string,
@@ -256,7 +259,8 @@ export async function mintScriptIdentity(
       prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
       tokenHash: digestToken(token),
       scopes: [...DEFAULT_AGENT_SCOPES],
-      expiresAt: null,
+      // Every key expires; this one outlives one acceptance run, no more.
+      expiresAt: new Date(Date.now() + SCRIPT_IDENTITY_LIFETIME_MS),
     }),
   );
 

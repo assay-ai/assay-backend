@@ -515,7 +515,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       } satisfies McpSession);
     });
 
-    it('third-party grant on the MCP host: the same session but paymentsAllowed false', async () => {
+    it('third-party grant on the MCP host: the same session but paymentsAllowed false and no payment key', async () => {
       const fx = build('mcp');
       seedGrant(fx, { clientRowId: 'client-third' });
       fx.credentials.rows.push(
@@ -534,6 +534,8 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
         ...viaKey,
         credentialId: 'grant-1',
         paymentsAllowed: false,
+        // A session that may not pay carries no payment key (M2).
+        delegateAccount: null,
       });
     });
   });

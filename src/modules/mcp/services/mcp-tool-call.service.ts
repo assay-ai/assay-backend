@@ -1,3 +1,5 @@
+import { AuthErrors } from '@modules/auth/errors/auth.errors';
+import { AgentScope } from '@shared/auth/agent-scope';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
@@ -626,6 +628,16 @@ export class McpToolCallService {
       // mode and must require no reconfiguration from the agent. Execution
       // simply continues below, among `PAID` and `FREEMIUM` bindings only, and
       // on rail B nothing is charged without a voucher the buyer signs.
+    }
+
+    // ── The key may pay ───────────────────────────────────────────────────
+    //
+    // Defence in depth for the free-calls-only key (M2): the paid path itself
+    // refuses a credential whose scopes lack `payments`, before any quote is
+    // offered or anything is created, rather than relying on it never having
+    // bound a payment key.
+    if (session.paymentsScopeMissing === true) {
+      throw AuthErrors.scopeMissing({ requiredScope: AgentScope.PAYMENTS });
     }
 
     // ── The buyer's chain ─────────────────────────────────────────────────

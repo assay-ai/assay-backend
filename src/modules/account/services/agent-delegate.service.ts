@@ -86,7 +86,10 @@ interface StoredChallenge extends DelegateBindingChallenge {
  * UPDATE: `AgentCredentialRepository.promotePendingDelegate`). So a leaked
  * API key cannot swap the payment key under the owner's running agent; it can
  * only ask, and the owner sees the new key's fingerprint before approving. A
- * newer proof replaces an older pending key (nothing live hangs on it).
+ * newer proof replaces an older pending key (nothing live hangs on it), and
+ * the owner can discard one (`DELETE /agents/:agentId/credentials/:id/pending-delegate`).
+ * A first bind writes only onto a row with no other key, so two racing first
+ * binds cannot both win: the later one is `ACCOUNT_DELEGATE_BIND_CONFLICT`.
  */
 @Injectable()
 export class AgentDelegateService {
@@ -270,10 +273,24 @@ export class AgentDelegateService {
       ? { pendingDelegateAccount: stored.delegate, pendingDelegateRequestedAt: now }
       : { delegateAccount: stored.delegate, delegateBoundAt: now };
     try {
-      await this.credentials.update(
-        { organizationId: session.organizationId, id: session.credentialId },
-        write,
-      );
+      if (replacing) {
+        await this.credentials.update(
+          { organizationId: session.organizationId, id: session.credentialId },
+          write,
+        );
+      } else if (
+        // A first bind (or the same key again) only onto a row that still has
+        // no other key: two first binds racing on one credential cannot both
+        // win, and the later one never silently replaces the earlier (M1).
+        !(await this.credentials.bindDelegateIfUnbound(
+          session.organizationId,
+          session.credentialId,
+          stored.delegate,
+          now,
+        ))
+      ) {
+        throw AccountErrors.delegateBindConflict();
+      }
     } catch (error) {
       const violation = error as {
         code?: string;

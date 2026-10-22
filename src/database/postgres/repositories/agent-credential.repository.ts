@@ -98,6 +98,46 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
   }
 
   /**
+   * Binds `delegate` as the credential's key only while it has no key, or
+   * already this one (case-insensitively), in one conditional UPDATE. False
+   * when another key got there first: the caller must not overwrite it.
+   */
+  async bindDelegateIfUnbound(
+    organizationId: string,
+    id: string,
+    delegate: string,
+    boundAt: Date,
+  ): Promise<boolean> {
+    const result = await this.manager
+      .createQueryBuilder()
+      .update(AgentCredentialEntity)
+      .set({ delegateAccount: delegate, delegateBoundAt: boundAt })
+      .where('organization_id = :organizationId', { organizationId })
+      .andWhere('id = :id', { id })
+      .andWhere('(delegate_account IS NULL OR lower(delegate_account) = lower(:delegate))', {
+        delegate,
+      })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /**
+   * The owner discards the key a credential waits with (it never signed for
+   * it). False when none was pending.
+   */
+  async clearPendingDelegate(organizationId: string, id: string): Promise<boolean> {
+    const result = await this.manager
+      .createQueryBuilder()
+      .update(AgentCredentialEntity)
+      .set({ pendingDelegateAccount: null, pendingDelegateRequestedAt: null })
+      .where('organization_id = :organizationId', { organizationId })
+      .andWhere('id = :id', { id })
+      .andWhere('pending_delegate_account IS NOT NULL')
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /**
    * The payer approved `delegate` on chain: every live credential of this
    * organization's `agentId` that waits with it as its PENDING key gets it as
    * its bound key, in one UPDATE (the old key stops signing for it at the

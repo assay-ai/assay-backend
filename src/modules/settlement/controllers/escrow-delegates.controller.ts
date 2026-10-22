@@ -161,8 +161,14 @@ export class EscrowDelegatesController {
       validUntil: new Date(Number(body.validUntil) * 1000).toISOString(),
       transactionHash: result.submission.transactionHash,
     });
-    await this.promotePending(session, delegateOn(session.agentAccount, body.delegate));
-    return toRelayedDto(EscrowDelegationKind.AUTHORIZE_DELEGATE, session.agentAccount, result);
+    const promoted = await this.promotePending(
+      session,
+      delegateOn(session.agentAccount, body.delegate),
+    );
+    return {
+      ...toRelayedDto(EscrowDelegationKind.AUTHORIZE_DELEGATE, session.agentAccount, result),
+      promotedCredentialIds: promoted,
+    };
   }
 
   /** `POST /escrow/delegates/revoke-intent` — the `RevokeDelegate` request the payer signs. */
@@ -227,20 +233,22 @@ export class EscrowDelegatesController {
    * it any more. A failure leaves the old binding in place and is logged: the
    * approval itself succeeded and must still be answered.
    */
-  private async promotePending(session: McpSession, delegate: AccountId): Promise<void> {
+  private async promotePending(session: McpSession, delegate: AccountId): Promise<string[]> {
     try {
       const promoted = await this.credentials.promotePendingDelegate(
         session.organizationId,
         session.agentId,
         delegate,
       );
-      if (promoted.length === 0) return;
+      if (promoted.length === 0) return promoted;
       // The session carries `delegateAccount`: a cached one would still name the old key.
       await this.sessions?.evictOrganization(session.organizationId);
+      return promoted;
     } catch (error) {
       this.logger.warn(
         `pending delegate not promoted: ${(error as Error)?.message ?? String(error)}`,
       );
+      return [];
     }
   }
 

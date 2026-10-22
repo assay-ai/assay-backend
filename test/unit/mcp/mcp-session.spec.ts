@@ -71,6 +71,8 @@ describe('ConfigMcpSessionSource — the token decides whose balance is spent', 
 
     expect(session.scopes).toEqual(['activity:read']);
     expect(session.paymentsAllowed).toBe(false);
+    // The paid-call path refuses it by scope (M2).
+    expect(session.paymentsScopeMissing).toBe(true);
   });
 
   it("a person's token carries no scopes (a person is not limited by them)", async () => {
@@ -160,6 +162,12 @@ describe('loadMcpCredentials — what a credentials file may hold, and where', (
         'test',
       ),
     ).toThrow(/scopes/);
+  });
+
+  it('refuses payments without tools:call, as a new key is (M8)', () => {
+    expect(() =>
+      loadMcpCredentials(file({ [STRONG]: { ...RECORD, scopes: ['payments'] } }), 'test'),
+    ).toThrow(/payments without tools:call/);
   });
 
   it('refuses a kind other than "human", rather than reading a typo as a machine', () => {

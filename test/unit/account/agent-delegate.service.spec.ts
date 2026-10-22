@@ -46,6 +46,17 @@ class FakeCredentials {
     this.updates.push({ criteria, patch });
     this.rows.set(criteria.id, { ...this.rows.get(criteria.id), ...patch });
   }
+  /** Mirrors the repository's conditional first bind (M1). */
+  async bindDelegateIfUnbound(_org: string, id: string, delegate: string, boundAt: Date) {
+    const row = this.rows.get(id);
+    const current = row?.delegateAccount ?? null;
+    if (current !== null && current.toLowerCase() !== delegate.toLowerCase()) return false;
+    await this.update(
+      { organizationId: _org, id },
+      { delegateAccount: delegate, delegateBoundAt: boundAt },
+    );
+    return true;
+  }
   /** Mirrors the repository: other, not revoked, same key case-insensitively. */
   private holders(delegate: string, except: string) {
     return [...this.rows.entries()].filter(
@@ -618,7 +629,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     });
 
     it('answers a lost race on the unique index as ALREADY_BOUND', async () => {
-      credentials.update = async () => {
+      credentials.bindDelegateIfUnbound = async () => {
         throw Object.assign(new Error('duplicate key'), {
           code: '23505',
           constraint: 'uq_agent_credentials_delegate_live',
@@ -630,6 +641,31 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
           errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
         },
       );
+    });
+
+    /**
+     * M1: two first binds race on one credential. Both read "no key"; the
+     * one that writes second finds a key there and must not overwrite it.
+     */
+    it('a first bind that loses the race to another key is ACCOUNT_DELEGATE_BIND_CONFLICT', async () => {
+      const winner = `${CHAIN}:${otherKey.address}`;
+      const read = credentials.findOneBy.bind(credentials);
+      // The read sees no key; the other bind lands right after it.
+      credentials.findOneBy = async (criteria: { id: string }) => {
+        const row = await read(criteria);
+        credentials.rows.set(criteria.id, {
+          ...credentials.rows.get(criteria.id),
+          delegateAccount: winner,
+          delegateBoundAt: new Date(),
+        });
+        return row;
+      };
+      const { challenge, signature } = await signChallenge();
+      await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject(
+        { errorCode: 'ACCOUNT_DELEGATE_BIND_CONFLICT', statusCode: 409 },
+      );
+      expect(credentials.rows.get('cred-1')?.delegateAccount).toBe(winner);
+      expect(credentials.rows.get('cred-1')?.pendingDelegateAccount ?? null).toBeNull();
     });
 
     it('checks only after the proof: a wrong key learns nothing', async () => {

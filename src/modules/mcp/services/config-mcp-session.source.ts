@@ -130,6 +130,24 @@ export function loadMcpCredentials(
     );
   }
 
+  // The same rule as a new key (`ACCOUNT_CREDENTIAL_SCOPES_INVALID`): a key
+  // that may pay must be able to call the tool it pays for.
+  const paysWithoutCalling = records.find(([, record]) => {
+    const scopes = (record as { scopes?: readonly string[] } | null)?.scopes;
+    return (
+      scopes !== undefined &&
+      scopes.includes(AgentScope.PAYMENTS) &&
+      !scopes.includes(AgentScope.TOOLS_CALL)
+    );
+  });
+  if (paysWithoutCalling) {
+    throw new Error(
+      `MCP_CREDENTIALS_FILE (${path}): credential ${JSON.stringify(
+        (paysWithoutCalling[1] as { credentialId?: unknown }).credentialId ?? null,
+      )} has payments without tools:call`,
+    );
+  }
+
   return Object.freeze(parsed as McpCredentialSnapshot);
 }
 
@@ -174,6 +192,7 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       callerKind: record.kind === 'human' ? McpCallerKind.CONFIG : McpCallerKind.AGENT,
       paymentsAllowed: scopes === undefined || scopes.includes(AgentScope.PAYMENTS),
       ...(scopes ? { scopes } : {}),
+      ...(scopes && !scopes.includes(AgentScope.PAYMENTS) ? { paymentsScopeMissing: true } : {}),
     });
   }
 

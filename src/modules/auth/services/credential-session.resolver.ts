@@ -101,6 +101,7 @@ export class CredentialSessionResolver {
 
     this.stampUse(credential);
     const scopes = agentScopesOf(credential.scopes);
+    const paymentsAllowed = opts.paymentsAllowed && scopes.includes(AgentScope.PAYMENTS);
 
     return {
       credentialId: credential.id,
@@ -111,9 +112,16 @@ export class CredentialSessionResolver {
       chainId: agent.chainId as ChainId,
       label: agent.label,
       callerKind: McpCallerKind.AGENT,
-      delegateAccount: (credential.delegateAccount as AccountId | null) ?? null,
-      paymentsAllowed: opts.paymentsAllowed && scopes.includes(AgentScope.PAYMENTS),
+      // A session that may not pay carries no payment key, so no voucher is
+      // accepted from it as the key's, whatever the row holds (M2).
+      delegateAccount: paymentsAllowed
+        ? ((credential.delegateAccount as AccountId | null) ?? null)
+        : null,
+      paymentsAllowed,
       scopes,
+      // The source lets it pay; the key's own scopes do not: a paid call is
+      // refused `AUTH_SCOPE_MISSING` (payments) rather than offered a voucher.
+      ...(opts.paymentsAllowed && !paymentsAllowed ? { paymentsScopeMissing: true } : {}),
     };
   }
 

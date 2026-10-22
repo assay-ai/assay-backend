@@ -381,6 +381,34 @@ export class AgentCredentialsService {
     if (isGrant) await sweepRevokedCredentialTokens(this.dataSource, id);
   }
 
+  /**
+   * The owner discards the payment key a credential waits with (M3): a key
+   * the agent proved while another was bound, which the owner does not mean
+   * to approve. The bound key is untouched and keeps signing. Idempotent:
+   * nothing pending is not an error.
+   */
+  async discardPendingDelegate(
+    organizationId: string,
+    agentId: string,
+    id: string,
+    actor: AuditActor,
+  ): Promise<void> {
+    const credential = await this.credentials.findOneBy({ organizationId, id });
+    if (!credential || credential.agentId !== agentId) {
+      throw AccountErrors.credentialNotFound({ id });
+    }
+    if (!(await this.credentials.clearPendingDelegate(organizationId, id))) return;
+    await this.audit.recordAfterCommit({
+      organizationId,
+      actor,
+      action: 'credential.pending_delegate_discarded',
+      resourceType: 'agent_credential',
+      resourceId: id,
+      before: { pendingDelegateAccount: credential.pendingDelegateAccount ?? null },
+      after: { pendingDelegateAccount: null },
+    });
+  }
+
   /** The OAuth clients of a page's grants, by row id, in one query. */
   private async clientsOf(
     rows: readonly AgentCredentialEntity[],
