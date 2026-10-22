@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { AuditLogWriter } from '@shared/audit';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
@@ -29,6 +30,7 @@ import {
   evaluatePublishGate,
   unmetRequirements,
 } from '../domain/publish-gate';
+import { revisionsWithSameCall } from '../domain/tested-call';
 import { CredentialVaultService } from '../credentials/credential-vault.service';
 import { originOf } from '../credentials/credential-rules';
 import { PublishCheckDto, PublishedToolBindingDto } from '../dto/publish-tool-binding.dto';
@@ -50,7 +52,8 @@ import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
  *
  * Registration is open and there is no approval to remove later; what stands
  * between a stranger's binding and paid traffic is four mechanical conditions
- * — a tester run at *this* revision, that run being green, a proved payout
+ * — a tester run at *this* revision (or one with the same call, see
+ * `tested-call.ts`), that run being green, a proved payout
  * address for a paid binding, and stake at or above the router's own minimum.
  * They are the answer to the risk open registration creates: the connectivity
  * check rejects dead endpoints, and this gate blocks bindings that do not run
@@ -99,6 +102,9 @@ export class BindingPublishService {
     private readonly vault: CredentialVaultService,
     // Records pruned credential sets (names only) in the publish transaction.
     @Optional() private readonly audit?: AuditLogWriter,
+    // The revision log, to find earlier revisions with the same call. From the
+    // `@Global` `PostgresModule`; optional only for hand-built harnesses.
+    @Optional() private readonly versions?: BindingVersionRepository,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -208,9 +214,12 @@ export class BindingPublishService {
   }
 
   private async evaluate(organizationId: string, row: ToolBindingEntity): Promise<PublishCheck> {
+    // This revision and the earlier ones with the same call: a passing run at
+    // any of them stands (a price-only change keeps the test, BUG-PRV-CATALOG-02).
+    const revisions = await this.sameCallRevisions(organizationId, row);
     const [latestRun, runsByMajor, built] = await Promise.all([
-      this.latestRun(organizationId, row),
-      this.runsByMajor(organizationId, row),
+      this.latestRun(organizationId, row, revisions),
+      this.runsByMajor(organizationId, row, revisions),
       this.candidate(organizationId, row),
     ]);
     const { candidate, settlementChains } = built;
@@ -261,6 +270,8 @@ export class BindingPublishService {
     return evaluatePublishGate({
       credentials: { required, origin, present },
       mappingVersion: row.mappingVersion,
+      sameCallRevisions: revisions.filter((revision) => revision !== row.mappingVersion),
+      authMode: row.authMode,
       latestRun,
       payoutByChain,
       stakeByChain,
@@ -276,12 +287,13 @@ export class BindingPublishService {
   private async runsByMajor(
     organizationId: string,
     row: ToolBindingEntity,
+    revisions: readonly number[],
   ): Promise<Map<number, PublishGateTestRun | null> | undefined> {
     if (!this.catalogue) return undefined;
     const majors = bindingRange(row.toolVersionRange ?? '^1');
     const [tool, runs] = await Promise.all([
       this.catalogue.findTool(row.toolId),
-      this.runs.findForRevision(organizationId, row.id, row.mappingVersion),
+      this.runs.findForRevision(organizationId, row.id, revisions),
     ]);
     // Each major's run must be at its NEWEST published version (review P2-2):
     // a run at an old minor never checked the fields a later minor added. A
@@ -302,6 +314,7 @@ export class BindingPublishService {
       if (major === undefined || byMajor.get(major)) continue;
       byMajor.set(major, {
         mappingVersion: run.mappingVersion,
+        authMode: run.authMode ?? null,
         outcome: run.outcome as BindingTestOutcome,
         failedLayer: run.failedLayer as BindingTestLayer | null,
         ranAt: run.createdAt,
@@ -310,15 +323,35 @@ export class BindingPublishService {
     return byMajor;
   }
 
+  /**
+   * `row.mappingVersion` first, then every earlier recorded revision whose
+   * call ({@link testedCallKey}) is the same. Without the revision log (a
+   * hand-built harness) only the current revision counts, as before.
+   */
+  private async sameCallRevisions(
+    organizationId: string,
+    row: ToolBindingEntity,
+  ): Promise<number[]> {
+    if (!this.versions) return [row.mappingVersion];
+    const snapshots = await this.versions.find({
+      where: { organizationId, bindingId: row.id },
+      order: { mappingVersion: 'DESC' },
+      take: 200,
+    });
+    return revisionsWithSameCall(row, snapshots);
+  }
+
   private async latestRun(
     organizationId: string,
     row: ToolBindingEntity,
+    revisions: readonly number[],
   ): Promise<PublishGateTestRun | null> {
-    const run = await this.runs.findLatestForRevision(organizationId, row.id, row.mappingVersion);
+    const run = await this.runs.findLatestForRevision(organizationId, row.id, revisions);
     if (!run) return null;
 
     return {
       mappingVersion: run.mappingVersion,
+      authMode: run.authMode ?? null,
       outcome: run.outcome as BindingTestOutcome,
       failedLayer: run.failedLayer as BindingTestLayer | null,
       ranAt: run.createdAt,

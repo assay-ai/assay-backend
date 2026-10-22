@@ -2,10 +2,10 @@ import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 
 import {
-  AgentDelegateBindingDto,
+  AgentDelegateBindResultDto,
   AgentDelegateBindingStatusDto,
   AgentDelegateStatusDto,
   BindDelegateBodyDto,
@@ -24,6 +24,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('AgentCredentials')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.PAYMENTS)
 @Controller('agents/me/delegate')
 export class AgentDelegateController {
   constructor(private readonly delegates: AgentDelegateService) {}
@@ -59,11 +60,17 @@ export class AgentDelegateController {
 
   @Post()
   @ApiOperation({ summary: 'Bind the delegate key to this credential, given its signed challenge' })
-  @ApiResponse({ status: 201, type: AgentDelegateBindingDto })
+  @ApiResponse({
+    status: 201,
+    type: AgentDelegateBindResultDto,
+    description:
+      '`status: ACTIVE` — bound. `PENDING_APPROVAL` — another key is bound and keeps ' +
+      'signing; this one is `pendingDelegate` until the payer approves it on enable-paid',
+  })
   bind(
     @CurrentSession() session: McpSession,
     @Body() body: BindDelegateBodyDto,
-  ): Promise<AgentDelegateBindingDto> {
+  ): Promise<AgentDelegateBindResultDto> {
     return this.delegates.bind(session, body.challengeId, body.signature);
   }
 }

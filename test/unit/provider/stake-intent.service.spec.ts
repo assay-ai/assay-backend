@@ -432,19 +432,15 @@ describe('ProviderStakeIntentService — stake transactions the provider signs',
     // Lean v3 leaves one blocker: time. The exposure authority that used to
     // hold back matured stake behind unsettled calls is gone, and with it the
     // second reason a withdrawal could be smaller than asked for.
+    const matured = BigInt(Math.floor(Date.now() / 1000)) - UNBONDING_PERIOD_SECONDS - 60n;
     const { service } = await build({
-      stake: {
-        bonded: 0n,
-        unbonding: 40_000_000n,
-        // Started just now — nowhere near matured.
-        unbondingStartedAt: BigInt(Math.floor(Date.now() / 1000)),
-      },
+      stake: { bonded: 0n, unbonding: 40_000_000n, unbondingStartedAt: matured },
       tokenBalance: 0n,
     });
 
-    const res = await service.createIntent(PROVIDER_ID, StakeIntentKind.WITHDRAW, '40000000');
+    const res = await service.createIntent(PROVIDER_ID, StakeIntentKind.WITHDRAW, '50000000');
 
-    expect(res.withdrawable?.amount).toBe('0');
+    expect(res.withdrawable?.amount).toBe('40000000');
     expect(res.blockedBy).toBe('UNBONDING_NOT_MATURED');
     // No transaction the chain would reject: the point of naming the limit is
     // to spare the provider the gas of discovering it.
@@ -477,6 +473,45 @@ describe('ProviderStakeIntentService — stake transactions the provider signs',
       'withdraw_stake',
       PROGRAM_ID as Address,
     );
+  });
+
+  it.each([
+    ['nothing unstaked', { bonded: 50_000_000n }],
+    [
+      'unbonding not matured yet',
+      {
+        bonded: 0n,
+        unbonding: 40_000_000n,
+        unbondingStartedAt: BigInt(Math.floor(Date.now() / 1000)),
+      },
+    ],
+  ])(
+    'refuses a withdrawal when nothing is withdrawable (%s) with PROVIDER_STAKE_NOTHING_WITHDRAWABLE (BUG-PRV-MONEY-01)',
+    async (_case, stake) => {
+      const { service } = await build({ stake, tokenBalance: 0n });
+
+      await expectErrorCodeAsync(
+        () => service.createIntent(PROVIDER_ID, StakeIntentKind.WITHDRAW, '1000000'),
+        ProviderErrorCode.PROVIDER_STAKE_NOTHING_WITHDRAWABLE,
+      );
+    },
+  );
+
+  it('refuses an unstake above the bonded stake with PROVIDER_STAKE_INSUFFICIENT_BONDED (BUG-PRV-MONEY-01)', async () => {
+    const { service } = await build({ stake: { bonded: 50_000_000n } });
+
+    await expectErrorCodeAsync(
+      () => service.createIntent(PROVIDER_ID, StakeIntentKind.UNSTAKE, '50000001'),
+      ProviderErrorCode.PROVIDER_STAKE_INSUFFICIENT_BONDED,
+    );
+  });
+
+  it('still builds an unstake of exactly the bonded stake', async () => {
+    const { service } = await build({ stake: { bonded: 50_000_000n } });
+
+    const res = await service.createIntent(PROVIDER_ID, StakeIntentKind.UNSTAKE, '50000000');
+
+    expect(res.transaction).not.toBeNull();
   });
 
   it('builds an unstake intent against an open account', async () => {
@@ -572,16 +607,13 @@ describe('ProviderStakeIntentService — stake transactions the provider signs',
       // The loser, asserted. Adopting the union must not turn `null` into an
       // empty solana member — a transaction the chain would reject is not
       // returned, and `blockedBy` says why.
+      const matured = BigInt(Math.floor(Date.now() / 1000)) - UNBONDING_PERIOD_SECONDS - 60n;
       const { service } = await build({
-        stake: {
-          bonded: 0n,
-          unbonding: 40_000_000n,
-          unbondingStartedAt: BigInt(Math.floor(Date.now() / 1000)),
-        },
+        stake: { bonded: 0n, unbonding: 40_000_000n, unbondingStartedAt: matured },
         tokenBalance: 0n,
       });
 
-      const res = await service.createIntent(PROVIDER_ID, StakeIntentKind.WITHDRAW, '40000000');
+      const res = await service.createIntent(PROVIDER_ID, StakeIntentKind.WITHDRAW, '50000000');
 
       expect(res.transaction).toBeNull();
       expect(res.blockedBy).not.toBeNull();

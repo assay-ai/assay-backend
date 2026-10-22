@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsBoolean, IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsOptional, IsUUID } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -59,6 +59,26 @@ export class ListToolCallsQueryDto extends ListQueryDto {
     return value;
   })
   refundable?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['free'],
+    description:
+      '`free`: also list the served free calls (`tool_call_records`), merged by time under one ' +
+      'cursor. Every item then carries `kind` (`paid` | `free`); a free row has no intent, no ' +
+      'payment status and no money fields. `status[]` or `refundable=true` leave free rows out. ' +
+      'Sort `createdAt` only. Without it the response is unchanged',
+  })
+  @IsOptional()
+  @IsIn(['free'])
+  include?: 'free';
+
+  @ApiPropertyOptional({
+    enum: ['paid', 'free'],
+    description: 'Only with `include=free`: only the paid rows, or only the free calls',
+  })
+  @IsOptional()
+  @IsIn(['paid', 'free'])
+  kind?: 'paid' | 'free';
 }
 
 /** One row of the call list, and the shape `GET /tool-calls/:intentId` returns for one. */
@@ -85,6 +105,16 @@ export class ToolCallDto {
       'provider forfeited or whose debt was written off. Always present, even when equal',
   })
   charged: MoneyDto;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'What the refund guarantee kept back, the receipt’s `withheld` and a part of ' +
+      '`GET /withheld`: the listed price for a call that reserved money and was not charged ' +
+      '(REFUNDED / VOIDED / EXPIRED with a hold, a forfeited or voided-debt call), zero ' +
+      'otherwise — zero for an EXPIRED call that never reserved anything (it never ran)',
+  })
+  withheld: MoneyDto;
 
   @ApiProperty({
     description:
@@ -148,3 +178,50 @@ export class ToolCallDto {
   })
   refundableIfReportedUntil?: Date | null;
 }
+
+/**
+ * A served free call in `GET /tool-calls?include=free` (BUG-AGT-01): no payment
+ * intent, no payment status and no money fields, because nothing was charged.
+ */
+export class FreeToolCallDto {
+  @ApiProperty({ enum: ['free'] })
+  kind: 'free';
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Always null: a free call has no intent',
+  })
+  intentId: null;
+
+  @ApiProperty({ description: 'The call id the provider received as `X-Assay-Call-Id`' })
+  callId: string;
+
+  @ApiPropertyOptional({ nullable: true, type: String })
+  toolId: string | null;
+
+  @ApiPropertyOptional({ nullable: true, type: String })
+  toolName: string | null;
+
+  @ApiPropertyOptional({ nullable: true, type: String })
+  providerId: string | null;
+
+  @ApiProperty({ enum: ['FREE', 'FREEMIUM'] })
+  pricingMode: string;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: String,
+    description: 'Only when the call was sampled for verification; null means not checked',
+  })
+  verdict: string | null;
+
+  @ApiProperty()
+  createdAt: Date;
+}
+
+/** A paid row of `GET /tool-calls?include=free`: the usual row plus `kind`. */
+export type PaidToolCallRowDto = ToolCallDto & { kind: 'paid' };
+
+/** One item of `GET /tool-calls`: the usual row, or with `include=free` either kind. */
+export type ToolCallListItemDto = ToolCallDto | PaidToolCallRowDto | FreeToolCallDto;

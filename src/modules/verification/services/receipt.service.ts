@@ -14,6 +14,7 @@ import {
   debtStateOf,
   isChargedWhenSettled,
   isNotCollected,
+  isRefundedByReport,
 } from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import {
@@ -140,6 +141,10 @@ export class ReceiptService {
       withheld: toMoneyDto(withheld),
       forfeited: settled && collection === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
+      // The call list's flag (BUG-X-01): an upheld report cancelled the charge
+      // (a held payment refunded, or a lapsed debt voided). Both read
+      // `debt: VOIDED` like a late-verdict void; this tells them apart from it.
+      refundedByReport: settled && isRefundedByReport(intent),
       chargeNote:
         settled && collection !== CollectionState.NORMAL ? intent.redemptionLastError : null,
       verdict: buildVerdict(record),

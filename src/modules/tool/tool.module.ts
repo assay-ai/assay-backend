@@ -3,15 +3,16 @@ import { ConfigService } from '@nestjs/config';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
-import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { ChainId } from '@modules/chains/ports/caip.types';
 import { ProviderModule } from '@modules/provider/provider.module';
-import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
 
 import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from './services/binding-call-counter.service';
 import { BindingCeilingService } from './services/binding-ceiling.service';
+import {
+  CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
+  ContractMinimumStakeFloors,
+} from './services/contract-minimum-stake-floors.service';
 import { loadToolCatalogue } from './services/catalogue-seed';
 import { TOOL_CATALOGUE } from './ports/tool-catalogue.port';
 import { DatabaseToolCatalogue } from './services/database-tool-catalogue';
@@ -112,8 +113,18 @@ import {
     // dial providers. See that module for why.
 
     {
+      // The floor per chain, raised to the settlement contract's own
+      // `params().minimumStake` when that is stricter (BUG: routing and the
+      // contract disagreed, $50 vs $100 on the e2e stack). Read before the
+      // module finishes starting and every 5 minutes after, each chain within
+      // 2 s; an unreadable chain keeps its last reading or the configured
+      // floor. One instance, shared with the binding editor's and the
+      // publish gate's `PROVIDER_MINIMUM_STAKE_BY_CHAIN`.
+      ...CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
+    },
+    {
       provide: ROUTER_CONFIG,
-      useFactory: (config: ConfigService, enabled: readonly ChainId[]): RouterConfig => {
+      useFactory: (floors: ContractMinimumStakeFloors, config: ConfigService): RouterConfig => {
         // One reader for the two env vars, shared with `ProviderApiModule` and
         // the stake monitor, so the router's floor and the provider console's
         // cannot disagree. `$50` at USDC's 6 decimals by default.
@@ -124,16 +135,17 @@ import {
         // discounted, so a chain this
         // deployment offers with no floor fails the boot rather than serving
         // paid calls it cannot price the collateral for.
-        const minimumStakeByChain = loadMinimumStakeByChain(config, enabled);
-
+        //
+        // The floor itself is `ContractMinimumStakeFloors.byChain`: config,
+        // raised to the contract's minimum where that is stricter.
         return {
           ...DEFAULT_ROUTER_TUNING,
           maxAttempts: Number(config.get<string>('ROUTER_MAX_ATTEMPTS') ?? 3),
           totalDeadlineMs: Number(config.get<string>('ROUTER_TOTAL_DEADLINE_MS') ?? 30_000),
-          minimumStakeByChain,
+          minimumStakeByChain: floors.byChain,
         };
       },
-      inject: [ConfigService, ENABLED_CHAINS],
+      inject: [ContractMinimumStakeFloors, ConfigService],
     },
 
     // How many calls each binding has served, which is what the
@@ -174,6 +186,7 @@ import {
   exports: [
     ProviderRouterService,
     QuoteIndexService,
+    ContractMinimumStakeFloors,
     TOOL_CATALOGUE,
     TOOL_CONTRACTS,
     TOOL_CONTRACT_CHANGES,

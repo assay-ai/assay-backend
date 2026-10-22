@@ -36,7 +36,10 @@ import { BOTH, ProviderStub, Via, World, credentialOf } from './equivalence-fixt
  *   `credential.revoked` entry (the shape is the same; the audit and revoke
  *   cases assert the values);
  * - the `agent_credentials` columns that differ by issuance (§6.2, R-OA-13):
- *   `issued_via`, `oauth_client_id`, `prefix`, `token_hash`, `expires_at`;
+ *   `issued_via`, `oauth_client_id`, `token_last4`, `token_hash`, `expires_at`,
+ *   and `scopes` (fixed by client kind: a third-party grant holds `tools:call`
+ *   alone; the assay-mcp grant's equal a key's, asserted by the session-source
+ *   suite);
  *   and the grant's own `oauth_*` token rows ({@link ISSUANCE_COLUMNS},
  *   {@link ISSUANCE_TABLES});
  * - the `credential.created` entries of the world's two fixture credentials,
@@ -53,9 +56,10 @@ import { BOTH, ProviderStub, Via, World, credentialOf } from './equivalence-fixt
 export const ISSUANCE_COLUMNS = [
   'issued_via',
   'oauth_client_id',
-  'prefix',
+  'token_last4',
   'token_hash',
   'expires_at',
+  'scopes',
 ] as const;
 
 /** Rows only a grant has: how its secret is held (§6.2). */

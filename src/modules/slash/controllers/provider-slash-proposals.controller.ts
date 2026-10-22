@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import {
@@ -8,8 +8,14 @@ import {
   SessionAuthGuard,
 } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { ApiCursorPage, CursorPageDto } from '@shared/api';
 
-import { SlashProposalCaseDto, SlashProposalIdParamsDto } from '../dto/slash-proposal.dto';
+import {
+  ListSlashProposalsQueryDto,
+  SlashProposalCaseDto,
+  SlashProposalDto,
+  SlashProposalIdParamsDto,
+} from '../dto/slash-proposal.dto';
 import { SlashCaseService } from '../services/slash-case.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator';
@@ -35,6 +41,18 @@ export class ProviderSlashProposalsController {
     private readonly cases: SlashCaseService,
     private readonly lifecycle: SlashProposalService,
   ) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Your proposals, newest first, including those not yet on chain (`onChain=false`)',
+  })
+  @ApiCursorPage(SlashProposalDto)
+  async list(
+    @CurrentSession() session: McpSession,
+    @Query() query: ListSlashProposalsQueryDto,
+  ): Promise<CursorPageDto<SlashProposalDto>> {
+    return this.cases.listForProvider(session.organizationId, query);
+  }
 
   @Get(':proposalId')
   @ApiOperation({ summary: 'One proposal, with everything the case screen renders' })

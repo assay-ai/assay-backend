@@ -76,6 +76,8 @@ function escrowState(): EscrowState {
     exists: true,
     chainReadable: true,
     lifetime: null,
+    uncreditedOnChain: null,
+    withdrawalsFrozen: null,
     account: ALICE.account,
     escrowPda: null,
     escrowTokenAccount: null,

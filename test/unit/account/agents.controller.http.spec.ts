@@ -5,6 +5,7 @@ import request from 'supertest';
 import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
 import { AgentsController } from '@modules/account/controllers/agents.controller';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { AgentListService } from '@modules/account/services/agent-list.service';
@@ -13,6 +14,8 @@ import { CursorPageDto } from '@shared/api';
 import { MCP_SESSION_SOURCE, McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { AuditLogWriter } from '@shared/audit';
+import { AGENT_SCOPES } from '@shared/auth/agent-scope';
+import { TENANT_CACHE_KEY } from '@shared/decorators/tenant-cache.decorator';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { ConfigService } from '@nestjs/config';
 import { getDataSourceToken } from '@nestjs/typeorm';
@@ -164,9 +167,10 @@ describe('PATCH /agents/:agentId over HTTP', () => {
 });
 
 /**
- * `GET /agents?include=` over HTTP: the plain list is unchanged and open to an
- * agent; `include` is a person's read (it nests the credentials route's
- * items), and only what was asked for is added.
+ * `GET /agents?include=` over HTTP: a person's read. `include` nests the
+ * credentials route's items for every agent, and only what was asked for is
+ * added. An agent credential is refused, whatever its scopes: the agents list
+ * and key metadata are the owner's (owner decision, agent key scopes).
  */
 describe('GET /agents?include= over HTTP', () => {
   let app: INestApplication;
@@ -175,12 +179,14 @@ describe('GET /agents?include= over HTTP', () => {
 
   const session = (callerKind: McpCallerKind) => ({
     credentialId: `cred-${callerKind}`,
+    storedCredential: callerKind === McpCallerKind.AGENT,
     organizationId: ORG_A,
     agentId: AGENT_A,
     agentAccount: 'eip155:46630:0x0000000000000000000000000000000000000001',
     chainId: 'eip155:46630',
     label: null,
     callerKind,
+    scopes: AGENT_SCOPES,
   });
   const sessions = {
     resolve: jest.fn(async (token: string | null) => {
@@ -203,14 +209,16 @@ describe('GET /agents?include= over HTTP', () => {
     name: 'laptop',
     issuedVia: 'API_KEY',
     oauthClient: null,
-    prefix: 'assay_sk_live_ab',
-    scopes: [],
+    hint: 'assay_sk_live_…2fds',
+    scopes: ['tools:call', 'payments', 'activity:read'],
     lastUsedAt: new Date('2026-10-19T08:00:00.000Z'),
     expiresAt: null,
     revokedAt: null,
     rotatedFromId: null,
     delegateAccount: 'eip155:46630:0x0000000000000000000000000000000000000002',
     delegateBoundAt: new Date('2026-10-18T08:00:00.000Z'),
+    pendingDelegateAccount: null,
+    pendingDelegateRequestedAt: null,
     createdAt: new Date('2026-10-18T07:00:00.000Z'),
   };
 
@@ -249,11 +257,22 @@ describe('GET /agents?include= over HTTP', () => {
       .query(query)
       .set('Authorization', `Bearer ${token}`);
 
-  it('without include is the list as before, for an agent too, and reads no credential', async () => {
-    const res = await get('machine');
+  it.each([{}, { include: 'credentials,health' }])(
+    'refuses an agent credential holding every scope (%o), reading nothing',
+    async (query) => {
+      const res = await get('machine', query);
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
+      expect(list).not.toHaveBeenCalled();
+      expect(firstPagesFor).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a person lists every agent of the organization', async () => {
+    const res = await get('person');
     expect(res.status).toBe(200);
+    expect(list).toHaveBeenCalledWith(ORG_A, expect.anything());
     expect(res.body.items).toEqual([agent(AGENT_A), agent(AGENT_B)]);
-    expect(firstPagesFor).not.toHaveBeenCalled();
   });
 
   it('reads every agent’s credentials in one call and nests both parts', async () => {
@@ -280,12 +299,9 @@ describe('GET /agents?include= over HTTP', () => {
     expect(res.body.items[0]).not.toHaveProperty('credentials');
   });
 
-  it('refuses include to an agent credential with 403, reading nothing', async () => {
-    const res = await get('machine', { include: 'health' });
-    expect(res.status).toBe(403);
-    expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
-    expect(list).not.toHaveBeenCalled();
-    expect(firstPagesFor).not.toHaveBeenCalled();
+  it('caches the page per organization (a person-only body)', () => {
+    const options = Reflect.getMetadata(TENANT_CACHE_KEY, AgentsController.prototype.list);
+    expect(options).toMatchObject({ vary: 'org' });
   });
 
   it.each([
@@ -301,13 +317,104 @@ describe('GET /agents?include= over HTTP', () => {
     expect(res.body.items[0]).toHaveProperty('health');
   });
 
-  it('reads an empty include as none: the plain list, open to an agent', async () => {
-    const res = await get('machine', { include: ',' });
+  it('reads an empty include as none: the plain list', async () => {
+    const res = await get('person', { include: ',' });
     expect(res.status).toBe(200);
     expect(firstPagesFor).not.toHaveBeenCalled();
   });
 
   it('refuses an unknown include with 400', async () => {
     expect((await get('person', { include: 'secrets' })).status).toBe(400);
+  });
+});
+
+/**
+ * `GET /agents/:agentId/credentials` over HTTP: a person reads any agent of
+ * the organization; an agent credential reads none, its own included.
+ */
+describe('GET /agents/:agentId/credentials over HTTP', () => {
+  let app: INestApplication;
+  const credentialList = jest.fn();
+  const AGENT_SIBLING = '5e0d2a61-7c3b-4d18-9f42-0a1b2c3d4e5f';
+
+  const session = (callerKind: McpCallerKind) => ({
+    credentialId: `cred-${callerKind}`,
+    storedCredential: callerKind === McpCallerKind.AGENT,
+    organizationId: ORG_A,
+    agentId: AGENT_A,
+    agentAccount: 'eip155:46630:0x0000000000000000000000000000000000000001',
+    chainId: 'eip155:46630',
+    label: null,
+    callerKind,
+    scopes: AGENT_SCOPES,
+  });
+  const sessions = {
+    resolve: jest.fn(async (token: string | null) => {
+      if (token === 'person') return session(McpCallerKind.HUMAN);
+      if (token === 'config-person') return session(McpCallerKind.CONFIG);
+      if (token === 'machine') return session(McpCallerKind.AGENT);
+      throw McpErrors.credentialInvalid();
+    }),
+  };
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AgentCredentialsController],
+      providers: [
+        { provide: AgentCredentialsService, useValue: { list: credentialList } },
+        { provide: MCP_SESSION_SOURCE, useValue: sessions },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
+    );
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+  }, 30_000);
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    credentialList.mockReset().mockResolvedValue(new CursorPageDto([], null));
+  });
+
+  const get = (agentId: string, token: string) =>
+    request(app.getHttpServer())
+      .get(`/agents/${agentId}/credentials`)
+      .set('Authorization', `Bearer ${token}`);
+
+  it.each([
+    ['its own agent', AGENT_A],
+    ['another agent of its organization', AGENT_SIBLING],
+    ['an agent of another organization', AGENT_B],
+  ])('refuses an agent credential reading %s, reading nothing', async (_name, agentId) => {
+    const res = await get(agentId, 'machine');
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
+    expect(credentialList).not.toHaveBeenCalled();
+  });
+
+  it.each(['person', 'config-person'])('lets a %s read any agent', async (token) => {
+    expect((await get(AGENT_SIBLING, token)).status).toBe(200);
+    expect(credentialList).toHaveBeenCalledWith(ORG_A, AGENT_SIBLING, expect.anything());
+  });
+
+  it('caches the page per organization (a person-only body)', () => {
+    const options = Reflect.getMetadata(
+      TENANT_CACHE_KEY,
+      AgentCredentialsController.prototype.list,
+    );
+    expect(options).toMatchObject({ vary: 'org' });
+  });
+
+  it('still refuses an agent credential minting a credential, even for itself', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/agents/${AGENT_A}/credentials`)
+      .set('Authorization', 'Bearer machine')
+      .send({ name: 'x' });
+    expect(res.status).toBe(403);
   });
 });

@@ -553,3 +553,186 @@ describe('SpendPolicyService.history', () => {
     expect(page.items[0].scope).toBe(SpendPolicyScope.ORGANIZATION);
   });
 });
+
+describe('SpendPolicyService.getForRequest — ?agentId= (BUG-BUY-CONNECT-05)', () => {
+  const OTHER = '6f1c2d3e-4b5a-4c6d-8e7f-901234567890';
+
+  function withAgents(owned: boolean) {
+    const exists = jest.fn().mockResolvedValue(owned);
+    const findLive = jest.fn(async (_org: string, agentId: string) => policyRow({ agentId }));
+    const { service, dataSource } = build({ findLive });
+    (dataSource as unknown as { getRepository: jest.Mock }).getRepository = jest
+      .fn()
+      .mockReturnValue({ exists });
+    return { service, exists, findLive };
+  }
+
+  it("reads another agent of the caller's own organization for a person", async () => {
+    const { service, exists, findLive } = withAgents(true);
+
+    const dto = await service.getForRequest(ORG, AGENT, OTHER, true);
+
+    expect(exists).toHaveBeenCalledWith({ where: { id: OTHER, organizationId: ORG } });
+    expect(findLive).toHaveBeenCalledWith(ORG, OTHER);
+    expect(dto.subjectAgentId).toBe(OTHER);
+    expect(dto.requestedAgentIgnored).toBe(false);
+  });
+
+  it('reads the own agent, not ignored, when the own agent is asked for or nothing is', async () => {
+    const { service, exists } = withAgents(true);
+
+    for (const requested of [AGENT, undefined]) {
+      const dto = await service.getForRequest(ORG, AGENT, requested, true);
+      expect(dto.subjectAgentId).toBe(AGENT);
+      expect(dto.requestedAgentIgnored).toBe(false);
+    }
+    expect(exists).not.toHaveBeenCalled();
+  });
+
+  it("reads the session's own agent, and says so, for an agent of another organization or an unknown one", async () => {
+    // `exists` scoped to the caller's organization is false for both.
+    const { service, findLive } = withAgents(false);
+
+    const dto = await service.getForRequest(ORG, AGENT, OTHER, true);
+
+    expect(findLive).toHaveBeenCalledWith(ORG, AGENT);
+    expect(dto.subjectAgentId).toBe(AGENT);
+    expect(dto.requestedAgentIgnored).toBe(true);
+  });
+
+  it('never lets an agent credential read another agent, nor queries a malformed or repeated id', async () => {
+    const { service, exists } = withAgents(true);
+
+    for (const [requested, human] of [
+      [OTHER, false],
+      ['not-a-uuid', true],
+      [[OTHER, AGENT], true],
+    ] as const) {
+      const dto = await service.getForRequest(ORG, AGENT, requested, human);
+      expect(dto.subjectAgentId).toBe(AGENT);
+      expect(dto.requestedAgentIgnored).toBe(true);
+    }
+    expect(exists).not.toHaveBeenCalled();
+  });
+});
+
+describe('SpendPolicyService.dropAgentPolicy — "Use account default" (BUG-BUY-CONNECT-05 part 2)', () => {
+  const AGENT_ID = '6f1c2d3e-4b5a-4c6d-8e7f-901234567890';
+  const orgDefault = () =>
+    policyRow({ id: 'policy-org', agentId: null, policyVersion: 7, perCallMax: '1000000' });
+  const own = (overrides: Record<string, unknown> = {}) =>
+    policyRow({ id: 'policy-own', agentId: AGENT_ID, ...overrides });
+
+  function withAgent(owned: boolean, rows: Array<Record<string, unknown> | null>) {
+    const findLive = jest.fn(async () => orgDefault());
+    const built = build({ findOneResults: rows, findLive });
+    const exists = jest.fn().mockResolvedValue(owned);
+    (built.dataSource as unknown as { getRepository: jest.Mock }).getRepository = jest
+      .fn()
+      .mockReturnValue({ exists });
+    return { ...built, exists };
+  }
+
+  it('404s an agent of another organization (or none), and writes nothing', async () => {
+    const { service, exists, dataSource, audit } = withAgent(false, [own(), orgDefault()]);
+
+    const code = await errorCodeOf(() => service.dropAgentPolicy(ORG, AGENT_ID, ACTOR));
+
+    expect(code).toBe('ACCOUNT_AGENT_NOT_FOUND');
+    expect(exists).toHaveBeenCalledWith({ where: { id: AGENT_ID, organizationId: ORG } });
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('404s a malformed id without querying', async () => {
+    const { service, exists } = withAgent(true, []);
+    const code = await errorCodeOf(() => service.dropAgentPolicy(ORG, 'not-a-uuid', ACTOR));
+    expect(code).toBe('ACCOUNT_AGENT_NOT_FOUND');
+    expect(exists).not.toHaveBeenCalled();
+  });
+
+  it("supersedes the agent's own row with nothing, audited in the same transaction", async () => {
+    const { service, tx, audit, dataSource } = withAgent(true, [own(), orgDefault()]);
+
+    const dto = await service.dropAgentPolicy(ORG, AGENT_ID, ACTOR);
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(tx.updateWheres).toContainEqual({ sql: 'id = :id', params: { id: 'policy-own' } });
+    expect(tx.updateSet).toEqual({ supersededAt: expect.any(Date) });
+    expect(tx.insertValues).toBeUndefined();
+    expect(audit.record).toHaveBeenCalledWith(
+      tx.manager,
+      expect.objectContaining({
+        organizationId: ORG,
+        actor: ACTOR,
+        action: 'spend_policy.dropped',
+        resourceType: 'spend_policy',
+        resourceId: 'policy-own',
+        before: expect.objectContaining({ agentId: AGENT_ID, perCallMax: '500000' }),
+        after: { agentId: AGENT_ID, fallsBackTo: 'policy-org', organizationPolicyVersion: 7 },
+      }),
+    );
+    expect(dto.scope).toBe(SpendPolicyScope.ORGANIZATION);
+    expect(dto.subjectAgentId).toBe(AGENT_ID);
+  });
+
+  it('writes nothing for an agent that already uses the default', async () => {
+    const { service, dataSource, audit } = withAgent(true, [null, orgDefault()]);
+    const dto = await service.dropAgentPolicy(ORG, AGENT_ID, ACTOR);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(dto.scope).toBe(SpendPolicyScope.ORGANIZATION);
+  });
+
+  it('refuses when dropping would change the agent access or resume it', async () => {
+    const restricted = withAgent(true, [
+      own({ accessMode: 'RESTRICTED', allowedToolsets: [{ id: 't1' }] }),
+      orgDefault(),
+    ]);
+    const restrictedError = await restricted.service
+      .dropAgentPolicy(ORG, AGENT_ID, ACTOR)
+      .catch((error) => error as BaseError & { publicContext?: Record<string, unknown> });
+    expect((restrictedError as BaseError).errorCode).toBe('SPEND_POLICY_DROP_REFUSED');
+    expect(
+      (restrictedError as unknown as { publicContext: Record<string, unknown> }).publicContext,
+    ).toEqual({ reason: 'ACCESS_DIFFERS' });
+
+    const paused = withAgent(true, [own({ paused: true }), orgDefault()]);
+    const pausedError = (await paused.service
+      .dropAgentPolicy(ORG, AGENT_ID, ACTOR)
+      .catch((error) => error)) as { publicContext: Record<string, unknown> };
+    expect(pausedError.publicContext).toEqual({ reason: 'PAUSED' });
+    expect(restricted.dataSource.transaction).not.toHaveBeenCalled();
+    expect(paused.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('404s when there is no organization default to fall back to', async () => {
+    const { service } = withAgent(true, [own(), null]);
+    const code = await errorCodeOf(() => service.dropAgentPolicy(ORG, AGENT_ID, ACTOR));
+    expect(code).toBe(SpendPolicyErrorCode.SPEND_POLICY_NOT_FOUND);
+  });
+
+  it('a later write at the scope continues the version history after a drop', async () => {
+    // current: none; org default; the newest superseded own version is 4.
+    const { service, tx } = build({
+      findOneResults: [null, orgDefault(), own({ policyVersion: 4, supersededAt: new Date() })],
+    });
+    await service.patch(ORG, AGENT_ID, { dailyCap: '2000000' }, ACTOR);
+    expect(tx.insertValues).toMatchObject({ agentId: AGENT_ID, policyVersion: 5 });
+  });
+
+  it('compares access as sets: the same toolsets in another order are not a difference', async () => {
+    const { service, dataSource } = withAgent(true, [
+      own({ allowedToolIds: ['b', 'a'], ruleMaxPrice: '1000' }),
+      policyRow({
+        id: 'policy-org',
+        agentId: null,
+        policyVersion: 7,
+        allowedToolIds: ['a', 'b'],
+        ruleMaxPrice: '1000',
+      }),
+    ]);
+    await service.dropAgentPolicy(ORG, AGENT_ID, ACTOR);
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+  });
+});

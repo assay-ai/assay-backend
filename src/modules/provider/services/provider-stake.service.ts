@@ -84,6 +84,34 @@ export function loadMinimumStakeParameters(config: ConfigService): MinimumStakeP
   };
 }
 
+/**
+ * {@link loadMinimumStakeParameters}' floor, raised to the effective routing
+ * floor of the same chain (`ContractMinimumStakeFloors.byChain`: the contract
+ * minimum when stricter), read at every use so a refresh shows at once.
+ *
+ * For the provider Capital screen and the stake monitor (review M-8), so they
+ * name the number routing gates on. Never below the configured floor, and the
+ * configured floor whenever the live entry is missing or in another asset.
+ */
+export function liveMinimumStakeParameters(
+  configured: MinimumStakeParameters,
+  byChain: MinimumStakeByChain,
+): MinimumStakeParameters {
+  const chainId = chainIdOf(configured.floor.asset);
+  return {
+    get floor(): Money {
+      const live = byChain.get(chainId)?.floor;
+      return live &&
+        live.asset === configured.floor.asset &&
+        live.decimals === configured.floor.decimals &&
+        MoneyUtil.greaterThan(live, configured.floor)
+        ? live
+        : configured.floor;
+    },
+    priceMultiple: configured.priceMultiple,
+  };
+}
+
 /** `$50`, the default minimum-stake floor. */
 const DEFAULT_MINIMUM_STAKE_FLOOR = '50000000';
 /** `1000×` the binding's price. */

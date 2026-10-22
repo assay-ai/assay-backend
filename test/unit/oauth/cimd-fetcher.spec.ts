@@ -135,7 +135,7 @@ describe('CimdFetcher (§6.3.7)', () => {
 
     it('sanitises the client name', async () => {
       const { fetcher, serve, repo } = setup();
-      serve(document(URL_A, { client_name: '  Example‮ App\u0007 ' }));
+      serve(document(URL_A, { client_name: '  Example\u202e App\u0007 ' }));
       await fetcher.fetch(URL_A, IP);
       expect(repo.rows.get(URL_A)!.clientName).toBe('Example App');
     });
@@ -256,7 +256,7 @@ describe('CimdFetcher (§6.3.7)', () => {
     });
 
     it('a name that sanitises to nothing or is too long → invalid', async () => {
-      await refused(document(URL_A, { client_name: '​‮' }));
+      await refused(document(URL_A, { client_name: '\u200b\u202e' }));
       await refused(document(URL_A, { client_name: 'x'.repeat(65) }));
     });
 

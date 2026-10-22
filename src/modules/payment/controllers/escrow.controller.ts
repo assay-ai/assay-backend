@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 
 import {
   DebtVoucherIntentBodyDto,
@@ -29,6 +29,7 @@ const DEBT_PENDING_DESCRIPTION =
 @ApiTags('Escrow')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.PAYMENTS)
 @Controller('escrow')
 export class EscrowController {
   constructor(

@@ -1,4 +1,6 @@
 import { AuditLogWriter } from '@shared/audit';
+import { AGENT_SCOPES } from '@shared/auth/agent-scope';
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -25,6 +27,7 @@ import { EscrowAccountService } from '@modules/settlement/services/escrow-accoun
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { SpendPolicyController } from '@modules/spend-policy/controllers/spend-policy.controller';
 import { SpendPolicyService } from '@modules/spend-policy/services/spend-policy.service';
+import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 /**
@@ -65,12 +68,20 @@ describe('human-only control writes', () => {
         label: null,
         callerKind,
         paymentsAllowed: true,
+        // Every scope: what is refused here is refused whatever a key holds.
+        scopes: AGENT_SCOPES,
       };
       return session;
     },
   };
 
-  const spendPolicy = { get: jest.fn(async () => ({})), patch: jest.fn(), history: jest.fn() };
+  const spendPolicy = {
+    get: jest.fn(async () => ({})),
+    getForRequest: jest.fn(async () => ({})),
+    patch: jest.fn(),
+    history: jest.fn(),
+    dropAgentPolicy: jest.fn(async () => ({})),
+  };
   const credentials = { list: jest.fn(async () => ({})), create: jest.fn(), revoke: jest.fn() };
   const notifications = {
     listChannels: jest.fn(async () => []),
@@ -124,6 +135,11 @@ describe('human-only control writes', () => {
         { provide: WithdrawalService, useValue: withdrawals },
         { provide: EscrowDelegationService, useValue: delegation },
         { provide: AuditLogWriter, useValue: { recordAfterCommit: jest.fn() } },
+        { provide: AccessEpochService, useValue: { bump: jest.fn() } },
+        {
+          provide: AgentCredentialRepository,
+          useValue: { promotePendingDelegate: jest.fn(async () => []) },
+        },
       ],
     }).compile();
 
@@ -144,6 +160,8 @@ describe('human-only control writes', () => {
     readonly path: string;
   }[] = [
     { method: 'patch', path: '/spend-policy' },
+    // "Use account default" (BUG-BUY-CONNECT-05 part 2): the agent must not drop its own limits.
+    { method: 'delete', path: `/spend-policy/agents/${AGENT_ID}` },
     { method: 'post', path: `/agents/${AGENT_ID}/credentials` },
     {
       method: 'delete',
@@ -210,34 +228,48 @@ describe('human-only control writes', () => {
     },
   );
 
+  it.each(['/spend-policy', '/escrow'])(
+    'GET %s still answers an agent credential with activity:read',
+    async (path) => {
+      const res = await request(app.getHttpServer())
+        .get(path)
+        .set('Authorization', 'Bearer token-agent');
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  // Owner decision: notification routing and the inbox are a person's, for
+  // every key (the Slack webhook URL is itself a secret).
   it.each([
-    '/spend-policy',
     '/notification-channels',
     '/notification-preferences',
     '/notifications',
     '/notifications/unread-count',
-    '/escrow',
-  ])('GET %s still answers an agent credential', async (path) => {
+  ])('GET %s refuses an agent credential, whatever its scopes', async (path) => {
     const res = await request(app.getHttpServer())
       .get(path)
       .set('Authorization', 'Bearer token-agent');
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
   });
 
-  // Review A-5: the list names every sibling credential, its prefix, its bound
-  // delegate key and its expiry — reconnaissance a leaked machine token must
-  // not get. An agent reads its own binding through `GET /agents/me/delegate`.
-  it('GET /agents/:agentId/credentials refuses an agent credential', async () => {
-    const agent = await request(app.getHttpServer())
-      .get(`/agents/${AGENT_ID}/credentials`)
-      .set('Authorization', 'Bearer token-agent');
-    expect(agent.status).toBe(403);
-    expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+  // Key metadata is the owner's: an agent credential reads no agent's keys,
+  // its own included.
+  it('GET /agents/:agentId/credentials refuses an agent credential, for any agent', async () => {
+    const OTHER = '33333333-3333-4333-8333-333333333333';
+    for (const agentId of [OTHER, AGENT_ID]) {
+      const agent = await request(app.getHttpServer())
+        .get(`/agents/${agentId}/credentials`)
+        .set('Authorization', 'Bearer token-agent');
+      expect(agent.status).toBe(403);
+      expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    }
     expect(credentials.list).not.toHaveBeenCalled();
 
     const human = await request(app.getHttpServer())
-      .get(`/agents/${AGENT_ID}/credentials`)
+      .get(`/agents/${OTHER}/credentials`)
       .set('Authorization', 'Bearer token-human');
     expect(human.status).toBe(200);
   });

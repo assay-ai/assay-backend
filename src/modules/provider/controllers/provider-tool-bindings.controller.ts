@@ -99,7 +99,13 @@ export class ProviderToolBindingsController {
     summary: 'Check a mapping without saving it — what the editor calls while you type',
   })
   @ApiResponse({ status: 201, type: ValidateMappingResponseDto })
-  @ApiResponse({ status: 400, description: 'TOOL_MAPPING_INVALID, with a pointer at the node' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'TOOL_MAPPING_INVALID, with a pointer at the node; or, for a request mapping, the save ' +
+      'checks: PROVIDER_SECRET_IN_MAPPING, PROVIDER_RESERVED_MAPPING_HEADER, ' +
+      'PROVIDER_TOO_MANY_MAPPING_HEADERS, PROVIDER_CREDENTIAL_IN_QUERY',
+  })
   async validateMapping(@Body() body: ValidateMappingBodyDto): Promise<ValidateMappingResponseDto> {
     return this.editor.validateMapping(body);
   }
