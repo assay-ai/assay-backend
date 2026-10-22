@@ -137,11 +137,13 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     throw new Error('condition never held');
   }
 
-  async function credential(): Promise<string> {
+  /** `beforeLast4`: the schema is rewound past `token_last4`, to when keys stored a `prefix`. */
+  async function credential(beforeLast4 = false): Promise<string> {
     const id = randomUUID();
+    const [column, value] = beforeLast4 ? ['prefix', 'assay_sk_live_'] : ['token_last4', 'test'];
     await dataSource.query(
-      `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes") ` +
-        `VALUES ($1, $2, $3, 'agent', 'assay_sk_live_test', $4, '{}')`,
+      `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "${column}", "token_hash", "scopes") ` +
+        `VALUES ($1, $2, $3, 'agent', '${value}', $4, '{}')`,
       [id, organizationId, agentId, `hash-${id}`],
     );
     return id;
@@ -249,8 +251,8 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     const otherOrg = randomUUID();
     const second = randomUUID();
     await dataSource.query(
-      `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes") ` +
-        `VALUES ($1, $2, $3, 'other agent', 'assay_sk_live_test', $4, '{}')`,
+      `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "token_last4", "token_hash", "scopes") ` +
+        `VALUES ($1, $2, $3, 'other agent', 'test', $4, '{}')`,
       [second, otherOrg, randomUUID(), `hash-${second}`],
     );
     const s2 = { ...session(second), organizationId: otherOrg };
@@ -335,9 +337,9 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       if (last?.name === 'AgentCredentialDelegateUnique1759600000002') break;
     }
     const key = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
-    const early = await credential();
-    const late = await credential();
-    const revoked = await credential();
+    const early = await credential(true);
+    const late = await credential(true);
+    const revoked = await credential(true);
     await dataSource.query(
       `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now() - interval '1 hour' WHERE "id" = $1`,
       [early, key],

@@ -73,7 +73,7 @@ describe('OAuth dashboard signals, database facts — real migrations', () => {
   ): Promise<void> {
     await dataSource.query(
       `INSERT INTO "agent_credentials"
-         ("organization_id", "agent_id", "name", "prefix", "token_hash", "issued_via",
+         ("organization_id", "agent_id", "name", "token_last4", "token_hash", "issued_via",
           "oauth_client_id", "expires_at", "revoked_at", "revoked_by", "deleted_at")
        VALUES ($1, $2, 'Example grant', NULL, NULL, 'OAUTH', $3, $4, $5, $6, $7)`,
       [
@@ -108,8 +108,8 @@ describe('OAuth dashboard signals, database facts — real migrations', () => {
     await insertGrant();
     // An API key is not a grant.
     await dataSource.query(
-      `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "prefix", "token_hash")
-       VALUES ($1, $2, 'Example key', 'assay_sk_live_ab', $3)`,
+      `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "token_last4", "token_hash")
+       VALUES ($1, $2, 'Example key', '2fds', $3)`,
       [ORGANIZATION, busy, randomUUID().replace(/-/g, '')],
     );
 

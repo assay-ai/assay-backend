@@ -198,9 +198,9 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
   async function insertApiKey(agentId: string): Promise<{ token: string; id: string }> {
     const token = `assay_sk_live_${randomBytes(24).toString('base64url')}`;
     const [row] = (await dataSource.query(
-      `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "prefix", "token_hash", "scopes")
+      `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "token_last4", "token_hash", "scopes")
        VALUES ($1, $2, 'CI deploy', $3, $4, '{tools:call,payments,activity:read}') RETURNING "id"`,
-      [ORGANIZATION, agentId, token.slice(0, 22), digestToken(token)],
+      [ORGANIZATION, agentId, token.slice(-4), digestToken(token)],
     )) as { id: string }[];
     return { token, id: row.id };
   }

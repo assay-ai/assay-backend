@@ -25,8 +25,9 @@ import { AgentScope, DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
+  agentCredentialHint,
+  agentCredentialLast4,
 } from '../constants/agent-credential-token.constants';
 
 import {
@@ -77,8 +78,8 @@ const CREDENTIALS_LIST: ListSpec = {
  *
  * `create` and `revoke` each append an `audit_log_entries` row in the same
  * transaction as the write (`credential.created` / `credential.revoked`). The
- * entry names the credential by id and name — never the token, its stored
- * prefix or its hash.
+ * entry names the credential by id and name — never the token, its hint or
+ * its hash.
  *
  * An OAuth grant (`issued_via = 'OAUTH'`) is a row of the same table and is
  * listed and revoked here like an API key (owner rule: OAuth = API key). Its
@@ -241,7 +242,7 @@ export class AgentCredentialsService {
       organizationId,
       agentId,
       name: body.name,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
       scopes,
       expiresAt,
@@ -274,7 +275,7 @@ export class AgentCredentialsService {
       id: saved.id,
       agentId: saved.agentId,
       name: saved.name,
-      prefix: saved.prefix,
+      hint: agentCredentialHint(saved.tokenLast4) as string,
       // Exactly once, and only here — see the class comment.
       token,
       scopes: saved.scopes,
@@ -440,7 +441,7 @@ export class AgentCredentialsService {
       name: entity.name,
       issuedVia: entity.issuedVia,
       oauthClient: client ? credentialClientView(client, this.clientTrust) : null,
-      prefix: entity.prefix,
+      hint: agentCredentialHint(entity.tokenLast4),
       scopes: entity.scopes,
       lastUsedAt: LastSeenRecorder.latest(entity.lastUsedAt, used),
       expiresAt: entity.expiresAt,

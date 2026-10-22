@@ -63,7 +63,8 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
+  agentCredentialHint,
+  agentCredentialLast4,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { AppMcpModule } from '@bootstrap/mcp/app.module';
@@ -176,7 +177,7 @@ async function main(): Promise<void> {
         [
           `organization ${DEMO_ORG_ID}`,
           `agent        ${DEMO_AGENT_ID} (${agent.primaryAccountId})`,
-          `credential   ${existing.id} prefix ${existing.prefix}… (already minted)`,
+          `credential   ${existing.id} ${agentCredentialHint(existing.tokenLast4) ?? ''} (already minted)`,
           `expires      ${expiresAt.toISOString()} (refreshed; re-run before then)`,
           '',
           'The token itself is not recoverable — only its digest is stored.',
@@ -193,7 +194,7 @@ async function main(): Promise<void> {
       organizationId: DEMO_ORG_ID,
       agentId: DEMO_AGENT_ID,
       name: DEMO_CREDENTIAL_NAME,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
       scopes: [...DEFAULT_AGENT_SCOPES],
       expiresAt,

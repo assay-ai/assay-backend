@@ -549,7 +549,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
     const id = fields.id ?? randomUUID();
     await dataSource.query(
       `INSERT INTO agent_credentials
-         (id, organization_id, agent_id, name, prefix, token_hash, scopes, created_at,
+         (id, organization_id, agent_id, name, token_last4, token_hash, scopes, created_at,
           last_used_at, expires_at, revoked_at, delegate_account, delegate_bound_at,
           issued_via, oauth_client_id, revoked_by)
        VALUES ($1, $2, $3, $4, $5, $6, '{}', COALESCE($7::timestamptz, now()), $8, $9, $10,
@@ -561,7 +561,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
         organizationId,
         agent,
         `key ${id.slice(0, 6)}`,
-        fields.oauthClientId ? null : `assay_sk_${id.slice(0, 6)}`,
+        fields.oauthClientId ? null : id.slice(0, 4),
         fields.oauthClientId ? null : `hash-${id}`,
         fields.createdAt ?? null,
         fields.lastUsedAt ?? null,

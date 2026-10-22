@@ -209,7 +209,7 @@ describe('GET /agents?include= over HTTP', () => {
     name: 'laptop',
     issuedVia: 'API_KEY',
     oauthClient: null,
-    prefix: 'assay_sk_live_ab',
+    hint: 'assay_sk_live_…2fds',
     scopes: ['tools:call', 'payments', 'activity:read'],
     lastUsedAt: new Date('2026-10-19T08:00:00.000Z'),
     expiresAt: null,

@@ -17,8 +17,18 @@ export function isAgentCredentialToken(token: string): boolean {
   return token.startsWith(AGENT_CREDENTIAL_TOKEN_PREFIX);
 }
 
+/** How many trailing characters of a token are stored in clear (`agent_credentials.token_last4`). */
+export const AGENT_CREDENTIAL_HINT_LENGTH = 4;
+
+/** The trailing characters kept for a new token: never more than {@link AGENT_CREDENTIAL_HINT_LENGTH}. */
+export function agentCredentialLast4(token: string): string {
+  return token.slice(-AGENT_CREDENTIAL_HINT_LENGTH);
+}
+
 /**
- * How much of the token is stored in clear for disambiguation.
- * `agent_credentials.prefix` is `varchar(24)`; this must not exceed it.
+ * What a key list shows to recognise a key: `assay_sk_live_…2fds`. `null`
+ * when nothing is stored (an OAuth grant, or a key created before the column).
  */
-export const AGENT_CREDENTIAL_STORED_PREFIX_LENGTH = 20;
+export function agentCredentialHint(last4: string | null | undefined): string | null {
+  return last4 ? `${AGENT_CREDENTIAL_TOKEN_PREFIX}…${last4}` : null;
+}

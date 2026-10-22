@@ -48,7 +48,7 @@ function oauthCredentialRow(overrides: Record<string, unknown> = {}) {
     name: 'Example app',
     issuedVia: CredentialIssuedVia.OAUTH,
     oauthClientId: BUILTIN_ROW,
-    prefix: null,
+    tokenLast4: null,
     tokenHash: null,
     scopes: [],
     ...overrides,
@@ -66,7 +66,7 @@ function credentialRow(overrides: Record<string, unknown> = {}) {
     name: 'CI deploy',
     issuedVia: CredentialIssuedVia.API_KEY,
     oauthClientId: null as string | null,
-    prefix: 'assay_sk_live_abc123' as string | null,
+    tokenLast4: '2fds' as string | null,
     tokenHash: 'deadbeef' as string | null,
     scopes: ['tools:call'],
     lastUsedAt: null,
@@ -225,7 +225,7 @@ describe('AgentCredentialsService.list', () => {
       'name',
       'issuedVia',
       'oauthClient',
-      'prefix',
+      'hint',
       'scopes',
       'lastUsedAt',
       'expiresAt',
@@ -302,7 +302,7 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
     expect(page.items[0]).toMatchObject({
       issuedVia: 'API_KEY',
       oauthClient: null,
-      prefix: 'assay_sk_live_abc123',
+      hint: 'assay_sk_live_…2fds',
     });
     // No client lookup for a page without grants.
     expect(oauthClients.findBy).not.toHaveBeenCalled();
@@ -312,7 +312,7 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
     const { service } = buildHarness([oauthCredentialRow()]);
     const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
 
-    expect(page.items[0]).toMatchObject({ issuedVia: 'OAUTH', prefix: null });
+    expect(page.items[0]).toMatchObject({ issuedVia: 'OAUTH', hint: null });
     expect(page.items[0].oauthClient).toEqual({
       clientId: BUILTIN_CLIENT_ID,
       name: 'Assay app (assay-mcp)',
@@ -491,14 +491,36 @@ describe('AgentCredentialsService.create', () => {
     const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR);
 
     expect(response.token).toMatch(/^assay_sk_live_/);
-    expect(response.token.startsWith(response.prefix)).toBe(true);
-    expect(response.prefix).toHaveLength(20);
-    expect(response.prefix.length).toBeLessThan(response.token.length);
+    expect(response.hint).toBe(`assay_sk_live_…${response.token.slice(-4)}`);
 
     const created = credentials.create.mock.calls[0][0];
     expect(created.tokenHash).not.toBe(response.token);
     expect(created.tokenHash).toHaveLength(64); // sha256 hex
     expect(created).not.toHaveProperty('token');
+    // In clear, only the last 4 characters; no prefix column, nothing else of the token.
+    expect(created.tokenLast4).toBe(response.token.slice(-4));
+    expect(created).not.toHaveProperty('prefix');
+    for (const [key, value] of Object.entries(created)) {
+      if (key === 'tokenHash' || typeof value !== 'string') continue;
+      expect(value.includes(response.token.slice(14, 20))).toBe(false);
+    }
+  });
+
+  it('list returns the hint only, never the token or its hash', async () => {
+    const { service } = buildHarness([credentialRow()]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+
+    expect(page.items[0].hint).toBe('assay_sk_live_…2fds');
+    expect(page.items[0]).not.toHaveProperty('token');
+    expect(page.items[0]).not.toHaveProperty('tokenLast4');
+    expect(JSON.stringify(page.items[0])).not.toContain('deadbeef');
+  });
+
+  it('list shows no hint for a key created before hints were stored', async () => {
+    const { service } = buildHarness([credentialRow({ tokenLast4: null })]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+
+    expect(page.items[0].hint).toBeNull();
   });
 
   it('defaults to tools:call payments activity:read and a 90-day expiry', async () => {
@@ -894,10 +916,10 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
       },
     });
 
-    // Neither the token, its stored prefix nor its hash is in the entry.
+    // Neither the token, its hint nor its hash is in the entry.
     const recorded = JSON.stringify(audit.record.mock.calls[0][1]);
     expect(recorded).not.toContain(response.token);
-    expect(recorded).not.toContain(response.prefix);
+    expect(recorded).not.toContain(response.hint);
     expect(recorded).not.toContain(digestToken(response.token));
   });
 

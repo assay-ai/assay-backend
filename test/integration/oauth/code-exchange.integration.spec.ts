@@ -533,7 +533,7 @@ describe('OAuth code exchange — real migrations', () => {
     // A third-party client's grant: free tool calls only (H2).
     expect(credential.scopes).toEqual(['tools:call']);
     expect(credential.name).toBe('Example app');
-    expect(credential.prefix).toBeNull();
+    expect(credential.tokenLast4).toBeNull();
     expect(credential.tokenHash).toBeNull();
     expect(credential.revokedAt).toBeNull();
 

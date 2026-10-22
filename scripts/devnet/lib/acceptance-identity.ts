@@ -33,7 +33,7 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { type AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
+  agentCredentialLast4,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { loadMcpCredentials } from '@modules/mcp/services/config-mcp-session.source';
@@ -157,7 +157,7 @@ export async function borrowOrganizationCredential(
       organizationId,
       agentId: agent.id,
       name: `devnet-acceptance-${label}`,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
       scopes: [...DEFAULT_AGENT_SCOPES],
       // A backstop for the one path `release()` cannot cover. `release()` is
@@ -256,7 +256,7 @@ export async function mintScriptIdentity(
       organizationId: agent.organizationId,
       agentId: agent.id,
       name: `devnet-acceptance-${label}`,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
       scopes: [...DEFAULT_AGENT_SCOPES],
       // Every key expires; this one outlives one acceptance run, no more.
