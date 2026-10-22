@@ -4,7 +4,7 @@ import { OrganizationScopedEntity } from './organization-scoped.entity';
 
 /** How a credential was obtained. Everything else about the row is the same. */
 export enum CredentialIssuedVia {
-  /** Created on the credentials screen; the row holds its token's hash and prefix. */
+  /** Created on the credentials screen; the row holds its token's hash and last 4 characters. */
   API_KEY = 'API_KEY',
   /** An OAuth grant; its tokens live in `oauth_access_tokens` / `oauth_refresh_tokens`. */
   OAUTH = 'OAUTH',
@@ -21,10 +21,12 @@ export enum CredentialIssuedVia {
  * the moment one session is stolen — and it removes the only reason rotation
  * exists.
  *
- * `prefix` is the first few characters, stored in clear, so the UI can show
- * `assay_live_8fK2…` next to "last used 3 minutes ago" and an operator can tell
- * which of four tokens is the one their CI is using. It is deliberately short
- * enough to be useless on its own.
+ * `token_last4` is the token's LAST four characters, stored in clear, so the UI
+ * can show `assay_sk_live_…2fds` next to "last used 3 minutes ago" and an
+ * operator can tell which of four tokens is the one their CI is using. Four
+ * characters of a 32-character random body are useless on their own; nothing
+ * else of the token is kept (the fixed `assay_sk_live_` part is not stored —
+ * every key has it). `NULL` for a row created before the column existed.
  *
  * ## Revocation is a timestamp, not a delete
  *
@@ -43,13 +45,12 @@ export enum CredentialIssuedVia {
  * ## An OAuth grant is a row of this table too
  *
  * OAuth only changes how a credential is obtained (`issued_via`). A grant has
- * no token of its own, so its `prefix` and `token_hash` are `NULL` and its
+ * no token of its own, so its `token_last4` and `token_hash` are `NULL` and its
  * `oauth_client_id` names the client; `ck_agent_credentials_issued_via` keeps
  * the two shapes apart. Limits, narrowing, revocation and audit are the same.
  */
 @Entity('agent_credentials')
 @Index('idx_agent_credentials_agent', ['organizationId', 'agentId'])
-@Index('idx_agent_credentials_prefix', ['organizationId', 'prefix'])
 @Index('idx_agent_credentials_oauth_live', ['agentId'], {
   where: `"issued_via" = 'OAUTH' AND "revoked_at" IS NULL`,
 })
@@ -71,16 +72,21 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
   @Column({ name: 'oauth_client_id', type: 'uuid', nullable: true })
   oauthClientId: string | null;
 
-  /** Clear-text leading characters, for disambiguation only. `NULL` for an OAuth grant. */
-  @Column({ name: 'prefix', type: 'varchar', length: 24, nullable: true })
-  prefix: string | null;
+  /**
+   * The token's last 4 characters, in clear, for recognising a key only
+   * (`agentCredentialHint`). `NULL` for an OAuth grant.
+   */
+  @Column({ name: 'token_last4', type: 'varchar', length: 4, nullable: true })
+  tokenLast4: string | null;
 
   /** SHA-256 hex of the full token. The only copy we keep. `NULL` for an OAuth grant. */
   @Column({ name: 'token_hash', type: 'varchar', length: 128, nullable: true })
   tokenHash: string | null;
 
   /**
-   * What this credential may do, as an array rather than a bitmask or a CSV.
+   * What this credential may do (`AgentScope`, enforced by
+   * `SessionAuthGuard` and the MCP host), as an array rather than a bitmask or
+   * a CSV. Fixed at creation; a value outside the vocabulary grants nothing.
    *
    * Postgres can index and query `text[]` containment directly, and a scope
    * added later does not renumber the ones already issued — which a bitmask
@@ -125,6 +131,18 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
 
   @Column({ name: 'delegate_bound_at', type: 'timestamptz', nullable: true })
   delegateBoundAt: Date | null;
+
+  /**
+   * A DELEGATE key the agent proved it holds while {@link delegateAccount} was
+   * already bound (CAIP-10). It signs nothing yet: it replaces the bound key
+   * only when the payer approves it on chain (`POST /escrow/delegates`), in
+   * one UPDATE. A new binding never silently replaces a live one.
+   */
+  @Column({ name: 'pending_delegate_account', type: 'varchar', length: 256, nullable: true })
+  pendingDelegateAccount: string | null;
+
+  @Column({ name: 'pending_delegate_requested_at', type: 'timestamptz', nullable: true })
+  pendingDelegateRequestedAt: Date | null;
 
   /**
    * Per-key narrowing of the agent's access (API only, design spec §7.7).

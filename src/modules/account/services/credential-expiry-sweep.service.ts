@@ -13,6 +13,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 
+import { agentCredentialHint } from '../constants/agent-credential-token.constants';
 import {
   CREDENTIAL_EXPIRY_SWEEP_CONFIG,
   CREDENTIAL_EXPIRY_WARNING_T1_MS,
@@ -59,7 +60,7 @@ export interface CredentialExpirySweepSummary {
  * ## API keys only
  *
  * An OAuth grant (`issued_via = 'OAUTH'`) has an `expires_at` that rolls
- * forward with its refresh chain and no `prefix` to quote, so warning on it
+ * forward with its refresh chain and no `hint` to quote, so warning on it
  * would notify every idle grant and print "null…". Its app signs in again on
  * its own; nothing here is for it. The query excludes it, and `sweep` drops
  * any such row that reaches it anyway.
@@ -192,10 +193,12 @@ export class CredentialExpirySweepService {
     return 'none';
   }
 
-  /** `Key "CI deploy" (assay_live_ab12…) of "research-bot"`: names, never ids. */
+  /** `Key "CI deploy" (assay_sk_live_…2fds) of "research-bot"`: names, never ids. */
   private async keyPhrase(credential: AgentCredentialEntity): Promise<string> {
     const label = await agentLabelOf(this.agents, credential.organizationId, credential.agentId);
-    return `Key "${credential.name}" (${credential.prefix}…) of ${label ? `"${label}"` : 'your agent'}`;
+    const hint = agentCredentialHint(credential.tokenLast4);
+    const named = hint ? `Key "${credential.name}" (${hint})` : `Key "${credential.name}"`;
+    return `${named} of ${label ? `"${label}"` : 'your agent'}`;
   }
 }
 

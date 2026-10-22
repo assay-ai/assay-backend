@@ -2,6 +2,7 @@ import {
   AgentCredentialEntity,
   CredentialIssuedVia,
 } from '@database/postgres/entities/agent-credential.entity';
+import { AgentScope } from '@shared/auth/agent-scope';
 import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import {
   OAuthClientEntity,
@@ -169,7 +170,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       id: 'grant-1',
       issuedVia: CredentialIssuedVia.OAUTH,
       oauthClientId: options.clientRowId ?? 'client-builtin',
-      prefix: null,
+      tokenLast4: null,
       tokenHash: null,
       name: 'Example app',
       delegateAccount: DELEGATE,
@@ -510,10 +511,11 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
         callerKind: McpCallerKind.AGENT,
         delegateAccount: DELEGATE,
         paymentsAllowed: true,
+        scopes: [AgentScope.TOOLS_CALL, AgentScope.PAYMENTS, AgentScope.ACTIVITY_READ],
       } satisfies McpSession);
     });
 
-    it('third-party grant on the MCP host: the same session but paymentsAllowed false', async () => {
+    it('third-party grant on the MCP host: the same session but paymentsAllowed false and no payment key', async () => {
       const fx = build('mcp');
       seedGrant(fx, { clientRowId: 'client-third' });
       fx.credentials.rows.push(
@@ -532,6 +534,8 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
         ...viaKey,
         credentialId: 'grant-1',
         paymentsAllowed: false,
+        // A session that may not pay carries no payment key (M2).
+        delegateAccount: null,
       });
     });
   });

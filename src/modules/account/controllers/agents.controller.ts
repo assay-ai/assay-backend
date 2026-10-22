@@ -24,12 +24,10 @@ export class AgentsController {
     private readonly agentList: AgentListService,
   ) {}
 
-  // `include` nests what `GET /agents/:agentId/credentials` returns, with that
-  // route's rule: a person gets every agent's, an agent its own key only
-  // (BUG-DEMO-02). The body then depends on the calling key, so the entry
-  // varies by credential: one key's page must never answer another token.
+  // A person's read, as `GET /agents/:agentId/credentials`, which `include` nests.
   @Get()
-  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['agents'] })
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Agents in this organization' })
   @ApiCursorPage(AgentWithIncludesDto)
   async list(

@@ -31,13 +31,8 @@ export class AgentsService {
     @Optional() private readonly sessions: SessionEvictions | null = null,
   ) {}
 
-  /** `onlyAgentId` narrows the list to that one agent (an agent token's view). */
-  async list(
-    organizationId: string,
-    query: ListAgentsQueryDto,
-    onlyAgentId?: string,
-  ): Promise<CursorPageDto<AgentDto>> {
-    const page = await this.agents.list(organizationId, query, onlyAgentId);
+  async list(organizationId: string, query: ListAgentsQueryDto): Promise<CursorPageDto<AgentDto>> {
+    const page = await this.agents.list(organizationId, query);
 
     const counts = await this.credentialCounts(
       organizationId,

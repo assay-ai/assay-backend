@@ -90,8 +90,10 @@ describe('dashboard composite routes over HTTP', () => {
       );
     });
 
-    it('is open to an agent credential, as the routes it stands for are', async () => {
-      expect((await call('/overview', 'machine')).status).toBe(200);
+    it("refuses an agent credential: dashboards are a person's (agent key scopes)", async () => {
+      const res = await call('/overview', 'machine');
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
     });
 
     it('refuses no credential with 401', async () => {

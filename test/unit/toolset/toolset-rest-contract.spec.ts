@@ -1,4 +1,5 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
@@ -30,6 +31,7 @@ const session = (callerKind: McpCallerKind): McpSession => ({
   label: null,
   callerKind,
   paymentsAllowed: true,
+  scopes: AGENT_SCOPES,
 });
 
 /**

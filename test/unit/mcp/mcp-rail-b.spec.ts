@@ -25,6 +25,7 @@ import { computeRequestHash } from '@modules/payment/domain/request-hash';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
 import { VelocityViolationKind } from '@modules/spend-policy/services/spend-policy-velocity.service';
+import { AgentScope } from '@shared/auth/agent-scope';
 
 import {
   PAYOUT_ACCOUNT,
@@ -615,6 +616,66 @@ describe('rail B over MCP', () => {
       expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_B_VOUCHER, false, true)).toBe(
         PaymentRail.RAIL_B_VOUCHER,
       );
+    });
+  });
+
+  /**
+   * M2 / M9 (a): the paid path itself checks the key may pay. A
+   * free-calls-only key (`tools:call`, no `payments`) on a paid tool is refused
+   * AUTH_SCOPE_MISSING naming `payments`, before any requirement, seq or
+   * provider; a third-party grant (its source never lets it pay) keeps the
+   * voucher requirement with no enable-paid link.
+   */
+  describe('a key that may not pay, on a paid tool', () => {
+    const FREE_ONLY: McpSession = {
+      ...RAIL_B_SESSION,
+      paymentsAllowed: false,
+      paymentsScopeMissing: true,
+      scopes: [AgentScope.TOOLS_CALL],
+    };
+
+    it('a free-calls-only key is refused AUTH_SCOPE_MISSING (payments) over MCP', async () => {
+      const h = harness();
+      const server = h.servers.create(FREE_ONLY);
+      const client = new Client({ name: 'test-agent', version: '0.0.0' });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const refused = (await client.callTool({
+        name: TOOL_NAME,
+        arguments: ARGS,
+      })) as CallToolResult;
+
+      expect(refused.isError).toBe(true);
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({ code: 'AUTH_SCOPE_MISSING' });
+      expect(refused._meta?.[X402_PAYMENT_REQUIRED]).toBeUndefined();
+      expect(h.invoker.invocations).toHaveLength(0);
+    });
+
+    it('names payments as the missing scope, even with a voucher presented', async () => {
+      const h = harness();
+      const requirement = await requirementOf(h);
+      await expect(
+        h.calls.call(FREE_ONLY, TOOL_NAME, ARGS, paying(requirement)),
+      ).rejects.toMatchObject({
+        errorCode: 'AUTH_SCOPE_MISSING',
+        context: { requiredScope: 'payments' },
+      });
+      expect(h.invoker.invocations).toHaveLength(0);
+    });
+
+    it('a third-party grant still gets the voucher requirement, with no fixUrl', async () => {
+      const h = harness();
+      const outcome = await h.calls.call(
+        { ...RAIL_B_SESSION, paymentsAllowed: false, scopes: [AgentScope.TOOLS_CALL] },
+        TOOL_NAME,
+        ARGS,
+        { rail: null, voucher: null },
+      );
+      expect(outcome.kind).toBe('ERROR');
+      if (outcome.kind !== 'ERROR') return;
+      expect(outcome.detail.paymentRequired).toBeDefined();
+      expect(outcome.detail.fixUrl ?? null).toBeNull();
     });
   });
 

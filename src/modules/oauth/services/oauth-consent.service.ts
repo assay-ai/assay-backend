@@ -19,6 +19,7 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { AccessMode, readAllowedToolsets } from '@modules/toolset/domain/access';
 import { auditActorOf } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { oauthGrantScopes } from '@shared/auth/agent-scope';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import {
@@ -118,6 +119,7 @@ export class OAuthConsentService {
       },
       returnTo: { kind: display.returnTo.kind, display: display.returnTo.display },
       scope: request.scope.split(' ').filter((scope) => scope !== ''),
+      grantedScopes: [...oauthGrantScopes(this.registry.isPaymentClient(client) === true)],
       agents,
       // A dead grant is shown too (spec F5 step 2: after an idle expiry the exchange still
       // copies its tool limits); `live` says whether it also frees a place under the cap.

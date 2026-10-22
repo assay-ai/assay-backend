@@ -90,20 +90,10 @@ export class AgentRepository extends AbstractRepository<AgentEntity> {
    * hand, and every other read on this table that answers "one organization's
    * agents" must do the same.
    */
-  async list(
-    organizationId: string,
-    query: ListQueryDto,
-    onlyAgentId?: string,
-  ): Promise<CursorPageDto<AgentEntity>> {
+  async list(organizationId: string, query: ListQueryDto): Promise<CursorPageDto<AgentEntity>> {
     const qb = this.createQueryBuilder('agent').where('agent.organizationId = :organizationId', {
       organizationId,
     });
-    // Narrowed in SQL, so the page, its cursor and `hasMore` describe the
-    // narrowed list and nothing of the organization's other agents.
-    if (onlyAgentId !== undefined) {
-      // An empty id narrows to nothing rather than falling back to the whole list.
-      qb.andWhere(onlyAgentId ? 'agent.id = :onlyAgentId' : '1 = 0', { onlyAgentId });
-    }
 
     applyTimeWindow(qb, query, AGENTS_LIST);
     return paginate(qb, query, AGENTS_LIST);

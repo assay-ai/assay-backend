@@ -11,6 +11,7 @@ import { digestToken } from '@shared/crypto/token-digest';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
+import { AgentScope } from '@shared/auth/agent-scope';
 
 const ORGANIZATION_ID = '11111111-1111-1111-1111-111111111111';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
@@ -47,7 +48,7 @@ function oauthCredentialRow(overrides: Record<string, unknown> = {}) {
     name: 'Example app',
     issuedVia: CredentialIssuedVia.OAUTH,
     oauthClientId: BUILTIN_ROW,
-    prefix: null,
+    tokenLast4: null,
     tokenHash: null,
     scopes: [],
     ...overrides,
@@ -65,7 +66,7 @@ function credentialRow(overrides: Record<string, unknown> = {}) {
     name: 'CI deploy',
     issuedVia: CredentialIssuedVia.API_KEY,
     oauthClientId: null as string | null,
-    prefix: 'assay_sk_live_abc123' as string | null,
+    tokenLast4: '2fds' as string | null,
     tokenHash: 'deadbeef' as string | null,
     scopes: ['tools:call'],
     lastUsedAt: null,
@@ -93,6 +94,7 @@ function buildHarness(
     })),
     findOneBy: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
+    clearPendingDelegate: jest.fn(async (): Promise<boolean> => false),
   };
 
   const agents = {
@@ -151,7 +153,10 @@ function buildHarness(
       return result;
     }),
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordAfterCommit: jest.fn().mockResolvedValue(undefined),
+  };
   const accessEpoch = {
     bump: jest.fn(async (organizationId: string) => {
       events.push(`bump:${organizationId}`);
@@ -220,7 +225,7 @@ describe('AgentCredentialsService.list', () => {
       'name',
       'issuedVia',
       'oauthClient',
-      'prefix',
+      'hint',
       'scopes',
       'lastUsedAt',
       'expiresAt',
@@ -229,6 +234,8 @@ describe('AgentCredentialsService.list', () => {
       // Agent payment delegation: the delegate key this credential proved it holds.
       'delegateAccount',
       'delegateBoundAt',
+      'pendingDelegateAccount',
+      'pendingDelegateRequestedAt',
       'createdAt',
     ]);
   });
@@ -295,7 +302,7 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
     expect(page.items[0]).toMatchObject({
       issuedVia: 'API_KEY',
       oauthClient: null,
-      prefix: 'assay_sk_live_abc123',
+      hint: 'assay_sk_live_…2fds',
     });
     // No client lookup for a page without grants.
     expect(oauthClients.findBy).not.toHaveBeenCalled();
@@ -305,7 +312,7 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
     const { service } = buildHarness([oauthCredentialRow()]);
     const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
 
-    expect(page.items[0]).toMatchObject({ issuedVia: 'OAUTH', prefix: null });
+    expect(page.items[0]).toMatchObject({ issuedVia: 'OAUTH', hint: null });
     expect(page.items[0].oauthClient).toEqual({
       clientId: BUILTIN_CLIENT_ID,
       name: 'Assay app (assay-mcp)',
@@ -451,6 +458,8 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
   });
 });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 describe('AgentCredentialsService.create', () => {
   it('refuses an agent that does not exist, before minting anything', async () => {
     const { service, credentials } = buildHarness();
@@ -482,22 +491,133 @@ describe('AgentCredentialsService.create', () => {
     const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR);
 
     expect(response.token).toMatch(/^assay_sk_live_/);
-    expect(response.token.startsWith(response.prefix)).toBe(true);
-    expect(response.prefix).toHaveLength(20);
-    expect(response.prefix.length).toBeLessThan(response.token.length);
+    expect(response.hint).toBe(`assay_sk_live_…${response.token.slice(-4)}`);
 
     const created = credentials.create.mock.calls[0][0];
     expect(created.tokenHash).not.toBe(response.token);
     expect(created.tokenHash).toHaveLength(64); // sha256 hex
     expect(created).not.toHaveProperty('token');
+    // In clear, only the last 4 characters; no prefix column, nothing else of the token.
+    expect(created.tokenLast4).toBe(response.token.slice(-4));
+    expect(created).not.toHaveProperty('prefix');
+    for (const [key, value] of Object.entries(created)) {
+      if (key === 'tokenHash' || typeof value !== 'string') continue;
+      expect(value.includes(response.token.slice(14, 20))).toBe(false);
+    }
   });
 
-  it('defaults scopes to an empty array and expiresAt to null', async () => {
-    const { service } = buildHarness();
-    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'no scopes' }, ACTOR);
+  it('list returns the hint only, never the token or its hash', async () => {
+    const { service } = buildHarness([credentialRow()]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
 
-    expect(response.scopes).toEqual([]);
-    expect(response.expiresAt).toBeNull();
+    expect(page.items[0].hint).toBe('assay_sk_live_…2fds');
+    expect(page.items[0]).not.toHaveProperty('token');
+    expect(page.items[0]).not.toHaveProperty('tokenLast4');
+    expect(JSON.stringify(page.items[0])).not.toContain('deadbeef');
+  });
+
+  it('list shows no hint for a key created before hints were stored', async () => {
+    const { service } = buildHarness([credentialRow({ tokenLast4: null })]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+
+    expect(page.items[0].hint).toBeNull();
+  });
+
+  it('defaults to tools:call payments activity:read and a 90-day expiry', async () => {
+    const { service, credentials } = buildHarness();
+    const before = Date.now();
+    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'default' }, ACTOR);
+
+    expect(response.scopes).toEqual(['tools:call', 'payments', 'activity:read']);
+    expect(credentials.create.mock.calls[0][0].scopes).toEqual([
+      'tools:call',
+      'payments',
+      'activity:read',
+    ]);
+    const lifetime = (response.expiresAt as Date).getTime() - before;
+    expect(lifetime).toBeGreaterThanOrEqual(90 * DAY_MS - 5_000);
+    expect(lifetime).toBeLessThanOrEqual(90 * DAY_MS + 5_000);
+  });
+
+  it('keeps exactly the scopes asked for (reports:write only when named)', async () => {
+    const { service } = buildHarness();
+
+    const ci = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'free only', scopes: [AgentScope.TOOLS_CALL] },
+      ACTOR,
+    );
+    expect(ci.scopes).toEqual(['tools:call']);
+
+    const reporter = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      {
+        name: 'sdk',
+        scopes: [AgentScope.TOOLS_CALL, AgentScope.PAYMENTS, AgentScope.REPORTS_WRITE],
+      },
+      ACTOR,
+    );
+    expect(reporter.scopes).toEqual(['tools:call', 'payments', 'reports:write']);
+
+    const reader = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'read only', scopes: [AgentScope.ACTIVITY_READ] },
+      ACTOR,
+    );
+    expect(reader.scopes).toEqual(['activity:read']);
+  });
+
+  it('refuses payments without tools:call, before minting anything', async () => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          ORGANIZATION_ID,
+          AGENT_ID,
+          { name: 'pay only', scopes: [AgentScope.PAYMENTS, AgentScope.ACTIVITY_READ] },
+          ACTOR,
+        ),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_SCOPES_INVALID,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
+  });
+
+  it('accepts an expiry up to 365 days away', async () => {
+    const { service } = buildHarness();
+    const expiresAt = new Date(Date.now() + 365 * DAY_MS - 60_000);
+
+    const response = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'a year', expiresAt },
+      ACTOR,
+    );
+
+    expect(response.expiresAt).toEqual(expiresAt);
+  });
+
+  it.each([
+    ['in the past', -60_000],
+    ['now', 0],
+    ['more than 365 days away', 365 * DAY_MS + 60_000],
+  ])('refuses an expiry %s (ACCOUNT_CREDENTIAL_EXPIRY_INVALID)', async (_label, offset) => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          ORGANIZATION_ID,
+          AGENT_ID,
+          { name: 'bad expiry', expiresAt: new Date(Date.now() + offset) },
+          ACTOR,
+        ),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_EXPIRY_INVALID,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
   });
 
   it('two credentials for the same agent get different tokens and different hashes', async () => {
@@ -517,6 +637,50 @@ describe('AgentCredentialsService.create', () => {
     const created = credentials.create.mock.calls[0][0];
     expect(created.organizationId).toBe(ORGANIZATION_ID);
     expect(created.agentId).toBe(AGENT_ID);
+  });
+});
+
+/** M3: the owner discards the payment key a credential waits with. */
+describe('AgentCredentialsService.discardPendingDelegate', () => {
+  const PENDING = 'eip155:46630:0x00000000000000000000000000000000000000d2';
+
+  it('returns ACCOUNT_CREDENTIAL_NOT_FOUND for another agent, and clears nothing', async () => {
+    const { service, credentials } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow({ agentId: OTHER_AGENT_ID }));
+
+    await expectErrorCodeAsync(
+      () => service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_NOT_FOUND,
+    );
+    expect(credentials.clearPendingDelegate).not.toHaveBeenCalled();
+  });
+
+  it('clears the pending key in its own organization and records who discarded which key', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow({ pendingDelegateAccount: PENDING }));
+    credentials.clearPendingDelegate.mockResolvedValueOnce(true);
+
+    await service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(credentials.clearPendingDelegate).toHaveBeenCalledWith(ORGANIZATION_ID, CREDENTIAL_ID);
+    expect(audit.recordAfterCommit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: ORGANIZATION_ID,
+        action: 'credential.pending_delegate_discarded',
+        resourceId: CREDENTIAL_ID,
+        before: { pendingDelegateAccount: PENDING },
+        after: { pendingDelegateAccount: null },
+      }),
+    );
+  });
+
+  it('is idempotent: nothing pending, nothing recorded', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow());
+
+    await service.discardPendingDelegate(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(audit.recordAfterCommit).not.toHaveBeenCalled();
   });
 });
 
@@ -728,7 +892,7 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
     const response = await service.create(
       ORGANIZATION_ID,
       AGENT_ID,
-      { name: 'CI deploy', scopes: ['tools:call'] },
+      { name: 'CI deploy', scopes: [AgentScope.TOOLS_CALL] },
       ACTOR,
     );
 
@@ -745,17 +909,17 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
         agentId: AGENT_ID,
         name: 'CI deploy',
         scopes: ['tools:call'],
-        expiresAt: null,
+        expiresAt: expect.any(String),
         issuedVia: 'API_KEY',
         clientId: null,
         replaces: null,
       },
     });
 
-    // Neither the token, its stored prefix nor its hash is in the entry.
+    // Neither the token, its hint nor its hash is in the entry.
     const recorded = JSON.stringify(audit.record.mock.calls[0][1]);
     expect(recorded).not.toContain(response.token);
-    expect(recorded).not.toContain(response.prefix);
+    expect(recorded).not.toContain(response.hint);
     expect(recorded).not.toContain(digestToken(response.token));
   });
 

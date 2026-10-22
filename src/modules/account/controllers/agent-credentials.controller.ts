@@ -11,15 +11,13 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { McpSession, storedCredentialIdOf } from '@modules/mcp/ports/mcp-session.port';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { auditActorOf } from '@shared/audit';
 import {
   AllowedWhileBlocked,
   CurrentSession,
-  HumanOrOwnAgentGuard,
   HumanSessionGuard,
-  isHumanCallerKind,
   SessionAuthGuard,
 } from '@shared/auth';
 
@@ -52,15 +50,11 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 export class AgentCredentialsController {
   constructor(private readonly credentials: AgentCredentialsService) {}
 
-  // A person's read of every key of the agent. An agent credential reads
-  // ITS OWN key only (BUG-DEMO-02): `HumanOrOwnAgentGuard` refuses any
-  // `:agentId` that is not its own, before the cache can answer, and the list
-  // is narrowed to the caller's own row — never a sibling key, never a secret
-  // (`AgentCredentialDto` has no hash). The cache entry varies by credential,
-  // so one key's row never answers another key of the same agent.
+  // A person's read of every key of the agent. An agent credential is refused
+  // (no `@RequireAgentScope`): key metadata is the owner's.
   @Get()
-  @TenantCache({ ttl: 5, vary: 'credential', epochs: ['agents'] })
-  @UseGuards(HumanOrOwnAgentGuard)
+  @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Credentials for one agent, newest first' })
   @ApiCursorPage(AgentCredentialDto)
   async list(
@@ -68,15 +62,7 @@ export class AgentCredentialsController {
     @Param() params: AgentIdParamDto,
     @Query() query: ListAgentCredentialsQueryDto,
   ): Promise<CursorPageDto<AgentCredentialDto>> {
-    if (isHumanCallerKind(session.callerKind)) {
-      return this.credentials.list(session.organizationId, params.agentId, query);
-    }
-    const own = storedCredentialIdOf(session);
-    // A config-file machine token has no stored row: nothing of its own to show.
-    if (!own) return CursorPageDto.empty();
-    return this.credentials.list(session.organizationId, params.agentId, query, {
-      credentialId: own,
-    });
+    return this.credentials.list(session.organizationId, params.agentId, query);
   }
 
   // Minting and revoking machine tokens is a person's act: an agent that
@@ -98,6 +84,32 @@ export class AgentCredentialsController {
       session.organizationId,
       params.agentId,
       body,
+      auditActorOf(session),
+    );
+  }
+
+  // Discarding the payment key a credential waits with is the owner's act,
+  // like approving it: a key holder could otherwise only re-park its own.
+  @Delete(':id/pending-delegate')
+  @UseGuards(HumanSessionGuard)
+  @AllowedWhileBlocked()
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Discard the payment key waiting for approval — the bound key keeps signing',
+  })
+  @ApiResponse({ status: 204, description: 'Discarded, or nothing was pending' })
+  @ApiResponse({
+    status: 404,
+    description: 'No such credential under this agent, in this organization',
+  })
+  async discardPendingDelegate(
+    @CurrentSession() session: McpSession,
+    @Param() params: RevokeAgentCredentialParamsDto,
+  ): Promise<void> {
+    await this.credentials.discardPendingDelegate(
+      session.organizationId,
+      params.agentId,
+      params.id,
       auditActorOf(session),
     );
   }

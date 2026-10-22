@@ -1,4 +1,5 @@
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { join } from 'node:path';
 
 import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
@@ -240,6 +241,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       callerKind,
       paymentsAllowed: true,
       storedCredential: callerKind === McpCallerKind.AGENT,
+      ...(callerKind === McpCallerKind.AGENT ? { scopes: DEFAULT_AGENT_SCOPES } : {}),
     } as McpSession;
   }
 
@@ -547,7 +549,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
     const id = fields.id ?? randomUUID();
     await dataSource.query(
       `INSERT INTO agent_credentials
-         (id, organization_id, agent_id, name, prefix, token_hash, scopes, created_at,
+         (id, organization_id, agent_id, name, token_last4, token_hash, scopes, created_at,
           last_used_at, expires_at, revoked_at, delegate_account, delegate_bound_at,
           issued_via, oauth_client_id, revoked_by)
        VALUES ($1, $2, $3, $4, $5, $6, '{}', COALESCE($7::timestamptz, now()), $8, $9, $10,
@@ -559,7 +561,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
         organizationId,
         agent,
         `key ${id.slice(0, 6)}`,
-        fields.oauthClientId ? null : `assay_sk_${id.slice(0, 6)}`,
+        fields.oauthClientId ? null : id.slice(0, 4),
         fields.oauthClientId ? null : `hash-${id}`,
         fields.createdAt ?? null,
         fields.lastUsedAt ?? null,
@@ -864,12 +866,10 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       expect(status.debts.debts).toHaveLength(1);
     });
 
-    it('answers an agent credential as the three routes do', async () => {
-      expect(await data('/me/status', {}, 'machine')).toEqual({
-        blockStatus: await data('/account/block-status', {}, 'machine'),
-        unreadCount: await data('/notifications/unread-count', {}, 'machine'),
-        debts: await data('/escrow/debts', {}, 'machine'),
-      });
+    it("refuses an agent credential: dashboards are a person's (agent key scopes)", async () => {
+      const refused = await get('/me/status', {}, 'machine');
+      expect(refused.status).toBe(403);
+      expect(JSON.stringify(refused.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
     });
   });
 
@@ -950,14 +950,13 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       expect(onlyHealth.items.every((a: any) => a.health && !('credentials' in a))).toBe(true);
     });
 
-    it('gives an agent credential its own agent only, as the credentials route does', async () => {
-      // BUG-DEMO-02: an agent reads its own agent's credential metadata.
-      const page = await data('/agents', { include: 'health' }, 'machine');
-      expect(page.items.length).toBeGreaterThan(0);
-      for (const row of page.items) expect('health' in row).toBe(row.agentId === agentId);
-      expect((await get(`/agents/${agentId}/credentials`, {}, 'machine')).status).toBe(200);
-      // Without include the list is open to it, as before.
-      expect((await get('/agents', {}, 'machine')).status).toBe(200);
+    it('refuses an agent credential, with or without include, as the credentials route does', async () => {
+      for (const query of [{}, { include: 'health' }]) {
+        const refused = await get('/agents', query, 'machine');
+        expect(refused.status).toBe(403);
+        expect(JSON.stringify(refused.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
+      }
+      expect((await get(`/agents/${agentId}/credentials`, {}, 'machine')).status).toBe(403);
       expect((await get('/agents', { include: 'secrets' })).status).toBe(400);
     });
   });
@@ -1041,6 +1040,7 @@ describe('composite dashboard reads equal the routes they stand for', () => {
       const { paidCalls, paidCallsUnknown, ...binding } = full;
       expect(status).toEqual({ ...binding, bound: true });
       expect(status.delegate).toMatch(/^eip155:/);
+      expect(status.pendingDelegate).toBeNull();
       expect(paidCalls).toBeDefined();
       expect(paidCallsUnknown).toBe(false);
     });
