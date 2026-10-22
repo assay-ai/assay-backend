@@ -209,6 +209,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       boundAt: null,
       pendingDelegate: null,
       pendingSince: null,
+      approvalUrl: null,
       paidCalls: null,
       paidCallsUnknown: false,
     });
