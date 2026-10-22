@@ -33,10 +33,11 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { type AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
+  agentCredentialLast4,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { loadMcpCredentials } from '@modules/mcp/services/config-mcp-session.source';
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 @Module({
@@ -156,9 +157,9 @@ export async function borrowOrganizationCredential(
       organizationId,
       agentId: agent.id,
       name: `devnet-acceptance-${label}`,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
-      scopes: [],
+      scopes: [...DEFAULT_AGENT_SCOPES],
       // A backstop for the one path `release()` cannot cover. `release()` is
       // called from a `finally`, and a `finally` does not run on SIGINT —
       // Ctrl-C during a slow HTTP call is an ordinary way to end an operator
@@ -216,6 +217,9 @@ export async function borrowOrganizationCredential(
  *    Nothing in the acceptance suite reads this address back and
  *    expects it to match a funded signer's address.
  */
+/** How long a key {@link mintScriptIdentity} mints stays valid: one run, with margin. */
+export const SCRIPT_IDENTITY_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 export async function mintScriptIdentity(
   app: INestApplicationContext,
   label: string,
@@ -252,10 +256,11 @@ export async function mintScriptIdentity(
       organizationId: agent.organizationId,
       agentId: agent.id,
       name: `devnet-acceptance-${label}`,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
-      scopes: [],
-      expiresAt: null,
+      scopes: [...DEFAULT_AGENT_SCOPES],
+      // Every key expires; this one outlives one acceptance run, no more.
+      expiresAt: new Date(Date.now() + SCRIPT_IDENTITY_LIFETIME_MS),
     }),
   );
 

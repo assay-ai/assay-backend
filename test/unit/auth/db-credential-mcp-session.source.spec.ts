@@ -167,6 +167,7 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
       delegateAccount: null,
       // An API key may always take part in paid calls (spec §6.3.13).
       paymentsAllowed: true,
+      scopes: ['tools:call', 'payments', 'activity:read'],
     });
   });
 

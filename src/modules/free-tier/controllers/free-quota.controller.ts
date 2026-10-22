@@ -2,7 +2,7 @@ import { Controller, Get, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 
 import { FreeQuotaResponseDto } from '../dto/free-quota-response.dto';
 import { FreeQuotaService } from '../services/free-quota.service';
@@ -20,6 +20,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Free tier')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.TOOLS_CALL)
 @Controller('free-quota')
 export class FreeQuotaController {
   constructor(private readonly quota: FreeQuotaService) {}

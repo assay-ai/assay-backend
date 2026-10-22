@@ -1,6 +1,9 @@
+import { AuthErrors } from '@modules/auth/errors/auth.errors';
+import { AgentScope } from '@shared/auth/agent-scope';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { enablePaidUrl } from '@modules/account/domain/enable-paid-url';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
@@ -625,6 +628,16 @@ export class McpToolCallService {
       // mode and must require no reconfiguration from the agent. Execution
       // simply continues below, among `PAID` and `FREEMIUM` bindings only, and
       // on rail B nothing is charged without a voucher the buyer signs.
+    }
+
+    // ── The key may pay ───────────────────────────────────────────────────
+    //
+    // Defence in depth for the free-calls-only key (M2): the paid path itself
+    // refuses a credential whose scopes lack `payments`, before any quote is
+    // offered or anything is created, rather than relying on it never having
+    // bound a payment key.
+    if (session.paymentsScopeMissing === true) {
+      throw AuthErrors.scopeMissing({ requiredScope: AgentScope.PAYMENTS });
     }
 
     // ── The buyer's chain ─────────────────────────────────────────────────
@@ -2488,9 +2501,7 @@ export const PAYMENT_KEY_SENTENCE = ' Paid calls need a payment key on your comp
 export const ASSAY_APP_SENTENCE = ' Paid tools need the Assay app on your computer.';
 
 /** `{WEB}/agents/enable-paid?credential={credentialId}` (R-PAY-1, R-PAY-4). */
-export function enablePaidUrl(webAppUrl: string, credentialId: string): string {
-  return `${webAppUrl}/agents/enable-paid?credential=${encodeURIComponent(credentialId)}`;
-}
+export { enablePaidUrl };
 
 /** The sentence a payment client's PAYMENT_ESCROW_NOT_OPEN ends with, before its link. */
 export const FUND_ESCROW_SENTENCE = ' Add funds to open it, then call again: ';

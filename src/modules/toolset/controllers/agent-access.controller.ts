@@ -4,7 +4,13 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { AgentIdParamDto } from '@modules/account/dto/agent-id-param.dto';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { auditActorOf } from '@shared/audit';
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AgentScope,
+  CurrentSession,
+  HumanSessionGuard,
+  RequireAgentScope,
+  SessionAuthGuard,
+} from '@shared/auth';
 
 import {
   AgentAccessDto,
@@ -30,6 +36,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 export class AgentAccessController {
   constructor(private readonly access: AgentAccessService) {}
 
+  @RequireAgentScope(AgentScope.TOOLS_CALL)
   @Get()
   @TenantCache({
     ttl: 30,

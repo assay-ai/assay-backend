@@ -76,6 +76,8 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'AgentCredentialPendingDelegate1762400000061',
+    'AgentCredentialScopes1762400000060',
     'BindingTestRunAuthMode1762400000050',
     'PaymentIntentsCreatedIndex1762400000040',
     'ConnectUrlServerName1762400000030',

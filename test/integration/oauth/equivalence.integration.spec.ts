@@ -1168,6 +1168,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         ...keySession,
         credentialId: world.grant.id,
         paymentsAllowed: false,
+        scopes: ['tools:call'],
       });
       const key = newDelegateKey();
       await expect(delegates.challenge(thirdParty, key.signer.address)).rejects.toMatchObject({
@@ -1196,7 +1197,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         ['post', '/agents/me/delegate/challenge'],
         ['post', '/agents/me/delegate'],
         ['get', '/spend-policy'],
-        ['get', '/toolsets'],
+        ['get', '/tool-calls'],
       ] as const) {
         const refused = await onApi(world.grant.bearer, method, path, {});
         expect({ path, status: refused.status, code: refused.body?.error?.code }).toEqual({

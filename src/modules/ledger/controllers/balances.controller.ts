@@ -1,7 +1,7 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { GetBalancesResponseDto } from '../dto/get-balances.dto';
@@ -18,6 +18,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Balances')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.ACTIVITY_READ)
 @Controller('balances')
 export class BalancesController {
   constructor(private readonly balances: BalancesService) {}

@@ -2,9 +2,20 @@
  * The identity the public live demo calls as.
  *
  * ```bash
- * yarn demo:identity            # prints the token; store it in DEMO_MCP_TOKEN
- * yarn demo:identity --rotate   # mint a new token, revoking nothing else
+ * yarn demo:identity --expires-in-days=365            # mint; store it in DEMO_MCP_TOKEN
+ * yarn demo:identity --expires-in-days=365            # again: refreshes the key's expiry
+ * yarn demo:identity --expires-in-days=365 --rotate   # mint a new token, revoking nothing else
  * ```
+ *
+ * ## The demo key expires, and this script refreshes it
+ *
+ * Every key expires (at most `CREDENTIAL_MAX_LIFETIME_DAYS`), the demo's too,
+ * so `--expires-in-days` is required: there is no default and no "never".
+ * Re-running the script on a stack that already has the demo key does not
+ * mint a new token (it cannot be recovered, and `DEMO_MCP_TOKEN` would have to
+ * change): it moves the SAME key's expiry to now + that many days. Re-run it
+ * before the printed expiry, or the homepage demo stops answering with
+ * `MCP_CREDENTIAL_INVALID` on that day.
  *
  * ## A real credential, not a constructed session
  *
@@ -52,10 +63,13 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
+  agentCredentialHint,
+  agentCredentialLast4,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
 import { AppMcpModule } from '@bootstrap/mcp/app.module';
+import { CREDENTIAL_MAX_LIFETIME_DAYS } from '@modules/account/constants/credential-expiry.constants';
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 /** Stable across runs, so `.env` does not need editing on a re-seed. */
@@ -67,8 +81,25 @@ function mintToken(): string {
   return `${AGENT_CREDENTIAL_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
 }
 
+/**
+ * `--expires-in-days=N`, required: 1 to `CREDENTIAL_MAX_LIFETIME_DAYS`, the
+ * same bound a key minted through the API has.
+ */
+function expiryFromArgs(argv: readonly string[]): Date {
+  const arg = argv.find((a) => a.startsWith('--expires-in-days='));
+  const days = arg ? Number(arg.slice('--expires-in-days='.length)) : NaN;
+  if (!Number.isInteger(days) || days < 1 || days > CREDENTIAL_MAX_LIFETIME_DAYS) {
+    throw new Error(
+      `--expires-in-days=N is required, 1 to ${CREDENTIAL_MAX_LIFETIME_DAYS}: every key expires, ` +
+        'the demo key too. Re-run this script before that day to refresh it.',
+    );
+  }
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
+
 async function main(): Promise<void> {
   const rotate = process.argv.includes('--rotate');
+  const expiresAt = expiryFromArgs(process.argv);
   const app = await NestFactory.createApplicationContext(AppMcpModule, { logger: false });
 
   try {
@@ -139,12 +170,15 @@ async function main(): Promise<void> {
     );
 
     if (existing && !rotate) {
+      // The same key, a later expiry: DEMO_MCP_TOKEN stays as it is.
+      await credentials.update({ organizationId: DEMO_ORG_ID, id: existing.id }, { expiresAt });
       // eslint-disable-next-line no-console
       console.log(
         [
           `organization ${DEMO_ORG_ID}`,
           `agent        ${DEMO_AGENT_ID} (${agent.primaryAccountId})`,
-          `credential   ${existing.id} prefix ${existing.prefix}… (already minted)`,
+          `credential   ${existing.id} ${agentCredentialHint(existing.tokenLast4) ?? ''} (already minted)`,
+          `expires      ${expiresAt.toISOString()} (refreshed; re-run before then)`,
           '',
           'The token itself is not recoverable — only its digest is stored.',
           'Re-run with --rotate to mint a new one.',
@@ -160,9 +194,10 @@ async function main(): Promise<void> {
       organizationId: DEMO_ORG_ID,
       agentId: DEMO_AGENT_ID,
       name: DEMO_CREDENTIAL_NAME,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
-      scopes: [],
+      scopes: [...DEFAULT_AGENT_SCOPES],
+      expiresAt,
     });
     await credentials.save(credential);
 
@@ -172,6 +207,7 @@ async function main(): Promise<void> {
         `organization  ${DEMO_ORG_ID}`,
         `agent         ${DEMO_AGENT_ID} (${agent.primaryAccountId})`,
         `credential    ${credential.id}`,
+        `expires       ${expiresAt.toISOString()} (re-run this script before then to refresh it)`,
         '',
         'Put this in the API process environment. It is printed once:',
         '',

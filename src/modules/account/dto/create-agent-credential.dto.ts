@@ -1,14 +1,23 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
-  ArrayMaxSize,
+  ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsDate,
+  IsIn,
   IsOptional,
   IsString,
   MaxLength,
   MinLength,
 } from 'class-validator';
+
+import { AGENT_SCOPES, AgentScope, DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
+
+import {
+  CREDENTIAL_DEFAULT_LIFETIME_DAYS,
+  CREDENTIAL_MAX_LIFETIME_DAYS,
+} from '../constants/credential-expiry.constants';
 
 export class CreateAgentCredentialBodyDto {
   @ApiProperty({ description: 'Human label — "CI deploy", "local dev"', example: 'CI deploy' })
@@ -17,24 +26,28 @@ export class CreateAgentCredentialBodyDto {
   @MaxLength(128)
   name: string;
 
-  // Not enforced (review A-4). No scope vocabulary exists yet, every credential
-  // minted so far carries `[]`, and nothing reads the column: a credential's
-  // powers are those of an agent session whatever it lists here. Enforcing a
-  // scope means defining the vocabulary first, so it is described as a label
-  // rather than as a permission.
   @ApiPropertyOptional({
-    type: [String],
+    enum: AgentScope,
+    isArray: true,
+    example: DEFAULT_AGENT_SCOPES,
     description:
-      'Free-form labels, stored and returned. Not enforced yet: a credential can ' +
-      'do everything an agent credential can, whatever it lists here.',
+      'What the key may do. Omitted: `tools:call payments activity:read`. ' +
+      '`payments` needs `tools:call`. `reports:write` is never on unless asked for. ' +
+      'A route not open to any scope (audit log, notifications, dashboards, toolset ' +
+      'management, deposits, the provider console…) refuses every key.',
   })
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(64)
-  @IsString({ each: true })
-  scopes?: string[];
+  @ArrayMinSize(1)
+  @ArrayUnique()
+  @IsIn(AGENT_SCOPES, { each: true })
+  scopes?: AgentScope[];
 
-  @ApiPropertyOptional({ description: 'ISO-8601. Omit for a credential that does not expire' })
+  @ApiPropertyOptional({
+    description:
+      `ISO-8601. Omitted: ${CREDENTIAL_DEFAULT_LIFETIME_DAYS} days from now. Must be in the ` +
+      `future and at most ${CREDENTIAL_MAX_LIFETIME_DAYS} days away; a key always expires`,
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
@@ -56,8 +69,13 @@ export class CreateAgentCredentialResponseDto {
   @ApiProperty()
   name: string;
 
-  @ApiProperty({ description: 'Clear-text leading characters, for disambiguation only' })
-  prefix: string;
+  @ApiProperty({
+    example: 'assay_sk_live_…2fds',
+    description:
+      'Recognises the key later without revealing it: `assay_sk_live_…` and the last 4 characters of `token`. ' +
+      'Key lists show the same value.',
+  })
+  hint: string;
 
   @ApiProperty({
     description:
@@ -66,10 +84,10 @@ export class CreateAgentCredentialResponseDto {
   })
   token: string;
 
-  @ApiProperty({ type: [String] })
+  @ApiProperty({ enum: AgentScope, isArray: true })
   scopes: string[];
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiProperty()
   expiresAt: Date | null;
 
   @ApiProperty()

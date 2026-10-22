@@ -138,7 +138,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       new OAuthGrantWriter(dataSource, credentials, audit),
       audit,
       epoch,
-      { issuer: MCP },
+      { issuer: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentials,

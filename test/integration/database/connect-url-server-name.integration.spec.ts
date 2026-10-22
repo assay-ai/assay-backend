@@ -68,6 +68,8 @@ describe('connect url server name migration', () => {
   it('reverts to 9 characters and applies again', async () => {
     // Later migrations sit on top of this one and touch none of its objects.
     for (const later of [
+      'AgentCredentialPendingDelegate1762400000061',
+      'AgentCredentialScopes1762400000060',
       'BindingTestRunAuthMode1762400000050',
       'PaymentIntentsCreatedIndex1762400000040',
     ]) {

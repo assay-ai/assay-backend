@@ -19,15 +19,21 @@ import {
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import {
+  AgentDelegateBindResultDto,
   AgentDelegateBindingDto,
   AgentDelegateBindingStatusDto,
   AgentDelegateStatusDto,
+  DelegateBindStatus,
   DelegateChallengeResponseDto,
   PaidCallsDto,
   PaidCallsStatus,
 } from '../dto/agent-delegate.dto';
 import { AccountErrors } from '../errors/account.errors';
+import type { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
+import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
+
+import { enablePaidUrl } from '../domain/enable-paid-url';
 
 /** How long an agent has to sign the challenge it asked for. */
 export const DELEGATE_CHALLENGE_TTL_SECONDS = 300;
@@ -41,6 +47,9 @@ const challengeKey = (credentialId: string) => `agent-delegate-challenge:${crede
 
 /** One live credential per delegate key, platform-wide (migration 1759600000002). */
 export const DELEGATE_LIVE_CONSTRAINT = 'uq_agent_credentials_delegate_live';
+
+/** One live credential per PENDING delegate key, platform-wide (migration 1762400000061). */
+export const PENDING_DELEGATE_LIVE_CONSTRAINT = 'uq_agent_credentials_pending_delegate_live';
 
 interface StoredChallenge extends DelegateBindingChallenge {
   readonly organizationId: string;
@@ -68,6 +77,19 @@ interface StoredChallenge extends DelegateBindingChallenge {
  * Challenges live in Redis with a TTL, one per credential (a new one replaces
  * the last), and are consumed with `GETDEL`, so one is good for one attempt; a
  * Redis flush only forces the agent to ask again.
+ *
+ * **A new key never silently replaces a bound one.** When the credential
+ * already has a key and proves another, the new one is stored as PENDING
+ * (`pending_delegate_account`): the bound key keeps signing, and the pending
+ * one replaces it only when the payer approves it on chain (the enable-paid
+ * page relays `POST /escrow/delegates` for that key, which promotes it in one
+ * UPDATE: `AgentCredentialRepository.promotePendingDelegate`). So a leaked
+ * API key cannot swap the payment key under the owner's running agent; it can
+ * only ask, and the owner sees the new key's fingerprint before approving. A
+ * newer proof replaces an older pending key (nothing live hangs on it), and
+ * the owner can discard one (`DELETE /agents/:agentId/credentials/:id/pending-delegate`).
+ * A first bind writes only onto a row with no other key, so two racing first
+ * binds cannot both win: the later one is `ACCOUNT_DELEGATE_BIND_CONFLICT`.
  */
 @Injectable()
 export class AgentDelegateService {
@@ -79,6 +101,9 @@ export class AgentDelegateService {
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
     private readonly delegations: EscrowDelegationService,
     @Optional() private readonly sessions: SessionEvictions | null = null,
+    // `WEB_APP_URL`, the origin of `approvalUrl`; absent (tests, a process
+    // without the toolset config) means no link.
+    @Optional() @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig | null = null,
   ) {}
 
   /**
@@ -111,10 +136,7 @@ export class AgentDelegateService {
       }
     }
     return {
-      credentialId: session.credentialId,
-      agentLabel: session.label ?? null,
-      delegate,
-      boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
+      ...bindingOf(this.host?.webAppUrl, session, row),
       paidCalls,
       paidCallsUnknown,
     };
@@ -131,14 +153,8 @@ export class AgentDelegateService {
       organizationId: session.organizationId,
       id: session.credentialId,
     });
-    const delegate = (row?.delegateAccount as AccountId | null | undefined) ?? null;
-    return {
-      credentialId: session.credentialId,
-      agentLabel: session.label ?? null,
-      bound: delegate !== null,
-      delegate,
-      boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
-    };
+    const binding = bindingOf(this.host?.webAppUrl, session, row);
+    return { ...binding, bound: binding.delegate !== null };
   }
 
   private async paidCalls(payer: AccountId, delegate: AccountId): Promise<PaidCallsDto> {
@@ -205,7 +221,7 @@ export class AgentDelegateService {
     session: McpSession,
     challengeId: string,
     signature: string,
-  ): Promise<AgentDelegateBindingDto> {
+  ): Promise<AgentDelegateBindResultDto> {
     this.assertAgent(session);
 
     // Consumed before it is checked: a challenge is good for one attempt.
@@ -244,12 +260,37 @@ export class AgentDelegateService {
       throw AccountErrors.delegateAlreadyBound({ delegate: stored.delegate });
     }
 
-    const boundAt = new Date();
+    const now = new Date();
+    const row = await this.credentials.findOneBy({
+      organizationId: session.organizationId,
+      id: session.credentialId,
+    });
+    const current = row?.delegateAccount ?? null;
+    const replacing = current !== null && !sameAccountSpelling(current, stored.delegate);
+    // Another key is bound: the proved key waits for the payer's approval and
+    // the bound one keeps working (see the class comment).
+    const write: Partial<AgentCredentialEntity> = replacing
+      ? { pendingDelegateAccount: stored.delegate, pendingDelegateRequestedAt: now }
+      : { delegateAccount: stored.delegate, delegateBoundAt: now };
     try {
-      await this.credentials.update(
-        { organizationId: session.organizationId, id: session.credentialId },
-        { delegateAccount: stored.delegate as AccountId, delegateBoundAt: boundAt },
-      );
+      if (replacing) {
+        await this.credentials.update(
+          { organizationId: session.organizationId, id: session.credentialId },
+          write,
+        );
+      } else if (
+        // A first bind (or the same key again) only onto a row that still has
+        // no other key: two first binds racing on one credential cannot both
+        // win, and the later one never silently replaces the earlier (M1).
+        !(await this.credentials.bindDelegateIfUnbound(
+          session.organizationId,
+          session.credentialId,
+          stored.delegate,
+          now,
+        ))
+      ) {
+        throw AccountErrors.delegateBindConflict();
+      }
     } catch (error) {
       const violation = error as {
         code?: string;
@@ -258,18 +299,25 @@ export class AgentDelegateService {
       };
       const code = violation?.code ?? violation?.driverError?.code;
       const constraint = violation?.constraint ?? violation?.driverError?.constraint;
-      if (code === UNIQUE_VIOLATION_CODE && constraint === DELEGATE_LIVE_CONSTRAINT) {
+      if (
+        code === UNIQUE_VIOLATION_CODE &&
+        (constraint === DELEGATE_LIVE_CONSTRAINT || constraint === PENDING_DELEGATE_LIVE_CONSTRAINT)
+      ) {
         throw AccountErrors.delegateAlreadyBound({ delegate: stored.delegate });
       }
       throw error;
     }
+    if (replacing) {
+      return {
+        ...bindingOf(this.host?.webAppUrl, session, { ...row, ...write } as AgentCredentialEntity),
+        status: DelegateBindStatus.PENDING_APPROVAL,
+      };
+    }
     // The session carries `delegateAccount`: a cached one would still name none.
     await this.sessions?.evictOrganization(session.organizationId);
     return {
-      credentialId: session.credentialId,
-      agentLabel: session.label ?? null,
-      delegate: stored.delegate,
-      boundAt: boundAt.toISOString(),
+      ...bindingOf(this.host?.webAppUrl, session, { ...row, ...write } as AgentCredentialEntity),
+      status: DelegateBindStatus.ACTIVE,
     };
   }
 
@@ -286,4 +334,33 @@ export class AgentDelegateService {
       throw AccountErrors.delegateClientNotAllowed();
     }
   }
+}
+
+/** The binding as every route answers it: the bound key and any key waiting for approval. */
+function bindingOf(
+  webAppUrl: string | undefined,
+  session: McpSession,
+  row: AgentCredentialEntity | null | undefined,
+): AgentDelegateBindingDto {
+  // The key the payer has to approve next: a pending one first, else the bound one.
+  const toApprove = row?.pendingDelegateAccount ?? row?.delegateAccount ?? null;
+  return {
+    credentialId: session.credentialId,
+    agentLabel: session.label ?? null,
+    delegate: (row?.delegateAccount as AccountId | null | undefined) ?? null,
+    boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
+    pendingDelegate: (row?.pendingDelegateAccount as AccountId | null | undefined) ?? null,
+    pendingSince: row?.pendingDelegateRequestedAt
+      ? row.pendingDelegateRequestedAt.toISOString()
+      : null,
+    approvalUrl:
+      webAppUrl && toApprove
+        ? enablePaidUrl(webAppUrl, session.credentialId, addressOf(toApprove))
+        : null,
+  };
+}
+
+/** `0x…` of a CAIP-10 account (`eip155:46630:0x…`). */
+function addressOf(account: string): string {
+  return account.slice(account.lastIndexOf(':') + 1);
 }

@@ -4,7 +4,8 @@ import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 
-import { RequestWithSession, SESSION_REQUEST_KEY } from './session-auth.guard';
+import type { RequestWithSession } from './session-auth.guard';
+import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
  * Refuses an agent machine credential on a route only a person may use.
@@ -40,43 +41,10 @@ const HUMAN_KINDS: ReadonlySet<McpCallerKind> = new Set([
 ]);
 
 /**
- * The guard's allow-list, for a route that is open to both kinds but returns
- * more to a person (`GET /agents?include=`): one list, so the two cannot drift.
+ * The guard's allow-list, for code that answers a person differently from an
+ * agent credential (`GET /spend-policy`, the MCP host's scope check): one
+ * list, so the two cannot drift.
  */
 export function isHumanCallerKind(callerKind: McpCallerKind): boolean {
   return HUMAN_KINDS.has(callerKind);
-}
-
-/**
- * A person, or the agent the route's `:agentId` names reading itself.
- *
- * For a read whose body belongs to one agent and holds no secret (its own
- * credentials' metadata, BUG-DEMO-02): a person passes as with
- * {@link HumanSessionGuard}; a machine credential passes only when `:agentId`
- * is its own session's agent, and is refused with the same
- * `AUTH_HUMAN_SESSION_REQUIRED` otherwise — another agent of the organization,
- * or an agent of another one, reads exactly as today.
- *
- * A guard, not a check in the handler: guards run before the tenant-cache
- * interceptor, so a cached body for `/agents/<A>/…` can only ever be answered
- * to a session that is agent A (or a person).
- */
-@Injectable()
-export class HumanOrOwnAgentGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
-    const request = context
-      .switchToHttp()
-      .getRequest<RequestWithSession & { params?: Record<string, unknown> }>();
-    const session = request[SESSION_REQUEST_KEY];
-
-    if (!session) throw McpErrors.credentialInvalid();
-    if (HUMAN_KINDS.has(session.callerKind)) return true;
-    if (session.callerKind !== McpCallerKind.AGENT) throw AuthErrors.humanSessionRequired();
-
-    const named = request.params?.agentId;
-    if (typeof named !== 'string' || !session.agentId || named !== session.agentId) {
-      throw AuthErrors.humanSessionRequired();
-    }
-    return true;
-  }
 }

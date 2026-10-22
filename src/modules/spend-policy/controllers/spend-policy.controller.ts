@@ -12,8 +12,10 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import {
+  AgentScope,
   CurrentSession,
   HumanSessionGuard,
+  RequireAgentScope,
   SessionAuthGuard,
   isHumanCallerKind,
 } from '@shared/auth';
@@ -42,6 +44,7 @@ export class SpendPolicyController {
     private readonly epochs: AccessEpochService,
   ) {}
 
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get()
   @ApiOperation({ summary: "The session's agent policy, falling back to the organization default" })
   @ApiQuery({
@@ -128,6 +131,7 @@ export class SpendPolicyController {
     return dto;
   }
 
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get('history')
   @ApiOperation({ summary: 'Policy version history, newest first' })
   @ApiCursorPage(SpendPolicyHistoryEntryDto)
