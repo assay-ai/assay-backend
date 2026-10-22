@@ -115,18 +115,22 @@ describe('EscrowDelegatesController — approving a pending payment key', () => 
     const { controller, promotePendingDelegate, evictOrganization } = build();
     promotePendingDelegate.mockResolvedValueOnce(['cred-1']);
 
-    await controller.authorize(SESSION, AUTHORIZE);
+    const answer = await controller.authorize(SESSION, AUTHORIZE);
 
     expect(promotePendingDelegate).toHaveBeenCalledWith('org-1', 'agent-1', `${CHAIN}:${DELEGATE}`);
     expect(evictOrganization).toHaveBeenCalledWith('org-1');
+    // The answer names who took the key (M3).
+    expect(answer.promotedCredentialIds).toEqual(['cred-1']);
   });
 
-  it('evicts nothing when no credential waited with the key', async () => {
+  it('evicts nothing when no credential waited with the key, and says so', async () => {
     const { controller, evictOrganization } = build();
 
-    await controller.authorize(SESSION, AUTHORIZE);
+    const answer = await controller.authorize(SESSION, AUTHORIZE);
 
     expect(evictOrganization).not.toHaveBeenCalled();
+    // Re-parked or discarded meanwhile: the page sees nothing was promoted.
+    expect(answer.promotedCredentialIds).toEqual([]);
   });
 
   it('promotes nothing when the relay refused', async () => {
@@ -143,6 +147,7 @@ describe('EscrowDelegatesController — approving a pending payment key', () => 
 
     await expect(controller.authorize(SESSION, AUTHORIZE)).resolves.toMatchObject({
       transactionHash: TX,
+      promotedCredentialIds: [],
     });
   });
 });

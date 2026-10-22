@@ -4,7 +4,8 @@ import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 
-import { RequestWithSession, SESSION_REQUEST_KEY } from './session-auth.guard';
+import type { RequestWithSession } from './session-auth.guard';
+import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
  * Refuses an agent machine credential on a route only a person may use.

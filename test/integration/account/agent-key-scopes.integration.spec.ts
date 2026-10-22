@@ -367,6 +367,79 @@ describe('agent key scopes — over HTTP, with real keys', () => {
     expect(refusal(response)).toMatchObject({ status: 401, code: 'MCP_CREDENTIAL_INVALID' });
   });
 
+  /** M3: the owner discards the payment key a credential waits with; a key cannot. */
+  describe('DELETE /agents/:agentId/credentials/:id/pending-delegate', () => {
+    // Fresh keys per credential: a key is one live credential's, platform-wide.
+    const fresh = () => `${CHAIN}:0x${randomUUID().replace(/-/g, '').padEnd(40, '1').slice(0, 40)}`;
+    let BOUND = fresh();
+    let PENDING = fresh();
+
+    async function waiting(): Promise<{ id: string; token: string }> {
+      BOUND = fresh();
+      PENDING = fresh();
+      const created = await createKey();
+      await dataSource.query(
+        `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now(), ` +
+          `"pending_delegate_account" = $3, "pending_delegate_requested_at" = now() WHERE "id" = $1`,
+        [created.body.data.id, BOUND, PENDING],
+      );
+      return { id: created.body.data.id, token: created.body.data.token };
+    }
+    const row = async (id: string) =>
+      (
+        await dataSource.query(
+          `SELECT "delegate_account", "pending_delegate_account", "pending_delegate_requested_at" ` +
+            `FROM "agent_credentials" WHERE "id" = $1`,
+          [id],
+        )
+      )[0];
+
+    it('a key, even with every scope, is refused: discarding is the owner’s act', async () => {
+      const { id } = await waiting();
+      const all = await key({
+        scopes: ['tools:call', 'payments', 'activity:read', 'reports:write'],
+      });
+      const response = await http()
+        .delete(`/agents/${agentId}/credentials/${id}/pending-delegate`)
+        .set(as(all));
+      expect(refusal(response)).toMatchObject({
+        status: 403,
+        code: 'AUTH_HUMAN_SESSION_REQUIRED',
+      });
+      expect((await row(id)).pending_delegate_account).toBe(PENDING);
+    });
+
+    it('the owner discards it; the bound key stays; a second call is a no-op', async () => {
+      const { id } = await waiting();
+      const path = `/agents/${agentId}/credentials/${id}/pending-delegate`;
+      expect((await http().delete(path).set(as(PERSON_TOKEN))).status).toBe(204);
+      expect(await row(id)).toEqual({
+        delegate_account: BOUND,
+        pending_delegate_account: null,
+        pending_delegate_requested_at: null,
+      });
+      expect((await http().delete(path).set(as(PERSON_TOKEN))).status).toBe(204);
+      const [{ entries }] = await dataSource.query(
+        `SELECT count(*)::int AS "entries" FROM "audit_log_entries" ` +
+          `WHERE "resource_id" = $1 AND "action" = 'credential.pending_delegate_discarded'`,
+        [id],
+      );
+      expect(entries).toBe(1);
+    });
+
+    it('404 under another agent', async () => {
+      const { id } = await waiting();
+      const response = await http()
+        .delete(`/agents/${randomUUID()}/credentials/${id}/pending-delegate`)
+        .set(as(PERSON_TOKEN));
+      expect(refusal(response)).toMatchObject({
+        status: 404,
+        code: 'ACCOUNT_CREDENTIAL_NOT_FOUND',
+      });
+      expect((await row(id)).pending_delegate_account).toBe(PENDING);
+    });
+  });
+
   describe('migration 1762400000060 — existing rows get scopes and an expiry', () => {
     it('API keys get the default scopes and at most 365 days; OAuth rows by client', async () => {
       const builtin = randomUUID();

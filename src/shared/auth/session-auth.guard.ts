@@ -6,7 +6,6 @@ import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import {
   MCP_SESSION_SOURCE,
-  McpCallerKind,
   McpSession,
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
@@ -14,6 +13,7 @@ import {
 import { AGENT_SCOPE_METADATA, AgentScope } from './agent-scope';
 
 import { extractBearerToken } from './bearer-token';
+import { isHumanCallerKind } from './human-session.guard';
 import {
   ALLOWED_WHILE_BLOCKED_METADATA,
   BLOCKED_SESSION_READ_ONLY_METADATA,
@@ -112,7 +112,7 @@ export class SessionAuthGuard implements CanActivate {
   }
 
   private assertAgentScope(context: ExecutionContext, session: McpSession): void {
-    if (PERSON_KINDS.has(session.callerKind)) return;
+    if (isHumanCallerKind(session.callerKind)) return;
     const required = this.reflector.getAllAndOverride<AgentScope | undefined>(
       AGENT_SCOPE_METADATA,
       [context.getHandler(), context.getClass()],
@@ -133,12 +133,6 @@ export class SessionAuthGuard implements CanActivate {
     );
   }
 }
-
-/** Sessions no scope limits: the same allow-list as `HumanSessionGuard`. */
-const PERSON_KINDS: ReadonlySet<McpCallerKind> = new Set([
-  McpCallerKind.HUMAN,
-  McpCallerKind.CONFIG,
-]);
 
 /** The methods a blocked person's session may still use. */
 const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);

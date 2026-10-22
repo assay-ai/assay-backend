@@ -286,4 +286,14 @@ export class RelayedDelegateResponseDto {
       'that read failed — the transaction itself landed; read `GET /escrow/delegates` again.',
   })
   delegates: EscrowDelegateDto[] | null;
+
+  @ApiProperty({
+    type: [String],
+    required: false,
+    description:
+      'Authorise only: the agent credentials whose PENDING payment key this approval made their ' +
+      'bound key. A credential the page approved for that is missing here no longer waits with ' +
+      'this key (another key was parked, or the owner discarded it): nothing changed for it.',
+  })
+  promotedCredentialIds?: string[];
 }

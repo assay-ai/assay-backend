@@ -517,6 +517,72 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       expect(after.delegate_bound_at).not.toBeNull();
     });
 
+    /** M9 (b): promotion is the approving person's organization's only. */
+    it('a person of another organization approving the same key promotes nothing', async () => {
+      const id = await credential();
+      const first = privateKeyToAccount(generatePrivateKey());
+      const second = privateKeyToAccount(generatePrivateKey());
+      await bindKey(id, first);
+      await bindKey(id, second);
+
+      expect(
+        await credentials.promotePendingDelegate(
+          randomUUID(),
+          agentId,
+          `${CHAIN}:${second.address}`,
+        ),
+      ).toEqual([]);
+      const [row] = await dataSource.query(
+        `SELECT "delegate_account", "pending_delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+        [id],
+      );
+      expect(row).toEqual({
+        delegate_account: `${CHAIN}:${first.address}`,
+        pending_delegate_account: `${CHAIN}:${second.address}`,
+      });
+    });
+
+    /**
+     * M3: a key re-parked (or discarded by the owner) after the owner's page
+     * loaded: the approval of the earlier pending key promotes nothing, and
+     * says so with an empty list rather than silently.
+     */
+    it('an approval of a pending key that was re-parked or discarded promotes nothing', async () => {
+      const id = await credential();
+      const first = privateKeyToAccount(generatePrivateKey());
+      const shown = privateKeyToAccount(generatePrivateKey());
+      const reparked = privateKeyToAccount(generatePrivateKey());
+      await bindKey(id, first);
+      await bindKey(id, shown);
+      await bindKey(id, reparked);
+
+      expect(
+        await credentials.promotePendingDelegate(
+          organizationId,
+          agentId,
+          `${CHAIN}:${shown.address}`,
+        ),
+      ).toEqual([]);
+
+      expect(await credentials.clearPendingDelegate(organizationId, id)).toBe(true);
+      expect(await credentials.clearPendingDelegate(organizationId, id)).toBe(false);
+      expect(
+        await credentials.promotePendingDelegate(
+          organizationId,
+          agentId,
+          `${CHAIN}:${reparked.address}`,
+        ),
+      ).toEqual([]);
+      const [row] = await dataSource.query(
+        `SELECT "delegate_account", "pending_delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+        [id],
+      );
+      expect(row).toEqual({
+        delegate_account: `${CHAIN}:${first.address}`,
+        pending_delegate_account: null,
+      });
+    });
+
     it('never promotes a pending key of a revoked credential', async () => {
       const id = await credential();
       const first = privateKeyToAccount(generatePrivateKey());
@@ -556,6 +622,57 @@ describe('agent_credentials.delegate_account — binding a credential to its del
           [waiter, `${CHAIN}:${contested.address.toLowerCase()}`],
         ),
       ).rejects.toMatchObject({ constraint: 'uq_agent_credentials_pending_delegate_live' });
+    });
+  });
+
+  /**
+   * M1: two first binds racing on one credential. The write is conditional,
+   * so they can never both end ACTIVE, and the key on the row is the one the
+   * winner was told.
+   */
+  describe('two first binds racing on one credential', () => {
+    it('the conditional write refuses to overwrite another key', async () => {
+      const id = await credential();
+      const first = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
+      const second = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
+      expect(await credentials.bindDelegateIfUnbound(organizationId, id, first, new Date())).toBe(
+        true,
+      );
+      expect(await credentials.bindDelegateIfUnbound(organizationId, id, second, new Date())).toBe(
+        false,
+      );
+      // The same key again is no conflict.
+      expect(
+        await credentials.bindDelegateIfUnbound(
+          organizationId,
+          id,
+          first.toLowerCase(),
+          new Date(),
+        ),
+      ).toBe(true);
+      const [row] = await dataSource.query(
+        `SELECT "delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+        [id],
+      );
+      expect(row.delegate_account.toLowerCase()).toBe(first.toLowerCase());
+    });
+
+    it('two concurrent writes of different keys: exactly one wins', async () => {
+      for (let round = 0; round < 5; round += 1) {
+        const id = await credential();
+        const keys = [0, 1].map(
+          () => `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`,
+        );
+        const won = await Promise.all(
+          keys.map((key) => credentials.bindDelegateIfUnbound(organizationId, id, key, new Date())),
+        );
+        expect(won.filter(Boolean)).toHaveLength(1);
+        const [row] = await dataSource.query(
+          `SELECT "delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+          [id],
+        );
+        expect(row.delegate_account).toBe(keys[won.indexOf(true)]);
+      }
     });
   });
 

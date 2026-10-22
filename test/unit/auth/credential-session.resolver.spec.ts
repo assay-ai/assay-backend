@@ -189,6 +189,21 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
 
       expect(session.paymentsAllowed).toBe(false);
       expect(session.scopes).toEqual(['tools:call']);
+      // The paid-call path refuses it by scope (M2).
+      expect(session.paymentsScopeMissing).toBe(true);
+    });
+
+    it('a session that may not pay carries no payment key, whatever the row holds (M2)', async () => {
+      const { resolver, agents } = build();
+      seedLinkedAgent(agents);
+      const row = buildCredential({
+        scopes: ['tools:call'],
+        delegateAccount: `${CHAIN}:0x00000000000000000000000000000000000000d1`,
+      });
+
+      const session = await resolver.sessionFor(row, { paymentsAllowed: true });
+
+      expect(session.delegateAccount).toBeNull();
     });
 
     it('payments does not lift a source that refuses payments (third-party OAuth)', async () => {
@@ -198,6 +213,8 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
       const session = await resolver.sessionFor(buildCredential(), { paymentsAllowed: false });
 
       expect(session.paymentsAllowed).toBe(false);
+      // The source's own answer stands: no scope refusal for a third-party grant.
+      expect(session.paymentsScopeMissing).toBeUndefined();
     });
 
     it('a row with no scopes may do nothing', async () => {
