@@ -415,7 +415,10 @@ async function readPayoutAccount(
  */
 function derivedAgentAccount(chainId: ChainId, agentId: string): string {
   if (namespaceOf(chainId) === ChainNamespace.EIP155) {
-    const address = createHash('sha1').update(`sla-window-seed:account:${agentId}`).digest('hex');
+    const address = createHash('sha256')
+      .update(`sla-window-seed:account:${agentId}`)
+      .digest('hex')
+      .slice(0, 40);
     return `${chainId}:0x${address}`;
   }
   return `${chainId}:${agentId.replace(/-/g, '').slice(0, 32)}`;
