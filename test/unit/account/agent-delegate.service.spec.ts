@@ -181,6 +181,56 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     expect((await service.current(session())).delegate).toBe(`${CHAIN}:${delegateKey.address}`);
   });
 
+  describe('approvalUrl: the enable-paid link, from the configured web origin', () => {
+    const WEB = 'https://portal.example.test';
+    const A = `${CHAIN}:${delegateKey.address}`;
+    const B = `${CHAIN}:${otherKey.address}`;
+    let withHost: AgentDelegateService;
+    beforeEach(() => {
+      const adapter = new EvmChainAdapter(new Map(), new Map([[CHAIN, deployment(CHAIN)]]), [
+        CHAIN,
+      ]);
+      withHost = new AgentDelegateService(
+        credentials as never,
+        new ChainAdapterRegistry([adapter], [CHAIN]),
+        redis as never,
+        delegations as never,
+        null,
+        { webAppUrl: WEB, mcpPublicUrl: 'https://mcp.example.test' },
+      );
+    });
+
+    it('is null while no key is bound or pending', async () => {
+      expect((await withHost.bindingStatus(session())).approvalUrl).toBeNull();
+    });
+
+    it('names the bound key, then the pending one once a rebinding waits', async () => {
+      credentials.rows.set('cred-1', { delegateAccount: A, delegateBoundAt: new Date() });
+      expect((await withHost.bindingStatus(session())).approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${delegateKey.address}`,
+      );
+
+      credentials.rows.set('cred-1', {
+        delegateAccount: A,
+        delegateBoundAt: new Date(),
+        pendingDelegateAccount: B,
+        pendingDelegateRequestedAt: new Date(),
+      });
+      expect((await withHost.current(session())).approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${otherKey.address}`,
+      );
+    });
+
+    it('is on the bind answer too', async () => {
+      const challenge = await withHost.challenge(session(), delegateKey.address);
+      const { signature } = await signWith(challenge);
+      const bound = await withHost.bind(session(), challenge.challengeId, signature);
+      expect(bound.approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${delegateKey.address}`,
+      );
+    });
+  });
+
   describe('rebinding: a new key never silently replaces a bound one (D3)', () => {
     const A = `${CHAIN}:${delegateKey.address}`;
     const B = `${CHAIN}:${otherKey.address}`;
@@ -285,6 +335,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         paidCallsUnknown: false,
         pendingDelegate: null,
         pendingSince: null,
+        approvalUrl: null,
       });
       expect(delegations.reads).toEqual([]);
     });
@@ -307,6 +358,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         paidCallsUnknown: false,
         pendingDelegate: null,
         pendingSince: null,
+        approvalUrl: null,
       });
       expect(delegations.reads).toEqual([session().agentAccount]);
     });
@@ -323,6 +375,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         paidCallsUnknown: true,
         pendingDelegate: null,
         pendingSince: null,
+        approvalUrl: null,
       });
     });
 
@@ -467,6 +520,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         boundAt: '2026-10-01T00:00:00.000Z',
         pendingDelegate: null,
         pendingSince: null,
+        approvalUrl: null,
       });
     });
 
@@ -479,6 +533,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         boundAt: null,
         pendingDelegate: null,
         pendingSince: null,
+        approvalUrl: null,
       });
     });
 

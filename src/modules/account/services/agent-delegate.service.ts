@@ -31,6 +31,9 @@ import {
 import { AccountErrors } from '../errors/account.errors';
 import type { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { SessionEvictions } from '@modules/auth/session-cache/session-evictions.service';
+import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
+
+import { enablePaidUrl } from '../domain/enable-paid-url';
 
 /** How long an agent has to sign the challenge it asked for. */
 export const DELEGATE_CHALLENGE_TTL_SECONDS = 300;
@@ -95,6 +98,9 @@ export class AgentDelegateService {
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
     private readonly delegations: EscrowDelegationService,
     @Optional() private readonly sessions: SessionEvictions | null = null,
+    // `WEB_APP_URL`, the origin of `approvalUrl`; absent (tests, a process
+    // without the toolset config) means no link.
+    @Optional() @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig | null = null,
   ) {}
 
   /**
@@ -127,7 +133,7 @@ export class AgentDelegateService {
       }
     }
     return {
-      ...bindingOf(session, row),
+      ...bindingOf(this.host?.webAppUrl, session, row),
       paidCalls,
       paidCallsUnknown,
     };
@@ -144,7 +150,7 @@ export class AgentDelegateService {
       organizationId: session.organizationId,
       id: session.credentialId,
     });
-    const binding = bindingOf(session, row);
+    const binding = bindingOf(this.host?.webAppUrl, session, row);
     return { ...binding, bound: binding.delegate !== null };
   }
 
@@ -286,14 +292,14 @@ export class AgentDelegateService {
     }
     if (replacing) {
       return {
-        ...bindingOf(session, { ...row, ...write } as AgentCredentialEntity),
+        ...bindingOf(this.host?.webAppUrl, session, { ...row, ...write } as AgentCredentialEntity),
         status: DelegateBindStatus.PENDING_APPROVAL,
       };
     }
     // The session carries `delegateAccount`: a cached one would still name none.
     await this.sessions?.evictOrganization(session.organizationId);
     return {
-      ...bindingOf(session, { ...row, ...write } as AgentCredentialEntity),
+      ...bindingOf(this.host?.webAppUrl, session, { ...row, ...write } as AgentCredentialEntity),
       status: DelegateBindStatus.ACTIVE,
     };
   }
@@ -315,9 +321,12 @@ export class AgentDelegateService {
 
 /** The binding as every route answers it: the bound key and any key waiting for approval. */
 function bindingOf(
+  webAppUrl: string | undefined,
   session: McpSession,
   row: AgentCredentialEntity | null | undefined,
 ): AgentDelegateBindingDto {
+  // The key the payer has to approve next: a pending one first, else the bound one.
+  const toApprove = row?.pendingDelegateAccount ?? row?.delegateAccount ?? null;
   return {
     credentialId: session.credentialId,
     agentLabel: session.label ?? null,
@@ -327,5 +336,14 @@ function bindingOf(
     pendingSince: row?.pendingDelegateRequestedAt
       ? row.pendingDelegateRequestedAt.toISOString()
       : null,
+    approvalUrl:
+      webAppUrl && toApprove
+        ? enablePaidUrl(webAppUrl, session.credentialId, addressOf(toApprove))
+        : null,
   };
+}
+
+/** `0x…` of a CAIP-10 account (`eip155:46630:0x…`). */
+function addressOf(account: string): string {
+  return account.slice(account.lastIndexOf(':') + 1);
 }

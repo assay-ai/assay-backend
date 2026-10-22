@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { enablePaidUrl } from '@modules/account/domain/enable-paid-url';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
@@ -2488,9 +2489,7 @@ export const PAYMENT_KEY_SENTENCE = ' Paid calls need a payment key on your comp
 export const ASSAY_APP_SENTENCE = ' Paid tools need the Assay app on your computer.';
 
 /** `{WEB}/agents/enable-paid?credential={credentialId}` (R-PAY-1, R-PAY-4). */
-export function enablePaidUrl(webAppUrl: string, credentialId: string): string {
-  return `${webAppUrl}/agents/enable-paid?credential=${encodeURIComponent(credentialId)}`;
-}
+export { enablePaidUrl };
 
 /** The sentence a payment client's PAYMENT_ESCROW_NOT_OPEN ends with, before its link. */
 export const FUND_ESCROW_SENTENCE = ' Add funds to open it, then call again: ';
