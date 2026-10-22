@@ -5,7 +5,7 @@
 # Pinned to a patch release by digest so a rebuild cannot silently fall back to
 # an older cached `node:24-alpine`. 24.22.1 carries the October 2026 security
 # fixes (Brotli decoder RCE, TLS hostname checks); Dependabot proposes bumps.
-FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS development
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS development
 
 WORKDIR /app
 
@@ -27,7 +27,7 @@ COPY . .
 # client compiles first because `dist/` resolves it as an ordinary dependency.
 RUN yarn build
 
-FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS production
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS production
 
 ARG NODE_ENV=production
 ENV NODE_ENV=${NODE_ENV}
