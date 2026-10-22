@@ -1,5 +1,6 @@
 import type { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import type { AgentScope } from '@shared/auth/agent-scope';
 
 /**
  * Who is calling, resolved from the bearer token.
@@ -69,12 +70,30 @@ export interface McpSession {
    * Whether this session may take part in paid calls: bind a payment
    * (delegate) key and receive the enable-paid `fixUrl` (spec §6.3.13, H2).
    *
-   * True for API keys, for OAuth grants issued to a client in
-   * `OAUTH_PAYMENT_CLIENTS`, and for config and Privy sessions; false only for
-   * other OAuth grants. Set by the source that resolved the token, never read
+   * For a stored credential: true when it holds the `payments` scope and is
+   * an API key or an OAuth grant of a client in `OAUTH_PAYMENT_CLIENTS`; true
+   * for config and Privy sessions; false otherwise. Set by the source that resolved the token, never read
    * from the request, and never derived from how the credential was issued.
    */
   readonly paymentsAllowed: boolean;
+
+  /**
+   * True when the source would let this agent credential pay but its own
+   * scopes lack `payments` (a free-calls-only key). The paid-call path refuses
+   * it `AUTH_SCOPE_MISSING` naming `payments`, so the agent is told the key
+   * cannot pay instead of being asked for a voucher. Absent otherwise; a
+   * third-party grant (the source never lets it pay) keeps its own answer.
+   */
+  readonly paymentsScopeMissing?: boolean;
+
+  /**
+   * What an {@link McpCallerKind.AGENT} session may do (`AgentScope`), from
+   * the credential row, or the config record. `SessionAuthGuard` admits an
+   * agent session only on a route that names a scope it holds, and the MCP
+   * host only with `tools:call`. Not read for a person's session. Absent
+   * means none.
+   */
+  readonly scopes?: readonly AgentScope[];
 
   /**
    * Set when the caller's organization, account or delegate is on the

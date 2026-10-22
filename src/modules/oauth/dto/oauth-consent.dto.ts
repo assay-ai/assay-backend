@@ -4,6 +4,7 @@ import { IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { AccessMode } from '@modules/toolset/domain/access';
+import { AgentScope } from '@shared/auth/agent-scope';
 
 /**
  * The consent API's shapes (spec §6.3.5). Nothing here ever carries a code,
@@ -164,6 +165,15 @@ export class OAuthConsentRequestDto {
 
   @ApiProperty({ type: [String] })
   scope: string[];
+
+  @ApiProperty({
+    enum: AgentScope,
+    isArray: true,
+    description:
+      'What the grant may do once approved, fixed by client: the Assay app gets ' +
+      '`tools:call payments activity:read`, any other client `tools:call` only',
+  })
+  grantedScopes: AgentScope[];
 
   @ApiProperty({ type: [OAuthConsentAgentDto] })
   agents: OAuthConsentAgentDto[];

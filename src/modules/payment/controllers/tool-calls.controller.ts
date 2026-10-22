@@ -3,11 +3,15 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 
 import { GetToolCallParamsDto } from '../dto/get-tool-call.dto';
-import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
+import {
+  ListToolCallsQueryDto,
+  ToolCallDto,
+  ToolCallListItemDto,
+} from '../dto/list-tool-calls.dto';
 import { ToolCallsService } from '../services/tool-calls.service';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
@@ -22,6 +26,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('ToolCalls')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.ACTIVITY_READ)
 @Controller('tool-calls')
 export class ToolCallsController {
   constructor(
@@ -35,13 +40,13 @@ export class ToolCallsController {
   @ApiOperation({
     summary:
       'Tool calls, newest first — filterable by status, tool, provider, verdict, and calls ' +
-      'still refundable if reported now',
+      'still refundable if reported now; `include=free` adds the served free calls (`kind`)',
   })
   @ApiCursorPage(ToolCallDto)
   async list(
     @CurrentSession() session: McpSession,
     @Query() query: ListToolCallsQueryDto,
-  ): Promise<CursorPageDto<ToolCallDto>> {
+  ): Promise<CursorPageDto<ToolCallListItemDto>> {
     return this.toolCalls.list(session.organizationId, query, (calls, now) =>
       this.refunds.ofCalls(calls, now),
     );

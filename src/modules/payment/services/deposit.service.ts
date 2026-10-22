@@ -31,6 +31,7 @@ import {
   depositResource,
 } from '../constants/deposit-intent.constants';
 import { assertDepositAssetIsSettlementAsset } from '../domain/deposit-asset';
+import { assertDepositScheme } from '../domain/deposit-wire';
 import { throwForX402InvalidReason } from '../domain/x402-error-mapping';
 import { PaymentErrors } from '../errors/payment.errors';
 import { DEPOSIT_MINIMUM_USD } from '../constants/deposit-intent.constants';
@@ -199,6 +200,10 @@ export class DepositService {
         expiresAt: intent.expiresAt.toISOString(),
       });
     }
+
+    // Scheme, then network (inside `assertPayloadBoundToIntent`), then the
+    // payload: a wrong scheme is named as such, not as undecodable bytes.
+    assertDepositScheme(payload.scheme);
 
     const adapter = this.registry.resolve(intent.chainId);
     // Pure PDA derivation — no RPC, and by settle time the escrow already

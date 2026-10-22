@@ -1,5 +1,6 @@
 import { MetricsSnapshotDto, SignalReadingDto } from '../dto/metrics-snapshot.dto';
 import { SignalAvailability } from '../domain/signal-catalog';
+import { formatDurationMs } from '@shared/alerting/golden-signals';
 
 /**
  * `GET /operator/dashboard` — a static, server-rendered HTML string.
@@ -145,7 +146,10 @@ function signalRow(signal: SignalReadingDto): string {
       ? `<span class="badge badge-absent">no data source</span>`
       : signal.value === null
         ? `<span class="badge badge-absent">no data</span>`
-        : `${formatValue(signal.value, signal.unit)} <span class="reason">${escapeHtml(signal.unit)}</span>`;
+        : signal.unit === 'seconds'
+          ? // BUG-OPS-CORE-05: a whole, readable duration, not `85.682 seconds`.
+            escapeHtml(formatDurationMs(signal.value * 1000))
+          : `${formatValue(signal.value, signal.unit)} <span class="reason">${escapeHtml(signal.unit)}</span>`;
 
   const extra =
     signal.extra && Object.keys(signal.extra).length > 0

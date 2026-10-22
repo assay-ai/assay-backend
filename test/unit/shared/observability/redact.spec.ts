@@ -6,8 +6,8 @@ import { isForbiddenKey, redact, REDACTED } from '@shared/observability';
  * names outright: `VERIFIER_SIGNING_KEYS`, `EXPOSURE_AUTHORITY_SIGNING_KEY`,
  * `JWT_SECRET`, `VERIFICATION_SAMPLING_SECRET`, `REDIS_PASSWORD`,
  * `DATABASE_PASSWORD`, an `Authorization: Bearer …` value, and the raw
- * agent-credential token (`prefix` / `tokenHash` are the two explicit
- * exceptions — `agent-credential.entity.ts`).
+ * agent-credential token (`tokenHash` is the explicit exception and
+ * `tokenLast4` / `hint` are safe — `agent-credential.entity.ts`).
  */
 describe('isForbiddenKey', () => {
   it.each([
@@ -71,8 +71,8 @@ describe('isForbiddenKey', () => {
     expect(isForbiddenKey(key)).toBe(true);
   });
 
-  it.each(['tokenHash', 'token_hash', 'prefix'])(
-    'never forbids %s — the two fields agent-credential.entity.ts calls safe',
+  it.each(['tokenHash', 'token_hash', 'tokenLast4', 'hint'])(
+    'never forbids %s — the fields agent-credential.entity.ts calls safe',
     (key) => {
       expect(isForbiddenKey(key)).toBe(false);
     },
@@ -131,14 +131,14 @@ describe('redact', () => {
     expect(result.request.headers.authorization).toBe(REDACTED);
   });
 
-  it('keeps prefix and tokenHash alongside a redacted sibling', () => {
+  it('keeps tokenLast4 and tokenHash alongside a redacted sibling', () => {
     const result = redact({
-      prefix: 'assay_live_8f',
+      tokenLast4: '2fds',
       tokenHash: 'abcd1234',
       token: 'assay_live_8fK2secretvalue',
     }) as Record<string, unknown>;
 
-    expect(result.prefix).toBe('assay_live_8f');
+    expect(result.tokenLast4).toBe('2fds');
     expect(result.tokenHash).toBe('abcd1234');
     expect(result.token).toBe(REDACTED);
   });
@@ -251,10 +251,11 @@ describe('redact', () => {
     expect(String(result.stack)).not.toContain(AT);
   });
 
-  it('keeps a 32-byte hex value (a transaction hash) and an API-key prefix readable', () => {
+  it('keeps a 32-byte hex value (a transaction hash) and an API-key hint readable', () => {
     const txHash = '0x' + 'cd'.repeat(32);
     expect(redact(`tx ${txHash}`)).toBe(`tx ${txHash}`);
-    expect(redact({ prefix: 'assay_sk_live_ab12cd' })).toEqual({ prefix: 'assay_sk_live_ab12cd' });
+    expect(redact({ hint: 'assay_sk_live_…2fds' })).toEqual({ hint: 'assay_sk_live_…2fds' });
+    expect(redact('key assay_sk_live_…2fds')).toBe('key assay_sk_live_…2fds');
   });
 
   it('keeps an error-code shaped code (ECONNREFUSED, a Postgres code) and blanks any other', () => {

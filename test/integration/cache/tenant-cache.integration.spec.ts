@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import {
   Controller,
   INestApplication,
@@ -18,6 +19,7 @@ import { DataSource } from 'typeorm';
 
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
@@ -26,6 +28,7 @@ import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hol
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { AgentsController } from '@modules/account/controllers/agents.controller';
 import { NotificationsController } from '@modules/account/controllers/notifications.controller';
@@ -192,6 +195,7 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
           agentId: agentA,
           agentAccount: payerA,
           callerKind: McpCallerKind.AGENT,
+          scopes: DEFAULT_AGENT_SCOPES,
         } as McpSession;
       case 'personB':
         return {
@@ -333,7 +337,13 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
           },
         },
         { provide: BalancesService, useValue: balances },
-        { provide: ReceiptSummaryService, useValue: new ReceiptSummaryService(paymentIntents) },
+        {
+          provide: ReceiptSummaryService,
+          useValue: new ReceiptSummaryService(
+            paymentIntents,
+            new ToolCallRecordRepository(dataSource),
+          ),
+        },
         { provide: ReceiptService, useValue: {} },
         { provide: NotificationsService, useValue: notifications },
         {
@@ -664,10 +674,34 @@ describe('tenant read cache (Redis + epochs + single flight + ETag)', () => {
       );
     });
 
-    it("an agent token never gets a person's cached `include` answer", async () => {
+    it("an agent token never gets a person's cached `include` answer: it is refused first", async () => {
+      // A second agent in the same organization: the person sees both, the
+      // agent token only itself, and neither list answers the other.
+      const sibling = await dataSource.getRepository(AgentEntity).save(
+        dataSource.getRepository(AgentEntity).create({
+          organizationId: orgA,
+          privyUserId: `did:privy:${randomUUID()}`,
+          email: null,
+          label: 'Sibling A',
+          status: 'ACTIVE',
+          primaryAccountId: null,
+          chainId: null,
+          lastLoginAt: new Date(),
+        }),
+      );
+      const ids = (res: { body: { data: { items: { agentId: string }[] } } }) =>
+        res.body.data.items.map((a) => a.agentId);
+      const spy = jest.spyOn(agentsService, 'list');
+      const person = await get('/agents?include=health', 'personA').expect(200);
       await get('/agents?include=health', 'personA').expect(200);
-      await get('/agents?include=health', 'personA').expect(200);
-      await get('/agents?include=health', 'machineA').expect(403);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(ids(person)).toEqual(expect.arrayContaining([agentA, sibling.id]));
+      // An agent token is refused the route before the cache can answer it.
+      const machine = await get('/agents?include=health', 'machineA').expect(403);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(machine.body)).not.toContain(sibling.id);
+      const personAgain = await get('/agents?include=health', 'personA').expect(200);
+      expect(ids(personAgain)).toEqual(expect.arrayContaining([agentA, sibling.id]));
     });
   });
 

@@ -4,6 +4,14 @@ import { DataSource, In } from 'typeorm';
 
 import { ToolCallRecordEntity } from '../entities/tool-call-record.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
+import { ReceiptsSummaryGroupBy } from './payment-intent.repository';
+
+/** Free calls served in a summary window, for one group key (and UTC day). */
+export interface FreeCallsSummaryRow {
+  readonly key: string;
+  readonly freeCalls: number;
+  readonly day?: string;
+}
 
 /** What the relay path writes instead of a payment intent. */
 @Injectable()
@@ -107,6 +115,52 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
   }
 
   /**
+   * Free calls served in `[from, to)`, grouped the way
+   * `PaymentIntentRepository.summarizeReceipts` groups the paid ones, so
+   * `GET /receipts/summary` can count them (`freeCalls`). A refused call served
+   * nothing and is not counted; a free call has no asset, so no asset filter
+   * applies.
+   *
+   * The keys match the intent side's: a tool or provider id, a UTC day, the
+   * verdict (`UNVERIFIED` when not sampled), the agent, and `agent:<id>` for
+   * the credential (a free call does not record one). `status` groups every
+   * free call under `FREE`: it has no payment status.
+   */
+  async summarizeFreeCalls(
+    organizationId: string,
+    groupBy: ReceiptsSummaryGroupBy,
+    window: { readonly from: Date; readonly to: Date },
+    options: { readonly byUtcDay?: boolean } = {},
+  ): Promise<FreeCallsSummaryRow[]> {
+    const groupExpression = freeGroupExpression(groupBy);
+    const qb = this.createQueryBuilder('record')
+      .select(groupExpression, 'key')
+      .addSelect('COUNT(*)', 'freeCalls')
+      .where('record.organizationId = :organizationId', { organizationId })
+      .andWhere('record.pricing_mode IS NOT NULL')
+      .andWhere('record.refusal_code IS NULL')
+      .andWhere('record.created_at >= :from', { from: window.from })
+      .andWhere('record.created_at < :to', { to: window.to });
+    // A constant key (`status`) is not grouped or ordered on: Postgres refuses
+    // a literal in either, and there is one group anyway.
+    const constant = groupBy === ReceiptsSummaryGroupBy.STATUS;
+    if (!constant) qb.groupBy(groupExpression).orderBy(groupExpression, 'ASC');
+    if (options.byUtcDay) {
+      const dayExpression = freeGroupExpression(ReceiptsSummaryGroupBy.DAY);
+      qb.addSelect(dayExpression, 'day').addGroupBy(dayExpression);
+      if (constant) qb.orderBy(dayExpression, 'ASC');
+    }
+    const rows = (await qb.getRawMany<{ key: string; freeCalls: string; day?: string }>()).filter(
+      (row) => Number(row.freeCalls) > 0,
+    );
+    return rows.map((row) => ({
+      key: row.key,
+      freeCalls: Number(row.freeCalls),
+      ...(options.byUtcDay ? { day: row.day } : {}),
+    }));
+  }
+
+  /**
    * Deletes one batch of records past their 30-day retention, and says how many
    * went.
    *
@@ -148,5 +202,25 @@ export class ToolCallRecordRepository extends OrganizationScopedRepository<ToolC
     }
 
     return deleted;
+  }
+}
+
+/** `summarizeFreeCalls`' group key: the same key the intent side gives the same call. */
+function freeGroupExpression(groupBy: ReceiptsSummaryGroupBy): string {
+  switch (groupBy) {
+    case ReceiptsSummaryGroupBy.TOOL:
+      return "COALESCE(record.tool_id, 'unassigned')";
+    case ReceiptsSummaryGroupBy.PROVIDER:
+      return "COALESCE(record.provider_id::text, 'unassigned')";
+    case ReceiptsSummaryGroupBy.DAY:
+      return "to_char((record.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')";
+    case ReceiptsSummaryGroupBy.STATUS:
+      return "'FREE'";
+    case ReceiptsSummaryGroupBy.VERDICT:
+      return "COALESCE(record.verdict, 'UNVERIFIED')";
+    case ReceiptsSummaryGroupBy.AGENT:
+      return 'record.agent_id::text';
+    case ReceiptsSummaryGroupBy.CREDENTIAL:
+      return "'agent:' || record.agent_id::text";
   }
 }

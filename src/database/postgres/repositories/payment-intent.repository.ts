@@ -115,7 +115,10 @@ export interface ReceiptsSummaryRow {
   /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
   readonly inProgressTotal: bigint;
   readonly inProgressCalls: number;
-  /** Calls listed at zero (free tier). Counted in `calls`, adding nothing to any amount. */
+  /**
+   * Intents listed at zero, counted in `calls`. A free-tier call has no intent:
+   * `ReceiptSummaryService` adds those from `tool_call_records`, outside `calls`.
+   */
   readonly freeCalls: number;
   /** The UTC day (`YYYY-MM-DD`), present only when asked for with `byUtcDay`. */
   readonly day?: string;
@@ -1514,6 +1517,40 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [assetId, [...accounts]],
     )) as { account: string; held: string }[];
     return new Map(rows.map((row) => [row.account, BigInt(row.held)]));
+  }
+
+  /**
+   * Voucher seqs in `1..upTo` that no payment intent of this payer carries,
+   * highest first, at most `limit` (A2). A redeemed seq with no intent was
+   * signed by somebody else (or a copy of this database): the reconciler reads
+   * `held(payer, seq)` for these to name a hold the mirror does not have. Each
+   * gap is capped at `limit` before it is expanded, so a wide gap (a realigned
+   * `next_seq`) costs no more than a narrow one.
+   */
+  async voucherSeqGaps(
+    assetId: string,
+    account: string,
+    upTo: bigint,
+    limit: number,
+  ): Promise<string[]> {
+    if (upTo < 1n || limit < 1) return [];
+    const rows = (await this.manager.query(
+      `WITH "seqs" AS (
+         SELECT DISTINCT "voucher_seq" AS "s" FROM "payment_intents"
+          WHERE "asset_id" = $1 AND "agent_account" = $2
+            AND "voucher_seq" IS NOT NULL AND "voucher_seq" <= $3::bigint
+         UNION ALL SELECT $3::bigint + 1
+       ), "bounds" AS (
+         SELECT "s", COALESCE(LAG("s") OVER (ORDER BY "s"), 0) AS "prev" FROM "seqs"
+       )
+       SELECT "g"::text AS "seq"
+         FROM "bounds",
+              generate_series(GREATEST("prev" + 1, "s" - $4::bigint), "s" - 1) AS "g"
+        ORDER BY "g" DESC
+        LIMIT $4`,
+      [assetId, account, upTo.toString(), limit],
+    )) as { seq: string }[];
+    return rows.map((row) => row.seq);
   }
 
   /** `Σ price_amount` the escrow holds, every payer: the mirror of `totalHeld()`. */

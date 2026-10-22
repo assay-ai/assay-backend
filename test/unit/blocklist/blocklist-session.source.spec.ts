@@ -2,7 +2,6 @@ import { Controller, ExecutionContext, Post } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
-import { AuthErrorCode } from '@modules/auth/errors/auth.errors';
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
@@ -53,7 +52,7 @@ describe('BlocklistSessionSource', () => {
   });
 
   it.each([McpCallerKind.AGENT])(
-    'refuses a %s credential of a blocked organization with AUTH_ORGANIZATION_SUSPENDED',
+    'refuses a %s credential of a blocked organization with ACCOUNT_BLOCKED (BUG-X-02)',
     async (kind) => {
       const source = new BlocklistSessionSource(
         sourceOf(session(kind)),
@@ -61,8 +60,10 @@ describe('BlocklistSessionSource', () => {
       );
 
       await expect(source.resolve('token')).rejects.toMatchObject({
-        errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED,
+        errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
         statusCode: 403,
+        message: 'Your account is blocked by Assay; contact support',
+        publicContext: { role: BlockedRole.ORGANIZATION },
       });
     },
   );
@@ -156,12 +157,15 @@ describe('SessionAuthGuard on a blocked person', () => {
   });
 
   it.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
-    'refuses a %s with the organization code',
+    'refuses a %s with ACCOUNT_BLOCKED and the blocked wording',
     async (method) => {
       const { request, context: ctx } = context(method);
       await expect(
         blockedHuman(BlockedRole.ORGANIZATION, BlockSubjectKind.ORGANIZATION).canActivate(ctx),
-      ).rejects.toMatchObject({ errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED });
+      ).rejects.toMatchObject({
+        errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+        message: 'Your account is blocked by Assay; contact support',
+      });
       expect(request[SESSION_REQUEST_KEY]).toBeUndefined();
     },
   );
@@ -214,7 +218,7 @@ describe('SessionAuthGuard on a route marked @BlockedSessionReadOnly', () => {
       new Reflector(),
     );
     await expect(guard.canActivate(ctx)).rejects.toMatchObject({
-      errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED,
+      errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
     });
   });
 
@@ -228,7 +232,7 @@ describe('SessionAuthGuard on a route marked @BlockedSessionReadOnly', () => {
       new Reflector(),
     );
     await expect(guard.canActivate(ctx)).rejects.toMatchObject({
-      errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED,
+      errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
       statusCode: 403,
     });
     expect(request[SESSION_REQUEST_KEY]).toBeUndefined();
@@ -324,6 +328,33 @@ describe('the MCP endpoint, for a blocked person', () => {
         {} as never,
       ),
     ).rejects.toMatchObject({ errorCode: AccountErrorCode.ACCOUNT_BLOCKED });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a person of a blocked organization with ACCOUNT_BLOCKED and the blocked wording (BUG-X-02)', async () => {
+    const create = jest.fn();
+    const controller = new McpController(
+      sourceOf(
+        session(McpCallerKind.HUMAN, {
+          blocked: { role: BlockedRole.ORGANIZATION, subjectKind: BlockSubjectKind.ORGANIZATION },
+        }),
+      ),
+      { create } as never,
+      { resolve: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
+    );
+
+    await expect(
+      controller.handle(
+        { method: 'POST', originalUrl: '/', headers: { authorization: 'Bearer t' } } as never,
+        {} as never,
+      ),
+    ).rejects.toMatchObject({
+      errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+      statusCode: 403,
+      message: 'Your account is blocked by Assay; contact support',
+    });
     expect(create).not.toHaveBeenCalled();
   });
 });

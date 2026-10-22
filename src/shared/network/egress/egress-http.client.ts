@@ -45,7 +45,13 @@ import { EgressLimits, EgressPolicy, EgressTrust, UNTRUSTED_EGRESS_POLICY } from
 import { withSanctionedEgress } from './egress-lockdown';
 import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from './egress-relay.config';
 import { EgressRelayTransport } from './egress-relay.transport';
-import { EgressDnsLookup, EgressTarget, resolveEgressTarget } from './resolve-target';
+import { EGRESS_CONFIG_HOSTS } from './egress-config-hosts';
+import {
+  EgressDnsLookup,
+  EgressTarget,
+  LastGoodDnsAnswers,
+  resolveEgressTarget,
+} from './resolve-target';
 
 export interface EgressRequest {
   readonly url: string;
@@ -162,12 +168,25 @@ export class EgressHttpClient implements OnModuleDestroy {
    */
   private readonly relayRequired = process.env.NODE_ENV === 'production';
 
+  /**
+   * Per host, the last answer that passed the address check, for a lookup that
+   * fails transiently twice (BUG-X-04). See {@link LastGoodDnsAnswers}.
+   */
+  private readonly lastGoodDns = new LastGoodDnsAnswers();
+
   constructor(
     @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
     @Optional()
     @Inject(EGRESS_CONNECT_OVERRIDE)
     private readonly connectOverride?: EgressConnectOverride,
     @Optional() @Inject(EGRESS_RELAY_CONFIG) relayConfig?: EgressRelayConfig | null,
+    /**
+     * Hosts named by server configuration (chain RPC, facilitator, Kora),
+     * read at boot. See `EGRESS_CONFIG_HOSTS` and the `CONFIG` DNS tier.
+     */
+    @Optional()
+    @Inject(EGRESS_CONFIG_HOSTS)
+    private readonly configHosts?: ReadonlySet<string>,
   ) {
     this.relay = relayConfig ? new EgressRelayTransport(relayConfig) : null;
   }
@@ -226,6 +245,9 @@ export class EgressHttpClient implements OnModuleDestroy {
           currentUrl,
           hopPolicy(policy, hop),
           refusal ? () => Promise.reject(refusal) : this.dnsLookup,
+          // Never for a hop that must not be resolved at all.
+          refusal ? undefined : this.lastGoodDns,
+          this.configHosts,
         ),
         remaining,
         currentUrl,

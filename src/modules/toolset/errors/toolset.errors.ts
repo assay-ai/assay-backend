@@ -28,6 +28,7 @@ export enum ToolsetErrorCode {
   TOOLSET_CUTOFF_SELF_CONFIRM = 'TOOLSET_CUTOFF_SELF_CONFIRM',
   TOOLSET_HANDLE_NOT_FOUND = 'TOOLSET_HANDLE_NOT_FOUND',
   TOOLSET_HANDLE_REASSIGN_REFUSED = 'TOOLSET_HANDLE_REASSIGN_REFUSED',
+  TOOLSET_ORGANIZATION_NOT_FOUND = 'TOOLSET_ORGANIZATION_NOT_FOUND',
 }
 
 export type ToolsetErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOLSET', `${ToolsetErrorCode}`>;
@@ -177,6 +178,12 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     message: (context?: Record<string, any>) =>
       `The handle cannot be reassigned${context?.reason ? `: ${context.reason}` : ''}`,
     publicContext: ['reason'],
+  },
+  /** A reassign names an organization that does not exist; nothing is queued. */
+  organizationNotFound: {
+    code: ToolsetErrorCode.TOOLSET_ORGANIZATION_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Organization not found',
   },
   refusedCallNotFound: {
     code: ToolsetErrorCode.TOOLSET_REFUSED_CALL_NOT_FOUND,

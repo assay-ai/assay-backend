@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { FreeTierModule } from '@modules/free-tier/free-tier.module';
 import { LedgerModule } from '@modules/ledger/ledger.module';
+import { NotificationModule } from '@modules/notification/notification.module';
 import { PaymentModule } from '@modules/payment/payment.module';
 import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
 import { ChainsModule } from '@modules/chains/chains.module';
@@ -94,10 +95,13 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
     // Both are on the `tools/call` path before any money moves:
     // `SpendPolicyModule` refuses a call the agent's policy forbids, and
     // `FreeTierModule` decides whether the call costs anything at all.
-    // `NOTIFICATION_PORT` arrives transitively through `PaymentModule` and
-    // `LedgerModule`, which both need it for their own producers.
     SpendPolicyModule,
     FreeTierModule,
+    // `NOTIFICATION_PORT`, for `McpCallRecorder`'s `call.refused_repeatedly`.
+    // Imported here: `PaymentModule` and `LedgerModule` import it without
+    // re-exporting it, so it does not reach this module through them, and the
+    // recorder's `@Optional()` port would silently be `undefined`.
+    NotificationModule,
     // What each MCP URL serves and what each caller may use: the view, the
     // access policy and the agent rules a call is checked and routed under.
     ToolsetModule,

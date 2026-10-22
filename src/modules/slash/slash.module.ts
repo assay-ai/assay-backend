@@ -13,8 +13,10 @@ import { ConfigService } from '@nestjs/config';
 import {
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
   ProviderStakeService,
+  liveMinimumStakeParameters,
   loadMinimumStakeParameters,
 } from '@modules/provider/services/provider-stake.service';
+import { ContractMinimumStakeFloors } from '@modules/tool/services/contract-minimum-stake-floors.service';
 
 import {
   SLASH_CONFIG,
@@ -89,9 +91,12 @@ import { SlashProposalService } from './services/slash-proposal.service';
     // stateless. Everything with a cache behind it — the freshness window on
     // `PROVIDER_STAKE_SOURCE`, the staleness budget on `ONCHAIN_STAKE_READER` —
     // is a provider of `ProviderModule` / `ChainsModule` and is shared, so both
-    // instances read the same cached figures and cannot disagree. What this
-    // does duplicate is the minimum-stake parameter load, which is env-derived
-    // and identical.
+    // instances read the same cached figures and cannot disagree. The
+    // minimum-stake parameters are the effective routing floor: config, raised
+    // to the contract minimum when stricter, read from `ToolModule`'s one
+    // `ContractMinimumStakeFloors` instance — the very map `ROUTER_CONFIG`
+    // reads — so a case brief never quotes a lower minimum than routing gates
+    // on, and never one below config (lot 1 C11, review M-8).
     //
     // The right long-term home is `ProviderModule`, so there is one instance
     // and no argument about it. Moving it there means giving that module
@@ -99,8 +104,9 @@ import { SlashProposalService } from './services/slash-proposal.service';
     // provider-domain change of its own.
     {
       provide: PROVIDER_MINIMUM_STAKE_PARAMETERS,
-      useFactory: loadMinimumStakeParameters,
-      inject: [ConfigService],
+      useFactory: (config: ConfigService, floors: ContractMinimumStakeFloors) =>
+        liveMinimumStakeParameters(loadMinimumStakeParameters(config), floors.byChain),
+      inject: [ConfigService, ContractMinimumStakeFloors],
     },
     ProviderStakeService,
     SlashProposalService,
