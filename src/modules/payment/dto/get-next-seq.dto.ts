@@ -10,8 +10,8 @@ export class GetNextSeqResponseDto {
    * treatment `SolanaUnsignedTransactionDto.lastValidBlockHeight` already gets.
    * Parsing it into a JavaScript `number` rounds above 2^53, and a rounded seq
    * either repeats one the chain has redeemed (dead on arrival,
-   * `VoucherSeqNotIncreasing`) or skips ahead of one still in flight, killing
-   * that one instead.
+   * `VoucherSeqNotIncreasing` on Solana, `VoucherSeqUsed` on eip155) or, on
+   * Solana, skips ahead of one still in flight, killing that one instead.
    */
   @ApiProperty({ example: '42', description: 'The voucher `seq` to sign. Decimal u64.' })
   seq: string;

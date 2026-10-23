@@ -464,7 +464,10 @@ export class ReconciliationService {
    * database restored from a backup taken before some of its vouchers were
    * redeemed. Re-issuing those numbers would mean the buyer signs, the call is
    * served, and the redemption dies `VoucherSeqNotIncreasing`: `seq_high` only
-   * ever rises, so a re-issued number is refused for ever.
+   * ever rises, so a re-issued number is refused for ever. On eip155 (D-23) a
+   * number at or below `seqHigh` is dead only if it is used — but a restored
+   * database cannot tell which ones are, and the gap cap anchors on `seqHigh`,
+   * so the allocator is moved above it on both chains.
    *
    * Raising `next_seq` past `seq_high` costs nothing. The numbers in between
    * become holes, and the current program makes holes free and unbounded — there is no

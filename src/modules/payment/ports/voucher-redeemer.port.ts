@@ -1,4 +1,4 @@
-import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 
 /**
@@ -125,6 +125,22 @@ export interface VoucherRedeemerPort {
    */
   readonly maxBatchSize: number;
 
+  /**
+   * Whether this chain's replay rule makes a payer's vouchers ORDER-sensitive,
+   * for the chain `id` names (a CAIP-2 chain, CAIP-10 account or CAIP-19 asset).
+   *
+   * `true` on Solana: `redeem_voucher` admits `seq > seq_high` and nothing
+   * else, so a lower seq that lands after a higher one is dead for good. The
+   * redemption pass then takes a payer's vouchers in ascending seq and holds
+   * back the later ones while an earlier one has not landed.
+   *
+   * `false` on `eip155`: `AssayEscrow` admits each `(payer, seq)` once, in any
+   * order (D-23), so a voucher being retried holds nothing back.
+   *
+   * Optional: absent is `true`, the safe answer.
+   */
+  requiresAscendingSeq?(id: ChainId | AccountId | AssetId): boolean;
+
   redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome>;
 
   /**
@@ -146,9 +162,10 @@ export interface VoucherRedeemerPort {
    * chain, or `null` when none of them did. Throws when it cannot tell yet (one
    * is still pending, or the RPC did not answer).
    *
-   * Asked when a voucher comes back `VoucherSeqNotIncreasing`: that is also what
-   * a voucher that ALREADY landed gets, and closing it as buyer debt would
-   * charge the buyer a second time (review 2026-10-15 P-1). Optional: a chain
+   * Asked when a voucher comes back `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (`eip155`, D-23) — or any other terminal refusal: that is
+   * also what a voucher that ALREADY landed gets, and closing it as buyer debt
+   * would charge the buyer a second time (review 2026-10-15 P-1). Optional: a chain
    * without it has that refusal closed at once.
    */
   findLanding?(request: RedeemVoucherRequest, txRefs: readonly string[]): Promise<string | null>;

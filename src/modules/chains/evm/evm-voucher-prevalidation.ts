@@ -13,7 +13,18 @@ export interface PrevalidationState {
   readonly paused: boolean;
   /** `msg.sender == p.redeemer`: whether the relayer is the key the contract accepts. */
   readonly redeemerIsUs: boolean;
+  /**
+   * The escrow's high-water mark: the highest seq ever redeemed. Since D-23 it
+   * is only the anchor of the gap cap (`MAX_SEQ_GAP` applies only above it);
+   * a seq at or below it is fine unless {@link seqUsed}.
+   */
   readonly seqHigh: bigint;
+  /**
+   * `held(payer, seq).status != None`: this `(payer, seq)` was already
+   * redeemed — held, collected or refunded. Records are never deleted, so a
+   * refunded seq stays used. The chain's replay rule since D-23.
+   */
+  readonly seqUsed: boolean;
   /**
    * The escrow's caps as `_redeem` applies them: on an escrow with the tighten
    * delay (D-21) the EFFECTIVE caps from `effectiveCapsOf` — a cap lowered less
@@ -105,8 +116,10 @@ export function decayWindow(state: {
  * invented, and two entries are **not** where the Anchor program puts them:
  *
  *  - **`seq` is checked BEFORE the signature** (divergence 3). Cheaper on chain
- *    — a stale voucher is refused without paying for `ecrecover` — and it leaks
- *    nothing, because `escrowOf` already returns `seqHigh` to anybody who asks.
+ *    — a used seq is refused without paying for `ecrecover` — and it leaks
+ *    nothing, because `held(payer, seq)` and `escrowOf` are public views.
+ *    D-23's order: zero, then used (`held(payer, seq)`), then the gap cap,
+ *    which applies only to a seq above `seqHigh`.
  *  - **`ProviderBelowMinimumStake` sits at the ANCHOR position** (divergence 4):
  *    after the spending limits and before the balance. Being paid is the
  *    counterpart of being slashable, and it reads `bonded` only, because stake
@@ -143,10 +156,15 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
     return 'VoucherExpired';
   }
 
+  // D-23: each `(payer, seq)` once, in any order. A seq at or below `seqHigh`
+  // is fine as long as it was never used; D-17's jump cap applies only above
+  // the mark — the contract's order, and its guard against the subtraction.
   if (voucher.seq === 0n) return 'VoucherSeqZero';
-  if (voucher.seq <= state.seqHigh) return 'VoucherSeqNotIncreasing';
-  // D-17's seq jump cap, right after the increasing check — the contract's order.
-  if (voucher.seq - state.seqHigh > BigInt(EVM_CONSTANTS.MAX_SEQ_GAP)) {
+  if (state.seqUsed) return 'VoucherSeqUsed';
+  if (
+    voucher.seq > state.seqHigh &&
+    voucher.seq - state.seqHigh > BigInt(EVM_CONSTANTS.MAX_SEQ_GAP)
+  ) {
     return 'VoucherSeqGapTooLarge';
   }
 
@@ -185,4 +203,103 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
   if (state.balance < voucher.amount) return 'EscrowInsufficient';
 
   return null;
+}
+
+/** One item of a `redeemVoucherBatch`, as {@link prevalidateBatch} takes it. */
+export interface PrevalidationItem {
+  readonly voucher: EvmVoucher;
+  /** Read for THIS item before the batch; the payer's earlier items are applied on top. */
+  readonly state: PrevalidationState;
+  /** The delegate that signed (any spelling), or `null` for the payer's own key. */
+  readonly delegate?: string | null;
+}
+
+/**
+ * {@link prevalidateVoucher} over a batch, item by item, exactly as
+ * `redeemVoucherBatch` runs `_redeem`: each item sees the effects of the items
+ * before it that would settle.
+ *
+ * Every state was read before the batch, so on its own it knows nothing about
+ * an earlier item of the same payer. Since D-23 one payer's items may share a
+ * batch in any order, so the earlier ones are applied here the way the chain
+ * applies them: the seq becomes used (a second copy of the same voucher is
+ * `VoucherSeqUsed`), `seqHigh = max(seqHigh, seq)` (the gap cap of later items
+ * anchors on it), the balance drops by the amount, and the escrow's — and the
+ * signing delegate's — window counter is decayed to now and grows by it.
+ *
+ * Only an item that would settle has effects: a refused one is left out of the
+ * batch, so the chain never sees it.
+ */
+export function prevalidateBatch(items: readonly PrevalidationItem[]): (string | null)[] {
+  interface EscrowEffects {
+    seqHigh: bigint;
+    readonly used: Set<bigint>;
+    balance: bigint;
+    spentInWindow: bigint;
+    windowStartedAt: number;
+  }
+  interface WindowEffects {
+    spentInWindow: bigint;
+    windowStartedAt: number;
+  }
+  const escrows = new Map<string, EscrowEffects>();
+  const delegates = new Map<string, WindowEffects>();
+
+  return items.map(({ voucher, state, delegate }) => {
+    const payer = voucher.payer.toLowerCase();
+    const delegateKey = delegate ? `${payer}:${delegate.toLowerCase()}` : null;
+    const escrow = escrows.get(payer);
+    const grant = delegateKey === null ? undefined : delegates.get(delegateKey);
+
+    const effective: PrevalidationState =
+      escrow === undefined && grant === undefined
+        ? state
+        : {
+            ...state,
+            ...(escrow === undefined
+              ? {}
+              : {
+                  seqHigh: escrow.seqHigh,
+                  seqUsed: state.seqUsed || escrow.used.has(voucher.seq),
+                  balance: escrow.balance,
+                  spentInWindow: escrow.spentInWindow,
+                  windowStartedAt: escrow.windowStartedAt,
+                }),
+            delegation:
+              grant === undefined || !state.delegation
+                ? state.delegation
+                : {
+                    ...state.delegation,
+                    spentInWindow: grant.spentInWindow,
+                    windowStartedAt: grant.windowStartedAt,
+                  },
+          };
+
+    const refusal = prevalidateVoucher(voucher, effective);
+    if (refusal !== null) return refusal;
+
+    // The effects of `_redeem`, in its terms.
+    const used = escrow?.used ?? new Set<bigint>();
+    used.add(voucher.seq);
+    escrows.set(payer, {
+      seqHigh: voucher.seq > effective.seqHigh ? voucher.seq : effective.seqHigh,
+      used,
+      balance: effective.balance - voucher.amount,
+      spentInWindow: decayWindow(effective) + voucher.amount,
+      windowStartedAt: Math.max(effective.nowSeconds, effective.windowStartedAt),
+    });
+    const delegation = effective.delegation ?? null;
+    if (delegateKey !== null && delegation !== null) {
+      delegates.set(delegateKey, {
+        spentInWindow:
+          decayWindow({
+            spentInWindow: delegation.spentInWindow,
+            windowStartedAt: delegation.windowStartedAt,
+            nowSeconds: effective.nowSeconds,
+          }) + voucher.amount,
+        windowStartedAt: Math.max(effective.nowSeconds, delegation.windowStartedAt),
+      });
+    }
+    return null;
+  });
 }

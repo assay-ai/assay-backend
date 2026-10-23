@@ -123,6 +123,11 @@ interface ChainState {
   effective: Record<string, readonly [bigint, bigint, bigint, bigint]>;
   /** Every function the multicalls read, in order. */
   read: string[];
+  /**
+   * `payer:seq` (payer lower case) → `HeldStatus` (1 Held, 2 Collected,
+   * 3 Refunded). Anything absent is 0, `None`: the seq is unused.
+   */
+  held: Record<string, number>;
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -140,6 +145,7 @@ function harness(overrides: Partial<ChainState> = {}) {
     tightenDelay: false,
     effective: {},
     read: [],
+    held: {},
     ...overrides,
   };
 
@@ -155,6 +161,16 @@ function harness(overrides: Partial<ChainState> = {}) {
       }
       case 'bondedOf':
         return state.bonded;
+      case 'held': {
+        const key = `${String(args[0]).toLowerCase()}:${String(args[1])}`;
+        return {
+          provider: PROVIDER,
+          amount: 0n,
+          takeRateBps: 0,
+          status: state.held[key] ?? 0,
+          collectableAt: 0n,
+        };
+      }
       case 'delegationOf': {
         const key = `${String(args[0]).toLowerCase()}:${String(args[1]).toLowerCase()}`;
         return {
@@ -295,10 +311,10 @@ describe('EvmVoucherRedeemer', () => {
   });
 
   it('never submits a voucher pre-validation refused, and still reports it', async () => {
-    // Payer 1's escrow has already redeemed seq 10, so their voucher is stale.
+    // Payer 1's escrow has already used seq 10, so their voucher is dead.
     // Submitting it would revert the batch and take two good ones with it.
     const { redeemer, sendCall } = harness({
-      escrows: { [payerAddress(1).toLowerCase()]: { seqHigh: 10n } },
+      held: { [`${payerAddress(1).toLowerCase()}:10`]: 1 },
     });
 
     const outcomes = await redeemer.redeemBatch([request(0), request(1), request(2)]);
@@ -308,8 +324,77 @@ describe('EvmVoucherRedeemer', () => {
       payerAddress(2).toLowerCase(),
     ]);
     expect(outcomes.map((o) => o.kind)).toEqual(['REDEEMED', 'UNREDEEMABLE', 'REDEEMED']);
-    expect(outcomes[1].programError).toBe('VoucherSeqNotIncreasing');
+    expect(outcomes[1].programError).toBe('VoucherSeqUsed');
     expect(outcomes[1].signature).toBeNull();
+  });
+
+  /** D-23: each `(payer, seq)` once, in any order. */
+  describe('per-seq replay (D-23)', () => {
+    it('redeems a lower seq after a higher one: seq <= seqHigh is not refused', async () => {
+      const { redeemer, sendCall, state } = harness({
+        escrows: { [payerAddress(0).toLowerCase()]: { seqHigh: 11n } },
+      });
+
+      const outcome = await redeemer.redeem(request(0, { seq: '10' }));
+
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+      expect(state.read).toContain('held');
+    });
+
+    it.each([
+      ['held', 1],
+      ['collected', 2],
+      ['refunded', 3],
+    ])('refuses a %s seq as VoucherSeqUsed, and sends nothing', async (_, status) => {
+      const { redeemer, sendCall } = harness({
+        held: { [`${payerAddress(0).toLowerCase()}:10`]: status },
+      });
+
+      const outcome = await redeemer.redeem(request(0));
+
+      expect(outcome).toEqual({
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        signature: null,
+        programError: 'VoucherSeqUsed',
+      });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    it('batches several seqs of ONE payer, out of order, in one transaction', async () => {
+      const { redeemer, sendCall } = harness();
+
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { seq: '12' }),
+        request(0, { seq: '10' }),
+        request(0, { seq: '11' }),
+      ]);
+
+      expect(outcomes.map((o) => o.kind)).toEqual(['REDEEMED', 'REDEEMED', 'REDEEMED']);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+      expect(calledFunction(sendCall.mock.calls[0][0])).toBe('redeemVoucherBatch');
+      expect(batchedPayers(sendCall.mock.calls[0][0])).toHaveLength(3);
+    });
+
+    it('applies an earlier item’s spend to the next one of the same payer', async () => {
+      // 1.5 USDG in the escrow: the first 1.0 settles, the second does not fit
+      // and is left out instead of reverting the batch.
+      const { redeemer, sendCall } = harness({
+        escrows: { [payerAddress(0).toLowerCase()]: { balance: 1_500_000n } },
+      });
+
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { seq: '10' }),
+        request(0, { seq: '11' }),
+      ]);
+
+      expect(outcomes.map((o) => o.programError)).toEqual([null, 'EscrowInsufficient']);
+      expect(batchedPayers(sendCall.mock.calls[0][0])).toHaveLength(1);
+    });
+
+    it('says it does not require ascending seq', () => {
+      expect(harness().redeemer.requiresAscendingSeq()).toBe(false);
+    });
   });
 
   it('sends nothing at all when pre-validation refuses every item', async () => {
@@ -391,7 +476,7 @@ describe('EvmVoucherRedeemer', () => {
     // The refused item is not in the batch and must not be in the retry either
     // — its outcome came from the pre-validation and is still the right one.
     const { redeemer, sendCall } = harness({
-      escrows: { [payerAddress(1).toLowerCase()]: { seqHigh: 10n } },
+      held: { [`${payerAddress(1).toLowerCase()}:10`]: 2 },
     });
     sendCall.mockResolvedValueOnce({
       hash: '0xbad',
@@ -406,17 +491,17 @@ describe('EvmVoucherRedeemer', () => {
     // 1 batch + 2 singles. The refused one was never sent, twice over.
     expect(sendCall).toHaveBeenCalledTimes(3);
     expect(outcomes[1].kind).toBe(RedeemOutcomeKind.UNREDEEMABLE);
-    expect(outcomes[1].programError).toBe('VoucherSeqNotIncreasing');
+    expect(outcomes[1].programError).toBe('VoucherSeqUsed');
   });
 
-  it('refuses two vouchers from the SAME payer in one batch', async () => {
-    // `seq` is per payer: the second copy would fail `seq > seqHigh` because
-    // the first already advanced it, and take the whole batch with it.
-    const { redeemer } = harness();
+  it('refuses the SAME voucher twice in one batch, before anything is read', async () => {
+    // The second copy would fail `VoucherSeqUsed` because the first already
+    // used the seq, and take the whole batch with it.
+    const { redeemer, sendCall, state } = harness();
 
-    await expect(redeemer.redeemBatch([request(0), request(0, { seq: '11' })])).rejects.toThrow(
-      /payer/i,
-    );
+    await expect(redeemer.redeemBatch([request(0), request(0)])).rejects.toThrow(/twice/i);
+    expect(state.read).toEqual([]);
+    expect(sendCall).not.toHaveBeenCalled();
   });
 
   it('refuses a batch of 65 and accepts a batch of 64', async () => {
@@ -450,7 +535,7 @@ describe('EvmVoucherRedeemer', () => {
     ['ProgramPaused', RedeemOutcomeKind.PAUSED],
     ['NotRedeemer', RedeemOutcomeKind.MISCONFIGURED],
     ['AssetDecimalsNotSix', RedeemOutcomeKind.MISCONFIGURED],
-    ['VoucherSeqNotIncreasing', RedeemOutcomeKind.UNREDEEMABLE],
+    ['VoucherSeqUsed', RedeemOutcomeKind.UNREDEEMABLE],
     ['SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
     ['MalleableSignature', RedeemOutcomeKind.UNREDEEMABLE],
     ['VoucherSeqGapTooLarge', RedeemOutcomeKind.UNREDEEMABLE],
@@ -796,8 +881,8 @@ describe('EvmVoucherRedeemer', () => {
   });
 
   /**
-   * REGRESSION (review 2026-10-15 P-1): `VoucherSeqNotIncreasing` is also what
-   * a voucher that already landed gets. The redeemer records each transaction
+   * REGRESSION (review 2026-10-15 P-1): `VoucherSeqUsed` (D-23; formerly
+   * `VoucherSeqNotIncreasing`) is also what a voucher that already landed gets. The redeemer records each transaction
    * before its broadcast, and can say afterwards whether one of them redeemed
    * this voucher — so the job commits it instead of absorbing it.
    */

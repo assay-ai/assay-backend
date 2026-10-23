@@ -72,7 +72,15 @@ class FakeRedeemer {
   /** `seq` → the outcome that seq gets. Anything absent is REDEEMED. */
   outcomes: Record<string, RedeemOutcomeKind> = {};
 
+  /** `undefined` leaves the port's method absent (the safe default, `true`). */
+  ascending: boolean | undefined = undefined;
+
   constructor(readonly maxBatchSize: number) {}
+
+  get requiresAscendingSeq(): (() => boolean) | undefined {
+    const ascending = this.ascending;
+    return ascending === undefined ? undefined : () => ascending;
+  }
 
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
     this.singles.push(request);
@@ -115,6 +123,7 @@ function build(
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
     lapseRedemption: jest.fn().mockResolvedValue(undefined),
+    recordRedemptionError: jest.fn().mockResolvedValue(undefined),
   };
 
   const service = new VoucherRedemptionService(
@@ -270,6 +279,106 @@ describe('VoucherRedemptionService batch forming', () => {
       expect(new Set(batch.map((r) => r.payer)).size).toBe(batch.length);
     }
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['1'], ['2'], ['3']]);
+  });
+});
+
+/**
+ * D-23: on `eip155` each `(payer, seq)` is redeemed once, in any order, so the
+ * hold-backs that exist only for Solana's `seq > seq_high` rule are off there
+ * (`requiresAscendingSeq` is `false`). Solana keeps them.
+ */
+describe('VoucherRedemptionService — a chain that redeems any seq order', () => {
+  function anyOrder(rows: RedeemableIntent[], maxBatchSize: number) {
+    const built = build(rows, maxBatchSize);
+    built.redeemer.ascending = false;
+    return built;
+  }
+
+  it('asks the queue for every payer row, not only the lowest open seq', async () => {
+    const { service, payments } = anyOrder([pending(5, ALICE)], 64);
+
+    await service.run(USDC);
+
+    expect(payments.findAwaitingRedemption.mock.calls[0][5]).toEqual({ orderedBySeq: false });
+  });
+
+  it('a Solana pass asks the queue exactly as before', async () => {
+    const { service, payments, redeemer } = build([pending(5, ALICE)], 1);
+    redeemer.ascending = true;
+
+    await service.run(USDC);
+
+    expect(payments.findAwaitingRedemption.mock.calls[0]).toHaveLength(5);
+  });
+
+  it('puts several of one payer’s vouchers in one batch', async () => {
+    const { service, redeemer, intents } = anyOrder(
+      [pending(5, ALICE), pending(6, ALICE), pending(9, BOB)],
+      64,
+    );
+
+    await service.run(USDC);
+
+    expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6', '9']]);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(3);
+  });
+
+  it('never puts the same (payer, seq) twice in one batch', async () => {
+    // Two rows naming one voucher cannot exist (a unique index), but if they
+    // did the second copy would revert the whole batch with VoucherSeqUsed.
+    const twin = pending(5, ALICE, { id: 'intent-5-twin' });
+    const { service, redeemer } = anyOrder([pending(5, ALICE), twin, pending(6, ALICE)], 64);
+
+    await service.run(USDC);
+
+    for (const batch of redeemer.batches) {
+      const keys = batch.map((r) => `${r.payer}#${r.seq}`);
+      expect(new Set(keys).size).toBe(keys.length);
+    }
+    expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6'], ['5']]);
+  });
+
+  it('a retry does not hold back the payer’s later vouchers in a batch', async () => {
+    const { service, redeemer, intents } = anyOrder(
+      [pending(5, ALICE), pending(6, ALICE), pending(9, BOB)],
+      64,
+    );
+    redeemer.outcomes['5'] = RedeemOutcomeKind.RETRY;
+
+    await service.run(USDC);
+
+    expect(redeemer.batches.flat().map((r) => r.seq)).toEqual(['5', '6', '9']);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(2);
+  });
+
+  it('a retry does not hold back the payer’s later vouchers one by one either', async () => {
+    const { service, redeemer } = anyOrder([pending(5, ALICE), pending(6, ALICE)], 1);
+    redeemer.outcomes['5'] = RedeemOutcomeKind.RETRY;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5', '6']);
+  });
+
+  it('a row that cannot be built holds back nothing', async () => {
+    const { service, redeemer } = anyOrder(
+      [pending(5, ALICE, { providerAccount: null }), pending(6, ALICE)],
+      64,
+    );
+
+    await service.run(USDC);
+
+    expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['6']]);
+  });
+
+  it('Solana still holds back a payer’s later vouchers after a retry', async () => {
+    const { service, redeemer } = build([pending(5, ALICE), pending(6, ALICE)], 1);
+    redeemer.ascending = true;
+    redeemer.outcomes['5'] = RedeemOutcomeKind.RETRY;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5']);
   });
 });
 

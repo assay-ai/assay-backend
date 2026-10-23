@@ -368,14 +368,24 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
     expect(replaced).toEqual([]);
   });
 
-  it('refuses a seq at or below a live voucher of the payer (it would be stepped over)', async () => {
-    const { service, session, debt, open, sign } = build();
+  it('admits a seq below a live voucher of the payer: eip155 redeems any order (D-23)', async () => {
+    const { service, session, debt, open, sign, replaced } = build();
     const { voucher } = await service.voucherIntent(session, debt.id);
-    open.maxSeq = 9n;
+    open.maxSeq = BigInt(voucher.seq) + 5n;
+
+    await service.settle(session, debt.id, { voucher, signature: sign(voucher) });
+    expect(replaced).toHaveLength(1);
+  });
+
+  it('still refuses the very seq a live voucher of the payer carries, as a replay', async () => {
+    const { service, session, debt, open, sign, replaced } = build();
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    open.maxSeq = BigInt(voucher.seq);
 
     await expect(
       service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
-    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE });
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED });
+    expect(replaced).toEqual([]);
   });
 
   it('refuses a debt that is not the session payer’s own', async () => {
@@ -475,11 +485,11 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
     const { service, session, debt, debts, intents, open, sign } = build();
     debts[0] = { ...debt, writtenOff: true, cause: 'uncollected:VoucherExpired' };
     const { voucher } = await service.voucherIntent(session, debt.id);
-    open.maxSeq = 9n;
+    open.maxSeq = BigInt(voucher.seq);
 
     await expect(
       service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
-    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE });
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED });
     expect(intents.releaseUnusedHold).toHaveBeenCalledWith(debt.organizationId, 'hold-reopened');
   });
 

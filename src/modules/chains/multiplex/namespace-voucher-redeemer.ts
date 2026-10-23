@@ -5,7 +5,7 @@ import {
 } from '@modules/payment/ports/voucher-redeemer.port';
 
 import { ChainErrors } from '../errors/chains.errors';
-import { chainIdOf, namespaceOf } from '../ports/caip.types';
+import { AccountId, AssetId, ChainId, chainIdOf, namespaceOf } from '../ports/caip.types';
 import { implementationFor } from './namespace-dispatch';
 
 /**
@@ -50,6 +50,11 @@ export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
     // `1` for an empty map rather than `Infinity`: a deployment with no redeemer
     // wired must not advertise an unbounded batch on its way to failing.
     this.maxBatchSize = sizes.length > 0 ? Math.min(...sizes) : 1;
+  }
+
+  /** The chain's own answer; `true` (the safe one) when its redeemer gives none. */
+  requiresAscendingSeq(id: ChainId | AccountId | AssetId): boolean {
+    return implementationFor(this.byNamespace, id).requiresAscendingSeq?.(id) ?? true;
   }
 
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
