@@ -24,7 +24,7 @@ together.
   `total_staked == deposited − withdrawn − slashed`, `vault >= total_staked`).
 - A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it, and the
   provider's USDG balance increases by `amount − fee` in one transaction.
-- A voucher with `seq <= seqHigh` reverts. A voucher malleated to high-s reverts. A voucher with
+- A voucher whose `(payer, seq)` was already redeemed reverts, in any order (D-23). A voucher malleated to high-s reverts. A voucher with
   mainnet's `chainId` in its domain reverts on testnet.
 - A full two-phase slash: propose → 72 h (warped) → execute, and a second run where
   `revokeVerifier` in the window makes `executeSlash` revert and `expireSlash` release.
