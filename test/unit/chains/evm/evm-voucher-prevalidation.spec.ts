@@ -64,7 +64,8 @@ describe('prevalidateVoucher', () => {
     ['InvalidVoucherWindow', { expiresAt: GOOD.issuedAt }],
     ['VoucherLifetimeTooLong', { expiresAt: GOOD.issuedAt + 301n }],
     ['VoucherNotYetValid', { issuedAt: BigInt(NOW) + 121n, expiresAt: BigInt(NOW) + 200n }],
-    ['VoucherExpired', { issuedAt: BigInt(NOW - 2_000), expiresAt: BigInt(NOW - 1_900) }],
+    // Past expiresAt + 7,200 (D-24; Solana keeps 1,800).
+    ['VoucherExpired', { issuedAt: BigInt(NOW - 7_400), expiresAt: BigInt(NOW - 7_201) }],
     ['VoucherSeqZero', { seq: 0n }],
     ['VoucherExceedsPerCallLimit', { amount: 2_000_001n }],
   ])('names %s', (expected, patch) => {
@@ -94,7 +95,7 @@ describe('prevalidateVoucher', () => {
     ).toBeNull();
     expect(
       prevalidateVoucher(
-        { ...GOOD, issuedAt: BigInt(NOW - 1_900), expiresAt: BigInt(NOW - 1_800) },
+        { ...GOOD, issuedAt: BigInt(NOW - 7_300), expiresAt: BigInt(NOW - 7_200) },
         STATE,
       ),
     ).toBeNull();

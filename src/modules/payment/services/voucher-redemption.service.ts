@@ -20,9 +20,9 @@ import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
-  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  maxVoucherRedeemableLifeSeconds,
   PROVIDER_FORFEIT_PREFIX,
-  REDEEM_GRACE_SECONDS,
+  redeemGraceSeconds,
   REDEMPTION_DEADLINE_MARGIN_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
@@ -205,7 +205,7 @@ export class VoucherRedemptionService {
     @Inject(VOUCHER_REDEEMER) private readonly redeemer: VoucherRedeemerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly blocklist: AccountBlocklistService,
-    /** Injected so a test can age a hold without waiting 37 minutes. */
+    /** Injected so a test can age a hold without waiting out the chain's window. */
     @Optional() private readonly now: () => number = () => Date.now(),
     // The ON-CHAIN pause and blocklist (D-19). Optional: without it the
     // contract's own refusal is what the pass meets.
@@ -475,7 +475,8 @@ export class VoucherRedemptionService {
    *
    * **Blocking a buyer freezes collection.** The hold stays open and the
    * provider is not paid while the block stands. The chain refuses a voucher
-   * after `expiresAt + REDEEM_GRACE_SECONDS` (about 30 minutes after the call)
+   * after `expiresAt + redeemGraceSeconds` (about 30 minutes after the call on
+   * Solana, about two hours on eip155)
    * with `VoucherExpired`, so a block that lasts longer than that does not
    * "resume": the next pass after the unblock meets `UNREDEEMABLE`, and the
    * call becomes buyer debt ({@link lapse}) — the platform pays nothing. A
@@ -1040,11 +1041,11 @@ export class VoucherRedemptionService {
 
   /**
    * Whether the voucher is within {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} of
-   * its on-chain deadline (`expiresAt + REDEEM_GRACE_SECONDS`): the last pass
-   * that can still redeem it.
+   * its on-chain deadline (`expiresAt + redeemGraceSeconds`, per the row's
+   * chain): the last pass that can still redeem it.
    */
   private atRedemptionDeadline(row: RedeemableIntent): boolean {
-    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + REDEEM_GRACE_SECONDS;
+    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + redeemGraceSeconds(row.assetId);
     return Math.floor(this.now() / 1000) >= deadline - REDEMPTION_DEADLINE_MARGIN_SECONDS;
   }
 
@@ -1053,7 +1054,7 @@ export class VoucherRedemptionService {
     return (
       Math.floor(row.expiresAt.getTime() / 1000) +
       CLOCK_SKEW_TOLERANCE_SECONDS +
-      REDEEM_GRACE_SECONDS +
+      redeemGraceSeconds(row.assetId) +
       LANDING_SETTLE_SECONDS
     );
   }
@@ -1184,7 +1185,7 @@ export class VoucherRedemptionService {
    * Overdue holds need an alert.
    *
    * Counted from `issued_at` rather than from the intent's own timestamps,
-   * because `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` is the chain's window and the
+   * because `maxVoucherRedeemableLifeSeconds` is the chain's window and the
    * chain counts from the signed field. Once past it the next pass will come
    * back `VoucherExpired` and the call becomes buyer debt — so this fires
    * *before* the collection fails, not after it.
@@ -1195,7 +1196,8 @@ export class VoucherRedemptionService {
     programError: string | null,
   ): Promise<void> {
     const ageSeconds = Math.floor(this.now() / 1000) - issuedAt;
-    if (ageSeconds <= MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS) {
+    const deadlineSeconds = maxVoucherRedeemableLifeSeconds(row.assetId);
+    if (ageSeconds <= deadlineSeconds) {
       return;
     }
 
@@ -1204,13 +1206,13 @@ export class VoucherRedemptionService {
       name: VOUCHER_REDEMPTION_ALERTS.OVERDUE,
       summary:
         `A rail-B hold is ${ageSeconds}s old and still not redeemed — past the ` +
-        `${MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS}s the program will still accept`,
+        `${deadlineSeconds}s the chain will still accept`,
       details: {
         intentId: row.id,
         buyer: row.agentAccount,
         seq: row.voucherSeq,
         ageSeconds,
-        deadlineSeconds: MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+        deadlineSeconds,
         lastRefusal: programError ?? 'none',
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,

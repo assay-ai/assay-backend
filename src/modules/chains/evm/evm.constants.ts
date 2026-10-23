@@ -14,7 +14,7 @@ import { ChainId } from '../ports/caip.types';
  */
 export const EVM_CONSTANTS = {
   /**
-   * `Constants.sol:147`. `redeemVoucherBatch` refuses more.
+   * `Constants.sol:225`. `redeemVoucherBatch` refuses more.
    *
    * Validated against `ArbGasInfo.getGasAccountingParams()` →
    * `maxTxGasLimit = 32,000,000` on both 4663 and 46630: the worst measured
@@ -25,29 +25,30 @@ export const EVM_CONSTANTS = {
    * been re-measured against the real token.
    */
   MAX_REDEEM_BATCH: 64,
-  /** `Constants.sol:38` — `WITHDRAW_DELAY_SECONDS = 3600`. */
-  WITHDRAW_DELAY_SECONDS: 3_600,
+  /** `Constants.sol:72` — `WITHDRAW_DELAY_SECONDS = 3 * 3600` (D-24; Solana keeps 3,600). */
+  WITHDRAW_DELAY_SECONDS: 10_800,
   /**
-   * `Constants.sol:66` — `TIGHTEN_DELAY_SECONDS = WITHDRAW_DELAY_SECONDS` (D-21).
+   * `Constants.sol:79` — `TIGHTEN_DELAY_SECONDS = WITHDRAW_DELAY_SECONDS` (D-21;
+   * 10,800 since D-24).
    * A payer's tightening (revoke, shorter horizon, lower caps) binds a voucher
    * that was already valid only this long after it lands, and every delegate
    * grant needs `validUntil >= now + this` (`DelegateValidUntilInvalid`).
    */
-  TIGHTEN_DELAY_SECONDS: 3_600,
-  /** `Constants.sol:41` — `REDEEM_GRACE_SECONDS = 30 * 60`. */
-  REDEEM_GRACE_SECONDS: 1_800,
-  /** `Constants.sol:47` — `VOUCHER_MAX_LIFETIME_SECONDS = 5 * 60`. */
+  TIGHTEN_DELAY_SECONDS: 10_800,
+  /** `Constants.sol:106` — `REDEEM_GRACE_SECONDS = 2 * 3600` (D-24; Solana keeps 1,800). */
+  REDEEM_GRACE_SECONDS: 7_200,
+  /** `Constants.sol:112` — `VOUCHER_MAX_LIFETIME_SECONDS = 5 * 60`. */
   VOUCHER_MAX_LIFETIME_SECONDS: 300,
-  /** `Constants.sol:51` — `CLOCK_SKEW_TOLERANCE_SECONDS = 120`, one-sided. */
+  /** `Constants.sol:116` — `CLOCK_SKEW_TOLERANCE_SECONDS = 120`, one-sided. */
   CLOCK_SKEW_TOLERANCE_SECONDS: 120,
   /**
-   * `Constants.sol:56` — 120 + 300 + 1 800. The widest a voucher can stay
+   * `Constants.sol:120` — 120 + 300 + 7,200. The widest a voucher can stay
    * redeemable, and the quantity `WITHDRAW_DELAY_SECONDS` has to exceed for a
    * withdraw request to be unable to outrun a voucher already signed.
    */
-  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS: 2_220,
+  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS: 7_620,
   /**
-   * `Constants.sol:87` — `SLASH_WINDOW_SECONDS = 86_400`. One width for two
+   * `Constants.sol:151` — `SLASH_WINDOW_SECONDS = 86_400`. One width for two
    * rolling counters: the buyer's spend window and the provider's slash window.
    *
    * It is the denominator of `Window.decay`, which is why a redemption
@@ -57,14 +58,14 @@ export const EVM_CONSTANTS = {
    */
   SLASH_WINDOW_SECONDS: 86_400,
   /**
-   * `Constants.sol` — `MAX_DELEGATION_LIFETIME_SECONDS = 365 * 86_400`. The
+   * `Constants.sol:234` — `MAX_DELEGATION_LIFETIME_SECONDS = 365 * 86_400`. The
    * longest horizon one delegate authorisation may carry.
    */
   MAX_DELEGATION_LIFETIME_SECONDS: 31_536_000,
-  /** `Constants.sol` — `MAX_DELEGATES_PER_PAYER = 16`. Revoking frees a place. */
+  /** `Constants.sol:239` — `MAX_DELEGATES_PER_PAYER = 16`. Revoking frees a place. */
   MAX_DELEGATES_PER_PAYER: 16,
   /**
-   * `Constants.sol:152` — `MAX_SEQ_GAP = 1_000_000`. A redeemed voucher needs
+   * `Constants.sol:221` — `MAX_SEQ_GAP = 1_000_000`. A redeemed voucher needs
    * `seq <= seqHigh + MAX_SEQ_GAP`, else `VoucherSeqGapTooLarge` (D-17). The
    * payment domain mirrors it as `VOUCHER_MAX_SEQ_GAP` so issuing and
    * admission refuse the same seqs; `constants-pin.spec.ts` holds the two
@@ -72,25 +73,37 @@ export const EVM_CONSTANTS = {
    */
   MAX_SEQ_GAP: VOUCHER_MAX_SEQ_GAP,
   /**
-   * `Constants.sol:172` — `MAX_SIGNATURE_LIFETIME_SECONDS = 3600`. Every
+   * `Constants.sol:248` — `MAX_SIGNATURE_LIFETIME_SECONDS = 3600`. Every
    * `*BySig` door refuses `deadline > block.timestamp + 3600`
    * (`SignatureDeadlineTooFar`, D-18). The backend signs deadlines at chain
    * time + `VOUCHER_MAX_LIFETIME_SECONDS` (300), well inside it.
    */
   MAX_SIGNATURE_LIFETIME_SECONDS: 3_600,
   /**
-   * `Constants.sol:182` — `MAX_SLASH_BATCH = 64` (D-19). `disputeSlashBatch`,
+   * `Constants.sol:229` — `MAX_SLASH_BATCH = 64` (D-19). `disputeSlashBatch`,
    * `upholdSlashBatch` and `cancelSlashBatch` refuse more (`BatchTooLarge`)
    * and an empty list (`EmptyBatch`).
    */
   MAX_SLASH_BATCH: 64,
   /**
-   * `Constants.sol:56` — `DISPUTE_TIMEOUT_SECONDS = 30 * 86_400` (D-19). A
+   * `Constants.sol:67` — `DISPUTE_TIMEOUT_SECONDS = 30 * 86_400` (D-19). A
    * `Disputed` record becomes `expireSlash`-able (`DisputeUnresolved`) at
    * `disputedAt + this`; the 7-day execution grace no longer applies to it.
    */
   DISPUTE_TIMEOUT_SECONDS: 2_592_000,
 } as const;
+
+/**
+ * The least a delegate grant's `validUntil` may lie past the chain's clock when
+ * the backend issues its `AuthorizeDelegate` request: the tighten delay
+ * (`validUntil >= now + TIGHTEN_DELAY_SECONDS` at the landing block) plus the
+ * relay window (the signed `deadline` is chain time +
+ * `VOUCHER_MAX_LIFETIME_SECONDS`, and the relayer may land it until then) —
+ * 11,100 s since D-24. Risk register F8. Not a contract constant, so it lives
+ * outside {@link EVM_CONSTANTS}.
+ */
+export const EVM_DELEGATE_MIN_VALID_UNTIL_AHEAD_SECONDS =
+  EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS + EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS;
 
 /**
  * The escrow call a buyer makes to fund their escrow, as its Solidity

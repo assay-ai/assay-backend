@@ -252,7 +252,7 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
    * A delegation the escrow would refuse, caught before the payer is asked to
    * sign: the delegate is not an address on the payer's chain or is the payer
    * itself, a cap is zero or above the escrow's own ceiling (set the escrow
-   * limits first), or `validUntil` is less than an hour after the request's
+   * limits first), or `validUntil` is less than `TIGHTEN_DELAY_SECONDS` after the request's
    * deadline (D-21) or more than a year out. `reason` names which, in the
    * contract's own terms.
    */

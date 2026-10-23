@@ -841,8 +841,8 @@ export class VoucherService {
         // The three fields `redeem_voucher` cannot reconstruct minutes later.
         // The signature is the buyer's and no key here could produce it again;
         // `resourceHash` hashes a `resource` string that a binding may since have
-        // changed; `issuedAt` is both a signed field and the instant the 2,220s
-        // redemption deadline runs from. The resource hash is the CHAIN's —
+        // changed; `issuedAt` is both a signed field and the instant the
+        // redemption deadline (2,220s on Solana, 7,620s on eip155) runs from. The resource hash is the CHAIN's —
         // sha256 on Solana, keccak256 on eip155 — because it is replayed as
         // signed bytes and nothing recomputes it.
         voucherSignature: input.signed.signature,
