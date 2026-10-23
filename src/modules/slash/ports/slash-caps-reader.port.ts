@@ -16,7 +16,11 @@ export interface SlashCaps {
   readonly windowAllowanceMinor: bigint;
   /** `(bonded + unbonding) − pendingSlash` — what other standing judgements have not reserved. */
   readonly freeStakeMinor: bigint;
-  /** `params.verifierDailyCap` — the most one verifier key may take per rolling day. */
+  /**
+   * `params.verifierDailyCap`. Kept in the ParamSet, but no longer applied by
+   * `executeSlash` (review 2026-10-23 M-1): read for display only, never a
+   * ceiling a plan or a keeper waits on.
+   */
   readonly verifierDailyCapMinor: bigint;
   /** `params.slashAgentBps` / `slashPlatformBps`, for the dust floor and the report. */
   readonly agentBps: number;

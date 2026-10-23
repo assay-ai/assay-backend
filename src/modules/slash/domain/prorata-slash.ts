@@ -29,8 +29,9 @@ import type { SlashRecordSnapshot } from '../ports/slash-executor.port';
  *   the agent account ascending, so the answer never depends on row order.
  * - **Bounded by the contract.** `proposeSlash` refuses a `penalty` above
  *   `params.penaltyAmount`, and the provider's rolling window admits at most
- *   `slashCapBps` of the stake at risk; `executeSlash` also stops at the
- *   verifier key's daily cap. When any of these binds, the WHOLE plan is
+ *   `slashCapBps` of the stake at risk (the verifier key's daily cap is no
+ *   longer applied by `executeSlash`, review 2026-10-23 M-1). When either
+ *   binds, the WHOLE plan is
  *   scaled down — the total is reduced and re-split by the same weights — so
  *   no agent's share is clipped while another's is not. What bound is
  *   recorded in {@link ProRataPlan.binding}, and every part keeps its
@@ -61,8 +62,8 @@ export interface ProRataCaps {
   readonly perPartCeiling: bigint;
   /**
    * The most all the parts together may take. The caller passes the smallest
-   * of the provider's per-window allowance (`atRisk × slashCapBps`), the stake
-   * not already reserved by other judgements, and the verifier key's daily cap.
+   * of the provider's per-window allowance (`atRisk × slashCapBps`) and the
+   * stake not already reserved by other judgements.
    */
   readonly totalCeiling: bigint;
   /**

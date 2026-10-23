@@ -30,6 +30,13 @@ const revert = (name: string) =>
 
 class FakeParts {
   rows: SlashProposalPartEntity[] = [];
+  /** What `signedAgainstProviderSince` answers, and every `since` it was asked. */
+  signedToday = 0n;
+  readonly signedAsked: Date[] = [];
+  async signedAgainstProviderSince(_providerId: string, _chainId: string, since: Date) {
+    this.signedAsked.push(since);
+    return this.signedToday;
+  }
   async findForEpoch(organizationId: string, proposalId: string, chainEpoch: number) {
     return this.rows
       .filter((row) => row.proposalId === proposalId && row.chainEpoch === chainEpoch)
@@ -145,7 +152,9 @@ function build(
 ) {
   const parts = new FakeParts();
   const executor = new ScriptedExecutor();
+  const linked: string[] = [];
   const windowCalls = {
+    linkedAgentAccounts: async () => [...linked],
     sumFailedPriceByAgent: async () =>
       weights.map(([agentAccount, spend]) => ({
         organizationId: 'agent-org',
@@ -173,8 +182,9 @@ function build(
     chainRequestId: 'c'.repeat(64),
     penaltyAmount: '300',
     toolId: 'tool-1',
+    providerId: 'provider-1',
   } as SlashProposalEntity;
-  return { parts, executor, service, proposal };
+  return { parts, executor, service, proposal, linked };
 }
 
 beforeAll(() => {
@@ -232,6 +242,80 @@ describe('SlashPartsService.propose', () => {
       ],
     );
     expect(result).toMatchObject({ status: 'PENDING', reservedMinor: '300', executableAt: X0 });
+  });
+
+  describe('review 2026-10-23 M-1: self-slashing', () => {
+    it('never signs a part whose beneficiary is linked to the provider; the others go', async () => {
+      const { service, proposal, executor, parts, linked } = build([
+        [agent(1), '200'],
+        [agent(2), '100'],
+      ]);
+      linked.push(agent(1));
+
+      const result = await service.propose(proposal, '0xprovider');
+
+      expect(executor.batches).toEqual([{ kind: 'propose', size: 1 }]);
+      expect(
+        parts.rows.map((row) => [row.agentAccount, row.chainStatus, row.chainLastError]),
+      ).toEqual([
+        [agent(1), 'REFUSED', 'LinkedBeneficiary'],
+        [agent(2), 'PENDING', null],
+      ]);
+      // The linked share is simply not levied: the honest part is unchanged.
+      expect(result).toMatchObject({ status: 'PENDING', reservedMinor: '100' });
+    });
+
+    it('signs nothing, and says why, when every remaining beneficiary is linked', async () => {
+      const { service, proposal, executor, linked } = build([[agent(1), '300']]);
+      linked.push(agent(1));
+      await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_LINKED_BENEFICIARY,
+      });
+      expect(executor.batches).toEqual([]);
+    });
+
+    it('does not sign beyond the provider’s on-chain window for the day; waits, then goes', async () => {
+      const { service, proposal, executor, parts } = build([
+        [agent(1), '200'],
+        [agent(2), '100'],
+      ]);
+      // 19,999,800 signed against this provider in the last day + 300 > 20,000,000.
+      parts.signedToday = CAPS.windowAllowanceMinor - 200n;
+      const now = new Date('2026-10-20T12:00:00Z');
+
+      await expect(service.propose(proposal, '0xprovider', now)).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+      });
+      expect(executor.batches).toEqual([]);
+      expect(parts.signedAsked[0].getTime()).toBe(now.getTime() - 86_400_000);
+      expect(parts.rows.every((row) => row.chainStatus === 'NONE')).toBe(true);
+
+      // The day rolls on: it fits.
+      parts.signedToday = CAPS.windowAllowanceMinor - 300n;
+      await expect(service.propose(proposal, '0xprovider', now)).resolves.toMatchObject({
+        status: 'PENDING',
+      });
+    });
+
+    it('always signs a case when nothing else was signed against the provider that day', async () => {
+      const { service, proposal, executor } = build([[agent(1), '300']]);
+      await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+        status: 'PENDING',
+      });
+      expect(executor.batches).toEqual([{ kind: 'propose', size: 1 }]);
+    });
+
+    it('plans against the provider window and free stake only, never the verifier key cap', async () => {
+      const { service, proposal, parts } = build([[agent(1), '300']]);
+      const original = { ...CAPS };
+      Object.assign(CAPS, { verifierDailyCapMinor: 1n });
+      try {
+        await service.propose(proposal, '0xprovider');
+      } finally {
+        Object.assign(CAPS, original);
+      }
+      expect(parts.rows.map((row) => row.penaltyAmount)).toEqual(['300']);
+    });
   });
 
   it('C5: signs a genuine multiplier-2 case whose 60% shares are more than the payers paid', async () => {
