@@ -249,6 +249,21 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   redemptionLastError: string | null;
 
   /**
+   * Retryable redemption refusals of this voucher so far
+   * (`PaymentIntentRepository.recordRedemptionRetry`). Drives the back-off.
+   */
+  @Column({ name: 'redemption_attempts', type: 'int', default: 0 })
+  redemptionAttempts: number;
+
+  /**
+   * Not attempted again before this instant, on a chain that admits any seq
+   * order (review 2026-10-23 I-1): a refused row cannot take a pass's batch
+   * from rows that would redeem. Capped at the voucher's last pass.
+   */
+  @Column({ name: 'redemption_retry_at', type: 'timestamptz', nullable: true })
+  redemptionRetryAt: Date | null;
+
+  /**
    * When this served rail-B call became BUYER DEBT: its voucher can no longer
    * be redeemed for a reason that is not the provider's, so the hold stays
    * open and nobody is credited until the buyer signs a replacement voucher

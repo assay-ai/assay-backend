@@ -150,6 +150,22 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    * WARN, so a provider that keeps forfeiting is seen.
    */
   PROVIDER_FORFEIT: 'voucher_provider_forfeit',
+  /**
+   * The chain refused a voucher `VoucherSeqUsed`, none of its own recorded
+   * transactions shows the landing, and the escrow's `held(payer, seq)` record
+   * names this voucher's provider and amount: it landed unobserved, and the
+   * hold was committed from the record — never turned into buyer debt. WARN:
+   * nothing is owed, but a landing this process did not record needs a look.
+   */
+  SEQ_USED_UNOBSERVED: 'voucher_seq_used_unobserved',
+  /**
+   * The chain refused a voucher `VoucherSeqUsed`, none of its own recorded
+   * transactions shows the landing, and `held(payer, seq)` does NOT match this
+   * voucher (another provider or amount). Not buyer debt: the hold stays open
+   * and a human decides. CRITICAL — the seq this platform issued was used by
+   * somebody else's voucher.
+   */
+  SEQ_USED_ANOMALY: 'voucher_seq_used_anomaly',
 } as const;
 
 /**
@@ -206,3 +222,13 @@ export const BUYER_DEBT_WRITE_OFF_DAYS = 30;
 export function debtReplaceableAfterExpirySeconds(caipId: string): number {
   return redeemGraceSeconds(caipId) + CLOCK_SKEW_TOLERANCE_SECONDS;
 }
+
+/**
+ * The back-off of a voucher the chain refused with a retryable error, on a
+ * chain that admits any seq order (review 2026-10-23 I-1): 60 s, doubling,
+ * at most 600 s between attempts — well under the 7,200 s grace — and never
+ * past the voucher's last pass ({@link REDEMPTION_DEADLINE_MARGIN_SECONDS}
+ * before its deadline). `PaymentIntentRepository.recordRedemptionRetry`.
+ */
+export const REDEMPTION_RETRY_BASE_SECONDS = 60;
+export const REDEMPTION_RETRY_MAX_SECONDS = 600;

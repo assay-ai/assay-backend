@@ -3,7 +3,12 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
-import { redeemGraceIntervalSql } from '@modules/payment/constants/voucher-redemption.constants';
+import {
+  REDEMPTION_DEADLINE_MARGIN_SECONDS,
+  REDEMPTION_RETRY_BASE_SECONDS,
+  REDEMPTION_RETRY_MAX_SECONDS,
+  redeemGraceIntervalSql,
+} from '@modules/payment/constants/voucher-redemption.constants';
 import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -1084,7 +1089,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * load-bearing.** The chain permits out-of-order redemption, but `seq_high`
    * only advancing past holds that have already been decided is what keeps the
    * in-flight gap meaningful: `next_seq − oldest_pending_seq` bounds
-   * `next_seq − seq_high` only while the redemptions go up in sequence.
+   * `next_seq − seq_high` only while the redemptions go up in sequence. (On a
+   * chain that requires ascending seq; see `orderedBySeq` below.)
    *
    * **Deliberately cross-organization.** The job runs in the scheduler, per
    * asset, on behalf of no tenant — and the ordering above is per *buyer
@@ -1102,7 +1108,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * `orderedBySeq: false` is for a chain that admits each `(payer, seq)` once
    * in any order (`eip155`, D-23): a row is then never held back by a LOWER seq
    * of its payer — still open, or behind a payer-side block — only by its own
-   * blocked parties. The default keeps both hold-backs (Solana).
+   * blocked parties. The default keeps both hold-backs (Solana). Such a queue
+   * is not ordered by `(agent_account, voucher_seq)`: a row in its retry
+   * back-off is left out, and the batch is filled round-robin by payer and by
+   * provider (review 2026-10-23 I-1) — see the query below.
    */
   async findAwaitingRedemption(
     assetId: string,
@@ -1218,11 +1227,67 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       );
     }
 
-    return query
-      .orderBy('intent.agentAccount', 'ASC')
-      .addOrderBy('intent.voucherSeq', 'ASC')
-      .limit(limit)
-      .getRawMany<RedeemableIntent>();
+    if (orderedBySeq) {
+      return query
+        .orderBy('intent.agentAccount', 'ASC')
+        .addOrderBy('intent.voucherSeq', 'ASC')
+        .limit(limit)
+        .getRawMany<RedeemableIntent>();
+    }
+
+    // Any order (D-23): nothing holds a payer's rows back any more, so the
+    // pass is kept FAIR instead (review 2026-10-23 I-1). A row the chain
+    // refused with a retryable error waits out its back-off
+    // (`recordRedemptionRetry`), and the batch is filled ROUND-ROBIN by payer
+    // and by provider: every payer's and every provider's first row comes
+    // before anybody's second, so no payer and no provider can take the batch
+    // while somebody else is waiting — and a lone busy one still fills it.
+    // Within a round, rows never refused come first, then the nearest deadline.
+    query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
+    const [inner, parameters] = query.getQueryAndParameters();
+    const rows = (await this.manager.query(
+      `SELECT ranked.* FROM (
+         SELECT queue.*,
+                row_number() OVER (PARTITION BY queue."agentAccount"
+                                   ORDER BY queue."expiresAt", queue."voucherSeq") AS "payerRound",
+                row_number() OVER (PARTITION BY queue."providerAccount"
+                                   ORDER BY queue."expiresAt", queue."agentAccount",
+                                            queue."voucherSeq") AS "providerRound"
+           FROM (${inner}) queue
+       ) ranked
+       ORDER BY GREATEST(ranked."payerRound", ranked."providerRound") ASC,
+                (ranked."redemptionLastError" IS NOT NULL) ASC,
+                ranked."expiresAt" ASC,
+                ranked."agentAccount" ASC,
+                ranked."voucherSeq" ASC
+       LIMIT $${parameters.length + 1}`,
+      [...parameters, limit],
+    )) as (RedeemableIntent & { payerRound?: unknown; providerRound?: unknown })[];
+    return rows.map(({ payerRound: _payer, providerRound: _provider, ...row }) => row);
+  }
+
+  /**
+   * A retryable refusal of this voucher (review 2026-10-23 I-1): it is not
+   * attempted again for 1, 2, 4, 8, then 10 minutes — but never past its last
+   * pass, `REDEMPTION_DEADLINE_MARGIN_SECONDS` before its on-chain deadline
+   * (`expires_at` + the chain's grace), so a provider that tops up its stake
+   * or a buyer that re-grants is still met in time. Read only on a chain that
+   * admits any seq order.
+   */
+  async recordRedemptionRetry(organizationId: string, id: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_attempts" = "redemption_attempts" + 1,
+              "redemption_retry_at" = LEAST(
+                now() + LEAST(interval '${REDEMPTION_RETRY_MAX_SECONDS} seconds',
+                              interval '${REDEMPTION_RETRY_BASE_SECONDS} seconds'
+                                * power(2, LEAST("redemption_attempts", 4))),
+                GREATEST(now(),
+                         "expires_at" + ${redeemGraceIntervalSql('"chain_id"')}
+                           - interval '${REDEMPTION_DEADLINE_MARGIN_SECONDS} seconds'))
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id],
+    );
   }
 
   /**

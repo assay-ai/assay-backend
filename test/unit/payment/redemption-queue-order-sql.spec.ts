@@ -33,6 +33,12 @@ async function rendered(
     .spyOn(repo, 'createQueryBuilder')
     .mockImplementation(((alias: string) =>
       dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
+  // A chain that admits any order wraps the built query in the fair ordering
+  // and sends it raw (review 2026-10-23 I-1).
+  jest.spyOn(repo.manager, 'query').mockImplementation((async (text: string, values: unknown[]) => {
+    captured = { sql: text, params: { ...values } };
+    return [];
+  }) as never);
 
   await repo.findAwaitingRedemption(
     'eip155:46630/erc20:0xabc',
@@ -123,6 +129,60 @@ describe('PaymentIntentRepository.findAwaitingRedemption — a chain that redeem
     const guard = sql.replace(/\s+/g, ' ');
     expect(guard).toMatch(/payment_intents earlier/);
     expect(guard).toMatch(/held\.voucher_seq <= "?intent"?\.voucher_seq/);
+  });
+
+  /**
+   * Review 2026-10-23 I-1: with no hold-back, one payer or one provider could
+   * fill the LIMIT with rows the chain keeps refusing as retryable. The SQL is
+   * also run against Postgres in `redemption-fair-queue.integration.spec.ts`.
+   */
+  it('leaves out a row in its retry back-off', async () => {
+    const { sql } = await rendered(undefined, { orderedBySeq: false });
+    expect(sql.replace(/\s+/g, ' ')).toMatch(
+      /\("intent"\."redemption_retry_at" IS NULL OR "intent"\."redemption_retry_at" <= now\(\)\)/,
+    );
+  });
+
+  it('fills the batch round-robin by payer and by provider, never-refused rows first', async () => {
+    const { sql, params } = await rendered(undefined, { orderedBySeq: false });
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toContain('row_number() OVER (PARTITION BY queue."agentAccount"');
+    expect(flat).toContain('row_number() OVER (PARTITION BY queue."providerAccount"');
+    expect(flat).toMatch(
+      /ORDER BY GREATEST\(ranked\."payerRound", ranked\."providerRound"\) ASC, \(ranked\."redemptionLastError" IS NOT NULL\) ASC, ranked\."expiresAt" ASC/,
+    );
+    // The batch size is the last parameter, after the inner query's own.
+    const values = Object.values(params);
+    expect(flat).toContain(`LIMIT $${values.length}`);
+    expect(values[values.length - 1]).toBe(100);
+  });
+
+  it('keeps Solana’s queue as it was: seq order, no back-off', async () => {
+    const { sql } = await rendered();
+    expect(sql).not.toMatch(/redemption_retry_at/);
+    expect(sql).not.toMatch(/row_number/);
+  });
+});
+
+describe('PaymentIntentRepository.recordRedemptionRetry — the back-off (I-1)', () => {
+  it('backs off 60 s doubling to at most 600 s, and never past the last pass', async () => {
+    const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
+    await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+    const repo = new PaymentIntentRepository(dataSource);
+    let sql = '';
+    jest.spyOn(repo.manager, 'query').mockImplementation((async (text: string) => {
+      sql = text.replace(/\s+/g, ' ');
+      return [];
+    }) as never);
+    await repo.recordRedemptionRetry('org', 'id');
+    expect(sql).toContain('"redemption_attempts" = "redemption_attempts" + 1');
+    expect(sql).toContain(
+      "now() + LEAST(interval '600 seconds', interval '60 seconds' * power(2, LEAST(\"redemption_attempts\", 4)))",
+    );
+    expect(sql).toContain(
+      `GREATEST(now(), "expires_at" + (CASE WHEN split_part("chain_id", ':', 1) = 'eip155' ` +
+        `THEN interval '7200 seconds' ELSE interval '1800 seconds' END) - interval '60 seconds')`,
+    );
   });
 });
 
