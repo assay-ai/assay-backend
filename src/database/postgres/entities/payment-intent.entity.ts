@@ -209,7 +209,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /**
    * Unix seconds — offset 223 of the signed bytes.
    *
-   * Also the instant `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` (2,220s) is counted
+   * Also the instant `maxVoucherRedeemableLifeSeconds` (2,220s on Solana,
+   * 7,620s on eip155) is counted
    * from, which is what makes a hold overdue rather than merely slow. Kept as
    * a `bigint` string for the reason `voucherSeq` is: the chain reads an
    * `i64`, and the byte layout does not care what JavaScript can hold.

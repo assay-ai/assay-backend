@@ -241,8 +241,8 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
         state: 'OPEN',
         lapsedAt: '2026-10-16T00:00:00.000Z',
         writeOffAt: '2026-11-15T00:00:00.000Z',
-        // expiresAt + 1,800 s grace + 120 s skew.
-        replaceableAt: '2026-10-16T00:27:00.000Z',
+        // expiresAt + 7,200 s grace (eip155, D-24) + 120 s skew.
+        replaceableAt: '2026-10-16T01:57:00.000Z',
         replacedAt: null,
       }),
     ]);
@@ -262,7 +262,8 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
     });
     expect(allocate).not.toHaveBeenCalled();
     const [listed] = await service.list(session);
-    expect(listed.replaceableAt).toBe(new Date(expiresAt.getTime() + 1_920_000).toISOString());
+    // eip155 (D-24): 7,200 s grace + 120 s skew; Solana would be 1,920 s.
+    expect(listed.replaceableAt).toBe(new Date(expiresAt.getTime() + 7_320_000).toISOString());
     expect(payments.replaceLapsedVoucher).not.toHaveBeenCalled();
   });
 

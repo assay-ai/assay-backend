@@ -1,10 +1,13 @@
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
+
 /**
  * Every minute.
  *
- * The deadline this races is `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` (2,220s ≈ 37
- * minutes) — after which the program refuses the voucher outright and the
- * call becomes buyer debt — so a five-minute cadence would spend an eighth of
- * the budget sitting in a queue. Written out rather than
+ * The deadline this races is {@link maxVoucherRedeemableLifeSeconds} (2,220s ≈
+ * 37 minutes on Solana, 7,620s ≈ 2 h 7 min on eip155) — after which the chain
+ * refuses the voucher outright and the call becomes buyer debt — so a
+ * five-minute cadence would spend an eighth of the Solana budget sitting in a
+ * queue. Written out rather than
  * `CronExpression.EVERY_MINUTE` for the reason `RECONCILIATION_CRON` is: the
  * cadence a runbook quotes should be greppable as a literal.
  */
@@ -17,19 +20,65 @@ export const VOUCHER_REDEMPTION_CRON = '0 * * * * *';
 export const VOUCHER_REDEMPTION_BATCH = 100;
 
 /**
- * `MAX_VOUCHER_LIFETIME_SECONDS` (300) + `CLOCK_SKEW_TOLERANCE_SECONDS` (120)
- * + `REDEEM_GRACE_SECONDS` (1,800) — the outer edge of the window in which the
- * program will still accept a voucher, counted from `issued_at`.
- *
- * Written as the sum rather than as 2,220 so that a change to any of the three
- * on chain reads here as an arithmetic disagreement rather than as a number
- * nobody can source.
+ * `MAX_VOUCHER_LIFETIME_SECONDS` (300) and `CLOCK_SKEW_TOLERANCE_SECONDS` (120)
+ * are the same on both chains. The redemption grace is not (assay-evm D-24):
+ * the Solana program keeps `REDEEM_GRACE_SECONDS = 30 * 60`, `AssayEscrow`
+ * raised it to `2 * 3600` (`EVM_CONSTANTS.REDEEM_GRACE_SECONDS`). So the grace
+ * and everything derived from it is asked per chain, through
+ * {@link redeemGraceSeconds} and {@link maxVoucherRedeemableLifeSeconds}, and
+ * in SQL through {@link redeemGraceIntervalSql}.
  */
 export const MAX_VOUCHER_LIFETIME_SECONDS = 300;
 export const CLOCK_SKEW_TOLERANCE_SECONDS = 120;
-export const REDEEM_GRACE_SECONDS = 1_800;
-export const MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS =
-  MAX_VOUCHER_LIFETIME_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS;
+/** The Solana program's `REDEEM_GRACE_SECONDS` (`constants.rs`, `30 * 60`). */
+export const SOLANA_REDEEM_GRACE_SECONDS = 1_800;
+
+/**
+ * Whether a CAIP identifier (chain, account or asset) is on `eip155`. Every
+ * other namespace the platform serves is Solana, whose values are the
+ * defaults below. A plain prefix read rather than a full CAIP parse: a
+ * deadline computation must not throw on a malformed row.
+ */
+function isEip155(caipId: string): boolean {
+  return caipId.split(':', 1)[0] === 'eip155';
+}
+
+/**
+ * How long after `expiresAt` the chain still redeems a voucher: 7,200 s on
+ * eip155 (`Constants.sol` `REDEEM_GRACE_SECONDS`, D-24), 1,800 s on Solana.
+ * `caipId` is the intent's chain id, payer account or asset id.
+ */
+export function redeemGraceSeconds(caipId: string): number {
+  return isEip155(caipId) ? EVM_CONSTANTS.REDEEM_GRACE_SECONDS : SOLANA_REDEEM_GRACE_SECONDS;
+}
+
+/**
+ * `MAX_VOUCHER_LIFETIME_SECONDS` + `CLOCK_SKEW_TOLERANCE_SECONDS` + the
+ * chain's {@link redeemGraceSeconds} — the outer edge of the window in which
+ * the chain will still accept a voucher, counted from `issued_at`: 7,620 s on
+ * eip155, 2,220 s on Solana.
+ *
+ * Written as the sum rather than as a literal so that a change to any of the
+ * three on chain reads here as an arithmetic disagreement rather than as a
+ * number nobody can source.
+ */
+export function maxVoucherRedeemableLifeSeconds(caipId: string): number {
+  return MAX_VOUCHER_LIFETIME_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS + redeemGraceSeconds(caipId);
+}
+
+/**
+ * {@link redeemGraceSeconds} as a SQL `interval`, decided per row on the CAIP-2
+ * `chain_id` column named by `chainIdColumn` — for queries that read rows of
+ * both chains at once. Both values are literals from the constants above,
+ * never input.
+ */
+export function redeemGraceIntervalSql(chainIdColumn: string): string {
+  return (
+    `(CASE WHEN split_part(${chainIdColumn}, ':', 1) = 'eip155' ` +
+    `THEN interval '${EVM_CONSTANTS.REDEEM_GRACE_SECONDS} seconds' ` +
+    `ELSE interval '${SOLANA_REDEEM_GRACE_SECONDS} seconds' END)`
+  );
+}
 
 /**
  * How long past a voucher's on-chain deadline "not found" is still read as
@@ -57,7 +106,7 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    */
   UNREDEEMABLE: 'voucher_unredeemable',
   /**
-   * A hold has outlived `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` and is still not
+   * A hold has outlived {@link maxVoucherRedeemableLifeSeconds} and is still not
    * redeemed — an overdue hold needs an alert. It is about to become
    * an `UNREDEEMABLE`.
    */
@@ -68,7 +117,7 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    *
    * CRITICAL and not WARN: nothing redeems until a human acts, every rail-B
    * hold stays open meanwhile, and each one is on a clock —
-   * `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` — after which the call becomes buyer
+   * {@link maxVoucherRedeemableLifeSeconds} — after which the call becomes buyer
    * debt the buyer must re-sign. An outage that silently converts into debt is
    * the shape of failure the alert catalogue exists for.
    */
@@ -129,7 +178,7 @@ export const UNCOLLECTED_PREFIX = 'uncollected:';
 export const DEBT_VOIDED_PREFIX = 'voided:';
 
 /**
- * How close to a voucher's on-chain deadline (`expiresAt + REDEEM_GRACE_SECONDS`)
+ * How close to a voucher's on-chain deadline (`expiresAt + redeemGraceSeconds`)
  * the platform stops waiting on it: one redemption pass. A verdict that lands
  * later settles as debt at once, and a voucher still refused by a buyer
  * tightening (a revoked or expired delegate, a lowered cap) that late becomes
@@ -146,12 +195,14 @@ export const BUYER_DEBT_WRITE_OFF_DAYS = 30;
 
 /**
  * How long past a debt's lapsed voucher's `expiresAt` its replacement may be
- * accepted: `REDEEM_GRACE_SECONDS` (the contract refuses the voucher after
- * `expiresAt + grace`) + `CLOCK_SKEW_TOLERANCE_SECONDS` (a block clock ahead of
- * ours). Before then the old voucher may still be redeemable — a debt can
- * lapse before its deadline — and a replacement at a higher seq redeemed after
- * it would charge the buyer twice. `trg_payment_intents_voucher_seq_immutable`
- * (migration 1760900000000) enforces the same 1,920 s.
+ * accepted: the chain's {@link redeemGraceSeconds} (the chain refuses the
+ * voucher after `expiresAt + grace`) + `CLOCK_SKEW_TOLERANCE_SECONDS` (a block
+ * clock ahead of ours) — 7,320 s on eip155, 1,920 s on Solana. Before then the
+ * old voucher may still be redeemable — a debt can lapse before its deadline —
+ * and a replacement at a higher seq redeemed after it would charge the buyer
+ * twice. `trg_payment_intents_voucher_seq_immutable` (migration
+ * 1762400000050) enforces the same bounds per chain.
  */
-export const DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS =
-  REDEEM_GRACE_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS;
+export function debtReplaceableAfterExpirySeconds(caipId: string): number {
+  return redeemGraceSeconds(caipId) + CLOCK_SKEW_TOLERANCE_SECONDS;
+}

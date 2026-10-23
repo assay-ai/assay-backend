@@ -3,7 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
-import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import { redeemGraceIntervalSql } from '@modules/payment/constants/voucher-redemption.constants';
 import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -803,7 +803,10 @@ export interface UnsettledVoucherTotals {
   readonly total: bigint;
   /** The largest single one: what a per-voucher cap must still allow. */
   readonly largest: bigint;
-  /** The last instant the chain still redeems one of them (`expires_at` + grace), or null. */
+  /**
+   * The last instant the chain still redeems one of them (`expires_at` + the
+   * row's chain grace: 7,200 s on eip155, 1,800 s on Solana), or null.
+   */
   readonly redeemableUntil: Date | null;
   /**
    * `Σ price_amount` redeemed at or after `since`: what a counter read at
@@ -816,13 +819,14 @@ export interface UnsettledVoucherTotals {
  * A rail-B intent the chain has not redeemed and still can: in flight
  * (`CREATED`, not expired) or served with its hold open, and not past the
  * chain's redemption grace — past that it is lost already, whatever the caps.
+ * The grace is the row's own chain's (`redeemGraceIntervalSql`).
  */
 const UNSETTLED_VOUCHER_SQL =
   `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
   // Redeemed into the escrow's hold already (G3.B1): not unsettled.
   ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "held_at" IS NULL AND "status" IN (` +
   [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
-  `) AND "expires_at" > now() - interval '${REDEEM_GRACE_SECONDS} seconds'))`;
+  `) AND "expires_at" > now() - ${redeemGraceIntervalSql('"chain_id"')}))`;
 
 /**
  * A rail-B intent the chain's window counter cannot contain yet, given the
@@ -1169,7 +1173,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND earlier.rail = :rail
               AND earlier.voucher_seq IS NOT NULL
               AND earlier.voucher_seq < intent.voucher_seq
-              AND earlier.expires_at > now() - interval '${REDEEM_GRACE_SECONDS} seconds'
+              AND earlier.expires_at > now() - ${redeemGraceIntervalSql('earlier.chain_id')}
               AND (earlier.status IN (:...earlierOpenStatuses)
                    OR (earlier.status = 'CREATED' AND earlier.expires_at > now()))
          )`,
@@ -3174,7 +3178,8 @@ async function readUnsettledVouchers(
        COUNT(*) FILTER (WHERE ${UNSETTLED_VOUCHER_SQL})::int AS "count",
        COALESCE(SUM("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "total",
        COALESCE(MAX("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "largest",
-       MAX("expires_at") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "latestExpiry",
+       MAX("expires_at" + ${redeemGraceIntervalSql('"chain_id"')})
+         FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "redeemableUntil",
        COALESCE(SUM("price_amount") FILTER (
          WHERE "status" = '${SETTLED_STATUS}'
            AND COALESCE("held_at", "hold_released_at") >= $3::timestamptz
@@ -3193,16 +3198,14 @@ async function readUnsettledVouchers(
     count: number;
     total: string;
     largest: string;
-    latestExpiry: Date | null;
+    redeemableUntil: Date | null;
     redeemedSince: string;
   }>;
-  const latest = row?.latestExpiry ? new Date(row.latestExpiry) : null;
   return {
     count: Number(row?.count ?? 0),
     total: BigInt(row?.total ?? '0'),
     largest: BigInt(row?.largest ?? '0'),
-    redeemableUntil:
-      latest === null ? null : new Date(latest.getTime() + REDEEM_GRACE_SECONDS * 1000),
+    redeemableUntil: row?.redeemableUntil ? new Date(row.redeemableUntil) : null,
     redeemedSince: BigInt(row?.redeemedSince ?? '0'),
   };
 }

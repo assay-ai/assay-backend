@@ -1,7 +1,6 @@
 import { DataSource } from 'typeorm';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
-import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 
 /**
  * Renders `findAwaitingRedemption`'s SQL without a database, the way
@@ -72,8 +71,10 @@ describe('PaymentIntentRepository.findAwaitingRedemption — seq order', () => {
   it('stops holding back once the lower seq is past its own redemption window', async () => {
     const { sql } = await rendered();
     const guard = sql.replace(/\s+/g, ' ');
-    expect(guard).toMatch(
-      new RegExp(`earlier\\.expires_at > now\\(\\) - interval '${REDEEM_GRACE_SECONDS} seconds'`),
+    // Per the lower row's OWN chain (D-24): 7,200 s on eip155, 1,800 s on Solana.
+    expect(guard).toContain(
+      "earlier.expires_at > now() - (CASE WHEN split_part(earlier.chain_id, ':', 1) = 'eip155' " +
+        "THEN interval '7200 seconds' ELSE interval '1800 seconds' END)",
     );
   });
 });
@@ -140,5 +141,57 @@ describe('PaymentIntentRepository.findAwaitingRedemption — buyer debt', () => 
     expect(flat).toMatch(
       /"intent"\."redemption_last_error" IS NULL OR NOT \("intent"\."redemption_last_error" LIKE 'provider_forfeit:%' OR "intent"\."redemption_last_error" LIKE 'uncollected:%' OR "intent"\."redemption_last_error" LIKE 'voided:%'\)/,
     );
+  });
+});
+
+/**
+ * D-24: `AssayEscrow` redeems until `expiresAt + 7200`, the Solana program
+ * until `expiresAt + 1800`. The unsettled-voucher read decides "still
+ * redeemable" and the redeemable-until instant per row, on the row's own
+ * `chain_id`, rather than with one grace for both chains.
+ */
+describe('PaymentIntentRepository.unsettledVouchers — the per-chain grace', () => {
+  const PER_CHAIN_GRACE =
+    `(CASE WHEN split_part("chain_id", ':', 1) = 'eip155' ` +
+    `THEN interval '7200 seconds' ELSE interval '1800 seconds' END)`;
+
+  async function rendered(): Promise<{ sql: string; result: unknown }> {
+    const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
+    await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+    const repo = new PaymentIntentRepository(dataSource);
+    let sql = '';
+    jest.spyOn(repo.manager, 'query').mockImplementation((async (text: string) => {
+      sql = text;
+      return [
+        {
+          count: 1,
+          total: '5',
+          largest: '5',
+          redeemableUntil: new Date('2026-10-23T14:00:00Z'),
+          redeemedSince: '0',
+        },
+      ];
+    }) as never);
+    const result = await repo.unsettledVouchers({
+      payer: 'eip155:46630:0xabc',
+      assetId: 'eip155:46630/erc20:0xabc',
+      since: new Date('2026-10-23T12:00:00Z'),
+    });
+    return { sql: sql.replace(/\s+/g, ' '), result };
+  }
+
+  it('counts a served voucher as unsettled until expires_at + its own chain grace', async () => {
+    const { sql } = await rendered();
+    expect(sql).toContain(`"expires_at" > now() - ${PER_CHAIN_GRACE}`);
+  });
+
+  it('computes redeemableUntil in SQL, per row, and passes it through unchanged', async () => {
+    const { sql, result } = await rendered();
+    expect(sql).toContain(`MAX("expires_at" + ${PER_CHAIN_GRACE}) FILTER`);
+    expect(result).toMatchObject({
+      count: 1,
+      total: 5n,
+      redeemableUntil: new Date('2026-10-23T14:00:00Z'),
+    });
   });
 });

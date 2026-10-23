@@ -1,6 +1,7 @@
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { DropLegacyPaymentSchema1762400000000 } from '@database/postgres/migrations/1762400000000-drop-legacy-payment-schema';
 import { PaymentKeySpendIndexes1762400000020 } from '@database/postgres/migrations/1762400000020-payment-key-spend-indexes';
+import { VoucherSeqDebtReplacementPerChain1762400000050 } from '@database/postgres/migrations/1762400000050-voucher-seq-debt-replacement-per-chain';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -234,6 +235,8 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // so this harness refuses what production refuses.
       DropLegacyPaymentSchema1762400000000,
       PaymentKeySpendIndexes1762400000020,
+      // The debt-replacement deadline per chain (eip155 7,320 s, D-24).
+      VoucherSeqDebtReplacementPerChain1762400000050,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
