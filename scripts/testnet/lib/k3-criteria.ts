@@ -101,7 +101,7 @@ export const K3_CRITERIA: readonly K3Criterion[] = [
   {
     id: 'E3',
     chain: 'eip155:46630',
-    text: 'A voucher with `seq <= seqHigh` reverts. A voucher malleated to high-s reverts. A voucher with',
+    text: 'A voucher whose `(payer, seq)` was already redeemed reverts, in any order (D-23). A voucher malleated to high-s reverts. A voucher with',
     needs: [],
   },
   {
