@@ -9,6 +9,7 @@ import {
 import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
 import {
+  EVM_CLOCK_DRIFT_ALERT,
   EVM_REDEEM_BATCH_BASE_GAS,
   EVM_REDEEM_PER_VOUCHER_GAS,
   EvmVoucherRedeemer,
@@ -128,6 +129,12 @@ interface ChainState {
    * 3 Refunded). Anything absent is 0, `None`: the seq is unused.
    */
   held: Record<string, number>;
+  /** `block.timestamp` as Multicall3 answers it; `NOW` unless a test moves it. */
+  blockTimestamp: number;
+  /** `payer:seq` → the provider and amount the held record names. */
+  heldTerms: Record<string, { provider: string; amount: bigint }>;
+  /** This process's wall clock, seconds. */
+  wallClock: number;
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -146,6 +153,9 @@ function harness(overrides: Partial<ChainState> = {}) {
     effective: {},
     read: [],
     held: {},
+    blockTimestamp: NOW,
+    heldTerms: {},
+    wallClock: NOW,
     ...overrides,
   };
 
@@ -161,11 +171,13 @@ function harness(overrides: Partial<ChainState> = {}) {
       }
       case 'bondedOf':
         return state.bonded;
+      case 'getCurrentBlockTimestamp':
+        return BigInt(state.blockTimestamp);
       case 'held': {
         const key = `${String(args[0]).toLowerCase()}:${String(args[1])}`;
         return {
-          provider: PROVIDER,
-          amount: 0n,
+          provider: state.heldTerms[key]?.provider ?? PROVIDER,
+          amount: state.heldTerms[key]?.amount ?? 0n,
           takeRateBps: 0,
           status: state.held[key] ?? 0,
           collectableAt: 0n,
@@ -260,7 +272,7 @@ function harness(overrides: Partial<ChainState> = {}) {
     new Map([[TESTNET, DEPLOYMENT]]),
     redeemerPort,
     alerts,
-    { now: () => NOW * 1000 },
+    { now: () => state.wallClock * 1000 },
     { isLive: async () => state.tightenDelay },
   );
 
@@ -417,6 +429,75 @@ describe('EvmVoucherRedeemer', () => {
 
     const fine = harness();
     await expect(fine.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(false);
+  });
+
+  describe('decides expiry on the chain clock, not this process’s (review 2026-10-23 L-4)', () => {
+    const deadline = NOW + 60 + EVM_CONSTANTS.REDEEM_GRACE_SECONDS;
+
+    it('redeems a voucher the wall clock calls expired while the chain still accepts it', async () => {
+      const { redeemer, sendCall } = harness({
+        blockTimestamp: deadline - 5,
+        wallClock: deadline + 30,
+      });
+      const outcome = await redeemer.redeem(request(0));
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses VoucherExpired once the chain is past the deadline, whatever the wall clock says', async () => {
+      const { redeemer, sendCall, state } = harness();
+      state.blockTimestamp = deadline + 1;
+      const outcome = await redeemer.redeem(request(0));
+      expect(outcome).toMatchObject({
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'VoucherExpired',
+      });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    it('alerts when block.timestamp is more than 120 s from the wall clock, and not within it', async () => {
+      const near = harness();
+      near.state.blockTimestamp = NOW + 120;
+      await near.redeemer.redeem(request(0));
+      expect(near.emitted.filter((a) => a.name === EVM_CLOCK_DRIFT_ALERT)).toHaveLength(0);
+
+      const far = harness();
+      far.state.blockTimestamp = NOW - 121;
+      await far.redeemer.redeem(request(0));
+      const drift = far.emitted.filter((a) => a.name === EVM_CLOCK_DRIFT_ALERT);
+      expect(drift).toHaveLength(1);
+      expect(drift[0].details).toMatchObject({ driftSeconds: -121 });
+    });
+  });
+
+  describe('usedSeqRecord: what held(payer, seq) says about this voucher (M-B1)', () => {
+    const key = `${payerAddress(0).toLowerCase()}:10`;
+
+    it('MATCH when the record names this voucher’s provider and amount', async () => {
+      const { redeemer } = harness({
+        held: { [key]: 1 },
+        heldTerms: { [key]: { provider: PROVIDER, amount: 1_000_000n } },
+      });
+      await expect(redeemer.usedSeqRecord(request(0))).resolves.toBe('MATCH');
+    });
+
+    it('MISMATCH when it names another provider or another amount', async () => {
+      const other = harness({
+        held: { [key]: 2 },
+        heldTerms: { [key]: { provider: payerAddress(9), amount: 1_000_000n } },
+      });
+      await expect(other.redeemer.usedSeqRecord(request(0))).resolves.toBe('MISMATCH');
+      const amount = harness({
+        held: { [key]: 1 },
+        heldTerms: { [key]: { provider: PROVIDER, amount: 999_999n } },
+      });
+      await expect(amount.redeemer.usedSeqRecord(request(0))).resolves.toBe('MISMATCH');
+    });
+
+    it('NONE when the seq is unused', async () => {
+      const { redeemer } = harness();
+      await expect(redeemer.usedSeqRecord(request(0))).resolves.toBe('NONE');
+    });
   });
 
   it('retries SINGLY when the batch reverts, and never re-submits the batch', async () => {

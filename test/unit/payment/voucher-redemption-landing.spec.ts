@@ -160,6 +160,21 @@ class EvmChainRedeemer {
   }
 }
 
+/**
+ * The `eip155` redeemer as it ships: it can also read `held(payer, seq)` and
+ * say whether the record that makes the seq used is this voucher's (M-B1).
+ */
+class EvmRecordRedeemer extends EvmChainRedeemer {
+  record: 'MATCH' | 'MISMATCH' | 'NONE' | Error = 'MATCH';
+  readonly asked: RedeemVoucherRequest[] = [];
+
+  async usedSeqRecord(r: RedeemVoucherRequest): Promise<'MATCH' | 'MISMATCH' | 'NONE'> {
+    this.asked.push(r);
+    if (this.record instanceof Error) throw this.record;
+    return this.record;
+  }
+}
+
 function build(
   redeemer: ChainRedeemer | EvmChainRedeemer,
   clock: { nowSeconds: number } = { nowSeconds: NOW },
@@ -171,6 +186,7 @@ function build(
     releaseHold: jest.fn().mockResolvedValue(true),
   };
   const payments = {
+    recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
     findAwaitingRedemption: jest
       .fn()
       .mockImplementation(async () =>
@@ -309,7 +325,104 @@ describe('VoucherRedemptionService — VoucherSeqUsed on eip155 (D-23)', () => {
     expect(intents.releaseHold).not.toHaveBeenCalled();
   });
 
-  it('a seq used by no transaction of its own becomes buyer debt, named VoucherSeqUsed', async () => {
+  describe('no transaction of its own landed it: the chain’s record decides (M-B1)', () => {
+    it('a record naming its provider and amount is committed as redeemed unobserved — no debt', async () => {
+      const redeemer = new EvmRecordRedeemer(async () => undefined);
+      redeemer.used.add('1');
+      const { service, intents, payments, alerts } = build(redeemer);
+
+      await service.run(USDC);
+
+      expect(redeemer.sends).toBe(0);
+      expect(redeemer.asked.map((r) => r.seq)).toEqual(['1']);
+      expect(intents.commitRedeemedHold).toHaveBeenCalledWith(
+        'org-1',
+        'intent-1',
+        'unobserved:seq=1',
+      );
+      expect(payments.lapseRedemption).not.toHaveBeenCalled();
+      expect(intents.releaseHold).not.toHaveBeenCalled();
+      expect(alerts.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_UNOBSERVED,
+          severity: AlertSeverity.WARN,
+        }),
+      );
+    });
+
+    it('a record for another provider or amount is an anomaly: paged, hold open, no debt', async () => {
+      const redeemer = new EvmRecordRedeemer(async () => undefined);
+      redeemer.used.add('1');
+      redeemer.record = 'MISMATCH';
+      const { service, intents, payments, alerts } = build(redeemer);
+
+      await service.run(USDC);
+
+      expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+      expect(payments.lapseRedemption).not.toHaveBeenCalled();
+      expect(intents.releaseHold).not.toHaveBeenCalled();
+      expect(alerts.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_ANOMALY,
+          severity: AlertSeverity.CRITICAL,
+          aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        }),
+      );
+    });
+
+    it('decides before a forfeit too: a provider cause on record does not release a held payment', async () => {
+      const redeemer = new EvmRecordRedeemer(async () => undefined);
+      redeemer.used.add('1');
+      const { service, intents, payments } = build(redeemer);
+      payments.findAwaitingRedemption.mockImplementation(async () =>
+        intents.commitRedeemedHold.mock.calls.length > 0
+          ? []
+          : [{ ...row(), redemptionLastError: 'ProviderBelowMinimumStake' }],
+      );
+
+      await service.run(USDC);
+
+      expect(intents.commitRedeemedHold).toHaveBeenCalledWith(
+        'org-1',
+        'intent-1',
+        'unobserved:seq=1',
+      );
+      expect(intents.releaseHold).not.toHaveBeenCalled();
+    });
+
+    it('a record read that says unused, or fails, keeps the hold open for the next pass', async () => {
+      for (const record of ['NONE', new Error('rpc down')] as const) {
+        const redeemer = new EvmRecordRedeemer(async () => undefined);
+        redeemer.used.add('1');
+        redeemer.record = record;
+        const { service, intents, payments, alerts } = build(redeemer);
+
+        await service.run(USDC);
+
+        expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+        expect(payments.lapseRedemption).not.toHaveBeenCalled();
+        expect(intents.releaseHold).not.toHaveBeenCalled();
+        expect(alerts.emit).not.toHaveBeenCalled();
+      }
+    });
+
+    it('a record that still reads unused past the landing window is paged, never debt', async () => {
+      const redeemer = new EvmRecordRedeemer(async () => undefined);
+      redeemer.used.add('1');
+      redeemer.record = 'NONE';
+      const clock = { nowSeconds: NOW + 300 + 120 + 1_800 + LANDING_SETTLE_SECONDS + 1 };
+      const { service, payments, alerts } = build(redeemer, clock);
+
+      await service.run(USDC);
+
+      expect(payments.lapseRedemption).not.toHaveBeenCalled();
+      expect(alerts.emit).toHaveBeenCalledWith(
+        expect.objectContaining({ name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_ANOMALY }),
+      );
+    });
+  });
+
+  it('without a record reader, a seq used by no transaction of its own becomes buyer debt, named VoucherSeqUsed', async () => {
     const redeemer = new EvmChainRedeemer(async () => undefined);
     redeemer.used.add('1');
     const { service, intents, payments } = build(redeemer);

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { PaymentIntentRedemptionRetry1762400000060 } from '@database/postgres/migrations/1762400000060-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
@@ -324,6 +325,8 @@ export async function createBindingEditorTestContext(
       CreateBindingCredentials1762000000001,
       ToolBindingAuthMode1762000000002,
       CreateVaultKekChecks1762000000003,
+      // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
+      PaymentIntentRedemptionRetry1762400000060,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

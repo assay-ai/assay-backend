@@ -5,6 +5,7 @@ import {
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
+  UsedSeqRecord,
   VoucherRedeemerPort,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -12,10 +13,15 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
-import { ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
+import {
+  ASSAY_CONFIG_ABI,
+  ASSAY_ESCROW_ABI,
+  ASSAY_STAKE_ABI,
+  MULTICALL3_CLOCK_ABI,
+} from './abi/assay.abi';
 import { ASSAY_ESCROW_HOLD_ABI } from './abi/assay-hold.abi';
 import { EvmVoucher } from './eip712/voucher';
-import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
+import { EVM_CONSTANTS, EvmDeployment, MULTICALL3_ADDRESS } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
   PrevalidationDelegation,
@@ -55,6 +61,16 @@ export const EVM_REDEEM_PER_VOUCHER_GAS = 120_000n;
 
 /** The alert a refusal nobody can name raises. */
 export const EVM_REDEEM_UNKNOWN_REVERT_ALERT = 'evm_redeem_unknown_revert';
+
+/** The alert raised when the chain's clock and this process's disagree by more than {@link EVM_CLOCK_DRIFT_WARN_SECONDS}. */
+export const EVM_CLOCK_DRIFT_ALERT = 'evm_chain_clock_drift';
+
+/**
+ * How far `block.timestamp` may sit from this process's wall clock before it
+ * is reported (review 2026-10-23 L-4): a sequencer whose clock runs away moves
+ * every voucher's deadline, withdrawal and revocation with it.
+ */
+export const EVM_CLOCK_DRIFT_WARN_SECONDS = 120;
 
 export interface EvmVoucherRedeemerConfig {
   /** Milliseconds, `Date.now()`'s own unit. The chain's timestamps are seconds. */
@@ -281,6 +297,28 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     return state.providerBonded < state.minimumStake;
   }
 
+  /**
+   * `held(payer, seq)` against this voucher: whether the record that makes the
+   * seq used names this voucher's provider and amount (D-23). Asked after a
+   * `VoucherSeqUsed` that none of the intent's own transactions explains.
+   */
+  async usedSeqRecord(request: RedeemVoucherRequest): Promise<UsedSeqRecord> {
+    const chainId = this.chainOf(request);
+    const voucher = this.toVoucher(request);
+    const record = (await this.client(chainId).readContract({
+      address: getAddress(this.deployment(chainId).escrow),
+      abi: ASSAY_ESCROW_HOLD_ABI,
+      functionName: 'held',
+      args: [voucher.payer, voucher.seq],
+    })) as { provider: string; amount: bigint; status: number | bigint };
+    // `HeldStatus.None` is 0: the seq is unused.
+    if (Number(record.status) === 0) return 'NONE';
+    return getAddress(record.provider) === voucher.provider &&
+      BigInt(record.amount) === voucher.amount
+      ? 'MATCH'
+      : 'MISMATCH';
+  }
+
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
     if (requests.length === 0) {
       return [];
@@ -494,8 +532,10 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
   /**
    * `msg.sender`, `paused()`, every payer's escrow, every provider's bonded
-   * stake and every voucher's `held(payer, seq)` record (whether the seq is
-   * already used, D-23) — in **one** `multicall`. On an escrow with the tighten delay (D-21)
+   * stake, every voucher's `held(payer, seq)` record (whether the seq is
+   * already used, D-23) and the block's own timestamp — in **one**
+   * `multicall`. Windows and deadlines are pre-validated against that
+   * timestamp, not this process's clock (review 2026-10-23 L-4). On an escrow with the tighten delay (D-21)
    * the same multicall also asks `effectiveCapsOf(payer, delegate)` per item:
    * the caps `_redeem` applies NOW, and whether the delegate can still sign
    * (`docs/gas.md`'s prevalidation rule). The window COUNTERS still come from
@@ -554,13 +594,20 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
             functionName: 'held',
             args: [payers[index], BigInt(request.seq)] as readonly unknown[],
           })),
+          // The chain's clock, from the same block as the state above.
+          {
+            address: MULTICALL3_ADDRESS,
+            abi: MULTICALL3_CLOCK_ABI,
+            functionName: 'getCurrentBlockTimestamp',
+            args: [],
+          },
         ],
         allowFailure: false,
       }),
     ]);
 
     const heldOffset = 2 + payers.length + providers.length + (effective ? payers.length : 0);
-    const expected = heldOffset + requests.length;
+    const expected = heldOffset + requests.length + 1;
     if (results.length !== expected) {
       throw ChainErrors.rpcReplyMalformed({
         method: 'multicall(redeem state)',
@@ -576,7 +623,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // first thing the pre-validator asks.
     const redeemerIsUs =
       getAddress(parseAccountId(redeemerAddress).address) === getAddress(params.redeemer);
-    const nowSeconds = Math.floor(this.config.now() / 1000);
+    // The CHAIN's clock decides what the chain will refuse (review 2026-10-23
+    // L-4): `VoucherExpired` is terminal, and a sequencer whose timestamps lag
+    // the wall clock still accepts a voucher this process would call expired.
+    const nowSeconds = Number(results[expected - 1] as bigint);
+    this.checkClockDrift(chainId, nowSeconds);
 
     // `[maxVoucherAmount, maxPerWindow, delegateMaxVoucherAmount, delegateMaxPerWindow]`.
     const effectiveCaps = (index: number) =>
@@ -657,6 +708,33 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         minimumStake: params.minimumStake,
         delegation: grants.get(index) ?? null,
       };
+    });
+  }
+
+  /**
+   * Reports a chain clock more than {@link EVM_CLOCK_DRIFT_WARN_SECONDS} from
+   * this process's: a warning log on every read, and one alert per hour per
+   * chain. Nothing is refused on it — the chain's clock is what the chain
+   * applies — but deadlines, withdrawals and revocations all move with it.
+   */
+  private checkClockDrift(chainId: ChainId, chainSeconds: number): void {
+    const wallSeconds = Math.floor(this.config.now() / 1000);
+    const drift = chainSeconds - wallSeconds;
+    if (Math.abs(drift) <= EVM_CLOCK_DRIFT_WARN_SECONDS) return;
+    this.logger.warn(
+      `${chainId}: block.timestamp is ${drift}s ${drift > 0 ? 'ahead of' : 'behind'} this ` +
+        `process's clock (more than ${EVM_CLOCK_DRIFT_WARN_SECONDS}s)`,
+    );
+    void this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: EVM_CLOCK_DRIFT_ALERT,
+      summary:
+        `The chain's block.timestamp on ${chainId} is ${drift}s from this process's clock; ` +
+        `voucher deadlines, withdrawals and revocations move with the chain's`,
+      details: { chainId, driftSeconds: drift, chainSeconds, wallSeconds },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: `${EVM_CLOCK_DRIFT_ALERT}:${chainId}`,
+      suppressionWindowSeconds: 3_600,
     });
   }
 

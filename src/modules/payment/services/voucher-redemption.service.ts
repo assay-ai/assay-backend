@@ -32,6 +32,7 @@ import {
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
+  UsedSeqRecord,
   VOUCHER_REDEEMER,
   VoucherRedeemerPort,
 } from '../ports/voucher-redeemer.port';
@@ -39,6 +40,9 @@ import { PaymentIntentService } from './payment-intent.service';
 
 // Re-exported: callers and specs have always imported it from here.
 export { PROVIDER_FORFEIT_PREFIX };
+
+/** The eip155 refusal of a seq that already has an on-chain record (D-23). */
+const SEQ_USED = 'VoucherSeqUsed';
 
 /**
  * Refusals the PROVIDER causes. A voucher that dies of one — refused with it
@@ -196,6 +200,13 @@ export class VoucherRedemptionService {
    * the payee is asked live per row instead of being taken as unblocked.
    */
   private chainBlockedKnown = true;
+  /**
+   * Whether this pass's chain admits any seq order, so a retryable refusal
+   * backs off (`recordRedemptionRetry`) instead of being met again on every
+   * pass (review 2026-10-23 I-1). Solana keeps one row per payer in its queue
+   * and retries every pass, as it always has.
+   */
+  private retryBackoff = false;
 
   constructor(
     private readonly payments: PaymentIntentRepository,
@@ -230,6 +241,7 @@ export class VoucherRedemptionService {
     await this.recordProviderBlocks(asset, exclusions);
     // Asked of the chain, once per pass: see the class comment.
     const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;
+    this.retryBackoff = !ordered;
     const pending = ordered
       ? await this.payments.findAwaitingRedemption(
           asset,
@@ -801,6 +813,11 @@ export class VoucherRedemptionService {
         ) {
           return this.closeUnredeemable(row, request, outcome.programError, false);
         }
+        // Any order: this row waits out a back-off, so a run of refusals
+        // cannot fill every pass ahead of rows that would redeem (I-1).
+        if (this.retryBackoff) {
+          await this.payments.recordRedemptionRetry(row.organizationId, row.id);
+        }
         // Not settled: on a chain that requires ascending seq this buyer's
         // later vouchers wait a tick. See the class comment — going ahead of a
         // retryable seq there makes it unredeemable.
@@ -813,7 +830,7 @@ export class VoucherRedemptionService {
         // revoked and the chain answers `DelegateIsRevoked` (review #2, M1).
         const recorded = recordedProviderCause(row.redemptionLastError);
         if (recorded !== null) {
-          return this.closeUnredeemable(row, request, recorded, true);
+          return this.closeUnredeemable(row, request, recorded, true, outcome.programError);
         }
         // `VoucherExpired` ends a run of retries and no longer says why; the
         // refusal recorded on the last RETRY does.
@@ -821,7 +838,13 @@ export class VoucherRedemptionService {
           outcome.programError === 'VoucherExpired'
             ? (row.redemptionLastError ?? outcome.programError)
             : outcome.programError;
-        return this.closeUnredeemable(row, request, cause, isProviderCaused(cause));
+        return this.closeUnredeemable(
+          row,
+          request,
+          cause,
+          isProviderCaused(cause),
+          outcome.programError,
+        );
       }
 
       case RedeemOutcomeKind.PAUSED:
@@ -860,6 +883,8 @@ export class VoucherRedemptionService {
     request: RedeemVoucherRequest,
     cause: string | null,
     forfeit: boolean,
+    /** The chain's own refusal that closes it, when there is one. */
+    refusedWith: string | null = null,
   ): Promise<{ stop: boolean; settled: boolean }> {
     if (
       forfeit &&
@@ -887,6 +912,11 @@ export class VoucherRedemptionService {
           `answers "not found" for a mined one (final review N-7).`,
       );
       return { stop: false, settled: true };
+    }
+    if (refusedWith === SEQ_USED && this.redeemer.usedSeqRecord) {
+      // The seq is used on chain and none of our transactions shows it: the
+      // chain's own record decides, before any forfeit or debt (M-B1).
+      return this.closeSeqUsedUnobserved(row, request, cause);
     }
     if (forfeit) {
       await this.forfeit(row, cause ?? 'unknown');
@@ -918,6 +948,99 @@ export class VoucherRedemptionService {
     }
     // Settled, in the only sense this loop cares about: the hold is closed
     // and nothing will ever redeem this seq, so it cannot be stepped over.
+    return { stop: false, settled: true };
+  }
+
+  /**
+   * `VoucherSeqUsed` (eip155, D-23) means `held(payer, seq)` exists: this seq
+   * was redeemed. The redeemer is the platform's key and the seq is unique per
+   * payer account, so in practice the landing is ours, unobserved. Asked of
+   * the record itself:
+   *
+   * - it names this voucher's provider and amount → committed as a redemption
+   *   (`unobserved:seq=`, which reads the hold off the record) and paged as a
+   *   WARN. The buyer is not asked to pay a second time;
+   * - it names another provider or amount → an anomaly, paged CRITICAL. NOT
+   *   buyer debt: the hold stays open for a human;
+   * - it says the seq is unused (a node behind the one that refused) or cannot
+   *   be read → the hold stays open and the next pass asks again.
+   *
+   * `settled: true` in every case: the seq is used on chain, so nothing of
+   * this payer's can be stepped over by going ahead.
+   */
+  private async closeSeqUsedUnobserved(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+    cause: string | null,
+  ): Promise<{ stop: boolean; settled: boolean }> {
+    let record: UsedSeqRecord;
+    try {
+      record = (await this.redeemer.usedSeqRecord?.(request)) ?? 'NONE';
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED} and the chain's ` +
+          `record of the seq could not be read: ${describe(error)}. The hold stays open.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    const price = MoneyUtil.of(row.priceAmount, row.assetId as AssetId, row.decimals);
+    const details = {
+      intentId: row.id,
+      buyer: row.agentAccount,
+      provider: row.providerAccount ?? 'unknown',
+      seq: row.voucherSeq,
+      amount: MoneyUtil.format(price),
+      lastRefusal: cause ?? 'none',
+    };
+
+    if (record === 'MATCH') {
+      await this.intents.commitRedeemedHold(
+        row.organizationId,
+        row.id,
+        `unobserved:seq=${row.voucherSeq}`,
+      );
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}; no transaction ` +
+          `of its own shows the landing, but the escrow's record names its provider and amount. ` +
+          `Committed as redeemed unobserved — not buyer debt.`,
+      );
+      await this.alerts.emit({
+        severity: AlertSeverity.WARN,
+        name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_UNOBSERVED,
+        summary:
+          `A rail-B voucher was found redeemed on chain by no transaction this process ` +
+          `recorded; committed from the escrow's held(payer, seq) record`,
+        details,
+        aggregation: AlertAggregation.PER_EVENT,
+      });
+      return { stop: false, settled: true };
+    }
+
+    if (record === 'NONE' && !this.pastLandingWindow(row)) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED} but the record ` +
+          `read says the seq is unused (a lagging node?). The hold stays open for the next pass.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    this.logger.error(
+      `CRITICAL: intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}, and the ` +
+        `escrow's record of that seq ${record === 'NONE' ? 'still reads unused' : 'names another provider or amount'}. ` +
+        `Not buyer debt: the hold stays open until a human decides.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_ANOMALY,
+      summary:
+        `A rail-B voucher's seq is used on chain by a record that is not this voucher ` +
+        `(${record}); the hold stays open and nobody is charged until a human decides`,
+      details: { ...details, record },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: row.id,
+      suppressionWindowSeconds: 24 * 60 * 60,
+    });
     return { stop: false, settled: true };
   }
 

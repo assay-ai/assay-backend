@@ -124,6 +124,7 @@ function build(
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
     lapseRedemption: jest.fn().mockResolvedValue(undefined),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+    recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
   };
 
   const service = new VoucherRedemptionService(
@@ -369,6 +370,37 @@ describe('VoucherRedemptionService — a chain that redeems any seq order', () =
     await service.run(USDC);
 
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['6']]);
+  });
+
+  // Review 2026-10-23 I-1: a refused row waits out a back-off, so a run of
+  // them cannot fill every pass's LIMIT ahead of rows that would redeem.
+  it('backs off every row refused as retryable, batched or one by one, and only those', async () => {
+    for (const maxBatchSize of [64, 1]) {
+      const { service, redeemer, payments } = anyOrder(
+        [pending(5, ALICE), pending(6, ALICE), pending(9, BOB)],
+        maxBatchSize,
+      );
+      redeemer.outcomes['5'] = RedeemOutcomeKind.RETRY;
+      redeemer.outcomes['9'] = RedeemOutcomeKind.RETRY;
+
+      await service.run(USDC);
+
+      expect(payments.recordRedemptionRetry.mock.calls.map((call) => call[1])).toEqual([
+        'intent-5',
+        'intent-9',
+      ]);
+    }
+  });
+
+  it('Solana retries every pass, as before: no back-off', async () => {
+    const { service, redeemer, payments } = build([pending(5, ALICE)], 1);
+    redeemer.ascending = true;
+    redeemer.outcomes['5'] = RedeemOutcomeKind.RETRY;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles).toHaveLength(1);
+    expect(payments.recordRedemptionRetry).not.toHaveBeenCalled();
   });
 
   it('Solana still holds back a payer’s later vouchers after a retry', async () => {
