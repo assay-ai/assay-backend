@@ -673,6 +673,8 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * The seq was issued and never used, but a higher seq of this account is
    * already admitted or redeemed, so the chain would refuse this one
    * (`VoucherSeqNotIncreasing`) and it is not served (review 2026-10-15 P-2).
+   * Solana only: on eip155 (D-23) such a seq is still redeemable, and is
+   * refused only when the chain reports it used ({@link voucherSeqAlreadyUsed}).
    * The normal outcome of two parallel calls signed out of order (final
    * review N-6). **Retryable**: nothing was charged; the client requests a new
    * seq and signs again. Distinct from {@link voucherSeqAlreadyUsed}, which is

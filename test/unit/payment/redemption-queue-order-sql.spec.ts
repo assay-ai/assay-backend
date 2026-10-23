@@ -14,6 +14,7 @@ import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redempt
  */
 async function rendered(
   exclude?: Parameters<PaymentIntentRepository['findAwaitingRedemption']>[4],
+  options?: Parameters<PaymentIntentRepository['findAwaitingRedemption']>[5],
 ): Promise<{ sql: string; params: Record<string, unknown> }> {
   const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
   await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
@@ -40,6 +41,7 @@ async function rendered(
     'RAIL_B_VOUCHER',
     100,
     exclude,
+    options,
   );
   return captured;
 }
@@ -89,6 +91,37 @@ describe('PaymentIntentRepository.findAwaitingRedemption — blocked parties', (
     expect(guard).toMatch(/held\.voucher_delegate/);
     expect(guard).not.toMatch(/held\.provider_id/);
     expect(guard).not.toMatch(/held\.provider_account/);
+  });
+});
+
+/**
+ * D-23: on a chain that admits each `(payer, seq)` once in any order, a lower
+ * seq never dies of a higher one landing first, so neither hold-back applies.
+ */
+describe('PaymentIntentRepository.findAwaitingRedemption — a chain that redeems any order', () => {
+  const BLOCKS = {
+    organizationIds: ['11111111-1111-4111-8111-111111111111'],
+    walletKeys: ['eip155:0xabc'],
+    chainAccounts: ['eip155:46630:0xabc'],
+  };
+
+  it('does not hold a row back behind a lower open seq of its payer', async () => {
+    const { sql } = await rendered(undefined, { orderedBySeq: false });
+    expect(sql).not.toMatch(/payment_intents earlier/);
+  });
+
+  it('leaves a row out for its OWN blocked parties only, not an earlier seq’s', async () => {
+    const { sql } = await rendered(BLOCKS, { orderedBySeq: false });
+    const guard = sql.replace(/\s+/g, ' ');
+    expect(guard).toMatch(/held\.voucher_seq = "?intent"?\.voucher_seq/);
+    expect(guard).not.toMatch(/held\.voucher_seq <= /);
+  });
+
+  it('keeps both hold-backs by default', async () => {
+    const { sql } = await rendered(BLOCKS);
+    const guard = sql.replace(/\s+/g, ' ');
+    expect(guard).toMatch(/payment_intents earlier/);
+    expect(guard).toMatch(/held\.voucher_seq <= "?intent"?\.voucher_seq/);
   });
 });
 

@@ -229,7 +229,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /**
    * Every transaction the redemption job signed to redeem this rail-B voucher,
    * recorded BEFORE its broadcast (`PaymentIntentRepository.recordRedemptionTxRef`).
-   * Read when the chain answers `VoucherSeqNotIncreasing`, to tell a voucher
+   * Read when the chain answers `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (eip155) — or any terminal refusal — to tell a voucher
    * that already landed unobserved from one that never can (review 2026-10-15
    * P-1). Empty on rail A and on a voucher never sent.
    */

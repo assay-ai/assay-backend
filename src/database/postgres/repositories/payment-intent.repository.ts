@@ -1094,6 +1094,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * rail-B row written before voucher v2 has no signature to replay and never
    * will, so returning it would put a permanently unredeemable row at the head
    * of every pass.
+   *
+   * `orderedBySeq: false` is for a chain that admits each `(payer, seq)` once
+   * in any order (`eip155`, D-23): a row is then never held back by a LOWER seq
+   * of its payer — still open, or behind a payer-side block — only by its own
+   * blocked parties. The default keeps both hold-backs (Solana).
    */
   async findAwaitingRedemption(
     assetId: string,
@@ -1101,7 +1106,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     rail: string,
     limit: number,
     exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+    options: { readonly orderedBySeq?: boolean } = {},
   ): Promise<RedeemableIntent[]> {
+    const orderedBySeq = options.orderedBySeq ?? true;
     const query = this.createQueryBuilder('intent')
       .select('intent.organizationId', 'organizationId')
       .addSelect('intent.id', 'id')
@@ -1141,7 +1148,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
       // Redeemed into the escrow's hold already (G3.B1): its hold stays open
       // until `HeldCollectionJob` collects or a dispute refunds it.
-      .andWhere('intent.heldAt IS NULL')
+      .andWhere('intent.heldAt IS NULL');
+
+    if (orderedBySeq) {
       // A row waits while a LOWER seq of its payer is still in flight or open
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
@@ -1150,8 +1159,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // redemption window (final review N-1): past `expires_at` + grace the
       // chain refuses it anyway, so it is only a hole, and waiting on it to
       // the 24 h hold backstop would let every later voucher expire too.
-      // Per payer account, not per asset: the seq is the escrow's.
-      .andWhere(
+      // Per payer account, not per asset: the seq is the escrow's. Not on a
+      // chain that admits any order (D-23): nothing there can die of it.
+      query.andWhere(
         `NOT EXISTS (
            SELECT 1 FROM payment_intents earlier
             WHERE earlier.organization_id IS NOT NULL
@@ -1165,6 +1175,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
          )`,
         { earlierOpenStatuses: [...OPEN_HOLD_STATUSES] },
       );
+    }
 
     if (
       exclude.organizationIds.length > 0 ||
@@ -1175,7 +1186,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // queue, has a blocked party. Leaving out only the blocked row would let
       // the payer's later seqs through, and redeeming one of those advances
       // `seq_high` past the held one and kills it. Done in the query, BEFORE
-      // the LIMIT, so held rows can never fill the pass (audit E-1).
+      // the LIMIT, so held rows can never fill the pass (audit E-1). On a
+      // chain that admits any order (D-23) only the row's OWN parties count.
       //
       // Payer-side parties only — the payer's organization, the payer and the
       // delegate. A blocked provider or payee is NOT left out: the pass makes
@@ -1195,7 +1207,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND held.voucher_seq IS NOT NULL
               AND held.voucher_signature IS NOT NULL
               AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
-              AND held.voucher_seq <= intent.voucher_seq
+              AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
               AND (${blockedPartySql('held')})
          )`,
         blockedPartyParams(exclude),

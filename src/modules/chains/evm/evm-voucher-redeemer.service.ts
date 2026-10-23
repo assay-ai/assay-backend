@@ -13,12 +13,14 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
 import { ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
+import { ASSAY_ESCROW_HOLD_ABI } from './abi/assay-hold.abi';
 import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
   PrevalidationDelegation,
   PrevalidationState,
+  prevalidateBatch,
   prevalidateVoucher,
 } from './evm-voucher-prevalidation';
 import { isRevert } from './evm-voucher-authority';
@@ -94,10 +96,14 @@ const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'VoucherLifetimeTooLong',
   'VoucherExpired',
   'VoucherSeqZero',
-  'VoucherSeqNotIncreasing',
-  // The seq is more than MAX_SEQ_GAP above the payer's seqHigh. seqHigh only
-  // grows, so a later attempt can only stay refused or become
-  // VoucherSeqNotIncreasing — never settle on a different answer worth gas.
+  // D-23: this (payer, seq) was already redeemed — held, collected or
+  // refunded — and records are never deleted. Also what a voucher that ALREADY
+  // landed gets, which is why the job looks for its own landing before it
+  // closes anything (`findLanding`).
+  'VoucherSeqUsed',
+  // The seq is more than MAX_SEQ_GAP above the payer's seqHigh. Admission
+  // refuses such a voucher against a seqHigh that only grows afterwards, so a
+  // served voucher should never meet it.
   'VoucherSeqGapTooLarge',
   'SignerIsNotPayer',
   'InvalidSignature',
@@ -162,20 +168,23 @@ const HASH_PREFIX = 'sha256:';
  * assay-evm's `docs/gas.md` names three rules a job that does not know them will break:
  *
  *  1. **`seq` is per payer, not per batch.** Two payers' sequences constrain
- *     each other in no way; one payer's items must be ordered among themselves.
- *     Sorting a batch by `seq` globally is wrong.
+ *     each other in no way, and since D-23 one payer's items may come in any
+ *     order: each `(payer, seq)` is redeemed once, a lower seq after a higher
+ *     one included.
  *  2. **The same voucher twice in one batch reverts the batch** — the second
- *     copy fails `seq > seqHigh`, because the first already advanced it.
+ *     copy fails `VoucherSeqUsed`, because the first already used the seq.
  *  3. **The parameter set is read once for the whole batch**: every item settles
  *     against the treasury and take rate current when the batch started, even if
  *     a `Config` update lands mid transaction.
  *
- * This class takes the simplest arrangement that satisfies 1 and 2 at once:
- * **at most one voucher per payer per batch**, asserted rather than assumed. It
- * costs nothing — `VoucherRedemptionService` already blocks a payer for the rest
- * of a pass after one of theirs does not land — and it removes an entire class
- * of ordering bug rather than managing it. It costs about 27 500 gas per voucher
- * against the one-payer shape, which is the price of the guarantee.
+ * Rule 2 is asserted rather than assumed: a batch carrying one `(payer, seq)`
+ * twice is refused before anything is read. Several vouchers of one payer may
+ * share a batch, and pre-validation applies each one's effects to the next
+ * ({@link prevalidateBatch}) the way `_redeem` does, so the payer's balance,
+ * window and used seqs are what the chain will see at that item.
+ *
+ * Because no order is required, a voucher that does not land never holds back
+ * the same payer's later ones ({@link requiresAscendingSeq} is `false`).
  *
  * ## Why a revert cannot say which item did it
  *
@@ -190,6 +199,15 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
   /** `Constants.MAX_REDEEM_BATCH`. `redeemVoucherBatch` refuses more. */
   readonly maxBatchSize = EVM_CONSTANTS.MAX_REDEEM_BATCH;
+
+  /**
+   * `false`: `AssayEscrow` admits each `(payer, seq)` once, in any order
+   * (D-23), so a lower seq landing after a higher one is still paid and a
+   * voucher being retried never needs to hold back the payer's later ones.
+   */
+  requiresAscendingSeq(): boolean {
+    return false;
+  }
 
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmReaderClient>,
@@ -267,7 +285,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     if (requests.length === 0) {
       return [];
     }
-    this.assertOnePerPayer(requests);
+    this.assertNoDuplicateVoucher(requests);
     if (requests.length > EVM_CONSTANTS.MAX_REDEEM_BATCH) {
       throw ChainErrors.payloadMalformed({
         reason: `a redemption batch of ${requests.length} exceeds MAX_REDEEM_BATCH (64)`,
@@ -278,7 +296,15 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const vouchers = requests.map((request) => this.toVoucher(request));
     const signatures = requests.map((request) => this.signatureOf(request));
     const states = await this.readState(chainId, requests);
-    const refusals = vouchers.map((voucher, index) => prevalidateVoucher(voucher, states[index]));
+    // Item by item, each seeing the effects of the earlier items of its payer
+    // that would settle — what `redeemVoucherBatch` itself does.
+    const refusals = prevalidateBatch(
+      vouchers.map((voucher, index) => ({
+        voucher,
+        state: states[index],
+        delegate: requests[index].delegate ?? null,
+      })),
+    );
 
     // The batch is only the ones that would settle. Submitting a known-bad item
     // is submitting a transaction we already know reverts, and it takes 63 good
@@ -363,8 +389,10 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
    * from the escrow that emitted `VoucherRedeemed` for this payer, seq and
    * request hash. `null` when none did.
    *
-   * Asked only after the chain said `seq <= seqHigh`, so a transaction still
-   * pending cannot redeem this voucher any more — it will revert. It is still
+   * Asked after a terminal refusal — typically `VoucherSeqUsed`, which is what
+   * a voucher that already landed gets (D-23). Once the seq is used a
+   * transaction still pending cannot redeem this voucher any more — it will
+   * revert. It is still
    * "cannot tell yet" (a throw, so the hold waits a pass) rather than "did not
    * land": the state read and this read may come from RPC nodes a block apart.
    * A hash the node has never seen was dropped, or never broadcast (it is
@@ -465,8 +493,9 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   }
 
   /**
-   * `msg.sender`, `paused()`, every payer's escrow and every provider's bonded
-   * stake — in **one** `multicall`. On an escrow with the tighten delay (D-21)
+   * `msg.sender`, `paused()`, every payer's escrow, every provider's bonded
+   * stake and every voucher's `held(payer, seq)` record (whether the seq is
+   * already used, D-23) — in **one** `multicall`. On an escrow with the tighten delay (D-21)
    * the same multicall also asks `effectiveCapsOf(payer, delegate)` per item:
    * the caps `_redeem` applies NOW, and whether the delegate can still sign
    * (`docs/gas.md`'s prevalidation rule). The window COUNTERS still come from
@@ -519,12 +548,19 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
                 args: [payer, signers[index]] as readonly unknown[],
               }))
             : []),
+          ...requests.map((request, index) => ({
+            address: getAddress(deployment.escrow),
+            abi: ASSAY_ESCROW_HOLD_ABI,
+            functionName: 'held',
+            args: [payers[index], BigInt(request.seq)] as readonly unknown[],
+          })),
         ],
         allowFailure: false,
       }),
     ]);
 
-    const expected = 2 + payers.length + providers.length + (effective ? payers.length : 0);
+    const heldOffset = 2 + payers.length + providers.length + (effective ? payers.length : 0);
+    const expected = heldOffset + requests.length;
     if (results.length !== expected) {
       throw ChainErrors.rpcReplyMalformed({
         method: 'multicall(redeem state)',
@@ -604,11 +640,14 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       };
       const bonded = results[2 + payers.length + index] as bigint;
       const caps = effectiveCaps(index);
+      // `HeldStatus.None` is 0: anything else means the seq is used for good.
+      const held = results[heldOffset + index] as { status: number | bigint };
       return {
         nowSeconds,
         paused,
         redeemerIsUs,
         seqHigh: escrow.seqHigh,
+        seqUsed: Number(held.status) !== 0,
         maxVoucherAmount: caps ? caps[0] : escrow.maxVoucherAmount,
         maxPerWindow: caps ? caps[1] : escrow.maxPerWindow,
         spentInWindow: escrow.spentInWindow,
@@ -624,23 +663,23 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   /**
    * Rule 2, asserted rather than assumed.
    *
-   * A duplicate payer in one batch is not a rare accident: it is what the
-   * obvious `pending.slice(0, 64)` produces the first time a buyer has two
-   * vouchers waiting, and the batch it builds reverts on the second copy and
-   * takes every other item with it.
+   * The same `(payer, seq)` twice in one batch is this job's own bug — one
+   * hold handed over twice — and the chain reverts the second copy with
+   * `VoucherSeqUsed`, taking every other item with it. Two different seqs of
+   * one payer are fine (D-23).
    */
-  private assertOnePerPayer(requests: readonly RedeemVoucherRequest[]): void {
+  private assertNoDuplicateVoucher(requests: readonly RedeemVoucherRequest[]): void {
     const seen = new Set<string>();
     for (const request of requests) {
-      const payer = request.payer.toLowerCase();
-      if (seen.has(payer)) {
+      const key = `${request.payer.toLowerCase()}#${BigInt(request.seq)}`;
+      if (seen.has(key)) {
         throw ChainErrors.payloadMalformed({
           reason:
-            `a redemption batch carries two vouchers for the same payer (${request.payer}); ` +
-            `seq is per payer, so the second reverts the whole batch`,
+            `a redemption batch carries seq ${request.seq} of ${request.payer} twice; ` +
+            `the second copy would revert the whole batch with VoucherSeqUsed`,
         });
       }
-      seen.add(payer);
+      seen.add(key);
     }
   }
 

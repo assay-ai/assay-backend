@@ -115,16 +115,20 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  * This is the one caller that retires such a hold, and it does so only after a
  * transaction has confirmed and only while naming its signature.
  *
- * ## Ascending `seq`, per buyer, and it is now load-bearing
+ * ## Ascending `seq`, per buyer — where the chain needs it
  *
- * The settlement program admits a voucher on `seq > escrow.seq_high` and
- * nothing else. There is no replay bitmap and no out-of-order window: **a lower
- * seq that lands after a higher one is dead, permanently.** Redeeming seq 40
- * before seq 7 does not delay seq 7, it destroys it — the call was served and
- * its voucher can no longer be collected.
+ * Whether order matters is the CHAIN's answer
+ * ({@link VoucherRedeemerPort.requiresAscendingSeq}), asked once per pass.
  *
- * Two rules keep that from happening, and both are in this file:
+ * **Solana (`true`).** The settlement program admits a voucher on
+ * `seq > escrow.seq_high` and nothing else. There is no replay bitmap and no
+ * out-of-order window: **a lower seq that lands after a higher one is dead,
+ * permanently.** Redeeming seq 40 before seq 7 does not delay seq 7, it
+ * destroys it — the call was served and its voucher can no longer be
+ * collected. Three rules keep that from happening:
  *
+ * - the queue holds a row back while a lower seq of its payer is still open,
+ *   and leaves out a payer's later seqs behind a blocked one (the repository);
  * - the batch is ordered `(agent_account, voucher_seq)` ascending, by the
  *   repository's own query, so a buyer's oldest voucher is always reached
  *   first; and
@@ -135,6 +139,13 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  *
  * Skipping costs at most one tick of latency for that buyer and nothing at all
  * for every other buyer in the batch, because the skip is per account.
+ *
+ * **`eip155` (`false`).** `AssayEscrow` admits each `(payer, seq)` once, in any
+ * order (D-23): a lower seq landing after a higher one is still paid. None of
+ * the three hold-backs applies — a voucher that is retried, held or broken
+ * holds back nothing of its payer's — and a batch may carry several of one
+ * payer's vouchers, never the same one twice. The ascending order is kept; it
+ * is harmless.
  *
  * ## Who bears an unredeemable voucher: never the platform
  *
@@ -217,24 +228,36 @@ export class VoucherRedemptionService {
     // check below stays as a second line for a block that lands mid-pass.
     const exclusions = await this.exclusions(asset);
     await this.recordProviderBlocks(asset, exclusions);
-    const pending = await this.payments.findAwaitingRedemption(
-      asset,
-      PaymentIntentStatus.SETTLED,
-      PaymentRail.RAIL_B_VOUCHER,
-      VOUCHER_REDEMPTION_BATCH,
-      exclusions,
-    );
+    // Asked of the chain, once per pass: see the class comment.
+    const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;
+    const pending = ordered
+      ? await this.payments.findAwaitingRedemption(
+          asset,
+          PaymentIntentStatus.SETTLED,
+          PaymentRail.RAIL_B_VOUCHER,
+          VOUCHER_REDEMPTION_BATCH,
+          exclusions,
+        )
+      : await this.payments.findAwaitingRedemption(
+          asset,
+          PaymentIntentStatus.SETTLED,
+          PaymentRail.RAIL_B_VOUCHER,
+          VOUCHER_REDEMPTION_BATCH,
+          exclusions,
+          { orderedBySeq: false },
+        );
     this.loggedHolds.clear();
 
     if (pending.length === 0) {
       return;
     }
 
-    // Buyers whose current voucher did not land. Every later seq of theirs in
-    // this batch is skipped — see the class comment: submitting it would
-    // advance `seq_high` past the one still being retried and kill it outright.
-    // A throw counts as "did not land" for the same reason a `RETRY` does: this
-    // process does not know whether the transaction reached the chain.
+    // Buyers whose current voucher did not land. On a chain that requires
+    // ascending seq every later seq of theirs in this batch is skipped — see
+    // the class comment: submitting it would advance `seq_high` past the one
+    // still being retried and kill it outright. A throw counts as "did not
+    // land" for the same reason a `RETRY` does: this process does not know
+    // whether the transaction reached the chain. Elsewhere it is unused.
     const blocked = new Set<string>();
 
     // `maxBatchSize` is the CHAIN's answer, not a policy of this service:
@@ -242,7 +265,7 @@ export class VoucherRedemptionService {
     // transaction for a second, so `1` runs the loop below unchanged and
     // Solana's behaviour is byte-identical to what it has always been.
     if (this.redeemer.maxBatchSize > 1) {
-      return this.runBatched(pending, blocked);
+      return this.runBatched(pending, blocked, ordered);
     }
 
     for (const row of pending) {
@@ -258,7 +281,7 @@ export class VoucherRedemptionService {
         if (!forfeit.settled) blocked.add(row.agentAccount);
         continue;
       }
-      if (blocked.has(row.agentAccount)) {
+      if (ordered && blocked.has(row.agentAccount)) {
         this.logger.log(
           `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
             `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
@@ -308,21 +331,26 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * One pass, in batches of `maxBatchSize`, **one row per payer per batch**.
+   * One pass, in batches of `maxBatchSize`.
    *
-   * Rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the FIRST row
-   * per payer is that payer's lowest unredeemed seq — exactly the one that must
-   * land before any later one of theirs. Taking one per payer therefore
-   * satisfies the ordering rule and `redeemVoucherBatch`'s no-duplicates rule at
-   * once: the same payer twice in one batch reverts the batch, because the first
-   * copy already advanced `seqHigh`.
+   * Where the chain requires ascending seq (`ordered`), **one row per payer per
+   * batch**: rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the
+   * FIRST row per payer is that payer's lowest unredeemed seq — exactly the one
+   * that must land before any later one of theirs — and a payer who was
+   * blocked is skipped from then on.
+   *
+   * Where it does not (`eip155`, D-23), a batch may carry several of one
+   * payer's vouchers, but **never the same `(payer, seq)` twice**: the second
+   * copy would revert the whole batch with `VoucherSeqUsed`. A blocked payer's
+   * later vouchers still go.
    *
    * The rows a batch could not carry are not dropped — they are carried into the
-   * next one, and a payer who was blocked is skipped from then on.
+   * next one.
    */
   private async runBatched(
     pending: readonly RedeemableIntent[],
     blocked: Set<string>,
+    ordered: boolean,
   ): Promise<void> {
     let queue: readonly RedeemableIntent[] = pending;
 
@@ -344,7 +372,7 @@ export class VoucherRedemptionService {
           if (!forfeit.settled) blocked.add(row.agentAccount);
           continue;
         }
-        if (blocked.has(row.agentAccount)) {
+        if (ordered && blocked.has(row.agentAccount)) {
           this.logger.log(
             `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
               `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
@@ -352,7 +380,9 @@ export class VoucherRedemptionService {
           );
           continue;
         }
-        if (batch.length >= this.redeemer.maxBatchSize || seen.has(row.agentAccount)) {
+        // One per payer where order matters; one per (payer, seq) everywhere.
+        const slot = ordered ? row.agentAccount : `${row.agentAccount}#${row.voucherSeq}`;
+        if (batch.length >= this.redeemer.maxBatchSize || seen.has(slot)) {
           carried.push(row);
           continue;
         }
@@ -365,7 +395,7 @@ export class VoucherRedemptionService {
           continue;
         }
 
-        seen.add(row.agentAccount);
+        seen.add(slot);
         batch.push({ row, request: built.request, issuedAt: built.issuedAt });
       }
 
@@ -770,8 +800,9 @@ export class VoucherRedemptionService {
         ) {
           return this.closeUnredeemable(row, request, outcome.programError, false);
         }
-        // Not settled: this buyer's later vouchers wait a tick. See the class
-        // comment — going ahead of a retryable seq makes it unredeemable.
+        // Not settled: on a chain that requires ascending seq this buyer's
+        // later vouchers wait a tick. See the class comment — going ahead of a
+        // retryable seq there makes it unredeemable.
         return { stop: false, settled: false };
 
       case RedeemOutcomeKind.UNREDEEMABLE: {
@@ -816,8 +847,8 @@ export class VoucherRedemptionService {
    * provider ({@link forfeit}) or turned into buyer debt ({@link lapse}). The
    * platform never pays.
    *
-   * Every refusal, not only `VoucherSeqNotIncreasing`: a voucher that ALREADY
-   * landed gets that one, or `VoucherExpired` when the retry comes after its
+   * Every refusal, not only `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (`eip155`): a voucher that ALREADY landed gets that one, or `VoucherExpired` when the retry comes after its
    * deadline, which is checked first (final review N-2). Closing it without
    * looking charges the buyer a second time (review 2026-10-15 P-1). The seq
    * is dead on chain — or, for a forfeit, never going to be redeemed — so
