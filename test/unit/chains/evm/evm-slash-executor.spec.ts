@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { decodeFunctionData, getAddress, sha256, toBytes, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { MULTICALL3_ABI, ASSAY_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/assay.abi';
+import { ASSAY_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
 import { ChainErrorCode, ChainErrors } from '@modules/chains/errors/chains.errors';
 import { chainErrorName } from '@modules/slash/domain/chain-slash-outcome';
@@ -173,49 +173,38 @@ describe('EvmSlashExecutor — propose', () => {
   });
 });
 
-describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
-  it('puts every per-agent judgement of a window in ONE aggregate3 transaction', async () => {
+describe('EvmSlashExecutor — proposeBatch, one transaction per judgement (review 2026-10-23 L-1)', () => {
+  it('sends every judgement in its own proposeSlash transaction, never through Multicall3', async () => {
     const { chain, executor } = build();
 
     const outcomes = await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
 
-    expect(chain.sent).toHaveLength(1);
-    expect(getAddress(chain.sent[0].to)).toBe(getAddress(MULTICALL));
-    const { args } = decodeFunctionData({ abi: MULTICALL3_ABI, data: chain.sent[0].data });
-    const calls = args[0] as readonly {
-      target: string;
-      allowFailure: boolean;
-      callData: `0x${string}`;
-    }[];
-    expect(calls).toHaveLength(3);
-    expect(
-      calls.every((call) => call.allowFailure && getAddress(call.target) === getAddress(STAKE)),
-    ).toBe(true);
-    expect(
-      calls.map(
-        (call) =>
-          decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data: call.callData }).functionName,
-      ),
-    ).toEqual(['proposeSlash', 'proposeSlash', 'proposeSlash']);
-
+    // An attestation is never carried by an aggregate3 whose sub-call could
+    // fail and leave it valid, unused, in public calldata.
+    expect(multicallSends(chain)).toHaveLength(0);
+    expect(chain.sent).toHaveLength(3);
+    for (const sent of chain.sent) {
+      expect(getAddress(sent.to)).toBe(getAddress(STAKE));
+      expect(decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data: sent.data }).functionName).toBe(
+        'proposeSlash',
+      );
+    }
     expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true, true]);
-    expect(outcomes.map((outcome) => outcome.result?.signature)).toEqual([
-      chain.sent[0].hash,
-      chain.sent[0].hash,
-      chain.sent[0].hash,
-    ]);
+    expect(outcomes.map((outcome) => outcome.result?.signature)).toEqual(
+      chain.sent.map((sent) => sent.hash),
+    );
     for (const n of [1, 2, 3]) expect(chain.record(requestId(n))?.status).toBe(1);
   });
 
-  it('estimates the batch and sends it with headroom, under the ceiling', async () => {
+  it('estimates each proposal and sends it with headroom, under the ceiling', async () => {
     const { chain, executor } = build();
-    await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
-    // Fake estimate for 3 calls: 30 000 + 3 × 120 000 = 390 000; × 1.3.
-    expect(chain.sent[0].gasLimit).toBe(507_000n);
+    await executor.proposeBatch([proposal(1), proposal(2)]);
+    // Fake estimate for a single call: 150 000; × 1.3.
+    expect(chain.sent.map((sent) => sent.gasLimit)).toEqual([195_000n, 195_000n]);
   });
 
-  it('takes a call that would fail out of the batch, retries it singly, and reports it — never drops it', async () => {
-    const { chain, executor } = build();
+  it('refuses a judgement that would fail in its own simulation, sends nothing for it, and the others go', async () => {
+    const { chain, executor, signatures } = build();
 
     const outcomes = await executor.proposeBatch([
       proposal(1),
@@ -223,17 +212,14 @@ describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
       proposal(3),
     ]);
 
-    expect(multicallSends(chain)).toHaveLength(1);
-    const { args } = decodeFunctionData({ abi: MULTICALL3_ABI, data: chain.sent[0].data });
-    expect((args[0] as readonly unknown[]).length).toBe(2);
-    // The single retry was refused in simulation: no second transaction.
-    expect(chain.sent).toHaveLength(1);
-
+    expect(chain.sent).toHaveLength(2);
     expect(outcomes).toHaveLength(3);
     expect(outcomes[0].ok).toBe(true);
     expect(outcomes[2].ok).toBe(true);
     expect(outcomes[1].ok).toBe(false);
     expect(chainErrorName(outcomes[1].error)).toBe('PenaltyExceedsMaximum');
+    // Signed once each, immediately before its own simulation.
+    expect(signatures.filter((entry) => entry.requestId === requestId(2))).toHaveLength(1);
   });
 
   it('is idempotent on the request id: a retried batch adopts every record and sends nothing', async () => {
@@ -249,12 +235,9 @@ describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
     expect(signatures.length).toBe(signed);
   });
 
-  it('treats SlashAlreadyExists on the single retry as success-already', async () => {
+  it('adopts a record a stranger landed from our attestation, without signing or sending', async () => {
     const { chain, executor } = build();
-    // A stranger lands request 2 between our simulation and our send. Inside
-    // the batch its call reverts SlashAlreadyExists (allowFailure keeps the
-    // others); the receipt lacks its event; the single retry finds the record
-    // and adopts it.
+    // A stranger lands request 2 while request 1 is being sent.
     chain.beforeSend = () => {
       chain.state.records.set(requestId(2), {
         provider: getAddress(PROVIDER),
@@ -268,8 +251,6 @@ describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
         capAllowance: 20_000_000n,
         applied: 0n,
         executedAt: 0n,
-        // Landed from OUR attestation (e.g. an earlier send that was slow):
-        // same signed policy, same verifier.
         policy: sha256(toBytes('tool-uuid')),
       });
       chain.beforeSend = null;
@@ -280,50 +261,17 @@ describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
     expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true, true]);
     expect(outcomes[0].result?.adopted).toBe(false);
     expect(outcomes[1].result?.adopted).toBe(true);
-    expect(chain.sent).toHaveLength(1);
+    expect(chain.sent).toHaveLength(2);
   });
 
-  it('retries singly every call whose event is missing from the batch receipt', async () => {
-    const { chain, executor } = build();
-    // Change the state under the batch so call 2 fails INSIDE it: the
-    // receipt then lacks its SlashProposed, and the single retry names why.
-    chain.beforeSend = (data) => {
-      if (getAddress(chain.sent[chain.sent.length - 1].to) !== getAddress(MULTICALL)) return;
-      void data;
-      chain.params = { ...chain.params, penaltyAmount: 100_000n };
-    };
-
-    const outcomes = await executor.proposeBatch([
-      proposal(1, '100000'),
-      proposal(2, '100001'),
-      proposal(3, '100000'),
-    ]);
-
-    expect(outcomes[0].ok).toBe(true);
-    expect(outcomes[2].ok).toBe(true);
-    expect(outcomes[1].ok).toBe(false);
-    expect(chainErrorName(outcomes[1].error)).toBe('PenaltyExceedsMaximum');
-  });
-
-  it('chunks beyond the batch size, one aggregate3 per chunk', async () => {
-    const { chain, executor } = build({ batchSize: 2 });
-
-    const outcomes = await executor.proposeBatch([1, 2, 3, 4, 5].map((n) => proposal(n, '50000')));
-
-    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
-    // [1,2] and [3,4] batched; the lone [5] goes through the single door.
-    expect(multicallSends(chain)).toHaveLength(2);
-    expect(chain.sent).toHaveLength(3);
-  });
-
-  it('falls back to one transaction per judgement when no Multicall3 is configured', async () => {
-    const { chain, executor } = build({ multicall: false });
-
-    const outcomes = await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
-
-    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
-    expect(multicallSends(chain)).toHaveLength(0);
-    expect(chain.sent).toHaveLength(3);
+  it('sends one transaction per judgement whether or not a Multicall3 is configured', async () => {
+    for (const multicall of [true, false]) {
+      const { chain, executor } = build({ multicall });
+      const outcomes = await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
+      expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
+      expect(multicallSends(chain)).toHaveLength(0);
+      expect(chain.sent).toHaveLength(3);
+    }
   });
 });
 
@@ -476,39 +424,29 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
 });
 
 describe('review fixes — EvmSlashExecutor', () => {
-  // S1-1: a prepared attestation must never be reused by the single retry.
-  it('re-signs every single retry, so a slow batch send cannot expire its attestations', async () => {
-    const { chain, executor, signatures } = build();
-    const send = chain.relayer.sendCall;
-    chain.relayer.sendCall = async (call) => {
-      if (call.to.toLowerCase().endsWith(MULTICALL.slice(2).toLowerCase())) {
-        chain.now += 700n; // longer than the 600 s attestation lifetime
-        throw new Error('timeout waiting for receipt');
-      }
-      return send(call);
-    };
-
-    const outcomes = await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
-
-    expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true, true]);
-    // 3 for the batch, 3 fresh ones for the singles.
-    expect(signatures).toHaveLength(6);
-  });
-
   it('does not trust a permanent refusal while the batch carrying the request may still land', async () => {
     const { chain, executor } = build();
+    await executor.proposeBatch([proposal(1, '150001'), proposal(2, '150001')]);
+    chain.now += 72n * 3600n;
     const send = chain.relayer.sendCall;
     chain.relayer.sendCall = async (call) => {
       if (call.to.toLowerCase().endsWith(MULTICALL.slice(2).toLowerCase())) {
         // The node dropped the connection: the batch may or may not be mined.
-        // Meanwhile the ceiling moved, so a fresh single attempt is refused.
-        chain.params = { ...chain.params, penaltyAmount: 50_000n };
+        // Meanwhile the key was revoked, so a fresh single attempt is refused.
+        chain.revoked = true;
         throw new Error('socket hang up');
       }
       return send(call);
     };
 
-    const outcomes = await executor.proposeBatch([proposal(1), proposal(2)]);
+    const outcomes = await executor.executeBatch(
+      [1, 2].map((n) => ({
+        chainId: CHAIN,
+        requestId: requestId(n),
+        provider: PROVIDER,
+        beneficiary: AGENTS[n],
+      })),
+    );
 
     for (const outcome of outcomes) {
       expect(outcome.ok).toBe(false);
@@ -576,12 +514,21 @@ describe('review fixes — EvmSlashExecutor', () => {
   // S3(1): one chunk's RPC failure must not fail the others or lose a row.
   it('isolates a chunk whose simulation RPC fails, retrying its rows singly', async () => {
     const { chain, executor } = build({ batchSize: 2 });
+    await executor.proposeBatch([1, 2, 3, 4].map((n) => proposal(n, '50000')));
+    chain.now += 72n * 3600n;
     chain.failNextCalls = 1; // the first chunk's aggregate3 simulation
 
-    const outcomes = await executor.proposeBatch([1, 2, 3, 4].map((n) => proposal(n, '50000')));
+    const outcomes = await executor.executeBatch(
+      [1, 2, 3, 4].map((n) => ({
+        chainId: CHAIN,
+        requestId: requestId(n),
+        provider: PROVIDER,
+        beneficiary: AGENTS[n],
+      })),
+    );
 
     expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
-    for (const n of [1, 2, 3, 4]) expect(chain.record(requestId(n))?.status).toBe(1);
+    for (const n of [1, 2, 3, 4]) expect(chain.record(requestId(n))?.status).toBe(2);
   });
 
   it('keeps the receipt amounts of a batched execution whose receipt read failed once', async () => {

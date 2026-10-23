@@ -168,6 +168,68 @@ export class SlaWindowCallRepository extends OrganizationScopedRepository<SlaWin
       .getRawMany();
   }
 
+  /**
+   * The payers of this window's failed calls to `providerId` who are LINKED to
+   * that provider (review 2026-10-23 M-1, self-slashing): a slash part paying
+   * one of them would hand the provider's own side the 60% share, and its
+   * record would fill the provider's slash window ahead of honest buyers'.
+   *
+   * `providerId` is the provider's organization id, as on `payment_intents`
+   * and `slash_proposals`. Linked means any of: the call was paid by the
+   * provider's own organization or by the tool's publishing organization; the
+   * paying agent belongs to one of those; or the paying wallet is a payout or
+   * stake wallet the provider enrolled, or the primary wallet of an agent of
+   * either organization.
+   * Wallets are compared by address, case-insensitively, on any chain.
+   * Returns the agent accounts as stored on the intents.
+   */
+  async linkedAgentAccounts(
+    windowId: string,
+    assetId: string,
+    providerId: string,
+    toolId: string | null,
+  ): Promise<string[]> {
+    const rows = (await this.manager.query(
+      `WITH owner AS (
+         -- provider_id IS the provider's organization (providerId == organizationId,
+         -- see SlashProposalEntity); a providers row by that id is read too.
+         SELECT $3::uuid AS org
+         UNION
+         SELECT p.organization_id FROM providers p WHERE p.id = $3
+         UNION
+         SELECT t.owner_org_id FROM tools t WHERE t.id = $4 AND t.owner_org_id IS NOT NULL
+       ),
+       wallet AS (
+         SELECT lower(split_part(e.payout_account_id, ':', 3)) AS address
+           FROM provider_chain_enrolments e WHERE e.organization_id IN (SELECT org FROM owner)
+         UNION
+         SELECT lower(split_part(e.stake_authority_account_id, ':', 3))
+           FROM provider_chain_enrolments e
+          WHERE e.organization_id IN (SELECT org FROM owner)
+            AND e.stake_authority_account_id IS NOT NULL
+         UNION
+         SELECT lower(split_part(a.primary_account_id, ':', 3))
+           FROM agents a
+          WHERE a.organization_id IN (SELECT org FROM owner)
+            AND a.primary_account_id IS NOT NULL
+       )
+       SELECT DISTINCT intent.agent_account AS "agentAccount"
+         FROM sla_window_calls call
+         JOIN payment_intents intent ON intent.id = call.intent_id
+        WHERE call.window_id = $1
+          AND call.counted_as_failure = true
+          AND call.asset_id = $2
+          AND intent.provider_id = $3
+          AND (intent.organization_id IN (SELECT org FROM owner)
+               OR EXISTS (SELECT 1 FROM agents a
+                           WHERE a.id = intent.agent_id
+                             AND a.organization_id IN (SELECT org FROM owner))
+               OR lower(split_part(intent.agent_account, ':', 3)) IN (SELECT address FROM wallet))`,
+      [windowId, assetId, providerId, toolId],
+    )) as { agentAccount: string }[];
+    return rows.map((row) => row.agentAccount);
+  }
+
   async sumFailedPriceByAgent(
     windowId: string,
     assetId: string,

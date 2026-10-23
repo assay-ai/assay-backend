@@ -170,6 +170,31 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
     )) as { requestId: string; assetId: string }[];
   }
 
+  /**
+   * What this platform has signed against one provider on one chain since
+   * `since` (review 2026-10-23 M-1): the reservation (else the penalty) of
+   * every part, of any case and epoch, proposed on chain after it and still
+   * standing or executed. Cancelled and refused parts take nothing from the
+   * provider's window. Minor units.
+   */
+  async signedAgainstProviderSince(
+    providerId: string,
+    chainId: string,
+    since: Date,
+  ): Promise<bigint> {
+    const [row] = (await this.manager.query(
+      `SELECT COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount)), 0)::text AS "signed"
+         FROM slash_proposal_parts part
+         JOIN slash_proposals proposal ON proposal.id = part.proposal_id
+        WHERE proposal.provider_id = $1
+          AND proposal.asset_id LIKE $2
+          AND part.chain_status IN ('PENDING', 'DISPUTED', 'EXECUTED')
+          AND part.chain_proposed_at > $3`,
+      [providerId, `${chainId}/%`, since],
+    )) as { signed: string }[];
+    return BigInt(row?.signed ?? '0');
+  }
+
   /** One case's parts at one epoch, in agent order — the order they were planned in. */
   async findForEpoch(
     organizationId: string,

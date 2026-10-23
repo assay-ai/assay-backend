@@ -12,7 +12,7 @@
 export enum SlashHoldReason {
   /**
    * An upheld record is waiting to execute and its last attempt was refused
-   * `SlashWindowNotDrained`: the provider's (or the verifier key's) rolling
+   * `SlashWindowNotDrained`: the provider's rolling
    * window cannot take it whole, and execution is all or wait (assay-evm
    * 9f036a3), so nothing is collected until the window drains.
    */
