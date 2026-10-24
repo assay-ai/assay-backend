@@ -425,14 +425,37 @@ export class DepositService {
     // refetches `GET /balances` the moment this response lands, and a buffered
     // entry was still unflushed then — the buyer read an empty ledger beside a
     // deposit already marked SETTLED. One write per deposit; nothing to batch.
-    await this.ledger.appendNow({
-      organizationId,
-      accountId: intent.agentAccount,
-      entryType: LedgerEntryType.DEPOSIT_PENDING,
-      money: settledMoney,
-      intentId: intent.id,
-      chainTxRef: transaction,
-    });
+    try {
+      await this.ledger.appendNow({
+        organizationId,
+        accountId: intent.agentAccount,
+        entryType: LedgerEntryType.DEPOSIT_PENDING,
+        money: settledMoney,
+        intentId: intent.id,
+        chainTxRef: transaction,
+      });
+    } catch (error) {
+      // `uq_ledger_entries_deposit_pending` makes the pending credit single-use
+      // per signature. Losing it means another intent in this organization
+      // claimed the same transfer between our `findByChainTxRef` read and this
+      // write — the read-then-write race that guard cannot close, and the one
+      // that previously let two intents both credit (and both enter finality
+      // for) a single transfer. This intent can never settle on a transfer
+      // another intent owns, so fail it cleanly and report the same 409 the
+      // guard would have.
+      if (!isUniqueViolation(error)) throw error;
+      await this.deposits.transition(
+        organizationId,
+        intentId,
+        DepositIntentStatus.SETTLING,
+        DepositIntentStatus.FAILED,
+        { reason: `transaction ${transaction} already claimed by a concurrent deposit` },
+      );
+      throw PaymentErrors.depositTransactionAlreadyClaimed({
+        transaction,
+        claimedBy: 'a concurrent deposit',
+      });
+    }
 
     this.logger.log(
       `Deposit ${intent.id} settled: ${settledMoney.amount} ${settledMoney.asset} observed on ${transaction}`,
@@ -660,4 +683,11 @@ function describe(error: unknown): string {
 /** Bounded wait between chain reads. Local so this file adds no dependency. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Postgres `23505`, whatever driver wrapper it arrives inside — same check the rest of the codebase uses. */
+function isUniqueViolation(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { code?: string; driverError?: { code?: string } };
+  return candidate.code === '23505' || candidate.driverError?.code === '23505';
 }

@@ -100,12 +100,17 @@ export abstract class BaseGateway
   }
 
   /**
-   * Validate and extract user ID from socket handshake
-   * Override this method if you need authentication
+   * The authenticated user id for this socket, or null.
+   *
+   * Read ONLY from `client.data`, which the server sets after it verifies the
+   * handshake token (`handleConnection`). It is never read from
+   * `handshake.auth`: a client controls its own handshake, so trusting a
+   * client-supplied `userId` let anyone claim any identity (and, once a
+   * room-join path keyed on it existed, join any victim's room). Rooms must be
+   * derived from this server-verified value, never from client input.
    */
   protected getUserId(client: Socket): string | null {
-    // Example: Extract from auth token in handshake
-    const userId = client.handshake.auth?.userId;
-    return userId || null;
+    const userId = (client.data as { userId?: unknown } | undefined)?.userId;
+    return typeof userId === 'string' && userId.length > 0 ? userId : null;
   }
 }
