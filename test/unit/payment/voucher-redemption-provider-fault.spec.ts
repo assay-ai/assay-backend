@@ -4,6 +4,7 @@ import { RedeemableIntent } from '@database/postgres/repositories/payment-intent
 import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { redeemGraceSeconds } from '@modules/payment/constants/voucher-redemption.constants';
 import {
   RedeemOutcome,
   RedeemOutcomeKind,
@@ -474,8 +475,10 @@ describe('VoucherRedemptionService — a shortfall from unplanned slash records 
     );
   });
 
-  it('names the shortfall, not the provider’s minimum, when a live read decides a close', async () => {
-    const { service, payments } = build([row()], {
+  it('a live read of the shortfall never decides a close the stake did not refuse (N-2)', async () => {
+    // `VoucherExpired` with no stake refusal recorded: the shortfall seen live
+    // is not the provider's fault, so the close keeps its buyer-side handling.
+    const { service, payments, intents } = build([row()], {
       outcome: RedeemOutcomeKind.UNREDEEMABLE,
       programError: 'VoucherExpired',
       belowMinimum: true,
@@ -484,10 +487,55 @@ describe('VoucherRedemptionService — a shortfall from unplanned slash records 
 
     await service.run(USDC);
 
-    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
+  });
+
+  it('a buyer-caused close DURING the shortfall is buyer debt, not the provider’s forfeit (N-2)', async () => {
+    // A thief's records still stand (not yet released); the buyer revokes its
+    // delegate, and the escrow checks the delegate before the stake gate.
+    const { service, payments, intents } = build([row()], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'DelegateIsRevoked',
+      belowMinimum: true,
+      unplannedShort: true,
+    });
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
+    expect(payments.recordRedemptionError).not.toHaveBeenCalledWith(
       ORG,
       'intent-1',
-      `${PROVIDER_FORFEIT_PREFIX}${UNPLANNED} (refused VoucherExpired)`,
+      expect.stringContaining(PROVIDER_FORFEIT_PREFIX),
+    );
+  });
+
+  it('a buyer tightening at its deadline during the shortfall is buyer debt too (N-2)', async () => {
+    const { service, payments, intents } = build(
+      [
+        row({
+          redemptionLastError: UNPLANNED,
+          // Inside the last pass before the voucher's on-chain deadline.
+          expiresAt: new Date((NOW - redeemGraceSeconds(USDC) + 5) * 1000),
+        }),
+      ],
+      {
+        outcome: RedeemOutcomeKind.RETRY,
+        programError: 'DelegateWindowLimitExceeded',
+        belowMinimum: true,
+        unplannedShort: true,
+      },
+    );
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'DelegateWindowLimitExceeded',
     );
   });
 
