@@ -29,7 +29,9 @@ import { toFunctionSelector } from 'viem';
  * (3d8fc8e) appended `HeldPaymentNotHeld`, `HeldNotYetCollectable`,
  * `HeldRefundWindowClosed` and `InvalidCollectHold`. The clean-up before the
  * fresh deploy (D-22) removed `AdminChangeRequiresOwner` with
- * `updateConfig`'s `newAdmin` argument.
+ * `updateConfig`'s `newAdmin` argument. Per-seq replay (D-23) replaced
+ * `VoucherSeqNotIncreasing` with `VoucherSeqUsed` at the same position, so the
+ * count is unchanged. `VoucherSeqNotIncreasing` is now a Solana-only name.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -65,7 +67,10 @@ const NAMES: readonly string[] = [
   'SignatureDeadlineTooFar',
   'BadNonce',
   'VoucherSeqZero',
-  'VoucherSeqNotIncreasing',
+  // D-23: replaced `VoucherSeqNotIncreasing` in place. The chain admits each
+  // `(payer, seq)` once, in any order; a seq already used (held, collected or
+  // refunded) is refused with this.
+  'VoucherSeqUsed',
   'VoucherSeqGapTooLarge',
   'VoucherExpired',
   'VoucherNotYetValid',

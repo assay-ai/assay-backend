@@ -70,7 +70,7 @@ export interface EscrowIntentBuilderPort {
    *
    * **`chainId` is required, and originally it was not.** The delay is a per-chain
    * quantity — on `eip155` it is `Constants.sol`'s compile-time
-   * `WITHDRAW_DELAY_SECONDS = 3600`, with no getter and nothing on chain that
+   * `WITHDRAW_DELAY_SECONDS = 3 * 3600` (D-24), with no getter and nothing on chain that
    * can move it — so a zero-argument version of this method has no answer once
    * two chains are served. It is a required parameter rather than an optional
    * one so the compiler finds every caller instead of one of them discovering

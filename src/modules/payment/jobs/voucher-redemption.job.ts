@@ -16,7 +16,7 @@ import { VoucherRedemptionService } from '../services/voucher-redemption.service
  * §Scaling Design), so this fires once per deployment rather than once per API
  * replica. **Ticks never overlap** (`waitForCompletion`): one pass can outlast
  * the minute — a receipt waits up to 180 s — and a second pass over the same
- * rows would lose to `VoucherSeqNotIncreasing` on a voucher the first one had
+ * rows would lose to `VoucherSeqNotIncreasing` (`VoucherSeqUsed` on eip155) on a voucher the first one had
  * just redeemed. That is not a fee: the loser would close it as buyer debt and
  * charge the buyer a second time (review 2026-10-15 P-1). A tick that comes due while
  * a pass runs is skipped, and the next one after it finds the rows. Across

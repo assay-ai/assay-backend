@@ -27,7 +27,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   deadline. The contract refuses a voucher once `block.timestamp >
  *   expiresAt + REDEEM_GRACE_SECONDS` (1,800 s); 120 s more
  *   (`CLOCK_SKEW_TOLERANCE_SECONDS`) covers a block clock ahead of the
- *   database's. Kept equal to `DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS`.
+ *   database's. Superseded per chain by 1762400000070 (eip155: 7,320 s, D-24).
  *
  * Why the deadline clause and not just "lapsed": not every lapse comes after
  * the deadline. `VoucherExpired` does, but a permanent refusal that is not

@@ -361,8 +361,9 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     ) {
       throw SettlementErrors.delegationInvalid({
         reason:
-          `DelegateValidUntilInvalid — validUntil must be at least ${earliest} (an hour after ` +
-          `this request's deadline, ${deadline}) and at most ` +
+          `DelegateValidUntilInvalid — validUntil must be at least ${earliest} ` +
+          `(${EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS} s after this request's deadline, ` +
+          `${deadline}) and at most ` +
           `${EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS / 86_400} days out`,
       });
     }

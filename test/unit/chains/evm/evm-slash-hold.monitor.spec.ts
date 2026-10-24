@@ -88,13 +88,27 @@ describe('EvmSlashHoldMonitor', () => {
     const harness = build();
     harness.stake.pendingSlash = 99_500_000n;
     await harness.monitor.tick();
-    expect(harness.row()).toMatchObject({ held: true, reasons: ['STAKE_FULLY_RESERVED'] });
+    // 0.5 USDG free bonded is also below the minimum, so the chain stops paying (D-26).
+    expect(harness.row()).toMatchObject({
+      held: true,
+      reasons: ['STAKE_FULLY_RESERVED', 'BONDED_BELOW_MINIMUM'],
+    });
   });
 
-  it('does not hold for a reservation frozen by an on-chain dispute (review S-6)', async () => {
+  it('leaves a disputed reservation out of condition 2 (review S-6), not out of the D-26 minimum', async () => {
     const harness = build();
     harness.stake.pendingSlash = 99_500_000n;
     harness.setDisputed(new Map([[PROVIDER, 1_000_000n]]));
+    await harness.monitor.tick();
+    // The redeem gate counts every reservation, disputed ones too: the chain
+    // will not pay this provider, so routing must not send it paid calls.
+    expect(harness.row()).toMatchObject({ held: true, reasons: ['BONDED_BELOW_MINIMUM'] });
+  });
+
+  it('a disputed reservation that leaves the free bonded stake at the minimum does not hold', async () => {
+    const harness = build();
+    harness.stake.pendingSlash = 50_000_000n;
+    harness.setDisputed(new Map([[PROVIDER, 50_000_000n]]));
     await harness.monitor.tick();
     expect(harness.row()).toMatchObject({ held: false });
   });

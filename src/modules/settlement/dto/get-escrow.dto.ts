@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
@@ -264,10 +265,11 @@ export class GetEscrowUnsettledResponseDto {
   @ApiProperty({
     description:
       'How long a tightening (revoking a key, a shorter expiry, lower caps) waits before it ' +
-      'binds a payment already signed: 3600 on an escrow that keeps signed payments ' +
-      'collectable (assay-evm D-21) — nothing unsettled can then be stranded and no change ' +
-      'is refused for it — and 0 where a tightening binds at once (BUG-D1-07 applies).',
-    example: 3600,
+      `binds a payment already signed: ${EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS} on an escrow ` +
+      'that keeps signed payments collectable (assay-evm D-21, D-24) — nothing unsettled can ' +
+      'then be stranded and no change is refused for it — and 0 where a tightening binds at ' +
+      'once (BUG-D1-07 applies).',
+    example: EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS,
   })
   tightenDelaySeconds: number;
 }
