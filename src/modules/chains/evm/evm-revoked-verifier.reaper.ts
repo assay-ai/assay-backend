@@ -70,8 +70,10 @@ export interface ReapReport {
  *
  * 1. every verifier with a standing record in `evm_slash_records` (filled by
  *    `EvmSlashProposalWatcher` from `SlashProposed`, this platform's records
- *    and anybody else's) is asked `canSign` live; a key that cannot sign is
- *    flagged `verifier_unavailable` on its records;
+ *    and anybody else's, back-filled from the deploy block for records
+ *    proposed before the table existed) is asked `canSign` live, every pass;
+ *    a key that cannot sign is flagged `verifier_unavailable` on its records,
+ *    and a key that can sign again has the flag cleared;
  * 2. each of its standing records is re-read (`slashRecordOf`): one no longer
  *    `Pending`/`Disputed` is closed, one still standing is released with
  *    `expireSlash`, batched (`EvmSlashExecutor.expireBatch`, Multicall3);
@@ -101,12 +103,30 @@ export class EvmRevokedVerifierReaper {
     @Optional() @Inject(EVM_REAPER_CLOCK) private readonly now: () => Date = () => new Date(),
   ) {}
 
-  @Cron(EVM_REVOKED_VERIFIER_REAP_CRON)
+  /** The pass in progress in this process, if any (review 2026-10-24 wave 3 N-3). */
+  private inFlight: Promise<unknown> | null = null;
+
+  /**
+   * Ticks never overlap: a pass without Multicall3 sends up to 512 singles
+   * per key, each waiting for its receipt, and can outlast the two minutes. A
+   * tick that comes due while a pass runs is skipped (`waitForCompletion`, and
+   * the in-process guard for any other caller); the next one finds what is
+   * left. The scheduler is a single instance, as for every job.
+   */
+  @Cron(EVM_REVOKED_VERIFIER_REAP_CRON, { waitForCompletion: true })
   async handleTick(): Promise<void> {
+    if (this.inFlight) {
+      this.logger.warn('the previous revoked-verifier reap is still running; this tick is skipped');
+      return;
+    }
+    const pass = this.reap();
+    this.inFlight = pass;
     try {
-      await this.reap();
+      await pass;
     } catch (error) {
       this.logger.error(`revoked-verifier reap threw: ${describe(error)}`);
+    } finally {
+      this.inFlight = null;
     }
   }
 
@@ -146,7 +166,12 @@ export class EvmRevokedVerifierReaper {
         this.logger.warn(`canSign(${verifier}) on ${chainId} unreadable: ${describe(error)}`);
         continue;
       }
-      if (canSign) continue;
+      if (canSign) {
+        // Re-checked every pass, never taken from one read for good: a key
+        // that reads as able to sign again has its records' flag cleared.
+        await this.records.markVerifierAvailable(chainId, verifier);
+        continue;
+      }
       await this.records.markVerifierUnavailable(chainId, verifier);
       dead.push(verifier);
     }

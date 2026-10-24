@@ -182,6 +182,37 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
     });
   }
 
+  /**
+   * Where the back-fill of `evm_slash_records` stands (review 2026-10-24 wave
+   * 3 N-3): the last block back-filled, and whether it is done.
+   */
+  async findSlashBackfill(chainId: string): Promise<{ cursor: bigint | null; done: boolean }> {
+    const state = await this.findOne({
+      select: { id: true, slashBackfillCursorBlock: true, slashBackfillDoneAt: true },
+      where: { chainId },
+    });
+    return {
+      cursor:
+        state?.slashBackfillCursorBlock == null ? null : BigInt(state.slashBackfillCursorBlock),
+      done: state?.slashBackfillDoneAt != null,
+    };
+  }
+
+  async saveSlashBackfill(chainId: string, block: bigint | null, done: boolean): Promise<void> {
+    if (block === null && !done) return;
+    await this.manager.transaction(async (manager) => {
+      const state = await this.lockState(manager, chainId);
+      await manager.update(
+        EvmChainStateEntity,
+        { id: state.id },
+        {
+          ...(block === null ? {} : { slashBackfillCursorBlock: block.toString() }),
+          ...(done ? { slashBackfillDoneAt: new Date() } : {}),
+        },
+      );
+    });
+  }
+
   async recordError(chainId: string, message: string): Promise<void> {
     await this.manager.transaction(async (manager) => {
       const state = await this.lockState(manager, chainId);

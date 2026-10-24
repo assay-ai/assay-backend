@@ -97,6 +97,21 @@ export class EvmSlashRecordRepository extends AbstractRepository<EvmSlashRecordE
     );
   }
 
+  /**
+   * Clears the flag on every standing record of `verifier` on `chainId`: a
+   * later read says its key CAN sign (review 2026-10-24 wave 3 N-3). One bad
+   * read (a wrong config address, an RPC fault) must not label a live key's
+   * honest records "unplanned" for good. Idempotent.
+   */
+  async markVerifierAvailable(chainId: string, verifier: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE evm_slash_records
+          SET verifier_unavailable = false, updated_at = now()
+        WHERE chain_id = $1 AND verifier = $2 AND verifier_unavailable AND closed_at IS NULL`,
+      [chainId, verifier],
+    );
+  }
+
   /** Up to `limit` standing records of `verifier`, fewest reap attempts first. */
   async standingByVerifier(
     chainId: string,

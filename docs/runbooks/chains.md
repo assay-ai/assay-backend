@@ -146,8 +146,10 @@ details) has passed, 72 hours after the proposal (the chain's slash delay), and 
    (it blocks `proposeSlash`, `executeSlash`, deposits and redemptions; buyers can still withdraw).
 3. **Release.** Since D-27 anyone can call `AssayStake.expireSlash(requestId)` on a record whose
    verifier can no longer sign, and it releases the reservation at once. The scheduler's
-   `EvmRevokedVerifierReaper` does this by itself: every two minutes it asks `canSign` for every
-   verifier with a standing record in `evm_slash_records`, and for a key that cannot sign it
+   `EvmRevokedVerifierReaper` does this by itself: every two minutes (a pass still running skips
+   the next tick) it asks `canSign` for every verifier with a standing record in
+   `evm_slash_records`, every pass (a key that reads as able to sign again has its records' flag
+   cleared), and for a key that cannot sign it
    re-reads each of that key's records and sends `expireSlash` for the ones still `Pending` or
    `Disputed`, batched through Multicall3 (64 per batch), from the relayer. It is idempotent: a
    record already released by somebody else is just closed, and a failure is counted on the row
@@ -156,6 +158,13 @@ details) has passed, 72 hours after the proposal (the chain's slash delay), and 
    (CRITICAL: some records could not be released this pass). If the reaper is stuck, or faster
    release is wanted, the arbiter can send **`AssayStake.cancelSlashBatch`** (64 per transaction),
    highest priority to providers whose `freeBondedOf` is below the minimum.
+   `evm_slash_records` holds what the slash watcher read. On a chain the watcher was already
+   reading before the table existed, it back-fills the table from the deploy block
+   (`EVM_CHAIN_STATE_FROM_BLOCK`, else the deployment's `disputeUpgradeBlock`) up to its own
+   cursor, 100,000 blocks per tick, durably (`evm_chain_states.slash_backfill_cursor_block`,
+   `slash_backfill_done_at`); the log says when it caught up. With neither block set it logs an
+   error and gives up: set `EVM_CHAIN_STATE_FROM_BLOCK` and clear `slash_backfill_done_at` to run
+   it, or rely on a fresh deploy. Until it is done, a record from before the table is not reaped.
 4. **Verify.** No standing record of the key is left:
    `SELECT count(*) FROM evm_slash_records WHERE verifier = '<verifier, lower case>' AND closed_at IS NULL`
    is 0, and for each affected provider `freeBondedOf(provider) >= params().minimumStake` again.
