@@ -281,6 +281,47 @@ describe('OnChainProviderStakeSource — what counts as stake', () => {
   });
 });
 
+describe('OnChainProviderStakeSource — FREE bonded where the chain reports it (D-26)', () => {
+  it('routes on freeBonded, and caches it, when the reader reports one', async () => {
+    const cache = new FakeCache();
+    const account = accountIdOf(7);
+    const money = (amount: string) => ({
+      amount,
+      asset: ASSET_IDS.USDC_SOLANA_DEVNET,
+      decimals: 6,
+    });
+    const reader = {
+      bondedStakeOf: async () =>
+        new Map([
+          [
+            account,
+            {
+              account,
+              bonded: money('500'),
+              freeBonded: money('120'),
+              unbonding: money('0'),
+              unbondingStartedAt: null,
+              unbondingCompletesAt: null,
+              observedAt: new Date(),
+            },
+          ],
+        ]),
+    };
+    const source = new OnChainProviderStakeSource(
+      reader as never,
+      new ScriptedEnrolments([{ organizationId: 'org-1', stakeAuthority: account }]),
+      cache,
+      { freshTtlMs: STAKE_CACHE_TTL_MS, staleMaxMs: STAKE_STALE_MAX_MS, now: () => Date.now() },
+    );
+
+    const stake = (await source.stakeOn([on('org-1')])).get(stakeKey('org-1', DEVNET));
+
+    // 120, not 500: stake reserved by standing slash records is not paid on.
+    expect(stake?.staked.amount).toBe('120');
+    expect([...cache.values.values()].join()).toContain('"amount":"120"');
+  });
+});
+
 describe('OnChainProviderStakeSource — absent is not zero', () => {
   it('omits a provider that has not proved a stake authority', async () => {
     const { source, rpc } = build([{ organizationId: 'org-1', stakeAuthority: null }]);

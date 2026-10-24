@@ -5,7 +5,7 @@ import { EVM_CONSTANTS } from './evm.constants';
  * Everything `_redeem` reads that is not in the voucher itself.
  *
  * All of it comes off the chain in one `multicall` — the escrow struct, the
- * provider's bonded stake, and the two `AssayConfig` reads — so nothing here is
+ * provider's free bonded stake, and the two `AssayConfig` reads — so nothing here is
  * derived from anything else and nothing is a local copy of a program constant.
  */
 export interface PrevalidationState {
@@ -35,8 +35,13 @@ export interface PrevalidationState {
   readonly spentInWindow: bigint;
   readonly windowStartedAt: number;
   readonly balance: bigint;
-  /** `bondedOf(provider)` — **`bonded` alone**, never `bonded + unbonding`. */
-  readonly providerBonded: bigint;
+  /**
+   * The provider's FREE bonded stake, `bonded − pendingSlash` floored at zero
+   * (`freeBondedOf`, assay-evm D-26) — **`bonded` alone**, never `bonded +
+   * unbonding`, and less every standing slash record's reservation: stake
+   * reserved by `Pending` or `Disputed` records is not backing new traffic.
+   */
+  readonly providerFreeBonded: bigint;
   readonly minimumStake: bigint;
   /**
    * The signing delegate's on-chain grant (`delegationOf(payer, delegate)`,
@@ -44,6 +49,21 @@ export interface PrevalidationState {
    * the voucher was signed by a delegate; absent for the payer's own key.
    */
   readonly delegation?: PrevalidationDelegation | null;
+}
+
+/**
+ * `AssayStake.freeBondedOf`, off chain: `bonded − pendingSlash`, floored at
+ * zero (D-26). What the escrow's redeem gate compares with `minimumStake`.
+ * Saturation at `uint64` is irrelevant here: bigint does not overflow, and no
+ * minimum comes near it.
+ */
+export function freeBondedStake(stake: {
+  readonly bonded: bigint | number;
+  readonly pendingSlash: bigint | number;
+}): bigint {
+  const bonded = BigInt(stake.bonded);
+  const pending = BigInt(stake.pendingSlash);
+  return bonded > pending ? bonded - pending : 0n;
 }
 
 export interface PrevalidationDelegation {
@@ -199,7 +219,7 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
     }
   }
 
-  if (state.providerBonded < state.minimumStake) return 'ProviderBelowMinimumStake';
+  if (state.providerFreeBonded < state.minimumStake) return 'ProviderBelowMinimumStake';
   if (state.balance < voucher.amount) return 'EscrowInsufficient';
 
   return null;

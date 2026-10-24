@@ -48,7 +48,7 @@ const STATE: PrevalidationState = {
   spentInWindow: 0n,
   windowStartedAt: NOW - 3_600,
   balance: 5_000_000n,
-  providerBonded: 50_000_000n,
+  providerFreeBonded: 50_000_000n,
   minimumStake: 50_000_000n,
 };
 
@@ -77,7 +77,7 @@ describe('prevalidateVoucher', () => {
     ['ProgramPaused', { paused: true }],
     ['VoucherSeqUsed', { seqUsed: true }],
     ['EscrowWindowLimitExceeded', { spentInWindow: 9_500_000n }],
-    ['ProviderBelowMinimumStake', { providerBonded: 49_999_999n }],
+    ['ProviderBelowMinimumStake', { providerFreeBonded: 49_999_999n }],
     ['EscrowInsufficient', { balance: 999_999n }],
   ])('names %s from the state', (expected, patch) => {
     expect(prevalidateVoucher(GOOD, { ...STATE, ...patch })).toBe(expected);
@@ -106,7 +106,7 @@ describe('prevalidateVoucher', () => {
     expect(
       prevalidateVoucher(GOOD, { ...STATE, spentInWindow: 9_000_000n, windowStartedAt: NOW }),
     ).toBeNull();
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 50_000_000n })).toBeNull();
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 50_000_000n })).toBeNull();
     expect(prevalidateVoucher(GOOD, { ...STATE, balance: 1_000_000n })).toBeNull();
   });
 
@@ -181,7 +181,7 @@ describe('prevalidateVoucher', () => {
     // Divergence 4 puts ProviderBelowMinimumStake at the Anchor position, after
     // the spending limits and before the balance. A voucher that fails both
     // must report the stake.
-    const state = { ...STATE, providerBonded: 0n, balance: 0n };
+    const state = { ...STATE, providerFreeBonded: 0n, balance: 0n };
     expect(prevalidateVoucher(GOOD, state)).toBe('ProviderBelowMinimumStake');
   });
 
@@ -204,8 +204,8 @@ describe('prevalidateVoucher', () => {
 
   it('reads bonded stake alone, and a strict less-than against the floor', () => {
     // `_redeem` is `bondedOf(provider) < p.minimumStake`. Equal passes.
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 50_000_000n })).toBeNull();
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 49_999_999n })).toBe(
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 50_000_000n })).toBeNull();
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 49_999_999n })).toBe(
       'ProviderBelowMinimumStake',
     );
   });

@@ -198,7 +198,8 @@ export class OnChainProviderStakeSource implements ProviderStakePort {
         result.set(key, {
           providerId,
           chainId,
-          staked: fresh.bonded,
+          // FREE bonded where the chain's redeem gate reads it (D-26).
+          staked: routableStake(fresh),
           observedAt: fresh.observedAt,
         });
         continue;
@@ -330,10 +331,11 @@ export class OnChainProviderStakeSource implements ProviderStakePort {
             await this.cache.del(this.cacheKey(account));
             return;
           }
+          const routable = routableStake(stake);
           const reading: CachedReading = {
-            amount: stake.bonded.amount,
-            asset: stake.bonded.asset,
-            decimals: stake.bonded.decimals,
+            amount: routable.amount,
+            asset: routable.asset,
+            decimals: routable.decimals,
             observedAt: stake.observedAt.toISOString(),
           };
           await this.cache.set(this.cacheKey(account), reading, ttlSeconds);
@@ -348,4 +350,13 @@ export class OnChainProviderStakeSource implements ProviderStakePort {
   private cacheKey(account: AccountId): string {
     return `${STAKE_CACHE_KEY_PREFIX}:${account}`;
   }
+}
+
+/**
+ * The figure routing compares with the minimum: `freeBonded` where the chain
+ * reports it (EVM, D-26 — the redeem gate reads `bonded − pendingSlash`), else
+ * `bonded`. Never `bonded + unbonding`.
+ */
+function routableStake(stake: OnChainStake): Money {
+  return stake.freeBonded ?? stake.bonded;
 }
