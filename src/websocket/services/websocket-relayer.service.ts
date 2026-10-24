@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { WebSocketEventMessage } from '../types/event-data.interface';
 import type { Server, Socket } from 'socket.io';
-import { SubscribeMessage, WebSocketGateway } from '@nestjs/websockets';
+import { ConnectedSocket, SubscribeMessage, WebSocketGateway } from '@nestjs/websockets';
 import { WS_SUBSCRIBE_MESSAGES } from '../constants/ws-namespaces.constant';
 import { BaseGateway } from '../gateways/base.gateway';
 import { MAX_MESSAGE_AGE } from '../constants';
@@ -43,15 +43,38 @@ export class WebSocketRelayerService extends BaseGateway {
    * absent every connection is refused rather than silently trusted.
    */
   async handleConnection(client: Socket): Promise<void> {
-    const token = extractHandshakeToken(client);
-    const claims = token && this.tokenVerifier ? await this.tokenVerifier.verify(token) : null;
-    if (!claims) {
+    const userId = await this.resolveUserId(client);
+    if (!userId) {
       this.logger.warn(`Rejecting unauthenticated socket ${client.id}`);
       client.disconnect(true);
       return;
     }
-    (client.data as { userId?: string }).userId = claims.subject;
+    (client.data as { userId?: string }).userId = userId;
     await super.handleConnection(client);
+  }
+
+  /**
+   * The verified Privy subject for this handshake, or null for any reason to
+   * refuse. `verify()` is NOT total — `PrivyTokenVerifier` lets
+   * `PrivyJwksCache` throw `identityProviderUnavailable()` when it holds no
+   * usable key yet (cold start before the first JWKS fetch) or the IdP is
+   * unreachable. NestJS does not await or catch this gateway's
+   * `handleConnection`, so a throw here would (a) skip the disconnect below,
+   * leaving an unauthenticated socket connected — fail OPEN — and (b) surface
+   * as an unhandled rejection that can take the websocket process down. So any
+   * failure, thrown or null, resolves to null: the socket is refused.
+   */
+  private async resolveUserId(client: Socket): Promise<string | null> {
+    const token = extractHandshakeToken(client);
+    if (!token || !this.tokenVerifier) return null;
+    try {
+      const claims = await this.tokenVerifier.verify(token);
+      return claims?.subject ?? null;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Socket ${client.id} token verification errored — refusing: ${reason}`);
+      return null;
+    }
   }
 
   async handleDisconnect(client: Socket): Promise<void> {
@@ -59,8 +82,12 @@ export class WebSocketRelayerService extends BaseGateway {
   }
 
   @SubscribeMessage(WS_SUBSCRIBE_MESSAGES.PING)
-  ping() {
-    this.server.emit(WS_SUBSCRIBE_MESSAGES.PONG);
+  ping(@ConnectedSocket() client: Socket) {
+    // Reply only to the caller. `this.server.emit` would fan `pong` out to
+    // every connected socket — a pre-auth-reachable amplifier (NestJS binds
+    // message handlers at connect, before handleConnection's async auth
+    // resolves), turning one packet into N.
+    client.emit(WS_SUBSCRIBE_MESSAGES.PONG);
   }
 
   /** Called by `WebSocketEventsProcessor` for each `websocket.events` job. */
