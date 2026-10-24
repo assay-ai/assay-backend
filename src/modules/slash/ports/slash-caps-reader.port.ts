@@ -18,8 +18,9 @@ export interface SlashCaps {
   readonly freeStakeMinor: bigint;
   /**
    * `pendingSlash` — every standing (`Pending` or `Disputed`) record's
-   * reservation, this platform's or not. The on-chain half of the provider
-   * budget (review 2026-10-24 F-M1).
+   * reservation, this platform's or not. Already subtracted in
+   * `freeStakeMinor`; never counted against the window, which only
+   * executions consume (review 2026-10-24 wave 2 M-1). Kept for the log.
    */
   readonly pendingSlashMinor: bigint;
   /**
