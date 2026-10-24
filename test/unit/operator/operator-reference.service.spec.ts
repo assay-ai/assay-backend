@@ -1,4 +1,9 @@
-import { OperatorReferenceService } from '@modules/operator/services/operator-reference.service';
+import {
+  MINIMUM_STAKE_READ_TIMEOUT_MS,
+  OperatorReferenceService,
+} from '@modules/operator/services/operator-reference.service';
+import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { MoneyUtil } from '@shared/utils/money.util';
 import { OVERRIDE_CODES } from '@modules/operator/domain/override-register';
 import { SigningKeyState } from '@modules/verification/signing/domain/key-lifecycle';
 import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/verifier-registry.port';
@@ -22,8 +27,23 @@ function build(
     providerIds?: readonly string[];
     providerRegistry?: ReturnType<typeof fakeProviderRegistry>;
     config?: Readonly<Record<string, string>>;
+    readings?: readonly { chainId: ChainId; minimumStake: bigint | null; failure?: string }[];
   } = {},
 ): OperatorReferenceService {
+  const minimumStakes = options.readings
+    ? {
+        readMinimumStakes: jest.fn(async () =>
+          options.readings!.map((reading) => ({
+            chainId: reading.chainId,
+            minimumStake:
+              reading.minimumStake === null
+                ? null
+                : MoneyUtil.of(reading.minimumStake, EVM_ASSET, 6),
+            failure: reading.minimumStake === null ? (reading.failure ?? 'TIMEOUT') : null,
+          })),
+        ),
+      }
+    : null;
   return new OperatorReferenceService(
     fakePolicyRepository(options.policies ?? []),
     fakeVerifierKeyRepository(options.verifierKeys ?? []),
@@ -31,8 +51,12 @@ function build(
     fakeProviderRepositoryFor(options.providerIds ?? []),
     options.providerRegistry ?? fakeProviderRegistry(),
     fakeConfigService(options.config ?? {}),
+    minimumStakes as never,
   );
 }
+
+const EVM_CHAIN = 'eip155:46630' as ChainId;
+const EVM_ASSET = `${EVM_CHAIN}/erc20:0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac` as AssetId;
 
 describe('OperatorReferenceService — policy lifecycle', () => {
   it('returns an empty list against an empty database', async () => {
@@ -168,7 +192,8 @@ describe('OperatorReferenceService — verifier registry', () => {
     const [row] = await service.listVerifiers();
 
     expect(row.state).toBeNull();
-    expect(row.unreadableReason).toContain('chain unreadable');
+    // A fixed sentence: the error text can carry an internal RPC address.
+    expect(row.unreadableReason).toBe('chain unreadable');
   });
 
   it('reports null, not a fabricated state, for a key never registered on chain', async () => {
@@ -238,6 +263,70 @@ describe('OperatorReferenceService — economic parameters', () => {
     const minimumStake = rows.find((row) => row.key === 'minimumStake');
 
     expect(minimumStake?.overrideCount).toBe(1);
+  });
+
+  it('reads the minimum stake from the settlement contract, as the Contracts page does (BUG-OPS-CORE-02)', async () => {
+    const service = build({ readings: [{ chainId: EVM_CHAIN, minimumStake: 100_000_000n }] });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$100.00');
+    expect(row?.source).toBe('chain');
+    expect(row?.note).toContain('$50.00');
+  });
+
+  it('leaves the note empty when the chain agrees with the configured floor', async () => {
+    const service = build({ readings: [{ chainId: EVM_CHAIN, minimumStake: 50_000_000n }] });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$50.00');
+    expect(row?.source).toBe('chain');
+    expect(row?.note).toBeNull();
+  });
+
+  it('shows the configured floor with a short code, never the error text, when no chain answers', async () => {
+    const service = build({
+      readings: [{ chainId: EVM_CHAIN, minimumStake: null, failure: 'UNREADABLE' }],
+    });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.value).toBe('$50.00');
+    expect(row?.source).toBe('config');
+    expect(row?.note).toBe(
+      'No answer from the settlement contract on eip155:46630 (UNREADABLE); the configured floor is shown for it.',
+    );
+  });
+
+  it('keeps the chains that answered and shows the configured floor for one that timed out', async () => {
+    const other = 'eip155:1' as ChainId;
+    const service = build({
+      readings: [
+        { chainId: EVM_CHAIN, minimumStake: 100_000_000n },
+        { chainId: other, minimumStake: null, failure: 'TIMEOUT' },
+      ],
+    });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
+
+    expect(row?.source).toBe('chain');
+    expect(row?.value).toBe('eip155:46630 $100.00 · eip155:1 $50.00');
+    expect(row?.note).toContain('eip155:1 (TIMEOUT)');
+  });
+
+  it('asks the reader for a bounded read', async () => {
+    const readings = [{ chainId: EVM_CHAIN, minimumStake: 100_000_000n }];
+    const service = build({ readings });
+    const reader = (service as unknown as { minimumStakes: { readMinimumStakes: jest.Mock } })
+      .minimumStakes;
+
+    await service.listEconomicParameters();
+
+    expect(reader.readMinimumStakes).toHaveBeenCalledWith({
+      timeoutMs: MINIMUM_STAKE_READ_TIMEOUT_MS,
+    });
+    expect(MINIMUM_STAKE_READ_TIMEOUT_MS).toBe(2_000);
   });
 
   it('respects a custom take rate and penalty split from config', async () => {

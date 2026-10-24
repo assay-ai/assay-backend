@@ -2,7 +2,7 @@ import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
-import { RELAY_ALLOWED_PORTS, isIpLiteralHost } from '@shared/network/egress';
+import { RELAY_ALLOWED_PORTS, isDeniedHost, isIpLiteralHost } from '@shared/network/egress';
 
 import { ProviderErrors } from '../errors/provider.errors';
 import { CredentialHeader } from './credential-vault.crypto';
@@ -266,21 +266,24 @@ export function assertCredentialRemovable(
 }
 
 /**
- * Throws when the egress relay is configured and could not carry a call to
- * `endpoint` — the same rules as the relay transport's pre-check
- * (`egress-relay.transport.ts`), applied at Save so a provider learns now
- * rather than on every call: `https:` only, a host name rather than an IP
- * literal, and a port Cloudflare proxies. Unparsable input is left to the
- * other validators.
+ * Throws when `endpoint` names one of Assay's own hosts (`isDeniedHost`), with
+ * or without the relay: the egress client refuses those on every hop, and Save
+ * says so first. Then, when the egress relay is configured, throws when it
+ * could not carry a call to `endpoint` — the same rules as the relay
+ * transport's pre-check (`egress-relay.transport.ts`), applied at Save so a
+ * provider learns now rather than on every call: `https:` only, a host name
+ * rather than an IP literal, and a port Cloudflare proxies. Unparsable input is
+ * left to the other validators.
  */
 export function assertRelayableEndpoint(endpoint: string, relayConfigured: boolean): void {
-  if (!relayConfigured) return;
   let url: URL;
   try {
     url = new URL(endpoint);
   } catch {
     return;
   }
+  if (isDeniedHost(url.hostname)) throw ProviderErrors.endpointHostNotAllowed();
+  if (!relayConfigured) return;
   if (url.protocol !== 'https:') {
     throw ProviderErrors.endpointNotRelayable({ reason: 'use https' });
   }

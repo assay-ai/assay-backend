@@ -86,7 +86,7 @@ export class OverviewService {
         ...asset,
       }),
       // GET /tool-calls?limit&sort=createdAt&order=desc — as `ToolCallsController` calls it.
-      this.toolCalls.list(
+      this.toolCalls.listPaid(
         organizationId,
         plainToInstance(ListToolCallsQueryDto, {
           limit: String(query.callsLimit),

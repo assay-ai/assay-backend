@@ -36,6 +36,7 @@ export enum AuthErrorCode {
   AUTH_IDENTITY_PROVIDER_UNAVAILABLE = 'AUTH_IDENTITY_PROVIDER_UNAVAILABLE',
   AUTH_HUMAN_SESSION_REQUIRED = 'AUTH_HUMAN_SESSION_REQUIRED',
   AUTH_CLIENT_NOT_ALLOWED_HERE = 'AUTH_CLIENT_NOT_ALLOWED_HERE',
+  AUTH_SCOPE_MISSING = 'AUTH_SCOPE_MISSING',
 }
 
 export type AuthErrorCodesArePrefixed = AssertDomainErrorCodes<'AUTH', `${AuthErrorCode}`>;
@@ -119,6 +120,21 @@ export const AuthErrors = createDomainErrorFactory('AUTH', {
     code: AuthErrorCode.AUTH_CLIENT_NOT_ALLOWED_HERE,
     statusCode: 403,
     message: () => 'This app is connected for MCP calls only; it cannot use this API',
+  },
+
+  /**
+   * A genuine agent credential on a route it may use only with a scope it
+   * does not hold. 403: the credential is fine, and re-authenticating with it
+   * will not help; a person creates a key with that scope. `requiredScope`
+   * names it, so a client can say which.
+   */
+  scopeMissing: {
+    code: AuthErrorCode.AUTH_SCOPE_MISSING,
+    statusCode: 403,
+    publicContext: ['requiredScope'],
+    message: (context?: Record<string, any>) =>
+      `This key does not have the ${context?.requiredScope ?? 'required'} scope. ` +
+      'Create a key with that scope to use this',
   },
 
   identityProviderUnavailable: {

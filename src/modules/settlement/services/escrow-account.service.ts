@@ -1,7 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
+import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { AccountId, AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
@@ -17,6 +19,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { ESCROW_WINDOW_SECONDS } from '../constants/escrow-account.constants';
 import { SettlementErrors } from '../errors/settlement.errors';
+import { ReconciliationService } from './reconciliation.service';
 
 /**
  * The buyer's escrow, as one object — the balance,
@@ -80,6 +83,15 @@ export interface EscrowState {
    * escrow, or could not be read. Display only.
    */
   readonly lifetime: EscrowLifetime | null;
+  /**
+   * In the escrow on chain, not credited by the ledger, so no agent can spend
+   * it (A3): `chain − (available + held not yet in the escrow hold + pending)`,
+   * floored at zero — the reconciler's per-escrow comparison. `null` when there
+   * is no reading, or the ledger figures are not wired.
+   */
+  readonly uncreditedOnChain: Money | null;
+  /** The withdrawal freeze (`ReconciliationService.isFrozen`). `null` when unknown. */
+  readonly withdrawalsFrozen: boolean | null;
 }
 
 /** See {@link EscrowState.lifetime}. `spent` includes payments still in their dispute hold. */
@@ -157,6 +169,11 @@ export class EscrowAccountService {
     private readonly holds: LedgerHoldRepository,
     private readonly escrows: BuyerEscrowRepository,
     @Inject(ESCROW_INTENT_BUILDER) private readonly builder: EscrowIntentBuilderPort,
+    // Display-only figures beside the escrow (A3, D16). Optional: without them
+    // the two fields are `null`, never a guess.
+    @Optional() private readonly balances: AccountBalanceRepository | null = null,
+    @Optional() private readonly intents: PaymentIntentRepository | null = null,
+    @Optional() private readonly reconciliation: ReconciliationService | null = null,
   ) {}
 
   /**
@@ -267,6 +284,8 @@ export class EscrowAccountService {
         // is a fact about the escrow and not a failure to read one.
         chainReadable: true,
         lifetime: null,
+        uncreditedOnChain: null,
+        withdrawalsFrozen: await this.frozenOrNull(asset),
       };
     }
 
@@ -274,6 +293,10 @@ export class EscrowAccountService {
     const openHoldsAtomic = await this.holds.sumOpenByAccount(account, asset);
     const chainAtomic = BigInt(reading.balance.amount);
     const spendableAtomic = chainAtomic > openHoldsAtomic ? chainAtomic - openHoldsAtomic : 0n;
+    const [uncreditedAtomic, withdrawalsFrozen] = await Promise.all([
+      this.uncreditedAtomic(organizationId, account, asset, chainAtomic),
+      this.frozenOrNull(asset),
+    ]);
 
     return {
       exists: true,
@@ -307,7 +330,46 @@ export class EscrowAccountService {
             withdrawn: MoneyUtil.of(reading.lifetime.withdrawn, asset, decimals),
           }
         : null,
+      uncreditedOnChain:
+        uncreditedAtomic === null ? null : MoneyUtil.of(uncreditedAtomic, asset, decimals),
+      withdrawalsFrozen,
     };
+  }
+
+  /**
+   * What the chain holds beyond the ledger's mirror of this escrow, floored at
+   * zero. The mirror is the reconciler's (`walkEscrows`): `available + held +
+   * pending`, less the held payments already moved into the escrow's hold
+   * (G3.B1), which are out of the escrow balance but still in the ledger's held.
+   */
+  private async uncreditedAtomic(
+    organizationId: string,
+    account: AccountId,
+    asset: AssetId,
+    chainAtomic: bigint,
+  ): Promise<bigint | null> {
+    if (!this.balances || !this.intents) return null;
+    const [row, heldOnChain] = await Promise.all([
+      this.balances.findOneRow(organizationId, account, asset),
+      this.intents.sumHeldOnChainByAccounts(asset, [account]),
+    ]);
+    const mirrored =
+      BigInt(row?.available ?? '0') +
+      BigInt(row?.held ?? '0') -
+      (heldOnChain.get(account) ?? 0n) +
+      BigInt(row?.pending ?? '0');
+    return chainAtomic > mirrored ? chainAtomic - mirrored : 0n;
+  }
+
+  /** `isFrozen`, or `null` when it is not wired or could not be read: display only. */
+  private async frozenOrNull(asset: AssetId): Promise<boolean | null> {
+    if (!this.reconciliation) return null;
+    try {
+      return await this.reconciliation.isFrozen(asset);
+    } catch (error) {
+      this.logger.warn(`Could not read the withdrawal freeze for ${asset}: ${describe(error)}`);
+      return null;
+    }
   }
 
   /**
@@ -349,6 +411,8 @@ export class EscrowAccountService {
       observedAt: null,
       chainReadable: false,
       lifetime: null,
+      uncreditedOnChain: null,
+      withdrawalsFrozen: null,
     };
   }
 

@@ -61,6 +61,21 @@ export class SpendPolicyDto {
   @ApiProperty({ nullable: true, description: '`null` when `scope` is `ORGANIZATION`' })
   agentId: string | null;
 
+  @ApiPropertyOptional({
+    description:
+      '`GET` only: the agent whose limits these are, the requested `agentId` when it was read, ' +
+      "else the session's own agent. The policy itself may be the organization default " +
+      '(`scope`), which governs this agent until it has its own.',
+  })
+  subjectAgentId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      '`GET` only: true when an `agentId` was asked for and not read (an agent credential, ' +
+      "or not an agent of the caller's organization); the limits are then the session's own",
+  })
+  requestedAgentIgnored?: boolean;
+
   @ApiProperty({
     description: 'Monotonic within this scope. What a receipt names as `spendPolicyVersion`',
   })

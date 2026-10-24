@@ -4,7 +4,12 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import express, { json } from 'express';
 import request from 'supertest';
 
-import { ROUTE_BODY_LIMITS, applyRouteBodyLimits } from '@bootstrap/api/route-body-limits';
+import {
+  ROUTE_BODY_LIMITS,
+  applyApiCorsAndRouteBodyLimits,
+  applyRouteBodyLimits,
+} from '@bootstrap/api/route-body-limits';
+import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 /** The try route takes a 512 KB OpenAPI document; every other route keeps 100 KB. */
 describe('route body limits', () => {
@@ -68,6 +73,55 @@ describe('route body limits in a Nest app', () => {
         .post('/api/v1/provider/tools/try')
         .send({ blob: 'x'.repeat(512 * 1024) })
         .expect(404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * The API's own CORS + route-parser setup (`applyApiCorsAndRouteBodyLimits`,
+ * as `api/main.ts` calls it): a body the route-scoped parser refuses still
+ * carries the CORS headers for a listed origin, so the page can read the 413.
+ */
+describe('route body limits after the API CORS policy', () => {
+  const ORIGIN = 'http://localhost:4001';
+
+  async function appWithApiCors() {
+    const app = await NestFactory.create<NestExpressApplication>(EchoModule, { logger: false });
+    applyApiCorsAndRouteBodyLimits(app, [ORIGIN]);
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+    return app;
+  }
+
+  it('answers an oversized try body 413 PAYLOAD_TOO_LARGE with the CORS header', async () => {
+    const app = await appWithApiCors();
+    try {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/provider/tools/try')
+        .set('Origin', ORIGIN)
+        .send({ openapi: 'x'.repeat(700 * 1024) });
+      expect(response.status).toBe(413);
+      expect(response.headers['access-control-allow-origin']).toBe(ORIGIN);
+      expect(response.body).toMatchObject({
+        success: false,
+        error: { code: 'PAYLOAD_TOO_LARGE', statusCode: 413 },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('gives an unlisted origin no Access-Control-Allow-Origin on the same 413', async () => {
+    const app = await appWithApiCors();
+    try {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/provider/tools/try')
+        .set('Origin', 'https://evil.example')
+        .send({ openapi: 'x'.repeat(700 * 1024) });
+      expect(response.status).toBe(413);
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
     } finally {
       await app.close();
     }

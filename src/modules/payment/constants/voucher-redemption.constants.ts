@@ -217,7 +217,7 @@ export const BUYER_DEBT_WRITE_OFF_DAYS = 30;
  * old voucher may still be redeemable — a debt can lapse before its deadline —
  * and a replacement at a higher seq redeemed after it would charge the buyer
  * twice. `trg_payment_intents_voucher_seq_immutable` (migration
- * 1762400000050) enforces the same bounds per chain.
+ * 1762400000070) enforces the same bounds per chain.
  */
 export function debtReplaceableAfterExpirySeconds(caipId: string): number {
   return redeemGraceSeconds(caipId) + CLOCK_SKEW_TOLERANCE_SECONDS;

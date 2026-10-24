@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner, SelectQueryBuilder } from 'typeorm';
 
+import { containsLikePattern } from '@shared/utils/like-pattern.util';
+
 import { OverrideLogEntryEntity } from '../entities/override-log-entry.entity';
 import { AbstractRepository } from './abstract.repository';
 
@@ -99,9 +101,19 @@ export class OverrideLogEntryRepository extends AbstractRepository<OverrideLogEn
       // typed into a search box during an incident, and `to_tsquery` throws a
       // syntax error on an unbalanced quote. A search that 500s on a stray
       // apostrophe is a search nobody trusts at 03:00.
-      qb.andWhere(`to_tsvector('simple', entry.reason) @@ plainto_tsquery('simple', :search)`, {
-        search: filter.search,
-      });
+      //
+      // The console's box reads "who, reason, ticket", so the same term also
+      // matches the ticket and the actor's or approver's display name or email,
+      // literally (`containsLikePattern` escapes `%` and `_`). The exact-match
+      // `actorOperatorId` / `ticketRef` filters stay the precise ones.
+      qb.andWhere(
+        `(to_tsvector('simple', entry.reason) @@ plainto_tsquery('simple', :search)` +
+          ` OR entry.ticket_ref ILIKE :searchLike` +
+          ` OR EXISTS (SELECT 1 FROM operators op` +
+          ` WHERE op.id IN (entry.actor_operator_id, entry.approver_operator_id)` +
+          ` AND (op.display_name ILIKE :searchLike OR op.email ILIKE :searchLike)))`,
+        { search: filter.search, searchLike: containsLikePattern(filter.search) },
+      );
     }
 
     return qb;

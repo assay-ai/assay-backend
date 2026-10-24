@@ -8,7 +8,7 @@
  * `VERIFICATION_SAMPLING_SECRET`, `REDIS_PASSWORD`, `DATABASE_PASSWORD`), any
  * `Authorization: Bearer …` value, and the raw agent-credential token
  * (`src/database/postgres/entities/agent-credential.entity.ts` — only
- * `prefix` and `tokenHash` are safe).
+ * `tokenLast4` and `tokenHash` are safe).
  *
  * This walks the *object* about to be emitted and blanks values by key name,
  * deliberately not a regex over the rendered line — a regex has to be
@@ -24,12 +24,13 @@ export const REDACTED = '[REDACTED]';
 
 /**
  * Keys that would otherwise match a forbidden substring but are explicitly
- * safe to log — `agent-credential.entity.ts`'s two exceptions.
+ * safe to log — `agent-credential.entity.ts`'s exception (`tokenLast4` and
+ * the `hint` built from it match no forbidden key and no backstop shape).
  *
  * Checked against the *normalized* key (see {@link normalizeKey}), so this
  * also clears `token_hash` and `TokenHash`, not just the exact spelling.
  */
-const SAFE_KEYS = new Set(['tokenhash', 'prefix']);
+const SAFE_KEYS = new Set(['tokenhash']);
 
 /**
  * Substrings of a normalized key that mark its value as forbidden, wherever
@@ -250,8 +251,7 @@ export function redact(value: unknown, seen = new WeakSet<object>(), depth = 0):
 
 function redactEntry(key: string, value: unknown, seen: WeakSet<object>, depth: number): unknown {
   const normalized = normalizeKey(key);
-  // `prefix`/`tokenHash` are safe by definition (`agent-credential.entity.ts`);
-  // an API-key prefix would otherwise match the `assay_sk_live_` backstop.
+  // `tokenHash` is safe by definition (`agent-credential.entity.ts`).
   if (SAFE_KEYS.has(normalized) && typeof value === 'string') return value;
   if (normalized === CODE_KEY && isLoggableCode(value)) return value;
   return isForbiddenKey(key) ? REDACTED : redact(value, seen, depth + 1);

@@ -19,6 +19,7 @@ import {
 } from '@modules/notification/ports/notification.port';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
+import { oauthGrantScopes } from '@shared/auth/agent-scope';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
@@ -31,6 +32,7 @@ import {
 } from '../constants/oauth.constants';
 import { GracePayload, open as openGrace, seal as sealGrace } from '../domain/grace-box';
 import { hashOpaqueToken, isWellFormed, mint } from '../domain/opaque-token';
+import { isPaymentClient } from '../domain/payment-client';
 import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
 import { normaliseScope } from '../domain/scope';
@@ -185,7 +187,7 @@ export class OAuthTokenService {
     private readonly grants: OAuthGrantWriter,
     private readonly audit: AuditLogWriter,
     private readonly accessEpoch: AccessEpochService,
-    @Inject(OAUTH_CONFIG) private readonly config: Pick<OAuthConfig, 'issuer'>,
+    @Inject(OAUTH_CONFIG) private readonly config: Pick<OAuthConfig, 'issuer' | 'paymentClients'>,
     private readonly refreshTokens: OAuthRefreshTokenRepository,
     private readonly accessTokens: OAuthAccessTokenRepository,
     private readonly credentials: AgentCredentialRepository,
@@ -265,7 +267,14 @@ export class OAuthTokenService {
     }
 
     // Step 3: the grant.
-    const created = await this.grants.createGrant({ code, client, audience: this.config.issuer });
+    // Fixed at grant time, by client: the first-party `assay-mcp` client gets
+    // a new API key's scopes, any other client `tools:call` alone (H2).
+    const created = await this.grants.createGrant({
+      code,
+      client,
+      audience: this.config.issuer,
+      scopes: oauthGrantScopes(isPaymentClient(this.config.paymentClients, client)),
+    });
     if ('reason' in created) {
       if (created.reason === 'grant_limit_reached') return GRANT_LIMIT_REACHED;
       if (created.reason === 'agent_not_active') return AGENT_NOT_ACTIVE;

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { PaymentIntentRedemptionRetry1762400000060 } from '@database/postgres/migrations/1762400000060-payment-intent-redemption-retry';
+import { PaymentIntentRedemptionRetry1762400000080 } from '@database/postgres/migrations/1762400000080-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
@@ -30,6 +30,7 @@ import { AuditLogEntryEntity } from '@database/postgres/entities/audit-log-entry
 import { AuditLogWriter } from '@shared/audit';
 import { VaultKekCheckEntity } from '@database/postgres/entities/vault-kek-check.entity';
 import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
+import { BindingTestRunAuthMode1762400000050 } from '@database/postgres/migrations/1762400000050-binding-test-run-auth-mode';
 import { CreateVaultKekChecks1762000000003 } from '@database/postgres/migrations/1762000000003-create-vault-kek-checks';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
@@ -325,8 +326,9 @@ export async function createBindingEditorTestContext(
       CreateBindingCredentials1762000000001,
       ToolBindingAuthMode1762000000002,
       CreateVaultKekChecks1762000000003,
+      BindingTestRunAuthMode1762400000050,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
-      PaymentIntentRedemptionRetry1762400000060,
+      PaymentIntentRedemptionRetry1762400000080,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',
@@ -428,6 +430,7 @@ export async function createBindingEditorTestContext(
     catalogue,
     vault,
     new AuditLogWriter(dataSource),
+    versions,
   );
 
   const context: BindingEditorTestContext = {

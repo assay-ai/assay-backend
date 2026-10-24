@@ -167,6 +167,13 @@ export enum ProviderErrorCode {
    * without reading `Config.stake_mint` would be a transfer of a guessed token.
    */
   PROVIDER_STAKE_CHAIN_UNAVAILABLE = 'PROVIDER_STAKE_CHAIN_UNAVAILABLE',
+  /** An unstake for more than the bonded stake: `request_unstake` would revert. */
+  PROVIDER_STAKE_INSUFFICIENT_BONDED = 'PROVIDER_STAKE_INSUFFICIENT_BONDED',
+  /**
+   * A withdrawal while nothing is withdrawable: nothing unstaked, or its
+   * unbonding period not over yet. `withdraw_stake` would revert.
+   */
+  PROVIDER_STAKE_NOTHING_WITHDRAWABLE = 'PROVIDER_STAKE_NOTHING_WITHDRAWABLE',
   PROVIDER_PUBLISH_CHECKS_FAILED = 'PROVIDER_PUBLISH_CHECKS_FAILED',
   /** `GET /providers/me/tool-bindings/:id` — no binding by this id belongs to the caller. */
   PROVIDER_BINDING_NOT_FOUND = 'PROVIDER_BINDING_NOT_FOUND',
@@ -253,6 +260,8 @@ export enum ProviderErrorCode {
   PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
   /** With the egress relay on, an endpoint that is not https, or names an IP address. 400. */
   PROVIDER_ENDPOINT_NOT_RELAYABLE = 'PROVIDER_ENDPOINT_NOT_RELAYABLE',
+  /** The endpoint names one of Assay's own hosts (`EGRESS_DENIED_HOST_SUFFIXES`). 400. */
+  PROVIDER_ENDPOINT_HOST_NOT_ALLOWED = 'PROVIDER_ENDPOINT_HOST_NOT_ALLOWED',
   /** A request mapping declares more headers than a call can carry. 400. */
   PROVIDER_TOO_MANY_MAPPING_HEADERS = 'PROVIDER_TOO_MANY_MAPPING_HEADERS',
 }
@@ -341,6 +350,11 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Port ${context?.port} is not supported. Use 443 or one of: ` +
       `${RELAY_ALLOWED_PORTS.filter((port) => port !== 443).join(', ')}.`,
+  },
+  endpointHostNotAllowed: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_HOST_NOT_ALLOWED,
+    statusCode: 400,
+    message: () => "This endpoint cannot be called: it points at one of Assay's own hosts.",
   },
   endpointNotRelayable: {
     code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
@@ -579,6 +593,22 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
       `. This fails closed on purpose — a preflight built without the chain would quote balances` +
       ` nobody verified, and a transaction built without reading the stake mint would move a` +
       ` token you did not choose. Nothing was signed or submitted; retry.`,
+  },
+  stakeInsufficientBonded: {
+    code: ProviderErrorCode.PROVIDER_STAKE_INSUFFICIENT_BONDED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `You cannot unstake more than your bonded stake` +
+      `${context?.bonded ? ` (${context.bonded} atomic units)` : ''}` +
+      `. Nothing was built.`,
+    publicContext: ['bonded'],
+  },
+  stakeNothingWithdrawable: {
+    code: ProviderErrorCode.PROVIDER_STAKE_NOTHING_WITHDRAWABLE,
+    statusCode: 409,
+    message: () =>
+      'Nothing is withdrawable yet: unstake first, then wait for the unbonding period to end.' +
+      ' Nothing was built.',
   },
   publishChecksFailed: {
     code: ProviderErrorCode.PROVIDER_PUBLISH_CHECKS_FAILED,

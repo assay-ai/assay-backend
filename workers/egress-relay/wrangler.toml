@@ -1,4 +1,8 @@
 name = "assay-egress-relay"
+# Deployed twice, one Worker per environment, each with its own RELAY_TOKEN:
+#   npx wrangler deploy --name assay-egress-relay-dev
+#   npx wrangler deploy --name assay-egress-relay-prod
+# A bare `wrangler deploy` creates a third, unrouted Worker under this name.
 main = "src/index.ts"
 compatibility_date = "2026-10-18"
 # Reachable only on its custom domain: the workers.dev and preview URLs would
@@ -11,6 +15,9 @@ preview_urls = false
 
 [vars]
 ALLOW_HTTP = "0"
+# Assay's own domains (and subdomains), never fetched. Keep equal to the
+# backend's EGRESS_DENIED_HOST_SUFFIXES.
+DENIED_HOST_SUFFIXES = "goassay.ai"
 
 # Secrets (never in this file): wrangler secret put RELAY_TOKEN
 # Optional during rotation:     wrangler secret put RELAY_TOKEN_NEXT

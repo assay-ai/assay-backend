@@ -4,7 +4,8 @@ import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 
-import { RequestWithSession, SESSION_REQUEST_KEY } from './session-auth.guard';
+import type { RequestWithSession } from './session-auth.guard';
+import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
  * Refuses an agent machine credential on a route only a person may use.
@@ -40,8 +41,9 @@ const HUMAN_KINDS: ReadonlySet<McpCallerKind> = new Set([
 ]);
 
 /**
- * The guard's allow-list, for a route that is open to both kinds but returns
- * more to a person (`GET /agents?include=`): one list, so the two cannot drift.
+ * The guard's allow-list, for code that answers a person differently from an
+ * agent credential (`GET /spend-policy`, the MCP host's scope check): one
+ * list, so the two cannot drift.
  */
 export function isHumanCallerKind(callerKind: McpCallerKind): boolean {
   return HUMAN_KINDS.has(callerKind);

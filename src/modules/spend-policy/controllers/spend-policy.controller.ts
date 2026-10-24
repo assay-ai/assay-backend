@@ -1,10 +1,28 @@
-import { Body, Controller, Get, Patch, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AgentScope,
+  CurrentSession,
+  HumanSessionGuard,
+  RequireAgentScope,
+  SessionAuthGuard,
+  isHumanCallerKind,
+} from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { auditActorOf } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 
 import { SpendPolicyDto } from '../dto/get-spend-policy.dto';
 import {
@@ -20,13 +38,35 @@ import { SpendPolicyService } from '../services/spend-policy.service';
 @UseGuards(SessionAuthGuard)
 @Controller('spend-policy')
 export class SpendPolicyController {
-  constructor(private readonly spendPolicy: SpendPolicyService) {}
+  constructor(
+    private readonly spendPolicy: SpendPolicyService,
+    // The agent's resolved policy (and its version) is cached per organization epoch.
+    private readonly epochs: AccessEpochService,
+  ) {}
 
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get()
   @ApiOperation({ summary: "The session's agent policy, falling back to the organization default" })
+  @ApiQuery({
+    name: 'agentId',
+    required: false,
+    description:
+      "Another agent of the caller's own organization, read by a person (the consent card's " +
+      'agent select). An agent credential, or an id that is not one of the organization’s ' +
+      "agents, reads the session's own agent: `subjectAgentId` names the agent read and " +
+      '`requestedAgentIgnored` is true.',
+  })
   @ApiResponse({ status: 200, description: 'The live policy', type: SpendPolicyDto })
-  async get(@CurrentSession() session: McpSession): Promise<SpendPolicyDto> {
-    return this.spendPolicy.get(session.organizationId, session.agentId);
+  async get(
+    @CurrentSession() session: McpSession,
+    @Query('agentId') agentId?: unknown,
+  ): Promise<SpendPolicyDto> {
+    return this.spendPolicy.getForRequest(
+      session.organizationId,
+      session.agentId,
+      agentId,
+      isHumanCallerKind(session.callerKind),
+    );
   }
 
   // The agent's own credential may READ its limits (it needs them to plan),
@@ -50,6 +90,48 @@ export class SpendPolicyController {
     );
   }
 
+  /**
+   * "Use account default" on `/limits` (BUG-BUY-CONNECT-05 part 2): drops the
+   * agent's own policy, so the agent falls back to the organization default.
+   * A person's decision, audited; an agent of another organization is a 404.
+   */
+  @Delete('agents/:agentId')
+  @UseGuards(HumanSessionGuard)
+  @ApiOperation({
+    summary: "Drop an agent's own policy: the agent then uses the organization default",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'The policy now in force for the agent (the organization default)',
+    type: SpendPolicyDto,
+  })
+  @ApiResponse({ status: 403, description: 'AUTH_HUMAN_SESSION_REQUIRED — an agent credential' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'ACCOUNT_AGENT_NOT_FOUND — no such agent in this organization; SPEND_POLICY_NOT_FOUND — ' +
+      'no organization default to fall back to',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'SPEND_POLICY_DROP_REFUSED — `reason` ACCESS_DIFFERS (the agent has its own tool access or ' +
+      'rules, kept in the same policy) or PAUSED (the agent is paused, the default is not)',
+  })
+  async dropAgentPolicy(
+    @CurrentSession() session: McpSession,
+    @Param('agentId', new ParseUUIDPipe()) agentId: string,
+  ): Promise<SpendPolicyDto> {
+    const dto = await this.spendPolicy.dropAgentPolicy(
+      session.organizationId,
+      agentId,
+      auditActorOf(session),
+    );
+    await this.epochs.bump(session.organizationId);
+    return dto;
+  }
+
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
   @Get('history')
   @ApiOperation({ summary: 'Policy version history, newest first' })
   @ApiCursorPage(SpendPolicyHistoryEntryDto)

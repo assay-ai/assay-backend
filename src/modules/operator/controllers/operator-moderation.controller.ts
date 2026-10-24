@@ -141,6 +141,10 @@ export class OperatorModerationController {
     type: ApprovalQueuedDto,
     description: 'Queued for a second operator',
   })
+  @ApiResponse({
+    status: 404,
+    description: 'No such handle (TOOLSET_HANDLE_NOT_FOUND); nothing is queued',
+  })
   async renameHandle(
     @CurrentOperator() operator: OperatorSession,
     @Param() params: HandleParamDto,
@@ -164,6 +168,11 @@ export class OperatorModerationController {
     status: 202,
     type: ApprovalQueuedDto,
     description: 'Queued for a second operator',
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      'No such handle (TOOLSET_HANDLE_NOT_FOUND) or organization (TOOLSET_ORGANIZATION_NOT_FOUND); nothing is queued',
   })
   async reassignHandle(
     @CurrentOperator() operator: OperatorSession,

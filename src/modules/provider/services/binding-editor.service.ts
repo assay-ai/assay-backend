@@ -56,12 +56,13 @@ import { assertBindingContract, defaultBindingRange } from '../domain/binding-co
 /**
  * The fields a revision is *about*.
  *
- * Changing any of them raises `mapping_version`, writes a new `binding_versions`
- * snapshot, and — because the publish gate keys on the revision — invalidates
- * the tester run that was green a moment ago. That last consequence is the
- * point: these are exactly the fields that change what a call does or what it
- * costs, and a green tick that survived the change would be vouching for
- * something nobody ran.
+ * Changing any of them raises `mapping_version` and writes a new
+ * `binding_versions` snapshot, so the change goes live only by a publish.
+ * The tester run that was green a moment ago is invalidated when the change
+ * touches the call (`tested-call.ts`: endpoint, mappings, timeout, contract
+ * terms) — a green tick that survived it would vouch for something nobody
+ * ran. A change of the offer alone (price, pricing mode, asset, chains) keeps
+ * it: the tester sends none of those (BUG-PRV-CATALOG-02).
  *
  * `slaFailureRate` and the free-tier figures are deliberately outside the set.
  * They change routing arithmetic and quota accounting, not what the endpoint is
@@ -178,6 +179,10 @@ export class BindingEditorService {
 
     if (body.direction === MappingDirection.REQUEST) {
       const request = inspectRequestMapping(body.mapping, context);
+      // The same header count, `x-assay-*`, secret-constant and credential
+      // query checks the save runs, so the editor can say so as the provider
+      // types. No endpoint here: only the mapping's own entries are checked.
+      assertNoCredentialsInMapping('', request.spec);
       return {
         canonical: request.spec,
         selectors: [...request.selectors],

@@ -98,7 +98,9 @@ export class ProviderStakeIntentController {
   @ApiResponse({ status: 201, type: CreateStakeIntentResponseDto })
   @ApiResponse({
     status: 409,
-    description: 'No proved stake authority, or the account is not open yet',
+    description:
+      'No proved stake authority, the account is not open yet, or the amount is above the ' +
+      'bonded stake (`PROVIDER_STAKE_INSUFFICIENT_BONDED`)',
   })
   @ApiResponse({ status: 503, description: 'The chain could not be read; nothing was built' })
   async unstake(
@@ -115,12 +117,15 @@ export class ProviderStakeIntentController {
       'Returns `withdrawable` alongside `blockedBy`: `UNBONDING_NOT_MATURED` resolves with ' +
       'time, `EXPOSURE` resolves only when calls settle. A blocked withdrawal returns **no ' +
       'transaction** — `withdraw_stake` would reject it, and discovering that costs a network ' +
-      'fee. Still a `201`: the request was answered, and the answer is the limit.',
+      'fee. Still a `201` when part of the amount is withdrawable: the answer is the limit. ' +
+      'When nothing is, a `409`.',
   })
   @ApiResponse({ status: 201, type: CreateStakeIntentResponseDto })
   @ApiResponse({
     status: 409,
-    description: 'No proved stake authority, or the account is not open yet',
+    description:
+      'No proved stake authority, the account is not open yet, or nothing is withdrawable ' +
+      '(`PROVIDER_STAKE_NOTHING_WITHDRAWABLE`: nothing unstaked, or not matured)',
   })
   @ApiResponse({ status: 503, description: 'The chain could not be read; nothing was built' })
   async withdraw(

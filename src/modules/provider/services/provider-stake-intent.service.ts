@@ -131,6 +131,16 @@ export class ProviderStakeIntentService {
 
     const money = await this.resolveAmount(kind, account, amount);
 
+    // `request_unstake` reverts on more than `bonded`: refused before the fee.
+    if (
+      kind === StakeIntentKind.UNSTAKE &&
+      stake &&
+      money &&
+      MoneyUtil.toAtomic(money) > MoneyUtil.toAtomic(stake.bonded)
+    ) {
+      throw ProviderErrors.stakeInsufficientBonded({ bonded: stake.bonded.amount });
+    }
+
     if (kind === StakeIntentKind.WITHDRAW) {
       // `stake` is non-null here: `assertAccountState` has already refused a
       // withdrawal against an account that was never opened.
@@ -166,6 +176,12 @@ export class ProviderStakeIntentService {
     requested: Money,
   ): Promise<CreateStakeIntentResponseDto> {
     const limit = stakeWithdrawalLimit(stake, requested, new Date());
+
+    // Nothing unstaked, or not matured yet: there is no withdrawal to describe.
+    // A partly covered one still answers with `withdrawable` and `blockedBy`.
+    if (MoneyUtil.isZero(limit.withdrawable)) {
+      throw ProviderErrors.stakeNothingWithdrawable();
+    }
 
     if (limit.blockedBy !== null) {
       const preflight = await this.guard(account, () =>

@@ -1,4 +1,4 @@
-import { PaymentIntentRedemptionRetry1762400000060 } from '@database/postgres/migrations/1762400000060-payment-intent-redemption-retry';
+import { PaymentIntentRedemptionRetry1762400000080 } from '@database/postgres/migrations/1762400000080-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
@@ -208,7 +208,7 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       VerificationRecordDisputeOutcome1761800000001,
       ToolBindingAuthMode1762000000002,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
-      PaymentIntentRedemptionRetry1762400000060,
+      PaymentIntentRedemptionRetry1762400000080,
     ],
     synchronize: false,
     logging: false,

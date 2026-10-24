@@ -13,6 +13,15 @@ export {
   withSanctionedEgress,
 } from './egress-lockdown';
 export {
+  CONFIG_ORIGIN_URL_ENVS,
+  CONFIG_ORIGIN_URL_MAP_ENVS,
+  EGRESS_CONFIG_HOSTS,
+  configOriginEgressHosts,
+} from './egress-config-hosts';
+export { DNS_SERVERS_ENV, dnsServersLookup, parseDnsServers } from './egress-dns-servers';
+export type { DnsServersResolver } from './egress-dns-servers';
+export { EGRESS_DENIED_HOST_SUFFIXES_ENV, deniedHostSuffixes, isDeniedHost } from './denied-hosts';
+export {
   EGRESS_RELAY_CONFIG,
   EGRESS_RELAY_TOKEN_ENV,
   EGRESS_RELAY_URL_ENV,

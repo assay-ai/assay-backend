@@ -17,8 +17,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `debtReplaceableAfterExpirySeconds`, which `BuyerDebtService` gates on first;
  * the trigger is the backstop. Every other clause is unchanged.
  */
-export class VoucherSeqDebtReplacementPerChain1762400000050 implements MigrationInterface {
-  name = 'VoucherSeqDebtReplacementPerChain1762400000050';
+export class VoucherSeqDebtReplacementPerChain1762400000070 implements MigrationInterface {
+  name = 'VoucherSeqDebtReplacementPerChain1762400000070';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

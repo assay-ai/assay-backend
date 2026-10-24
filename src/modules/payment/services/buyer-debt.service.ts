@@ -384,7 +384,7 @@ export class BuyerDebtService {
  * replacement at a higher seq cannot charge the buyer twice. A debt lapsed on
  * `VoucherExpired` is past it already; one lapsed earlier (a permanent refusal,
  * a buyer tightening at the margin) waits for it. The voucher_seq trigger
- * (migration 1762400000050) enforces the same per-chain bound.
+ * (migration 1762400000070) enforces the same per-chain bound.
  */
 function replaceableAtOf(debt: OutstandingDebt): Date {
   return new Date(

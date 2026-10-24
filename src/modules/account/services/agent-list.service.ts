@@ -1,9 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
-import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { CursorPageDto } from '@shared/api';
-import { isHumanCallerKind } from '@shared/auth';
 
 import { agentHealth } from '../domain/agent-health';
 import {
@@ -21,9 +19,8 @@ import { AgentsService } from './agents.service';
  * once (`AgentCredentialsService.firstPagesFor`) rather than one
  * `GET /agents/:agentId/credentials` per agent.
  *
- * Without `include` it is `AgentsService.list`, unchanged. With it, it is a
- * person's read: it nests what the credentials route returns, and that route
- * is `HumanSessionGuard`'s, so a machine credential is refused the same way.
+ * A person's read: the route takes `HumanSessionGuard`, as the credentials
+ * route does. Without `include` it is `AgentsService.list`, unchanged.
  */
 @Injectable()
 export class AgentListService {
@@ -37,10 +34,6 @@ export class AgentListService {
     query: ListAgentsQueryDto,
   ): Promise<CursorPageDto<AgentWithIncludesDto>> {
     const include = new Set(query.include ?? []);
-    if (include.size > 0 && !isHumanCallerKind(session.callerKind)) {
-      throw AuthErrors.humanSessionRequired();
-    }
-
     const page = await this.agents.list(session.organizationId, query);
     if (include.size === 0) return page;
 

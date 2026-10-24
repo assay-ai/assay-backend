@@ -1,6 +1,7 @@
 import { All, Controller, Inject, Optional, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
+import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import { challengeHeader } from '@modules/oauth/domain/www-authenticate';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
@@ -13,6 +14,8 @@ import {
 } from '@modules/toolset/domain/mcp-url';
 import { AccessResolver } from '@modules/toolset/services/access.resolver';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
+import { AgentScope } from '@shared/auth/agent-scope';
+import { isHumanCallerKind } from '@shared/auth/human-session.guard';
 import { BaseError } from '@shared/errors/base.error';
 
 import { MCP_BEARER_SCHEME_RE } from '../constants/mcp.constants';
@@ -42,6 +45,7 @@ import { McpServerFactory } from '../services/mcp-server.factory';
  *         ─▶ this address sent too many bad tokens  → 429, no lookup
  *         ─▶ authenticate                           no or bad token     → 401
  *                                                   + WWW-Authenticate
+ *         ─▶ an agent key without `tools:call`       → 403 AUTH_SCOPE_MISSING
  *         ─▶ resolve the URL for this org           not here / not his  → 404
  *         ─▶ resolve the caller's access (cached, invalidated on write)
  *         ─▶ one MCP server bound to session + scope, for this request only
@@ -113,6 +117,14 @@ export class McpController {
     // this endpoint is a read of the account's own data — `tools/list` is the
     // shop and `tools/call` spends — so it is refused whole.
     if (session.blocked) throw sessionBlockedError(session.blocked);
+    // Every request here lists, searches or calls tools: an agent credential
+    // needs `tools:call` (a person's session is not limited by scopes).
+    if (
+      !isHumanCallerKind(session.callerKind) &&
+      !(session.scopes ?? []).includes(AgentScope.TOOLS_CALL)
+    ) {
+      throw AuthErrors.scopeMissing({ requiredScope: AgentScope.TOOLS_CALL });
+    }
 
     const view = await this.endpoints.resolve(session.organizationId, parsed);
     const scope: McpScope = {

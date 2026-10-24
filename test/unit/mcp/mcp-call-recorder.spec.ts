@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import {
@@ -181,5 +183,45 @@ describe('McpCallRecorder', () => {
       );
     }
     expect(notified[0]).toMatchObject({ title: 'Calls to _b_x__b_ keep being refused' });
+  });
+
+  it('says so in the log when the notification port is not wired (BUG-SEC-01)', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const recorder = new McpCallRecorder({
+        writeRefusal: async () => undefined,
+      } as unknown as ToolCallRecordWriter);
+      for (let n = 0; n < 2; n += 1) {
+        await recorder.recordRefusal(SESSION, undefined, 't', ToolAccessErrors.notAllowed(), 0);
+      }
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('NOTIFICATION_PORT');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('logs, and does not throw, when sending the alert fails', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const redis = { incr: async () => REPEAT_ALERT_THRESHOLD, expire: async () => 1 };
+      const recorder = new McpCallRecorder(
+        { writeRefusal: async () => undefined } as unknown as ToolCallRecordWriter,
+        undefined,
+        undefined,
+        { getRedisClient: () => redis } as unknown as CacheService,
+        {
+          notify: async () => {
+            throw new Error('queue down');
+          },
+        } as never,
+      );
+      await expect(
+        recorder.recordRefusal(SESSION, undefined, 't', ToolAccessErrors.notAllowed(), 0),
+      ).resolves.toEqual(expect.objectContaining({ callId: expect.any(String) }));
+      expect(String(warn.mock.calls[0][0])).toContain('queue down');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

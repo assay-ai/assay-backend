@@ -127,9 +127,9 @@ export const DisputeErrors = createDomainErrorFactory('DISPUTE', {
   notDecidable: {
     code: DisputeErrorCode.DISPUTE_NOT_DECIDABLE,
     statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Dispute cannot be decided from its current state` +
-      `${context?.state ? `: ${context.state}` : ''}`,
+    // Only an OPEN report is decided; every other state this module writes is
+    // a decision or a withdrawal. The state stays in the log context.
+    message: (_context?: Record<string, any>) => 'This report was already decided or withdrawn.',
   },
   /**
    * The call's payment is still being collected (a voucher awaiting

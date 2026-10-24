@@ -1,7 +1,7 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
@@ -19,6 +19,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Holds')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.ACTIVITY_READ)
 @Controller('holds')
 export class HoldsController {
   constructor(private readonly holds: HoldsService) {}

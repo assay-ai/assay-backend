@@ -17,8 +17,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Only read for chains that admit any seq order (`eip155`). Solana keeps one
  * row per payer in the queue and is unchanged.
  */
-export class PaymentIntentRedemptionRetry1762400000060 implements MigrationInterface {
-  name = 'PaymentIntentRedemptionRetry1762400000060';
+export class PaymentIntentRedemptionRetry1762400000080 implements MigrationInterface {
+  name = 'PaymentIntentRedemptionRetry1762400000080';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

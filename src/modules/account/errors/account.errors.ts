@@ -5,8 +5,8 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * audit log, agents, and agent credentials.
  *
  * The audit log has no write endpoint (it is append-only, read through this
- * module only). Listing under an unrecognised `agentId` is a filter that
- * matches nothing; minting a credential for one is a 404.
+ * module only). Listing or minting credentials under an unrecognised
+ * `agentId` is a 404.
  */
 export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',
@@ -19,6 +19,9 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
   ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
   ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED = 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+  ACCOUNT_DELEGATE_BIND_CONFLICT = 'ACCOUNT_DELEGATE_BIND_CONFLICT',
+  ACCOUNT_CREDENTIAL_SCOPES_INVALID = 'ACCOUNT_CREDENTIAL_SCOPES_INVALID',
+  ACCOUNT_CREDENTIAL_EXPIRY_INVALID = 'ACCOUNT_CREDENTIAL_EXPIRY_INVALID',
   // ── The account blocklist ──
   ACCOUNT_BLOCKED = 'ACCOUNT_BLOCKED',
 }
@@ -87,6 +90,20 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
         context?.delegate ? ` ${context.delegate}` : ''
       }; nothing was bound`,
   },
+  /** `payments` without `tools:call`: a key that may pay must be able to call. */
+  credentialScopesInvalid: {
+    code: AccountErrorCode.ACCOUNT_CREDENTIAL_SCOPES_INVALID,
+    statusCode: 400,
+    message: () => 'The payments scope needs the tools:call scope too; nothing was created',
+  },
+  /** `expiresAt` in the past, or more than the maximum lifetime away. */
+  credentialExpiryInvalid: {
+    code: AccountErrorCode.ACCOUNT_CREDENTIAL_EXPIRY_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `expiresAt must be in the future and at most ${context?.maxDays ?? 365} days from now; ` +
+      'nothing was created',
+  },
   /**
    * The key is already bound to ANOTHER live agent credential (in any
    * organization). A delegate key belongs to one credential, so what it spent
@@ -102,6 +119,18 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
       } is already bound to another agent credential; nothing was bound. Revoke that credential, or bind a key of this agent's own`,
   },
   /**
+   * Another key was bound to this credential between the read and the write
+   * (two first binds racing): nothing was bound. Binding again now stores the
+   * key as pending, for the payer's approval.
+   */
+  delegateBindConflict: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_BIND_CONFLICT,
+    statusCode: 409,
+    message: () =>
+      'Another payment key was bound to this credential at the same moment; nothing was bound. ' +
+      "Ask for a new challenge and bind again: the key then waits for the payer's approval",
+  },
+  /**
    * An OAuth grant of a client outside `OAUTH_PAYMENT_CLIENTS` asked for a
    * delegate challenge or a bind (R-OA-22). Only API keys and `assay-mcp`
    * grants may bind a payment key (spec §6.3.13, owner decision H2).
@@ -115,19 +144,24 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
   /**
    * A party to this request is on the account blocklist: a wallet that is the
    * payer, payee, delegate or stake authority, or the provider serving the
-   * call. A blocked *organization's own* session is refused with
-   * `AUTH_ORGANIZATION_SUSPENDED` instead, the code the dashboard already
-   * handles.
+   * call, or the organization behind the session itself (`ORGANIZATION`:
+   * "Your account is blocked by Assay", on the API and the MCP host).
    *
    * 403: the request is well formed and re-authenticating will not help. The
-   * context names the role (`PAYER`, `PAYEE`, …) and never the reason, which is
-   * the platform's internal note.
+   * response's `error.context.role` names the role (`ORGANIZATION` for the
+   * caller's own organization, else `PAYER`, `PAYEE`, `PROVIDER`, `DELEGATE`,
+   * `STAKE_AUTHORITY`), so a client tells its own block from another party's
+   * without reading the message. Never the reason, which is the platform's
+   * internal note, and never the subject kind.
    */
   accountBlocked: {
     code: AccountErrorCode.ACCOUNT_BLOCKED,
     statusCode: 403,
     message: (context?: Record<string, any>) =>
-      `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
-      'contact support',
+      context?.role === 'ORGANIZATION'
+        ? 'Your account is blocked by Assay; contact support'
+        : `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
+          'contact support',
+    publicContext: ['role'],
   },
 });

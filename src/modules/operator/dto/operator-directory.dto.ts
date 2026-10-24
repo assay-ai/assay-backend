@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   ArrayUnique,
   IsArray,
   IsEmail,
@@ -67,8 +68,9 @@ export class AddOperatorBodyDto {
   @MaxLength(256)
   email?: string;
 
-  @ApiProperty({ enum: OperatorRole, isArray: true })
+  @ApiProperty({ enum: OperatorRole, isArray: true, minItems: 1 })
   @IsArray()
+  @ArrayMinSize(1, { message: 'Choose at least one role' })
   @ArrayUnique()
   @ArrayMaxSize(16)
   @IsEnum(OperatorRole, { each: true })

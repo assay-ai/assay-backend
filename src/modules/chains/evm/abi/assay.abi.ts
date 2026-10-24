@@ -255,6 +255,14 @@ export const ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI = parseAbi([
 ]);
 
 /**
+ * The escrow's `Deposited`, alone: what the reconciler reads (read-only) to
+ * name a deposit no deposit intent credited (A2, BUG-BUY-MONEY-02).
+ */
+export const ASSAY_ESCROW_DEPOSIT_EVENTS_ABI = parseAbi([
+  'event Deposited(address indexed buyer, address indexed funder, uint64 amount, uint128 balance)',
+]);
+
+/**
  * `Multicall3.aggregate3` — the one batching door. Each call carries
  * `allowFailure: true`, so one refused judgement does not revert the others;
  * the per-call result is learned by simulating the batch first (`eth_call`

@@ -21,11 +21,13 @@ import { sweepRevokedCredentialTokens } from '@modules/oauth/services/oauth-gran
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
+import { AgentScope, DEFAULT_AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import {
-  AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
+  agentCredentialHint,
+  agentCredentialLast4,
 } from '../constants/agent-credential-token.constants';
 
 import {
@@ -37,6 +39,11 @@ import {
   AgentCredentialsPage,
   ListAgentCredentialsQueryDto,
 } from '../dto/list-agent-credentials.dto';
+import {
+  CREDENTIAL_DEFAULT_LIFETIME_DAYS,
+  CREDENTIAL_MAX_LIFETIME_DAYS,
+  ONE_DAY_MS,
+} from '../constants/credential-expiry.constants';
 import { AccountErrors } from '../errors/account.errors';
 import { LastSeenKind, LastSeenRecorder, credentialKey } from '@shared/last-seen';
 
@@ -71,8 +78,8 @@ const CREDENTIALS_LIST: ListSpec = {
  *
  * `create` and `revoke` each append an `audit_log_entries` row in the same
  * transaction as the write (`credential.created` / `credential.revoked`). The
- * entry names the credential by id and name — never the token, its stored
- * prefix or its hash.
+ * entry names the credential by id and name — never the token, its hint or
+ * its hash.
  *
  * An OAuth grant (`issued_via = 'OAUTH'`) is a row of the same table and is
  * listed and revoked here like an API key (owner rule: OAuth = API key). Its
@@ -97,6 +104,11 @@ export class AgentCredentialsService {
     agentId: string,
     query: ListAgentCredentialsQueryDto,
   ): Promise<CursorPageDto<AgentCredentialDto>> {
+    // An agent of another organization, or none at all, is a 404 like
+    // `/agents/:agentId/access`, not an empty page: a client must be able to
+    // tell "no keys" from "no such agent".
+    await this.assertAgentOf(organizationId, agentId);
+
     const qb = this.credentials
       .createQueryBuilder('credential')
       .where('credential.organizationId = :organizationId', { organizationId })
@@ -177,6 +189,14 @@ export class AgentCredentialsService {
     return pages;
   }
 
+  /** `ACCOUNT_AGENT_NOT_FOUND` unless the agent exists in this organization. */
+  private async assertAgentOf(organizationId: string, agentId: string): Promise<void> {
+    const agent = await this.agents.findById(agentId);
+    if (!agent || agent.organizationId !== organizationId) {
+      throw AccountErrors.agentNotFound({ agentId });
+    }
+  }
+
   /**
    * The one place rows read for {@link firstPagesFor} get their `lastUsedAt`:
    * the latest of the column and the stamp `LastSeenRecorder` has not written
@@ -212,10 +232,9 @@ export class AgentCredentialsService {
     body: CreateAgentCredentialBodyDto,
     actor: AuditActor,
   ): Promise<CreateAgentCredentialResponseDto> {
-    const agent = await this.agents.findById(agentId);
-    if (!agent || agent.organizationId !== organizationId) {
-      throw AccountErrors.agentNotFound({ agentId });
-    }
+    const scopes = scopesFor(body.scopes);
+    const expiresAt = expiryFor(body.expiresAt, new Date());
+    await this.assertAgentOf(organizationId, agentId);
 
     const token = generateToken();
 
@@ -223,10 +242,10 @@ export class AgentCredentialsService {
       organizationId,
       agentId,
       name: body.name,
-      prefix: token.slice(0, AGENT_CREDENTIAL_STORED_PREFIX_LENGTH),
+      tokenLast4: agentCredentialLast4(token),
       tokenHash: digestToken(token),
-      scopes: body.scopes ?? [],
-      expiresAt: body.expiresAt ?? null,
+      scopes,
+      expiresAt,
     });
 
     const saved = await this.dataSource.transaction(async (manager) => {
@@ -256,7 +275,7 @@ export class AgentCredentialsService {
       id: saved.id,
       agentId: saved.agentId,
       name: saved.name,
-      prefix: saved.prefix,
+      hint: agentCredentialHint(saved.tokenLast4) as string,
       // Exactly once, and only here — see the class comment.
       token,
       scopes: saved.scopes,
@@ -363,6 +382,34 @@ export class AgentCredentialsService {
     if (isGrant) await sweepRevokedCredentialTokens(this.dataSource, id);
   }
 
+  /**
+   * The owner discards the payment key a credential waits with (M3): a key
+   * the agent proved while another was bound, which the owner does not mean
+   * to approve. The bound key is untouched and keeps signing. Idempotent:
+   * nothing pending is not an error.
+   */
+  async discardPendingDelegate(
+    organizationId: string,
+    agentId: string,
+    id: string,
+    actor: AuditActor,
+  ): Promise<void> {
+    const credential = await this.credentials.findOneBy({ organizationId, id });
+    if (!credential || credential.agentId !== agentId) {
+      throw AccountErrors.credentialNotFound({ id });
+    }
+    if (!(await this.credentials.clearPendingDelegate(organizationId, id))) return;
+    await this.audit.recordAfterCommit({
+      organizationId,
+      actor,
+      action: 'credential.pending_delegate_discarded',
+      resourceType: 'agent_credential',
+      resourceId: id,
+      before: { pendingDelegateAccount: credential.pendingDelegateAccount ?? null },
+      after: { pendingDelegateAccount: null },
+    });
+  }
+
   /** The OAuth clients of a page's grants, by row id, in one query. */
   private async clientsOf(
     rows: readonly AgentCredentialEntity[],
@@ -394,7 +441,7 @@ export class AgentCredentialsService {
       name: entity.name,
       issuedVia: entity.issuedVia,
       oauthClient: client ? credentialClientView(client, this.clientTrust) : null,
-      prefix: entity.prefix,
+      hint: agentCredentialHint(entity.tokenLast4),
       scopes: entity.scopes,
       lastUsedAt: LastSeenRecorder.latest(entity.lastUsedAt, used),
       expiresAt: entity.expiresAt,
@@ -402,6 +449,8 @@ export class AgentCredentialsService {
       rotatedFromId: entity.rotatedFromId,
       delegateAccount: entity.delegateAccount ?? null,
       delegateBoundAt: entity.delegateBoundAt ?? null,
+      pendingDelegateAccount: entity.pendingDelegateAccount ?? null,
+      pendingDelegateRequestedAt: entity.pendingDelegateRequestedAt ?? null,
       createdAt: entity.createdAt,
     };
   }
@@ -409,4 +458,31 @@ export class AgentCredentialsService {
 
 function generateToken(): string {
   return `${AGENT_CREDENTIAL_TOKEN_PREFIX}${randomBytes(24).toString('base64url')}`;
+}
+
+/**
+ * The scopes a new key gets: the default (`tools:call payments activity:read`)
+ * when none are named, else exactly those named (the DTO has already refused
+ * an unknown or repeated one). `payments` without `tools:call` is refused.
+ */
+function scopesFor(requested: readonly AgentScope[] | undefined): AgentScope[] {
+  const scopes = [...(requested ?? DEFAULT_AGENT_SCOPES)];
+  if (scopes.includes(AgentScope.PAYMENTS) && !scopes.includes(AgentScope.TOOLS_CALL)) {
+    throw AccountErrors.credentialScopesInvalid();
+  }
+  return scopes;
+}
+
+/**
+ * When a new key expires: `CREDENTIAL_DEFAULT_LIFETIME_DAYS` from `now` when
+ * none is named; a named one must be in the future and no further than
+ * `CREDENTIAL_MAX_LIFETIME_DAYS` away. A key always expires.
+ */
+function expiryFor(requested: Date | undefined, now: Date): Date {
+  if (!requested) return new Date(now.getTime() + CREDENTIAL_DEFAULT_LIFETIME_DAYS * ONE_DAY_MS);
+  const latest = now.getTime() + CREDENTIAL_MAX_LIFETIME_DAYS * ONE_DAY_MS;
+  if (requested.getTime() <= now.getTime() || requested.getTime() > latest) {
+    throw AccountErrors.credentialExpiryInvalid({ maxDays: CREDENTIAL_MAX_LIFETIME_DAYS });
+  }
+  return requested;
 }

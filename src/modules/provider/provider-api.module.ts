@@ -3,9 +3,8 @@ import { ConfigService } from '@nestjs/config';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
-import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { ChainId } from '@modules/chains/ports/caip.types';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { ContractMinimumStakeFloors } from '@modules/tool/services/contract-minimum-stake-floors.service';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { VerificationModule } from '@modules/verification/verification.module';
@@ -45,7 +44,7 @@ import {
   PROVIDER_MINIMUM_STAKE_BY_CHAIN,
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
   ProviderStakeService,
-  loadMinimumStakeByChain,
+  liveMinimumStakeParameters,
   loadMinimumStakeParameters,
 } from './services/provider-stake.service';
 import { ProviderSlaWindowsService } from './services/provider-sla-windows.service';
@@ -157,19 +156,21 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     BindingPauseService,
     ProviderSlaWindowsService,
     {
+      // The Capital screen's requirement: the effective routing floor of the
+      // platform stake chain, never below config (review M-8).
       provide: PROVIDER_MINIMUM_STAKE_PARAMETERS,
-      useFactory: loadMinimumStakeParameters,
-      inject: [ConfigService],
+      useFactory: (config: ConfigService, floors: ContractMinimumStakeFloors) =>
+        liveMinimumStakeParameters(loadMinimumStakeParameters(config), floors.byChain),
+      inject: [ConfigService, ContractMinimumStakeFloors],
     },
     {
-      // The same floor the router gates on, keyed by chain — one derivation
-      // shared with `ToolModule.ROUTER_CONFIG`, so the binding editor's
-      // write-time refusal and the routing refusal cannot be
-      // about different numbers.
+      // The same floor the router gates on, keyed by chain — the very map
+      // `ToolModule.ROUTER_CONFIG` reads (config, raised to the contract's
+      // minimum), so the binding editor's write-time refusal and the routing
+      // refusal cannot be about different numbers.
       provide: PROVIDER_MINIMUM_STAKE_BY_CHAIN,
-      useFactory: (config: ConfigService, enabled: readonly ChainId[]) =>
-        loadMinimumStakeByChain(config, enabled),
-      inject: [ConfigService, ENABLED_CHAINS],
+      useFactory: (floors: ContractMinimumStakeFloors) => floors.byChain,
+      inject: [ContractMinimumStakeFloors],
     },
     ProviderStakeService,
   ],

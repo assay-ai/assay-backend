@@ -174,6 +174,13 @@ export class SlashProposalService {
     proposal.chainRequestId = deriveChainRequestId(proposal);
 
     const saved = await this.proposals.save(proposal);
+    // Dollars, not minor units, and no binding id: the operator console prints
+    // the summary as is on the case History (BUG-OPS-CASES-03).
+    const penalty = formatDollars({
+      amount: saved.penaltyAmount,
+      decimals: saved.decimals,
+      asset: saved.assetId,
+    });
 
     await this.events.append({
       organizationId: saved.organizationId,
@@ -183,8 +190,8 @@ export class SlashProposalService {
       actorType: 'system',
       actorId: null,
       summary: belowFloor
-        ? `Penalty of ${saved.penaltyAmount} is below the de-minimis floor; recorded, not levied`
-        : `Slash proposed: ${saved.penaltyAmount} against ${saved.bindingId}`,
+        ? `Penalty of ${penalty} is below the de-minimis floor; recorded, not levied`
+        : `Penalty of ${penalty} proposed`,
       detail,
     });
 

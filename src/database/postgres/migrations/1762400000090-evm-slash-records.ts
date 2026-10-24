@@ -12,8 +12,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * a key that can no longer sign, and the redeemer reads it so a provider short
  * of free stake only because of such records is not blamed for it.
  */
-export class EvmSlashRecords1762400000070 implements MigrationInterface {
-  name = 'EvmSlashRecords1762400000070';
+export class EvmSlashRecords1762400000090 implements MigrationInterface {
+  name = 'EvmSlashRecords1762400000090';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

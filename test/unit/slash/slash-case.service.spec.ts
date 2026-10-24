@@ -701,3 +701,101 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
     });
   });
 });
+
+describe('SlashCaseService.listForProvider (BUG-DEMO-03)', () => {
+  function buildList(
+    rows: ReturnType<typeof buildProposal>[],
+    parts: { find: jest.Mock } | null = null,
+  ) {
+    const fake = fakeQueryBuilder(rows);
+    const proposalsRepo = { createQueryBuilder: jest.fn().mockReturnValue(fake.qb) };
+    const binding = buildBinding({ id: TEST_BINDING_ID, organizationId: ORG });
+    const bindings = { find: jest.fn().mockResolvedValue([binding]) };
+    const windows = {
+      find: jest.fn().mockResolvedValue([buildWindow({ id: 'window_1', organizationId: ORG })]),
+    };
+    const catalogue = { findTool: jest.fn().mockResolvedValue(buildTool({ id: 'search_web' })) };
+    const service = new SlashCaseService(
+      {} as never,
+      {} as never,
+      {} as never,
+      windows as never,
+      {} as never,
+      {} as never,
+      bindings as never,
+      {} as never,
+      {} as never,
+      catalogue as never,
+      parts as never,
+      proposalsRepo as never,
+    );
+    return { service, fake, bindings, catalogue };
+  }
+
+  it("lists the provider's own proposals, the ones not on chain included, in the case shape", async () => {
+    const proposal = buildProposal({ id: 'p1', organizationId: ORG, chainStatus: 'PROPOSING' });
+    const { service, fake, bindings } = buildList([proposal]);
+
+    const page = await service.listForProvider(ORG, {
+      limit: 20,
+      onChain: false,
+      status: ['PROPOSED'],
+    } as never);
+
+    expect(fake.wheres).toEqual(
+      expect.arrayContaining([
+        { sql: 'proposal.organizationId = :organizationId', params: { organizationId: ORG } },
+        {
+          sql: 'proposal.chainStatus IN (:...offChain)',
+          params: { offChain: ['NONE', 'PROPOSING'] },
+        },
+        { sql: 'proposal.status IN (:...statuses)', params: { statuses: ['PROPOSED'] } },
+      ]),
+    );
+    expect(bindings.find).toHaveBeenCalledWith({
+      where: { organizationId: ORG, id: expect.anything() },
+    });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({
+      id: 'p1',
+      status: 'PROPOSED',
+      toolId: 'search_web',
+      penaltyAmount: { amount: '5136000' },
+      clocks: { chainStatus: 'PROPOSING' },
+    });
+  });
+
+  it('onChain=true keeps only proposals with an on-chain record', async () => {
+    const { service, fake } = buildList([]);
+    const page = await service.listForProvider(ORG, { limit: 20, onChain: true } as never);
+    expect(fake.wheres).toContainEqual({
+      sql: 'proposal.chainStatus NOT IN (:...offChain)',
+      params: { offChain: ['NONE', 'PROPOSING'] },
+    });
+    expect(page.items).toEqual([]);
+  });
+
+  it("reads every row's on-chain parts in one query, each at its own epoch", async () => {
+    const proposals = [
+      buildProposal({ id: 'p1', organizationId: ORG, chainStatus: 'PENDING', chainEpoch: 1 }),
+      buildProposal({ id: 'p2', organizationId: ORG, chainStatus: 'PENDING' }),
+    ];
+    const part = (proposalId: string, chainEpoch: number) => ({
+      proposalId,
+      chainEpoch,
+      chainStatus: 'PENDING',
+      chainDisputedAt: null,
+      chainExecutableAt: null,
+      cancelReason: null,
+    });
+    const parts = {
+      find: jest.fn().mockResolvedValue([part('p1', 0), part('p1', 1), part('p2', 0)]),
+    };
+    const { service } = buildList(proposals, parts);
+
+    const page = await service.listForProvider(ORG, { limit: 20 } as never);
+
+    expect(parts.find).toHaveBeenCalledTimes(1);
+    expect(page.items.map((item) => item.clocks.chainRecords)).toEqual([1, 1]);
+  });
+});

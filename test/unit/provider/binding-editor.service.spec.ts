@@ -823,6 +823,58 @@ describe('BindingEditorService.validateMapping — what the editor calls while y
     });
     expect(result.selectors).toEqual(['$.cityId']);
   });
+
+  // BUG-PRV-SETUP-02: the same hygiene checks as the save, as the provider types.
+  it.each([
+    [
+      'a secret-looking constant header',
+      { method: 'GET', headers: { 'X-Api-Key': { $const: 'abc' } } },
+      ProviderErrorCode.PROVIDER_SECRET_IN_MAPPING,
+    ],
+    [
+      'an x-assay- header',
+      { method: 'GET', headers: { 'x-assay-test': { $const: 'v' } } },
+      ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+    ],
+    [
+      `more than ${MAX_MAPPING_HEADERS} headers`,
+      {
+        method: 'GET',
+        headers: Object.fromEntries(
+          Array.from({ length: MAX_MAPPING_HEADERS + 1 }, (_, i) => [`x-h-${i}`, { $const: 'v' }]),
+        ),
+      },
+      ProviderErrorCode.PROVIDER_TOO_MANY_MAPPING_HEADERS,
+    ],
+    [
+      'a credential-like constant query entry',
+      { method: 'GET', query: { api_key: { $const: 'abc' } } },
+      ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    ],
+  ])('refuses %s in a request mapping', async (_case, mapping, code) => {
+    const { service } = build();
+
+    await expectErrorCodeAsync(
+      () =>
+        service.validateMapping({ direction: MappingDirection.REQUEST, mapping, toolId: TOOL.id }),
+      code,
+    );
+  });
+
+  it('still accepts derived and harmless constant headers', async () => {
+    const { service } = build();
+
+    const result = await service.validateMapping({
+      direction: MappingDirection.REQUEST,
+      mapping: {
+        method: 'GET',
+        headers: { Accept: { $const: 'application/json' }, 'X-Request-City': '$.cityId' },
+      },
+      toolId: TOOL.id,
+    });
+
+    expect(result.selectors).toEqual(['$.cityId']);
+  });
 });
 
 /**

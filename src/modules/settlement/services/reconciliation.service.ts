@@ -1,15 +1,24 @@
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
-import { HELD_PAYMENTS, HeldPaymentsPort } from '@modules/payment/ports/held-payments.port';
+import {
+  HELD_PAYMENTS,
+  HeldPaymentsPort,
+  HeldRecord,
+} from '@modules/payment/ports/held-payments.port';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowEntity } from '@database/postgres/entities/buyer-escrow.entity';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
+import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import {
+  ESCROW_DEPOSIT_LOGS,
+  EscrowDepositLogsPort,
+} from '@modules/chains/ports/escrow-deposit-logs.port';
 import { VAULT_PORT, VaultPort } from '@modules/chains/ports/vault.port';
 import {
   ESCROW_BALANCE_READER,
@@ -21,7 +30,12 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
   RECONCILIATION_ALERTS,
+  RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS,
   RECONCILIATION_ESCROW_PAGE,
+  RECONCILIATION_HELD_ORPHAN_SCAN_MAX,
+  RECONCILIATION_HELD_ORPHAN_SCAN_PER_ACCOUNT,
+  RECONCILIATION_HELD_READ_CONCURRENCY,
+  RECONCILIATION_NAMED_SCAN_BUDGET_MS,
   RECONCILIATION_MAX_CONSECUTIVE_FAILURES,
   RECONCILIATION_SHORTFALL_TOLERANCE_ATOMIC,
   RECONCILIATION_SURPLUS_TOLERANCE_UNITS,
@@ -107,7 +121,21 @@ export class ReconciliationService {
     // in no buyer's balance. Optional: without them nothing is held.
     @Optional() private readonly intents: PaymentIntentRepository | null = null,
     @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
+    // A2, read and report only: name each deposit no intent credited.
+    @Optional() private readonly deposits: DepositIntentRepository | null = null,
+    @Optional()
+    @Inject(ESCROW_DEPOSIT_LOGS)
+    private readonly depositLogs: EscrowDepositLogsPort | null = null,
   ) {}
+
+  /**
+   * The last answer of each A2 scan, by what it was asked: a figure that did
+   * not move since the last pass is not read from the chain again.
+   */
+  private readonly orphanScans = new Map<string, NamedScan>();
+  private readonly depositScans = new Map<string, NamedScan>();
+  /** The A2 scans' overall budget per pass. A field so a test can shorten it. */
+  protected namedScanBudgetMs = RECONCILIATION_NAMED_SCAN_BUDGET_MS;
 
   /**
    * One pass over one asset. Always records a row; alerts unless everything
@@ -207,7 +235,9 @@ export class ReconciliationService {
 
     const finishedAt = new Date();
 
-    return this.record({
+    // The run row first: it is what `isFrozen` reads, and nothing the A2
+    // scans below do may delay it (review I1).
+    const report = await this.record({
       asset,
       decimals,
       severity: worstOf(findings),
@@ -230,6 +260,82 @@ export class ReconciliationService {
       finishedAt,
       durationMs: finishedAt.getTime() - startedAt.getTime(),
     });
+
+    return this.appendNamedScans(report, asset, decimals, totalHeld, mirroredHeld, escrows);
+  }
+
+  /**
+   * A2, after the run row is written: the orphan holds and uncredited deposits
+   * by name, within one overall time budget
+   * ({@link RECONCILIATION_NAMED_SCAN_BUDGET_MS}). Their findings (all WARN)
+   * are appended to the row and alerted. A scan that runs out of time stops at
+   * its next chain call, caches nothing, and leaves a `RECONCILIATION_SCAN_TIMEOUT`
+   * WARN instead. Never throws: the core run is already recorded and must not
+   * be recorded again as a failure.
+   */
+  private async appendNamedScans(
+    report: ReconciliationReport,
+    asset: AssetId,
+    decimals: number,
+    totalHeld: bigint | null,
+    mirroredHeld: bigint,
+    escrows: EscrowWalk,
+  ): Promise<ReconciliationReport> {
+    try {
+      const deadline: ScanDeadline = { expired: false };
+      const done: ReconciliationFinding[] = [];
+      const work = (async () => {
+        done.push(
+          ...(await this.nameOrphanHolds(
+            asset,
+            decimals,
+            totalHeld,
+            mirroredHeld,
+            escrows.seqHighs,
+            deadline,
+          )),
+        );
+        done.push(
+          ...(await this.nameUncreditedDeposits(asset, decimals, escrows.surpluses, deadline)),
+        );
+        return true;
+      })();
+      let timer: NodeJS.Timeout | undefined;
+      const outOfTime = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), this.namedScanBudgetMs);
+      });
+      const finished = await Promise.race([work, outOfTime]);
+      clearTimeout(timer);
+      const extra = [...done];
+      if (!finished) {
+        deadline.expired = true;
+        work.catch(() => undefined);
+        extra.push({
+          code: ReconciliationFindingCode.RECONCILIATION_SCAN_TIMEOUT,
+          severity: ReconciliationSeverity.WARN,
+          summary:
+            `The orphan-hold and uncredited-deposit scans on ${asset} ran out of their ` +
+            `${this.namedScanBudgetMs} ms budget; what they did not finish is tried again next ` +
+            `pass. The run's own figures are recorded and unaffected.`,
+          details: { asset, budgetMs: this.namedScanBudgetMs },
+        });
+      }
+      if (extra.length === 0) return report;
+
+      const findings = [...report.findings, ...extra];
+      const severity = worstOf(findings);
+      if (report.id) {
+        await this.runs.update({ id: report.id }, { findings, severity });
+      }
+      const alerted = (await this.raise(extra)) || report.alerted;
+      if (alerted && !report.alerted && report.id) {
+        await this.runs.update({ id: report.id }, { alerted: true });
+      }
+      return { ...report, findings, severity, alerted };
+    } catch (error) {
+      this.logger.error(`Could not append the A2 findings on ${asset}: ${describe(error)}`);
+      return report;
+    }
   }
 
   /** `totalHeld()`, or `null` when the escrow has no hold or it could not be read. */
@@ -270,6 +376,195 @@ export class ReconciliationService {
     ];
   }
 
+  /**
+   * A2: the holds behind a positive `HELD_MIRROR_DRIFT` that outlived a pass,
+   * by name. Reads
+   * `held(payer, seq)` for the seqs no intent of that payer carries
+   * (`voucherSeqGaps`), highest first, at most
+   * {@link RECONCILIATION_HELD_ORPHAN_SCAN_MAX} per pass, and stops once the
+   * drift is accounted for. Never throws: a failed scan is logged, and the
+   * drift finding still stands.
+   */
+  private async nameOrphanHolds(
+    asset: AssetId,
+    decimals: number,
+    totalHeld: bigint | null,
+    mirroredHeld: bigint,
+    seqHighs: readonly EscrowSeqHigh[],
+    deadline: ScanDeadline,
+  ): Promise<ReconciliationFinding[]> {
+    if (!this.held || !this.intents || totalHeld === null || totalHeld <= mirroredHeld) {
+      this.orphanScans.delete(asset);
+      return [];
+    }
+    // Only a drift that outlived a pass: a redemption, collect or refund being
+    // booked moves it within one, and is not worth a chain read.
+    const key = `${totalHeld}:${mirroredHeld}`;
+    const cached = this.orphanScans.get(asset);
+    if (cached?.key !== key) {
+      this.orphanScans.set(asset, { key, findings: null });
+      return [];
+    }
+    if (cached.findings) return [...cached.findings];
+
+    const drift = totalHeld - mirroredHeld;
+    const findings: ReconciliationFinding[] = [];
+    try {
+      let budget = RECONCILIATION_HELD_ORPHAN_SCAN_MAX;
+      let named = 0n;
+      for (const { account, seqHigh } of seqHighs) {
+        if (budget <= 0 || named >= drift) break;
+        if (deadline.expired) return findings;
+        if (seqHigh < 1n) continue;
+        // Per escrow too (review M2): one escrow with many unused seqs must
+        // not spend the whole pass.
+        const seqs = await this.intents.voucherSeqGaps(
+          asset,
+          account,
+          seqHigh,
+          Math.min(budget, RECONCILIATION_HELD_ORPHAN_SCAN_PER_ACCOUNT),
+        );
+        budget -= seqs.length;
+        // A few at a time (review I2): the RPC quota is shared with redemptions.
+        const records: (HeldRecord | null)[] = [];
+        for (let start = 0; start < seqs.length; start += RECONCILIATION_HELD_READ_CONCURRENCY) {
+          if (deadline.expired) return findings;
+          records.push(
+            ...(await Promise.all(
+              seqs
+                .slice(start, start + RECONCILIATION_HELD_READ_CONCURRENCY)
+                .map((seq) => this.held!.readHeld(asset, { payer: account, seq })),
+            )),
+          );
+        }
+        records.forEach((record, index) => {
+          if (record?.status !== 'HELD') return;
+          named += record.amount;
+          findings.push({
+            code: ReconciliationFindingCode.HELD_ORPHAN,
+            severity: ReconciliationSeverity.WARN,
+            summary:
+              `Orphan hold on ${asset}: the escrow holds ${format(record.amount, decimals)} for ` +
+              `payer ${account} seq ${seqs[index]} (provider ${record.provider}, collectable ` +
+              `${record.collectableAt.toISOString()}), and no call of this platform carries that ` +
+              `seq. Another signer or redeemer used this escrow; refund or collect it on purpose.`,
+            details: {
+              asset,
+              account,
+              seq: seqs[index],
+              amount: record.amount.toString(),
+              provider: record.provider,
+              collectableAt: record.collectableAt.toISOString(),
+            },
+          });
+        });
+      }
+    } catch (error) {
+      this.logger.warn(`Could not name the orphan holds on ${asset}: ${describe(error)}`);
+      return findings;
+    }
+    if (!deadline.expired) this.orphanScans.set(asset, { key, findings });
+    return findings;
+  }
+
+  /**
+   * A2: for each escrow holding more than its mirror for two passes running,
+   * the `Deposited` events no
+   * deposit intent credited (`SETTLING` / `SETTLED`), by transaction, plus one
+   * `ESCROW_SURPLUS_UNEXPLAINED` for the part of the surplus those do not explain. At most
+   * {@link RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS} escrows per pass; an escrow
+   * whose figures did not move is not scanned again. Never throws.
+   */
+  private async nameUncreditedDeposits(
+    asset: AssetId,
+    decimals: number,
+    surpluses: readonly EscrowSurplus[],
+    deadline: ScanDeadline,
+  ): Promise<ReconciliationFinding[]> {
+    if (!this.depositLogs || !this.deposits) return [];
+    const findings: ReconciliationFinding[] = [];
+    const seen = new Set<string>();
+    for (const { account, chain, mirrored } of surpluses.slice(
+      0,
+      RECONCILIATION_DEPOSIT_SCAN_MAX_ACCOUNTS,
+    )) {
+      const scanKey = `${asset}:${account}`;
+      seen.add(scanKey);
+      // As for the holds: only figures that outlived a pass are scanned.
+      const key = `${chain}:${mirrored}`;
+      const cached = this.depositScans.get(scanKey);
+      if (cached?.key !== key) {
+        this.depositScans.set(scanKey, { key, findings: null });
+        continue;
+      }
+      if (cached.findings) {
+        findings.push(...cached.findings);
+        continue;
+      }
+      if (deadline.expired) return findings;
+      try {
+        const scan = await this.depositLogs.depositsTo(asset, account);
+        if (scan === null || deadline.expired) continue;
+        const { logs } = scan;
+        const credited = await this.deposits.findCreditedTxRefs(logs.map((log) => log.txHash));
+        const uncredited = logs.filter((log) => !credited.has(log.txHash.toLowerCase()));
+        const named: ReconciliationFinding[] = uncredited.map((log) => ({
+          code: ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT,
+          severity: ReconciliationSeverity.WARN,
+          summary:
+            `Uncredited deposit on ${asset}: transaction ${log.txHash} put ` +
+            `${format(log.amount, decimals)} into ${account}'s escrow (block ` +
+            `${log.blockNumber}) and no deposit intent credited it. Agents cannot spend it; ` +
+            `the buyer can still withdraw it. Never credit it by hand.`,
+          details: {
+            asset,
+            account,
+            txHash: log.txHash,
+            amount: log.amount.toString(),
+            blockNumber: log.blockNumber.toString(),
+          },
+        }));
+        // The surplus is `chain - mirrored`, and `mirrored` already nets out
+        // payments held on chain (`walkEscrows` takes `inHold` off the ledger
+        // held and pending is included), so held amounts are not part of it.
+        // What the named deposits do not explain is an older deposit (outside
+        // the scanned window) or a direct transfer. Read and report only.
+        const unexplained =
+          chain - mirrored - uncredited.reduce((sum, log) => sum + log.amount, 0n);
+        if (unexplained > 0n) {
+          named.push({
+            code: ReconciliationFindingCode.ESCROW_SURPLUS_UNEXPLAINED,
+            severity: ReconciliationSeverity.WARN,
+            summary:
+              `${format(unexplained, decimals)} of the extra balance in ${account}'s escrow on ` +
+              `${asset} matches no deposit in the last ${scan.toBlock - scan.fromBlock + 1n} ` +
+              `blocks scanned. An older deposit or a direct transfer may explain it; raise ` +
+              `RECONCILIATION_DEPOSIT_LOOKBACK_BLOCKS to look further back. Never credit it by hand.`,
+            details: {
+              asset,
+              account,
+              amount: unexplained.toString(),
+              lookbackBlocks: (scan.toBlock - scan.fromBlock + 1n).toString(),
+              fromBlock: scan.fromBlock.toString(),
+              toBlock: scan.toBlock.toString(),
+            },
+          });
+        }
+        if (deadline.expired) return findings;
+        this.depositScans.set(scanKey, { key, findings: named });
+        findings.push(...named);
+      } catch (error) {
+        this.logger.warn(
+          `Could not scan the deposits into ${account} on ${asset}: ${describe(error)}`,
+        );
+      }
+    }
+    for (const scanKey of [...this.depositScans.keys()]) {
+      if (scanKey.startsWith(`${asset}:`) && !seen.has(scanKey)) this.depositScans.delete(scanKey);
+    }
+    return findings;
+  }
+
   // ── Check 4 and 5: every buyer's own escrow ──────────────────────────────
 
   /**
@@ -295,6 +590,8 @@ export class ReconciliationService {
    */
   private async walkEscrows(asset: AssetId, decimals: number): Promise<EscrowWalk> {
     const findings: ReconciliationFinding[] = [];
+    const seqHighs: EscrowSeqHigh[] = [];
+    const surpluses: EscrowSurplus[] = [];
     let total = 0n;
     let read = 0;
     let shortfalls = 0;
@@ -349,10 +646,13 @@ export class ReconciliationService {
           findings.push(this.escrowShortfall(asset, decimals, account, row, chain, held));
         } else if (chain !== mirrored) {
           findings.push(this.escrowDrift(asset, decimals, account, chain, mirrored));
+          if (chain > mirrored) surpluses.push({ account, chain, mirrored });
         }
 
         if (reading) {
-          this.realignSeq(row, reading);
+          seqHighs.push({ account, seqHigh: reading.seqHigh });
+          const realigned = await this.realignSeq(row, reading);
+          if (realigned) findings.push({ ...realigned, details: { asset, ...realigned.details } });
         }
       }
 
@@ -372,7 +672,7 @@ export class ReconciliationService {
       });
     }
 
-    return { findings, total, read, shortfalls, unreadable };
+    return { findings, total, read, shortfalls, unreadable, seqHighs, surpluses };
   }
 
   /**
@@ -473,34 +773,58 @@ export class ReconciliationService {
    * become holes, and the current program makes holes free and unbounded — there is no
    * bitmap and no forward-jump limit any more, only `seq > seq_high`.
    *
-   * Fire-and-forget on purpose: the bump is idempotent (`WHERE next_seq < $3`),
-   * a failure is logged rather than propagated, and a reconciliation pass must
-   * not be aborted by a repair it attempted on the side. The WARN below is how
-   * the operator hears about it.
+   * The bump is idempotent (`WHERE next_seq < $3`); a failure is logged rather
+   * than propagated, and a reconciliation pass must not be aborted by a repair
+   * it attempted on the side. The WARN below is how
+   * the operator hears about it, and the `ESCROW_SEQ_REALIGNED` finding it
+   * returns is the alert (A2): a realign means another signer or redeemer
+   * used this escrow.
    */
-  private realignSeq(row: BuyerEscrowEntity, reading: EscrowChainBalance): void {
+  private async realignSeq(
+    row: BuyerEscrowEntity,
+    reading: EscrowChainBalance,
+  ): Promise<ReconciliationFinding | null> {
     const nextSeq = BigInt(row.nextSeq);
     if (reading.seqHigh < nextSeq) {
-      return;
+      return null;
     }
 
     const target = reading.seqHigh + 1n;
-    void this.escrows
-      .bumpNextSeqTo(row.organizationId, row.accountId, target)
-      .then((moved) => {
-        if (moved > 0) {
-          this.logger.warn(
-            `escrow_seq_realigned: ${row.accountId} next_seq ${nextSeq} -> ${target} ` +
-              `(chain seq_high ${reading.seqHigh}). The allocator was about to re-issue a ` +
-              `sequence number the chain has already redeemed.`,
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        this.logger.error(
-          `Could not realign next_seq for ${row.accountId} to ${target}: ${describe(error)}`,
-        );
-      });
+    // Awaited, and a finding only when it really moved (review M1): a seq
+    // allocated and redeemed between the row read and the chain read makes
+    // the row look behind, and the `WHERE next_seq < target` bump then moves
+    // nothing — that is a race, not another signer.
+    let moved: number;
+    try {
+      moved = await this.escrows.bumpNextSeqTo(row.organizationId, row.accountId, target);
+    } catch (error) {
+      this.logger.error(
+        `Could not realign next_seq for ${row.accountId} to ${target}: ${describe(error)}`,
+      );
+      return null;
+    }
+    if (moved <= 0) return null;
+    this.logger.warn(
+      `escrow_seq_realigned: ${row.accountId} next_seq ${nextSeq} -> ${target} ` +
+        `(chain seq_high ${reading.seqHigh}). The allocator was about to re-issue a ` +
+        `sequence number the chain has already redeemed.`,
+    );
+
+    return {
+      code: ReconciliationFindingCode.ESCROW_SEQ_REALIGNED,
+      severity: ReconciliationSeverity.WARN,
+      summary:
+        `Voucher seq realigned for ${row.accountId}: the chain has redeemed up to seq ` +
+        `${reading.seqHigh} but the allocator was at ${nextSeq}; next_seq moves to ${target}. ` +
+        `Some other signer or redeemer used this escrow (a copy of this database, or a ` +
+        `restored backup) — find it before it signs again.`,
+      details: {
+        account: row.accountId,
+        nextSeq: nextSeq.toString(),
+        seqHigh: reading.seqHigh.toString(),
+        target: target.toString(),
+      },
+    };
   }
 
   // ── The rules ────────────────────────────────────────────────────────────
@@ -888,6 +1212,35 @@ interface EscrowWalk {
   readonly shortfalls: number;
   /** Rows whose escrow could not be read — `total` is then a lower bound. */
   readonly unreadable: number;
+  /** Each escrow read, with the chain's `seq_high` (A2: where to look for orphan holds). */
+  readonly seqHighs: readonly EscrowSeqHigh[];
+  /** The escrows holding more than their mirror (A2: where to look for uncredited deposits). */
+  readonly surpluses: readonly EscrowSurplus[];
+}
+
+interface EscrowSeqHigh {
+  readonly account: AccountId;
+  readonly seqHigh: bigint;
+}
+
+interface EscrowSurplus {
+  readonly account: AccountId;
+  readonly chain: bigint;
+  readonly mirrored: bigint;
+}
+
+/** Set when the A2 scans' time budget is spent; each scan checks it between chain calls. */
+interface ScanDeadline {
+  expired: boolean;
+}
+
+/**
+ * One A2 scan's figures and, once they outlived a pass and were scanned, its
+ * answer (`null`: seen once, not scanned yet).
+ */
+interface NamedScan {
+  readonly key: string;
+  readonly findings: readonly ReconciliationFinding[] | null;
 }
 
 /** A run with no figures is a run that could not complete. */
@@ -932,6 +1285,16 @@ function alertNameOf(code: ReconciliationFindingCode): string {
       return RECONCILIATION_ALERTS.ESCROW_MIRROR_DRIFT;
     case ReconciliationFindingCode.RECONCILIATION_BLIND:
       return RECONCILIATION_ALERTS.RECONCILIATION_BLIND;
+    case ReconciliationFindingCode.HELD_ORPHAN:
+      return RECONCILIATION_ALERTS.HELD_ORPHAN;
+    case ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT:
+      return RECONCILIATION_ALERTS.ESCROW_UNCREDITED_DEPOSIT;
+    case ReconciliationFindingCode.ESCROW_SURPLUS_UNEXPLAINED:
+      return RECONCILIATION_ALERTS.ESCROW_SURPLUS_UNEXPLAINED;
+    case ReconciliationFindingCode.ESCROW_SEQ_REALIGNED:
+      return RECONCILIATION_ALERTS.ESCROW_SEQ_REALIGNED;
+    case ReconciliationFindingCode.RECONCILIATION_SCAN_TIMEOUT:
+      return RECONCILIATION_ALERTS.RECONCILIATION_SCAN_TIMEOUT;
     default:
       return RECONCILIATION_ALERTS.RECONCILIATION_FAILED;
   }
@@ -949,7 +1312,10 @@ function alertNameOf(code: ReconciliationFindingCode): string {
 function dedupeKeyOf(finding: ReconciliationFinding): string {
   const asset = finding.details.asset ?? 'unknown';
   const grain = finding.details.book ?? finding.details.account;
-  return grain === undefined ? `${asset}` : `${asset}:${grain}`;
+  // A2: one alert per orphan hold and per uncredited deposit, not one per payer.
+  const item = finding.details.seq ?? finding.details.txHash;
+  if (grain === undefined) return `${asset}`;
+  return item === undefined ? `${asset}:${grain}` : `${asset}:${grain}:${item}`;
 }
 
 /**
