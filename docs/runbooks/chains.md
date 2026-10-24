@@ -141,8 +141,8 @@ details) has passed, 72 hours after the proposal (the chain's slash delay), and 
    **`AssayConfig.revokeVerifier(<verifier>)`**. `executeSlash` re-checks the key, so nothing that
    key signed can execute any more, and it can sign nothing new. Revoking does NOT release the
    reservations: payments stay halted until each of the key's records is released. Revocation also
-   voids this platform's own honest records signed by that key; those cases close as cancelled.
-   If the scope is unclear, or more than one key is involved, also **`AssayConfig.setPaused(true)`**
+   voids this platform's own honest records signed by that key (see **Honest records voided by the
+   revocation** below). If the scope is unclear, or more than one key is involved, also **`AssayConfig.setPaused(true)`**
    (it blocks `proposeSlash`, `executeSlash`, deposits and redemptions; buyers can still withdraw).
 3. **Release.** Since D-27 anyone can call `AssayStake.expireSlash(requestId)` on a record whose
    verifier can no longer sign, and it releases the reservation at once. The scheduler's
@@ -178,6 +178,21 @@ grace). Only a voucher that dies of it is forfeited, under that cause (the buyer
 nobody is paid). A close the buyer caused (a revoked delegate, a lowered cap, a short escrow) is
 handled as it always is, buyer debt, even while such records stand: the shortfall is never read live
 as the provider's fault. A provider below the minimum for its own reasons is treated as before.
+
+**Honest records voided by the revocation are lost; the backend does not re-judge them.** The
+reaper expires them like the thief's (`SlashCancelled`, reason `VERIFIER_UNAVAILABLE`), each part
+is mirrored `CANCELLED` with `cancel_reason = 'VERIFIER_UNAVAILABLE'`, and the case closes
+`CANCELLED` once nothing of it stands (`EXECUTED` / partly executed when some part had already
+executed). Their request ids are spent on chain. Nothing re-proposes them under the replacement
+key: the epoch re-proposal path serves only a recalculated penalty, and re-signing plans read
+from a database that may be the compromised part would skip the check of stored parts that
+closes this playbook. A voided case with nothing executed does not count as a violation against
+the provider. Its beneficiaries are not compensated on chain. What the operator does:
+
+- list them (window-level cases, the ones split into parts):
+  `SELECT DISTINCT p.organization_id, p.proposal_id FROM slash_proposal_parts p WHERE p.cancel_reason = 'VERIFIER_UNAVAILABLE' AND p.cancelled_at >= '<revocation time>'`;
+- record them in the incident write-up with their providers and penalties;
+- any remedy for their buyers is decided by a person, outside the chain.
 
 For a single record when the key itself is still trusted (for example a mismatch traced to a database
 edit): **`AssayStake.cancelSlash(<requestId>)`** from the arbiter.
