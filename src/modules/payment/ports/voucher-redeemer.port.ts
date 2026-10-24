@@ -182,6 +182,23 @@ export interface VoucherRedeemerPort {
   providerBelowMinimumStake?(request: RedeemVoucherRequest): Promise<boolean>;
 
   /**
+   * Whether the voucher's provider is below the chain's minimum FREE stake
+   * (bonded − pending penalties) ONLY because of slash records it did not
+   * cause: records this platform never planned (the slash watcher flagged
+   * them foreign) or records signed by a verifier key that can no longer sign
+   * (revoked, e.g. stolen). Without those reservations it would be at or above
+   * the minimum. A live read; throws when it cannot tell. `false` when the
+   * provider is not below the minimum, or is below it for its own reasons.
+   *
+   * Asked when a voucher is refused `ProviderBelowMinimumStake` (review
+   * 2026-10-24 wave 2 M-2): such a refusal is not recorded as the provider's
+   * fault, so it is retried until the voucher's on-chain deadline, and only
+   * a voucher that dies of it is forfeited — under its own cause.
+   * Optional: a chain without it treats every such refusal as the provider's.
+   */
+  providerShortOnlyByUnplannedSlashes?(request: RedeemVoucherRequest): Promise<boolean>;
+
+  /**
    * What the chain's own record of this `(payer, seq)` says about this voucher
    * — a live read. A record naming the voucher's provider and amount answers
    * its status: `'HELD'`, `'COLLECTED'` or `'REFUNDED'`; `'MISMATCH'`: a record

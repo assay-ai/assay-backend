@@ -492,6 +492,42 @@ export class EvmSlashExecutor
   }
 
   /**
+   * `expireSlash` for many records at once (review 2026-10-24 wave 2 M-2):
+   * through `Multicall3` where the chain has one, else one transaction each,
+   * with the same simulate-then-send, adopt-or-retry-singly rules as
+   * `executeBatch`. `expireSlash` is permissionless, so the relayer sends it;
+   * since assay-evm D-27 it releases at once a record whose verifier can no
+   * longer sign. A record already released makes its row fail
+   * (`SlashNotPending`) without touching the others.
+   */
+  async expireBatch(
+    requests: readonly SlashCancelRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashCancelResult>[]> {
+    return this.batch<SlashCancelRequest, SlashCancelResult>(requests, {
+      single: (request) => this.expire(request),
+      prepare: async (request) => ({
+        callData: encodeFunctionData({
+          abi: ASSAY_STAKE_SLASH_ABI,
+          functionName: 'expireSlash',
+          args: [bytes32(request.requestId)],
+        }),
+      }),
+      confirm: async (request, receipt, hash) => {
+        const stake = this.deployment(request.chainId).stake;
+        const cancelled = findEvent(receipt, stake, 'SlashCancelled', request.requestId);
+        if (!cancelled) return null;
+        const args = cancelled.args as { cancelledAt: bigint; reason: number };
+        return {
+          signature: hash,
+          cancelledAt: secondsToDate(BigInt(args.cancelledAt)),
+          reason: cancelReasonFromEvm(Number(args.reason)),
+        };
+      },
+      instruction: 'expireSlash',
+    });
+  }
+
+  /**
    * The unsigned `cancelSlash` for the ARBITER, the only person this backend
    * builds a cancel for (assay-evm D-19: an overturn or a suspension is the
    * arbiter's `cancelSlash`, so the admin key stays cold). The arbiter is

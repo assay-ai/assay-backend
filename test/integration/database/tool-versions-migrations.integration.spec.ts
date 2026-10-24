@@ -76,6 +76,7 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'EvmSlashRecords1762400000070',
     'PaymentIntentRedemptionRetry1762400000060',
     'VoucherSeqDebtReplacementPerChain1762400000050',
     'PaymentIntentsCreatedIndex1762400000040',

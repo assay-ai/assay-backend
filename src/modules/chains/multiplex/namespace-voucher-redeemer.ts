@@ -1,6 +1,7 @@
 import {
   RedeemOutcome,
   RedeemVoucherRequest,
+  UsedSeqRecord,
   VoucherRedeemerPort,
 } from '@modules/payment/ports/voucher-redeemer.port';
 
@@ -71,6 +72,36 @@ export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
   ): Promise<string | null> {
     const redeemer = implementationFor(this.byNamespace, request.payer);
     return redeemer.findLanding ? redeemer.findLanding(request, txRefs) : null;
+  }
+
+  /**
+   * The payer's chain's live answer, `false` on a chain whose redeemer cannot
+   * read it — the same "not asked" the service gives a missing door.
+   */
+  async providerBelowMinimumStake(request: RedeemVoucherRequest): Promise<boolean> {
+    const redeemer = implementationFor(this.byNamespace, request.payer);
+    return redeemer.providerBelowMinimumStake ? redeemer.providerBelowMinimumStake(request) : false;
+  }
+
+  /** The payer's chain's answer; `false` on a chain that cannot tell (review 2026-10-24 wave 2 M-2). */
+  async providerShortOnlyByUnplannedSlashes(request: RedeemVoucherRequest): Promise<boolean> {
+    const redeemer = implementationFor(this.byNamespace, request.payer);
+    return redeemer.providerShortOnlyByUnplannedSlashes
+      ? redeemer.providerShortOnlyByUnplannedSlashes(request)
+      : false;
+  }
+
+  /**
+   * The payer's chain's record of the seq. Only `eip155` refuses
+   * `VoucherSeqUsed`, the one refusal this is asked after; a chain without
+   * per-seq records throws, which keeps the hold open.
+   */
+  async usedSeqRecord(request: RedeemVoucherRequest): Promise<UsedSeqRecord> {
+    const redeemer = implementationFor(this.byNamespace, request.payer);
+    if (!redeemer.usedSeqRecord) {
+      throw ChainErrors.unsupportedChain({ chainId: chainIdOf(request.payer) });
+    }
+    return redeemer.usedSeqRecord(request);
   }
 
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {

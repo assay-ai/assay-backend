@@ -55,6 +55,8 @@ const SEQ_USED = 'VoucherSeqUsed';
  * when it finally closes — even if the block was lifted in between.
  */
 const PROVIDER_CAUSED_ERRORS: ReadonlySet<string> = new Set([
+  // Unless it is only because of slash records the provider did not cause:
+  // see `UNPLANNED_SLASH_SHORTFALL`.
   'ProviderBelowMinimumStake',
   'ProviderBlocked',
   'PayeeBlocked',
@@ -82,6 +84,24 @@ function recordedProviderCause(stored: string | null | undefined): string | null
 }
 
 /**
+ * `ProviderBelowMinimumStake` when the provider is short of free stake ONLY
+ * because of slash records it did not cause — records this platform never
+ * planned, or records a revoked (e.g. stolen) verifier key signed (review
+ * 2026-10-24 wave 2 M-2). This service's own name, recorded on the intent in
+ * place of the program error.
+ *
+ * It is NOT in {@link PROVIDER_CAUSED_ERRORS}: it is not sticky, a later
+ * refusal replaces it, and it never turns a close the buyer caused into the
+ * provider's forfeit. The voucher is retried until its on-chain deadline (the
+ * reaper is releasing those records meanwhile); one that dies of it — closed
+ * `VoucherExpired` with this as its last refusal — is forfeited under this
+ * cause: the buyer is not charged, nobody is paid, the platform pays nothing.
+ */
+const UNPLANNED_SLASH_SHORTFALL = 'ProviderStakeHeldByUnplannedSlash';
+const BELOW_MINIMUM = 'ProviderBelowMinimumStake';
+
+/**
+ * Refusals the BUYER causes by tightening its own grant or caps/**
  * Refusals the BUYER causes by tightening its own grant or caps: a revoked
  * or expired delegate, a lowered per-voucher or window cap. Each is retried
  * until {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} before the voucher's
@@ -795,11 +815,15 @@ export class VoucherRedemptionService {
           outcome.programError !== null &&
           recordedProviderCause(row.redemptionLastError) === null
         ) {
-          await this.payments.recordRedemptionError(
-            row.organizationId,
-            row.id,
-            outcome.programError,
-          );
+          // Below the minimum only because of records the provider did not
+          // cause: recorded under its own, non-sticky name (review 2026-10-24
+          // wave 2 M-2) and retried until the deadline like any other.
+          const recorded =
+            outcome.programError === BELOW_MINIMUM &&
+            (await this.shortOnlyByUnplannedSlashes(row, request))
+              ? UNPLANNED_SLASH_SHORTFALL
+              : outcome.programError;
+          await this.payments.recordRedemptionError(row.organizationId, row.id, recorded);
         }
         // A buyer tightening still refusing one pass before the voucher's
         // deadline: no re-grant came, and the next attempt can only be
@@ -842,7 +866,9 @@ export class VoucherRedemptionService {
           row,
           request,
           cause,
-          isProviderCaused(cause),
+          // A voucher that died of an unplanned-slash shortfall is forfeited
+          // at its deadline, under that cause, never made buyer debt (M-2).
+          isProviderCaused(cause) || cause === UNPLANNED_SLASH_SHORTFALL,
           outcome.programError,
         );
       }
@@ -1101,14 +1127,45 @@ export class VoucherRedemptionService {
     if ((await this.isBlockedLive(row.providerAccount)) === true) return 'PayeeBlockedOnChain';
     if (!this.redeemer.providerBelowMinimumStake) return null;
     try {
-      return (await this.redeemer.providerBelowMinimumStake(request))
-        ? 'ProviderBelowMinimumStake'
-        : null;
+      if (!(await this.redeemer.providerBelowMinimumStake(request))) return null;
+      return (await this.shortOnlyByUnplannedSlashes(row, request))
+        ? UNPLANNED_SLASH_SHORTFALL
+        : BELOW_MINIMUM;
     } catch (error) {
       this.logger.warn(
         `Intent ${row.id}: the provider's stake could not be read live: ${describe(error)}`,
       );
       return undefined;
+    }
+  }
+
+  /**
+   * Whether the provider is below its minimum free stake only because of
+   * slash records it did not cause (review 2026-10-24 wave 2 M-2). `false`
+   * when the chain cannot tell or the read fails: the refusal is then the
+   * provider's, exactly as before.
+   */
+  private async shortOnlyByUnplannedSlashes(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+  ): Promise<boolean> {
+    if (!this.redeemer.providerShortOnlyByUnplannedSlashes) return false;
+    try {
+      const short = await this.redeemer.providerShortOnlyByUnplannedSlashes(request);
+      if (short) {
+        this.logger.warn(
+          `Intent ${row.id} (seq ${row.voucherSeq}): its provider is below the minimum free ` +
+            `stake only because of slash records it did not cause (unplanned, or signed by a ` +
+            `revoked verifier key). Not the provider's fault; retried until its deadline.`,
+        );
+      }
+      return short;
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id}: whether its provider's stake shortfall is its own could not be ` +
+          `read: ${describe(error)}`,
+      );
+      return false;
     }
   }
 

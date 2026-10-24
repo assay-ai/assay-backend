@@ -410,6 +410,22 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
     expect(result.signature).toBe(chain.sent[chain.sent.length - 1].hash);
   });
 
+  it('expires many records of a revoked key in one multicall (review 2026-10-24 wave 2 M-2)', async () => {
+    const { chain, executor } = build();
+    await executor.proposeBatch([proposal(1), proposal(2), proposal(3)]);
+    chain.revoked = true;
+    chain.sent.length = 0;
+
+    const outcomes = await executor.expireBatch(
+      [1, 2, 3].map((n) => ({ chainId: CHAIN, requestId: requestId(n), provider: PROVIDER })),
+    );
+
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
+    expect(multicallSends(chain)).toHaveLength(1);
+    for (const n of [1, 2, 3]) expect(chain.record(requestId(n))?.status).toBe(3);
+    expect(outcomes[0].result).toMatchObject({ signature: chain.sent[0].hash });
+  });
+
   it('reads the caps proposeSlash will apply', async () => {
     const { executor } = build();
     await expect(executor.readCaps({ chainId: CHAIN, provider: PROVIDER })).resolves.toEqual({
