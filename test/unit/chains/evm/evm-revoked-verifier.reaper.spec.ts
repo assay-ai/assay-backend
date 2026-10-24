@@ -49,6 +49,11 @@ class FakeRecords {
   async markVerifierUnavailable(_chainId: string, verifier: string) {
     this.rows.filter((r) => r.verifier === verifier).forEach((r) => (r.verifierUnavailable = true));
   }
+  async markVerifierAvailable(_chainId: string, verifier: string) {
+    this.rows
+      .filter((r) => r.verifier === verifier && !r.closedAt)
+      .forEach((r) => (r.verifierUnavailable = false));
+  }
   async standingByVerifier(_chainId: string, verifier: string, limit: number) {
     return this.rows
       .filter((r) => !r.closedAt && r.verifier === verifier)
@@ -136,7 +141,7 @@ function build() {
     holds as never,
     () => NOW,
   );
-  return { reaper, records, chain, alerts, sent, refuse, rechecked };
+  return { reaper, records, chain, alerts, sent, refuse, rechecked, expirer };
 }
 
 describe('EvmRevokedVerifierReaper (review 2026-10-24 wave 2 M-2)', () => {
@@ -250,5 +255,53 @@ describe('EvmRevokedVerifierReaper (review 2026-10-24 wave 2 M-2)', () => {
     expect(report).toMatchObject({ released: 0, failed: 1 });
     expect(sent).toEqual([]);
     expect(records.rows[0]).toMatchObject({ closedAt: null, reapLastError: 'VerifierMismatch' });
+  });
+
+  it('re-checks canSign every pass and clears the flag when the key reads as able to sign (wave 3 N-3)', async () => {
+    const { reaper, records, chain, refuse } = build();
+    records.add(1, STOLEN, PROVIDER_A);
+    // One wrong read (a misconfigured config address, an RPC fault).
+    chain.canSign.set(STOLEN, false);
+    refuse.set(
+      id(1),
+      ChainErrors.transactionFailed({
+        reason: 'SlashNotExpired',
+        customErrorCode: null,
+        programErrorName: 'SlashNotExpired',
+      }),
+    );
+    await reaper.reap();
+    expect(records.rows[0]).toMatchObject({ verifierUnavailable: true, closedAt: null });
+
+    // The next pass reads it right: the honest record is no longer "unplanned".
+    chain.canSign.set(STOLEN, true);
+    await expect(reaper.reap()).resolves.toEqual([]);
+    expect(records.rows[0]).toMatchObject({ verifierUnavailable: false, closedAt: null });
+  });
+
+  it('never runs two passes at once (wave 3 N-3)', async () => {
+    const { reaper, records, chain, expirer, sent } = build();
+    records.add(1, STOLEN, PROVIDER_A);
+    chain.canSign.set(STOLEN, false);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const send = expirer.expireBatch;
+    expirer.expireBatch = async (requests) => {
+      await gate;
+      return send(requests);
+    };
+
+    const first = reaper.handleTick();
+    // Let the first pass reach the send.
+    for (let i = 0; i < 20 && sent.length === 0; i += 1) await new Promise(setImmediate);
+    await reaper.handleTick(); // overlaps: skipped
+    release();
+    await first;
+
+    expect(sent).toEqual([[id(1)]]);
+    // Free again afterwards.
+    records.add(2, STOLEN, PROVIDER_A);
+    await reaper.handleTick();
+    expect(sent).toEqual([[id(1)], [id(2)]]);
   });
 });
