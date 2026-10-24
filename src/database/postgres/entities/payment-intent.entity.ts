@@ -209,7 +209,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /**
    * Unix seconds — offset 223 of the signed bytes.
    *
-   * Also the instant `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` (2,220s) is counted
+   * Also the instant `maxVoucherRedeemableLifeSeconds` (2,220s on Solana,
+   * 7,620s on eip155) is counted
    * from, which is what makes a hold overdue rather than merely slow. Kept as
    * a `bigint` string for the reason `voucherSeq` is: the chain reads an
    * `i64`, and the byte layout does not care what JavaScript can hold.
@@ -229,7 +230,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /**
    * Every transaction the redemption job signed to redeem this rail-B voucher,
    * recorded BEFORE its broadcast (`PaymentIntentRepository.recordRedemptionTxRef`).
-   * Read when the chain answers `VoucherSeqNotIncreasing`, to tell a voucher
+   * Read when the chain answers `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (eip155) — or any terminal refusal — to tell a voucher
    * that already landed unobserved from one that never can (review 2026-10-15
    * P-1). Empty on rail A and on a voucher never sent.
    */
@@ -245,6 +247,21 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    */
   @Column({ name: 'redemption_last_error', type: 'text', nullable: true })
   redemptionLastError: string | null;
+
+  /**
+   * Retryable redemption refusals of this voucher so far
+   * (`PaymentIntentRepository.recordRedemptionRetry`). Drives the back-off.
+   */
+  @Column({ name: 'redemption_attempts', type: 'int', default: 0 })
+  redemptionAttempts: number;
+
+  /**
+   * Not attempted again before this instant, on a chain that admits any seq
+   * order (review 2026-10-23 I-1): a refused row cannot take a pass's batch
+   * from rows that would redeem. Capped at the voucher's last pass.
+   */
+  @Column({ name: 'redemption_retry_at', type: 'timestamptz', nullable: true })
+  redemptionRetryAt: Date | null;
 
   /**
    * When this served rail-B call became BUYER DEBT: its voucher can no longer

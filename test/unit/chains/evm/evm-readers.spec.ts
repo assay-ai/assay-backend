@@ -324,6 +324,19 @@ describe('EvmStakeReader', () => {
     expect(stake!.account).toBe(PROVIDER_ACCOUNT);
   });
 
+  it('reports FREE bonded stake, bonded less pendingSlash floored at zero, for routing (D-26)', async () => {
+    const found = await stakeReader({ stake: { bonded: 500n, pendingSlash: 206n } }).bondedStakeOf([
+      PROVIDER_ACCOUNT,
+    ]);
+    const stake = found.get(PROVIDER_ACCOUNT)!;
+    expect(MoneyUtil.toAtomic(stake.bonded)).toBe(500n);
+    expect(MoneyUtil.toAtomic(stake.freeBonded!)).toBe(294n);
+
+    // The default words reserve more (206) than is bonded (201): zero, never negative.
+    const over = await stakeReader().bondedStakeOf([PROVIDER_ACCOUNT]);
+    expect(MoneyUtil.toAtomic(over.get(PROVIDER_ACCOUNT)!.freeBonded!)).toBe(0n);
+  });
+
   it('never folds unbonding into bonded', async () => {
     // The one bug this reader exists not to have: a provider who has requested
     // a full unstake would otherwise go on taking paid traffic for the whole

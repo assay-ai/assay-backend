@@ -16,7 +16,7 @@ import {
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
-  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
+  paymentIntentVerdictDeadlineLatestSeconds,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '../constants/payment-intent.constants';
 import {
@@ -343,7 +343,7 @@ export class PaymentIntentExpiryService {
    * verification enqueue fails, with its own reason. The hold stays open:
    * `resolve()` never commits a rail-B hold, and the redemption job collects
    * it from the buyer's escrow — or, for a row already past the latest its
-   * voucher can be redeemed (`PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS`),
+   * voucher can be redeemed (`paymentIntentVerdictDeadlineLatestSeconds`),
    * `resolve()` makes it buyer debt at once.
    *
    * Idempotent through the status compare-and-swap. A verdict that lands
@@ -381,7 +381,8 @@ export class PaymentIntentExpiryService {
         const tooLate =
           intent.expiresAt instanceof Date &&
           now.getTime() >
-            intent.expiresAt.getTime() + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS * 1000;
+            intent.expiresAt.getTime() +
+              paymentIntentVerdictDeadlineLatestSeconds(intent.chainId) * 1000;
         await this.paymentIntents.resolve(
           candidate.organizationId,
           candidate.id,

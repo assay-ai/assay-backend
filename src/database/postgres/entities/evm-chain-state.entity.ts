@@ -46,6 +46,18 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   slashWatchCursorBlock: string | null;
 
   /**
+   * The last block the slash watcher has back-filled into `evm_slash_records`
+   * from before its own cursor (review 2026-10-24 wave 3 N-3); `null` before
+   * the first page.
+   */
+  @Column({ name: 'slash_backfill_cursor_block', type: 'bigint', nullable: true })
+  slashBackfillCursorBlock: string | null;
+
+  /** When that back-fill caught up with `slash_watch_cursor_block` (or was not needed). */
+  @Column({ name: 'slash_backfill_done_at', type: 'timestamptz', nullable: true })
+  slashBackfillDoneAt: Date | null;
+
+  /**
    * The last block `EvmEscrowWithdrawalIndexer` has read (B7), apart from the
    * other two cursors for the same reason they are apart from each other.
    */

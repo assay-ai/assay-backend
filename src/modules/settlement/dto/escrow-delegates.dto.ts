@@ -5,6 +5,10 @@ import {
   UnsignedChainTransactionDto,
   unsignedChainTransactionSchema,
 } from '@modules/chains/dto/unsigned-chain-transaction.dto';
+import {
+  EVM_CONSTANTS,
+  EVM_DELEGATE_MIN_VALID_UNTIL_AHEAD_SECONDS,
+} from '@modules/chains/evm/evm.constants';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 import { EscrowDelegationKind, EscrowDelegationStatus } from '../ports/escrow-delegation.port';
@@ -65,9 +69,11 @@ export class CreateDelegateIntentBodyDto {
 
   @ApiProperty({
     description:
-      "Unix seconds. The delegate's authority lapses after this instant. At least an hour " +
-      "after the issued request's deadline (chain time + 300 s), so at least 3,900 s past " +
-      "the chain's clock (assay-evm D-21), and at most 365 days out.",
+      "Unix seconds. The delegate's authority lapses after this instant. At least " +
+      `${EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS} s (the tighten delay) after the issued ` +
+      `request's deadline (chain time + ${EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS} s), so ` +
+      `at least ${EVM_DELEGATE_MIN_VALID_UNTIL_AHEAD_SECONDS} s past the chain's clock (assay-evm D-21, ` +
+      'D-24), and at most 365 days out.',
     example: '1792000000',
   })
   @IsString()
@@ -240,10 +246,11 @@ export class ListEscrowDelegatesResponseDto {
   @ApiProperty({
     description:
       'How long a tightening (revoking a key, a shorter expiry, lower caps) waits before it ' +
-      'binds a payment already signed: 3600 on an escrow that keeps signed payments ' +
-      'collectable (assay-evm D-21) — nothing unsettled can then be stranded and no change ' +
-      'is refused for it — and 0 where a tightening binds at once (BUG-D1-07 applies).',
-    example: 3600,
+      `binds a payment already signed: ${EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS} on an escrow ` +
+      'that keeps signed payments collectable (assay-evm D-21, D-24) — nothing unsettled can ' +
+      'then be stranded and no change is refused for it — and 0 where a tightening binds at ' +
+      'once (BUG-D1-07 applies).',
+    example: EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS,
   })
   tightenDelaySeconds: number;
 }

@@ -352,7 +352,7 @@ describe('UnsettledVoucherGuard', () => {
         guard.refuseIfStranding(scope, { maxPerWindow: 2_000_000n }, false),
       ).resolves.toBeUndefined();
       expect(repository.unsettledVouchers).not.toHaveBeenCalled();
-      await expect(guard.tightenDelaySeconds(PAYER)).resolves.toBe(3_600);
+      await expect(guard.tightenDelaySeconds(PAYER)).resolves.toBe(10_800);
     });
 
     it('stays up until the delay is seen: the same change is refused without it', async () => {

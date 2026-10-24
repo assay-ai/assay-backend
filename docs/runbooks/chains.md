@@ -100,32 +100,102 @@ a split of traffic between deployments. Pause on chain when something is wrong.
 **Alerts:** `slash_proposal_unknown` and `slash_proposal_mismatch` (CRITICAL), from
 `EvmSlashProposalWatcher` in the scheduler. Every two minutes it reads `SlashProposed` events from the
 stake contract of each enabled `eip155` chain (at most 10,000 blocks per pass, from a cursor kept in
-Redis) and compares each record with `slash_proposal_parts`:
+Postgres, `evm_chain_states.slash_watch_cursor_block`) and compares each record with
+`slash_proposal_parts`:
 
 - `slash_proposal_unknown`: no part has this `chain_request_id`. The backend writes a part before it
   signs anything, so the record was signed outside this backend's planner.
 - `slash_proposal_mismatch`: a part exists, but the record's beneficiary or penalty differs from it.
 
+Every record it reads, planned or not, is also kept in `evm_slash_records` (provider, verifier,
+reservation, `foreign` for the two alerts above), and closed when the watcher sees it executed,
+cancelled or expired.
+
 `slash_watch_unreadable` (WARN) means the events could not be read, so nothing is being watched on
 that chain until it clears. The watcher only reads; it never signs or sends.
+
+**These alerts reach a person only if an alert sink is on.** Both the webhook and the Telegram sink
+are off by default (`ALERT_WEBHOOK_ENABLED`, `ALERT_TELEGRAM_ENABLED` in `.env.example`); with
+neither, the alert is a log line. Enabling Telegram/webhook delivery on every deployment that serves
+an EVM chain is planned and required before mainnet.
 
 **Treat either CRITICAL alert as a compromised verifier key or a compromised database.** A valid
 attestation is all `proposeSlash` checks, and the record can name any beneficiary.
 
-**The window is 72 hours.** Nothing moves at `proposeSlash`. Anyone can call `executeSlash` once the
-record's `executableAt` (in the alert details) has passed, 72 hours after the proposal, and then up to
-`slashCapBps` of the provider's stake per day moves, 60% of it to the named beneficiary. Act before
+**A proposal moves no money, but it acts at once.** Since D-26 every `Pending` or `Disputed` record
+reserves the provider's stake the moment it is proposed (`pendingSlash`), and the escrow refuses to
+pay a provider whose FREE stake (bonded stake minus pending penalties, `freeBondedOf`) is below the
+minimum (`ProviderBelowMinimumStake`). So a stolen verifier key can halt payments to any provider,
+or to every provider, in one block: one record is enough against a provider staked at exactly the
+minimum. The backend's slash hold then stops routing paid calls to those providers within a few
+minutes. Money itself moves only at `executeSlash`, once the record's `executableAt` (in the alert
+details) has passed, 72 hours after the proposal (the chain's slash delay), and then up to
+`slashCapBps` of the provider's stake per day, 60% of it to the named beneficiary. Act before
 `executableAt`; do not wait for business hours.
 
-Response, from the admin hardware wallet (the backend holds no admin key):
+### Stolen verifier key: the playbook
 
-1. **`AssayConfig.revokeVerifier(<verifier>)`** with the `verifier` from the alert. Execution re-checks
-   the key, so this voids every pending record that key signed, including any not yet alerted, and
-   stops new ones. Afterwards anyone can call `expireSlash(requestId)` to release the reservations.
-2. If the scope is unclear, or more than one key is involved: **`AssayConfig.setPaused(true)`**. It
-   blocks `proposeSlash` and `executeSlash` (and deposits and redemptions; buyers can still withdraw).
-3. For a single record when the key itself is still trusted (for example a mismatch traced to a
-   database edit): **`AssayStake.cancelSlash(<requestId>)`**.
+1. **Alert.** `slash_proposal_unknown` / `slash_proposal_mismatch` (CRITICAL). The `verifier` in the
+   alert details is the key that signed.
+2. **Revoke**, from the admin hardware wallet (the backend holds no admin key):
+   **`AssayConfig.revokeVerifier(<verifier>)`**. `executeSlash` re-checks the key, so nothing that
+   key signed can execute any more, and it can sign nothing new. Revoking does NOT release the
+   reservations: payments stay halted until each of the key's records is released. Revocation also
+   voids this platform's own honest records signed by that key (see **Honest records voided by the
+   revocation** below). If the scope is unclear, or more than one key is involved, also **`AssayConfig.setPaused(true)`**
+   (it blocks `proposeSlash`, `executeSlash`, deposits and redemptions; buyers can still withdraw).
+3. **Release.** Since D-27 anyone can call `AssayStake.expireSlash(requestId)` on a record whose
+   verifier can no longer sign, and it releases the reservation at once. The scheduler's
+   `EvmRevokedVerifierReaper` does this by itself: every two minutes (a pass still running skips
+   the next tick) it asks `canSign` for every verifier with a standing record in
+   `evm_slash_records`, every pass (a key that reads as able to sign again has its records' flag
+   cleared), and for a key that cannot sign it
+   re-reads each of that key's records and sends `expireSlash` for the ones still `Pending` or
+   `Disputed`, batched through Multicall3 (64 per batch), from the relayer. It is idempotent: a
+   record already released by somebody else is just closed, and a failure is counted on the row
+   (`reap_attempts`, `reap_last_error`) and retried next pass. Its alerts:
+   `evm_dead_verifier_records_releasing` (WARN, progress) and `evm_dead_verifier_records_stuck`
+   (CRITICAL: some records could not be released this pass). If the reaper is stuck, or faster
+   release is wanted, the arbiter can send **`AssayStake.cancelSlashBatch`** (64 per transaction),
+   highest priority to providers whose `freeBondedOf` is below the minimum.
+   `evm_slash_records` holds what the slash watcher read. On a chain the watcher was already
+   reading before the table existed, it back-fills the table from the deploy block
+   (`EVM_CHAIN_STATE_FROM_BLOCK`, else the deployment's `disputeUpgradeBlock`) up to its own
+   cursor, 100,000 blocks per tick, durably (`evm_chain_states.slash_backfill_cursor_block`,
+   `slash_backfill_done_at`); the log says when it caught up. With neither block set it logs an
+   error and gives up: set `EVM_CHAIN_STATE_FROM_BLOCK` and clear `slash_backfill_done_at` to run
+   it, or rely on a fresh deploy. Until it is done, a record from before the table is not reaped.
+4. **Verify.** No standing record of the key is left:
+   `SELECT count(*) FROM evm_slash_records WHERE verifier = '<verifier, lower case>' AND closed_at IS NULL`
+   is 0, and for each affected provider `freeBondedOf(provider) >= params().minimumStake` again.
+   The slash hold lifts by itself on the next check; unpause if you paused.
+
+While a provider is below its minimum free stake ONLY because of such records (foreign to this
+platform, or signed by a key that can no longer sign), its in-flight vouchers are not counted as its
+fault: the refusal is recorded as `ProviderStakeHeldByUnplannedSlash`, not as
+`ProviderBelowMinimumStake`, and the voucher is retried until its on-chain deadline (the redeem
+grace). Only a voucher that dies of it is forfeited, under that cause (the buyer is not charged and
+nobody is paid). A close the buyer caused (a revoked delegate, a lowered cap, a short escrow) is
+handled as it always is, buyer debt, even while such records stand: the shortfall is never read live
+as the provider's fault. A provider below the minimum for its own reasons is treated as before.
+
+**Honest records voided by the revocation are lost; the backend does not re-judge them.** The
+reaper expires them like the thief's (`SlashCancelled`, reason `VERIFIER_UNAVAILABLE`), each part
+is mirrored `CANCELLED` with `cancel_reason = 'VERIFIER_UNAVAILABLE'`, and the case closes
+`CANCELLED` once nothing of it stands (`EXECUTED` / partly executed when some part had already
+executed). Their request ids are spent on chain. Nothing re-proposes them under the replacement
+key: the epoch re-proposal path serves only a recalculated penalty, and re-signing plans read
+from a database that may be the compromised part would skip the check of stored parts that
+closes this playbook. A voided case with nothing executed does not count as a violation against
+the provider. Its beneficiaries are not compensated on chain. What the operator does:
+
+- list them (window-level cases, the ones split into parts):
+  `SELECT DISTINCT p.organization_id, p.proposal_id FROM slash_proposal_parts p WHERE p.cancel_reason = 'VERIFIER_UNAVAILABLE' AND p.cancelled_at >= '<revocation time>'`;
+- record them in the incident write-up with their providers and penalties;
+- any remedy for their buyers is decided by a person, outside the chain.
+
+For a single record when the key itself is still trusted (for example a mismatch traced to a database
+edit): **`AssayStake.cancelSlash(<requestId>)`** from the arbiter.
 
 Then: register a fresh verifier key (`yarn verifier:registry`), rotate the database and server
 credentials if the cause is not yet known, check the stored parts of every open case against the
@@ -191,6 +261,15 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - A dispute freezes only the part it names: the case's other parts keep
     executing (`chainStatus` stays `PENDING`, `chainDisputedParts` counts the
     disputed ones; `DISPUTED` means every live part is disputed).
+  - **Do not uphold more than about 7 windows per provider within 7 days.**
+    `executeSlash` takes at most one window (`atRisk × slashCapBps`) per
+    provider per rolling day, all or wait, and an upheld record expires unpaid
+    7 days after it becomes executable. Upheld records all start their 7 days
+    at once, so a mass uphold beyond 7 windows loses the overflow. Spread
+    larger upholds over days. The backend itself signs a provider's records at
+    most one window per rolling day of doors (measured at each new record's own
+    door, proposal + slash delay) and keeps at most 7 windows of them
+    `Pending`; a case beyond that waits (`SLASH_PROVIDER_DAILY_BUDGET`, retried).
   - A block intent for one of the platform's own addresses (treasury, redeemer,
     a verifier key, admin, owner, arbiter, the three contracts) is refused with
     `422 CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE`; each is read live.

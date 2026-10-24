@@ -218,6 +218,15 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
   readonly maxBatchSize = 1;
 
   /**
+   * `true`: `redeem_voucher` admits `seq > seq_high` and nothing else, so a
+   * lower seq landing after a higher one is dead. The pass keeps a payer's
+   * vouchers in ascending seq and holds the later ones back.
+   */
+  requiresAscendingSeq(): boolean {
+    return true;
+  }
+
+  /**
    * A loop, and it does not pretend to be a batch.
    *
    * There is no `redeem_voucher_batch` instruction and no room for a second

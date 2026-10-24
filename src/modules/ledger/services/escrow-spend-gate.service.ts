@@ -147,7 +147,7 @@ export class EscrowSpendGateService {
    * On chain, `request_withdraw` → wait `WITHDRAW_DELAY_SECONDS` → `withdraw`
    * is deliberately **not** blocked by pending redemptions: the program lets a
    * buyer leave without asking the platform's permission, which is the whole
-   * custody guarantee. So a buyer can request a withdrawal, wait out the hour,
+   * custody guarantee. So a buyer can request a withdrawal, wait out the delay,
    * spend the escrow on calls in the meantime, and `withdraw` before the
    * redemption cron lands any of the vouchers those calls produced. And once
    * `withdraw` has landed, `withdrawRequested` is back to zero and only the

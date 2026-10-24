@@ -843,8 +843,8 @@ describe('EvmEscrowIntentBuilder', () => {
     // The port's method takes the chain, because the delay is a
     // per-chain quantity: read off `Config` on Solana, a compile-time constant
     // in `Constants.sol` here with no getter at all.
-    await expect(builder.withdrawDelaySeconds(TESTNET)).resolves.toBe(3_600);
-    expect(EVM_CONSTANTS.WITHDRAW_DELAY_SECONDS).toBe(3_600);
+    await expect(builder.withdrawDelaySeconds(TESTNET)).resolves.toBe(10_800);
+    expect(EVM_CONSTANTS.WITHDRAW_DELAY_SECONDS).toBe(10_800);
   });
 
   it('refuses a withdraw delay for a chain this builder does not serve', async () => {

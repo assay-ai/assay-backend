@@ -46,6 +46,7 @@ import {
   Voucher,
 } from '../ports/x402.types';
 import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
+import { ASSAY_ESCROW_HOLD_ABI } from './abi/assay-hold.abi';
 import { evmDomain } from './eip712/domain';
 import { EvmVoucher, hashVoucher, voucherTypedData } from './eip712/voucher';
 import { EVM_DEPOSIT_METHOD, EvmDeployment } from './evm.constants';
@@ -661,6 +662,22 @@ export class EvmChainAdapter implements ChainAdapter {
       signature,
       nowSeconds,
     );
+  }
+
+  /**
+   * `held(payer, seq).status != None` — D-23's replay rule. A seq at or below
+   * the escrow's `seqHigh` is still redeemable on this chain unless this
+   * record exists; it is never deleted, so a refunded seq stays used.
+   */
+  async isVoucherSeqUsedOnChain(payer: AccountId, seq: bigint): Promise<boolean> {
+    const { chainId, address } = this.parseAccountId(payer);
+    const held = (await this.clientFor(chainId).readContract({
+      address: getAddress(this.deploymentFor(chainId).escrow),
+      abi: ASSAY_ESCROW_HOLD_ABI,
+      functionName: 'held',
+      args: [getAddress(address), seq],
+    })) as { status: number | bigint };
+    return Number(held.status) !== 0;
   }
 
   private readonly authorities = new Map<ChainId, EvmVoucherAuthority>();
