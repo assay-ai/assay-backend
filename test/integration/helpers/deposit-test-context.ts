@@ -11,6 +11,7 @@ import { CreateDepositIntents1755400000000 } from '@database/postgres/migrations
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { DepositFinalityResolution1758100000001 } from '@database/postgres/migrations/1758100000001-deposit-finality-resolution';
 import { DepositResolutionUniqueness1758200000000 } from '@database/postgres/migrations/1758200000000-deposit-resolution-uniqueness';
+import { DepositPendingUniqueness1762400000110 } from '@database/postgres/migrations/1762400000110-deposit-pending-uniqueness';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
@@ -165,6 +166,7 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
       TimestamptzTimestamps1755900000000,
       DepositFinalityResolution1758100000001,
       DepositResolutionUniqueness1758200000000,
+      DepositPendingUniqueness1762400000110,
     ],
     synchronize: false,
     logging: process.env.DEPOSIT_TEST_LOGGING === 'true',
