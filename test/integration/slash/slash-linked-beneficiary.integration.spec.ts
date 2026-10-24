@@ -107,7 +107,7 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
     ).resolves.toEqual([]);
   });
 
-  it('sums the pending parts due within the horizon and the parts executed in the last day, never a disputed one', async () => {
+  it('sums the pending parts and executions in the window at the new door, and the backlog, never a disputed one', async () => {
     const insert = (
       status: string,
       penalty: string,
@@ -140,29 +140,39 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
           executableIn,
         ],
       );
-    await insert('PENDING', '100', '1 hour', '90'); // due now: its reservation counts
-    await insert('EXECUTED', '200', '23 hours', null); // executed inside the rolling day
-    await insert('EXECUTED', '250', '30 hours', null); // executed before it: released
+    await insert('PENDING', '100', '1 hour', '90'); // door now: its reservation counts
+    await insert('EXECUTED', '200', '23 hours', null); // executed 23 h ago
+    await insert('EXECUTED', '250', '30 hours', null); // executed 30 h ago
     await insert('DISPUTED', '300', '2 hours', null); // cannot execute: free stake only
-    await insert('CANCELLED', '400', '1 hour', null); // takes nothing from the window
+    await insert('CANCELLED', '400', '1 hour', null); // takes nothing
     await insert('REFUSED', '500', '1 hour', null);
-    await insert('PENDING', '600', '25 hours', null, '20 hours'); // due within the horizon
-    await insert('PENDING', '650', '1 hour', null, '72 hours'); // due past it: not yet
+    await insert('PENDING', '600', '25 hours', null, '20 hours'); // door in 20 h
+    await insert('PENDING', '650', '1 hour', null, '72 hours'); // freshly proposed: door in 72 h
     await insert('DISPUTED', '700', '40 days', null); // self-disputed long ago: not counted
 
-    const since = new Date(Date.now() - 86_400_000);
-    const dueBy = new Date(Date.now() + 86_400_000);
-    await expect(parts.committedAgainstProvider(providerOrg, CHAIN, since, dueBy)).resolves.toEqual(
-      {
-        pendingDue: 690n,
-        executedSince: 200n,
-      },
-    );
+    // A new record whose door is now: its rolling day opened 24 h ago.
     await expect(
-      parts.committedAgainstProvider(providerOrg, 'eip155:1', since, dueBy),
+      parts.committedAgainstProvider(providerOrg, CHAIN, new Date(Date.now() - 86_400_000)),
     ).resolves.toEqual({
-      pendingDue: 0n,
-      executedSince: 0n,
+      pendingInWindow: 90n + 600n + 650n,
+      executedInWindow: 200n,
+      pendingTotal: 90n + 600n + 650n,
+    });
+    // A new record whose door is 72 h out (the slash delay): only the fresh
+    // part shares its day; nothing executed in it yet; the backlog is the same.
+    await expect(
+      parts.committedAgainstProvider(providerOrg, CHAIN, new Date(Date.now() + 48 * 3_600_000)),
+    ).resolves.toEqual({
+      pendingInWindow: 650n,
+      executedInWindow: 0n,
+      pendingTotal: 90n + 600n + 650n,
+    });
+    await expect(
+      parts.committedAgainstProvider(providerOrg, 'eip155:1', new Date(Date.now() - 86_400_000)),
+    ).resolves.toEqual({
+      pendingInWindow: 0n,
+      executedInWindow: 0n,
+      pendingTotal: 0n,
     });
   });
 });

@@ -260,8 +260,9 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `Slash case ${context?.proposalId ?? ''}: not signed yet — ${context?.signed ?? '?'} ` +
-      `already holds provider ${context?.providerId ?? ''}'s slash window (pending records due ` +
-      `within a day plus the last day's executions), or its free stake ` +
+      `already holds provider ${context?.providerId ?? ''}'s slash window at the new records' ` +
+      `door (pending records with a door in that rolling day plus its executions) or its ` +
+      `pending backlog (at most 7 windows), or its free stake ` +
       `(${context?.freeStake ?? '?'}) cannot cover it: ${context?.wanted ?? '?'} more would ` +
       `exceed ${context?.allowance ?? '?'}`,
   },

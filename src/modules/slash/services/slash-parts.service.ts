@@ -69,6 +69,16 @@ const SLASH_EXECUTION_GRACE_MS_FOR_PARTS = 7 * 24 * 60 * 60 * 1000;
 const SLASH_PROVIDER_WINDOW_MS = 86_400 * 1000;
 
 /**
+ * How many windows of this platform's `Pending` parts may stand against one
+ * provider at once: `SLASH_EXECUTION_GRACE` (7 days) / `SLASH_WINDOW` (1 day).
+ * The chain executes at most one window per rolling day and a record expires
+ * unpaid 7 days after its door (review 2026-10-24 wave 3 N-1).
+ */
+const SLASH_BACKLOG_WINDOWS = BigInt(
+  Math.floor(SLASH_EXECUTION_GRACE_MS_FOR_PARTS / SLASH_PROVIDER_WINDOW_MS),
+);
+
+/**
  * `proposeSlash`'s refusal of a judgement the provider's free stake cannot
  * cover in full (assay-evm D-26): nothing is written and the attestation is not
  * consumed, so it is retried, never final.
@@ -340,8 +350,9 @@ export class SlashPartsService {
   /**
    * Refuses (transiently: nothing signed, the case stays PROPOSING and is
    * retried) when `parts` would take the provider's slash budget past what its
-   * stake can pay (review 2026-10-23 M-1, review 2026-10-24 F-M1 and wave 2
-   * M-1). The two halves meter what the chain meters, and nothing else:
+   * stake can pay (review 2026-10-23 M-1, review 2026-10-24 F-M1, wave 2 M-1
+   * and wave 3 N-1). Each check meters what the chain meters, and nothing
+   * else:
    *
    * - **free stake.** `proposeSlash` refuses (`NothingToSlash`, nothing
    *   written) a judgement the provider's free stake (`atRisk −
@@ -350,15 +361,22 @@ export class SlashPartsService {
    *   `Disputed`, ours or not, of any age — counts here and only here: that
    *   is where the chain reserves it, and D-26 already stops the provider's
    *   income once the reservations take its free stake below the minimum.
+   * - **the backlog.** Each record can execute only during the grace after its
+   *   door (7 days) and the chain executes at most one window per rolling
+   *   day, so no more than {@link SLASH_BACKLOG_WINDOWS} windows of this
+   *   platform's `Pending` parts may stand at once: anything beyond that would
+   *   be signed only to expire unpaid.
    * - **the window.** Only executions consume the provider's rolling window
-   *   (`executeSlash`, `capAllowance` = `atRisk × slashCapBps` per 86,400 s),
-   *   so only what the last day executed plus this platform's `Pending`
-   *   parts whose door opens within the coming day (the planning horizon)
-   *   are counted against it, with `parts`. A `Disputed` record cannot
-   *   execute until the arbiter rules, so it never holds the window: one day
-   *   of records a provider disputes itself cannot block honest cases.
-   *   A case with nothing else holding the window always goes: its plan is
-   *   already capped at the window.
+   *   (`executeSlash`, `capAllowance` = `atRisk × slashCapBps` per 86,400 s).
+   *   The new parts' own door is `now + slashDelay` (the live delay), so what
+   *   competes with them is this platform's `Pending` parts whose door opens
+   *   in the rolling day that ends at that door (or later) and whatever
+   *   executed in it. A freshly proposed part — its door days out — counts,
+   *   so one day of signing never outruns one window. A `Disputed` record
+   *   cannot execute until the arbiter rules, so it never holds the window:
+   *   one day of records a provider disputes itself cannot block honest
+   *   cases. A case with nothing else in its window always goes (within the
+   *   backlog): its plan is already capped at the window.
    */
   private async assertWithinProviderDailyBudget(
     proposal: SlashProposalEntity,
@@ -370,21 +388,30 @@ export class SlashPartsService {
     if (!this.caps) {
       throw ChainErrors.programNotConfigured({ what: 'a slash caps reader for ' + chainId });
     }
+    // A chain whose executor cannot say counts the door as now: the earliest
+    // door, so the most records are counted against it (the safe side). A
+    // failed read throws: the case waits for the next tick.
+    const delaySeconds = (await this.executor.slashDelaySeconds?.(chainId)) ?? 0;
+    const door = now.getTime() + delaySeconds * 1000;
     const [own, caps] = await Promise.all([
       this.parts.committedAgainstProvider(
         proposal.providerId,
         chainId,
-        new Date(now.getTime() - SLASH_PROVIDER_WINDOW_MS),
-        new Date(now.getTime() + SLASH_PROVIDER_WINDOW_MS),
+        new Date(door - SLASH_PROVIDER_WINDOW_MS),
       ),
       this.caps.readCaps({ chainId, provider }),
     ]);
     const wanted = parts.reduce((sum, part) => sum + BigInt(part.penaltyAmount), 0n);
-    const committed = own.pendingDue + own.executedSince;
+    const committed = own.pendingInWindow + own.executedInWindow;
+    const backlogAllowance = caps.windowAllowanceMinor * SLASH_BACKLOG_WINDOWS;
 
     let allowance: bigint | null = null;
+    let held = committed;
     if (wanted > caps.freeStakeMinor) {
       allowance = caps.freeStakeMinor;
+    } else if (own.pendingTotal + wanted > backlogAllowance) {
+      allowance = backlogAllowance;
+      held = own.pendingTotal;
     } else if (committed > 0n && committed + wanted > caps.windowAllowanceMinor) {
       allowance = caps.windowAllowanceMinor;
     }
@@ -393,14 +420,15 @@ export class SlashPartsService {
     this.logger.warn(
       `slash case ${proposal.id}: not signed yet — ${wanted} does not fit provider ` +
         `${proposal.providerId}'s slash budget (free stake ${caps.freeStakeMinor}, ` +
-        `pendingSlash ${caps.pendingSlashMinor}; window ${caps.windowAllowanceMinor} of which ` +
-        `${committed} is held: pending and due ${own.pendingDue}, executed in the last day ` +
-        `${own.executedSince})`,
+        `pendingSlash ${caps.pendingSlashMinor}; backlog ${own.pendingTotal} of ` +
+        `${backlogAllowance}; window ${caps.windowAllowanceMinor} at its door ` +
+        `${new Date(door).toISOString()}, of which ${committed} is held: pending ` +
+        `${own.pendingInWindow}, executed ${own.executedInWindow})`,
     );
     throw SlashErrors.providerDailyBudget({
       proposalId: proposal.id,
       providerId: proposal.providerId,
-      signed: committed.toString(),
+      signed: held.toString(),
       wanted: wanted.toString(),
       allowance: allowance.toString(),
       freeStake: caps.freeStakeMinor.toString(),

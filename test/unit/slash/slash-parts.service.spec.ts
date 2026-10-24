@@ -31,19 +31,17 @@ const revert = (name: string) =>
 class FakeParts {
   rows: SlashProposalPartEntity[] = [];
   /** What `committedAgainstProvider` answers, and every bound it was asked with. */
-  pendingDue = 0n;
+  pendingInWindow = 0n;
   executedToday = 0n;
-  readonly signedAsked: Date[] = [];
-  readonly dueByAsked: Date[] = [];
-  async committedAgainstProvider(
-    _providerId: string,
-    _chainId: string,
-    executedSince: Date,
-    dueBy: Date,
-  ) {
-    this.signedAsked.push(executedSince);
-    this.dueByAsked.push(dueBy);
-    return { pendingDue: this.pendingDue, executedSince: this.executedToday };
+  pendingTotal = 0n;
+  readonly windowAsked: Date[] = [];
+  async committedAgainstProvider(_providerId: string, _chainId: string, windowOpensAfter: Date) {
+    this.windowAsked.push(windowOpensAfter);
+    return {
+      pendingInWindow: this.pendingInWindow,
+      executedInWindow: this.executedToday,
+      pendingTotal: this.pendingTotal,
+    };
   }
   async findForEpoch(organizationId: string, proposalId: string, chainEpoch: number) {
     return this.rows
@@ -85,6 +83,13 @@ class FakeParts {
 
 /** Every door scripted per request id; default: succeed. */
 class ScriptedExecutor implements SlashExecutorPort {
+  /** The live slash delay, seconds; `null`: the chain cannot say. */
+  slashDelay: number | null = null;
+  slashDelayFails: Error | null = null;
+  async slashDelaySeconds(): Promise<number | null> {
+    if (this.slashDelayFails) throw this.slashDelayFails;
+    return this.slashDelay;
+  }
   readonly proposeFails = new Map<string, unknown>();
   readonly executeFails = new Map<string, unknown>();
   readonly records = new Map<string, SlashRecordSnapshot>();
@@ -296,7 +301,7 @@ describe('SlashPartsService.propose', () => {
         errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
       });
       expect(executor.batches).toEqual([]);
-      expect(parts.signedAsked[0].getTime()).toBe(now.getTime() - 86_400_000);
+      expect(parts.windowAsked[0].getTime()).toBe(now.getTime() - 86_400_000);
       expect(parts.rows.every((row) => row.chainStatus === 'NONE')).toBe(true);
 
       // The day rolls on: it fits.
@@ -317,22 +322,48 @@ describe('SlashPartsService.propose', () => {
         }
       };
 
-      it('counts pending parts due within the coming day against the window', async () => {
+      it('counts pending parts whose door shares the new part’s window (wave 3 N-1)', async () => {
         const { service, proposal, executor, parts } = build([[agent(1), '300']]);
+        executor.slashDelay = 72 * 3600;
         const now = new Date('2026-10-20T12:00:00Z');
-        parts.pendingDue = CAPS.windowAllowanceMinor - 200n;
+        parts.pendingInWindow = CAPS.windowAllowanceMinor - 200n;
+        parts.pendingTotal = parts.pendingInWindow;
         await expect(service.propose(proposal, '0xprovider', now)).rejects.toMatchObject({
           errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
         });
         expect(executor.batches).toEqual([]);
-        // The planning horizon: due now or within the coming rolling day.
-        expect(parts.dueByAsked[0].getTime()).toBe(now.getTime() + 86_400_000);
+        // The rolling day that ends at the new part's own door (now + slash delay).
+        expect(parts.windowAsked[0].getTime()).toBe(now.getTime() + 48 * 3_600_000);
 
         // Executed, cancelled or expired since: it goes.
-        parts.pendingDue = 0n;
+        parts.pendingInWindow = 0n;
+        parts.pendingTotal = 0n;
         await expect(service.propose(proposal, '0xprovider', now)).resolves.toMatchObject({
           status: 'PENDING',
         });
+      });
+
+      it('caps the pending backlog at what the chain can execute within the grace (wave 3 N-1)', async () => {
+        const { service, proposal, executor, parts } = build([[agent(1), '300']]);
+        // Nothing in this part's window, but 7 windows (less 200) already stand.
+        parts.pendingTotal = 7n * CAPS.windowAllowanceMinor - 200n;
+        await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+          message: expect.stringContaining(`exceed ${7n * CAPS.windowAllowanceMinor}`),
+        });
+        expect(executor.batches).toEqual([]);
+
+        parts.pendingTotal = 7n * CAPS.windowAllowanceMinor - 300n;
+        await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+          status: 'PENDING',
+        });
+      });
+
+      it('waits when the slash delay cannot be read', async () => {
+        const { service, proposal, executor } = build([[agent(1), '300']]);
+        executor.slashDelayFails = new Error('rpc down');
+        await expect(service.propose(proposal, '0xprovider')).rejects.toThrow('rpc down');
+        expect(executor.batches).toEqual([]);
       });
 
       it('does not count the chain’s pendingSlash against the window, only against free stake', async () => {
@@ -1108,7 +1139,7 @@ describe('review 2026-10-24 wave 2 M-1: a disputed window does not freeze honest
       for (let day = 0; day < 30; day += 1) {
         const { service, proposal, executor, parts } = build([[agent(1), '300']]);
         // Disputed parts are not "pending and due"; nothing executed today.
-        parts.pendingDue = 0n;
+        parts.pendingInWindow = 0n;
         parts.executedToday = 0n;
         const now = new Date(Date.UTC(2026, 9, 24 + day, 12));
         await expect(
