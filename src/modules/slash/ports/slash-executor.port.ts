@@ -369,20 +369,25 @@ export async function oneByOne<Request, Result>(
 
 export interface SlashExecutorPort {
   /**
-   * {@link propose} for many judgements, in as few transactions as the chain
-   * allows. Outcome `i` is what `propose(requests[i])` would have returned or
-   * thrown — including adoption of a record already on chain.
+   * {@link propose} for many judgements. Outcome `i` is what
+   * `propose(requests[i])` would have returned or thrown — including adoption
+   * of a record already on chain.
    *
-   * On EVM this is one `Multicall3.aggregate3` per chunk (`proposeSlash` is
-   * authorised by the verifier's signature, not by `msg.sender`, so the
-   * multicall contract may carry it). A namespace that cannot batch answers by
+   * On EVM this is one transaction per judgement, never a `Multicall3` batch:
+   * each carries a signed attestation, and a sub-call that failed inside a
+   * batch would leave it valid and unused in public calldata (review
+   * 2026-10-23 L-1). A namespace that cannot batch answers the same way, by
    * calling the single door once per request.
    */
   proposeBatch(
     requests: readonly SlashProposalRequest[],
   ): Promise<readonly SlashBatchOutcome<SlashProposalResult>[]>;
 
-  /** {@link executeProposal} for many judgements — the same contract as {@link proposeBatch}. */
+  /**
+   * {@link executeProposal} for many judgements, in as few transactions as the
+   * chain allows (on EVM, one `Multicall3.aggregate3` per chunk) — the same
+   * outcome contract as {@link proposeBatch}.
+   */
   executeBatch(
     requests: readonly SlashExecutionRequest[],
   ): Promise<readonly SlashBatchOutcome<SlashExecutionResult>[]>;

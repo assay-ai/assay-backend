@@ -83,7 +83,7 @@ export interface UnsettledScope {
  * ## It stands down on an escrow with the tighten delay (assay-evm D-21)
  *
  * There a tightening binds an already-valid voucher only `TIGHTEN_DELAY_SECONDS`
- * (3,600 s) after it lands — longer than any voucher stays redeemable — so it
+ * (`EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS`, 10,800 s since D-24) after it lands — longer than any voucher stays redeemable — so it
  * can no longer strand one, and a voucher admitted against a read taken just
  * before the landing is covered too. Both defences are then skipped: nothing is
  * refused, nothing needs acknowledging, and no admission pause is written.

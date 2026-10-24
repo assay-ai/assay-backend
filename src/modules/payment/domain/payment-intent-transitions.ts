@@ -75,7 +75,7 @@ export interface PaymentIntentTransitionRule {
  * compare-and-set: a worker that resolves the call first wins, and one that
  * arrives after the backstop loses with `PAYMENT_INVALID_STATE_TRANSITION`.
  * A rail-B voucher stops being redeemable on chain within about 37 minutes of
- * issue, so a call 24 hours old can no longer be paid out from the escrow.
+ * issue on Solana and about two hours on eip155, so a call 24 hours old can no longer be paid out from the escrow.
  */
 export const PAYMENT_INTENT_TRANSITIONS: readonly PaymentIntentTransitionRule[] = [
   {

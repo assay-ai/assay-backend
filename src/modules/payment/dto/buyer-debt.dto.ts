@@ -59,7 +59,8 @@ export class BuyerDebtDto {
     description:
       'From when the debt can be settled (ISO 8601): its original voucher is past its on-chain ' +
       'redemption window, so it can never be redeemed besides the replacement. Usually already ' +
-      'past; a debt that lapsed early (not `VoucherExpired`) waits up to about 37 minutes.',
+      'past; a debt that lapsed early (not `VoucherExpired`) waits up to about 37 minutes on ' +
+      'Solana and about two hours on eip155.',
   })
   replaceableAt: string;
 

@@ -143,8 +143,10 @@ describe('provider slash hold, against a real database', () => {
     // Free stake exactly one penalty still backs it (review S-6): one unit less.
     stake.pendingSlash = 99_000_001n;
     await monitor().tick();
+    // D-26: the reservation also takes the FREE stake (bonded minus pendingSlash) below the
+    // minimum, so the below-minimum reason joins the reserved one.
     expect(await holds.findHeld([providerOrg])).toEqual([
-      expect.objectContaining({ reasons: ['STAKE_FULLY_RESERVED'] }),
+      expect.objectContaining({ reasons: ['STAKE_FULLY_RESERVED', 'BONDED_BELOW_MINIMUM'] }),
     ]);
   });
 

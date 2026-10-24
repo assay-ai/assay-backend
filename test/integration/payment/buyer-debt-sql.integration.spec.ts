@@ -54,13 +54,14 @@ describe('buyer debt SQL, against a real database', () => {
 
   /**
    * A served, settled rail-B call whose hold is still open: awaiting
-   * redemption. Its voucher expired an hour ago — past its on-chain deadline
-   * (`expires_at` + 1,800 s grace + 120 s skew), as a debt's voucher is by
-   * the time it can be replaced — unless `expiresIn` says otherwise.
+   * redemption. Its voucher expired three hours ago — past its on-chain
+   * deadline on eip155 (`expires_at` + 7,200 s grace + 120 s skew, D-24), as a
+   * debt's voucher is by the time it can be replaced — unless `expiresIn` says
+   * otherwise.
    */
   async function seedSettled(
     seq: number,
-    expiresIn = `-1 hour`,
+    expiresIn = `-3 hours`,
   ): Promise<{ id: string; holdId: string }> {
     const id = randomUUID();
     const holdId = randomUUID();
@@ -268,7 +269,7 @@ describe('buyer debt SQL, against a real database', () => {
       );
     const seqOf = async (id: string) => (await row(id)).voucher_seq;
 
-    it('is installed by 1760900000000 and enabled', async () => {
+    it('is installed by 1760900000000, made per chain by 1762400000070, and enabled', async () => {
       const [trigger] = (await dataSource.query(
         `SELECT t.tgenabled, p.prosrc
            FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
@@ -276,6 +277,8 @@ describe('buyer debt SQL, against a real database', () => {
       )) as Array<{ tgenabled: string; prosrc: string }>;
       expect(trigger.tgenabled).toBe('O');
       expect(trigger.prosrc).toContain('redemption_lapsed_at');
+      // eip155: grace 7,200 s + skew 120 s (D-24); Solana keeps 1,800 + 120.
+      expect(trigger.prosrc).toContain("interval '7320 seconds'");
       expect(trigger.prosrc).toContain("interval '1920 seconds'");
     });
 
@@ -317,17 +320,24 @@ describe('buyer debt SQL, against a real database', () => {
 
     it('refuses to replace a debt whose old voucher is still inside its on-chain window', async () => {
       // Lapsed early (e.g. a permanent refusal) — expired ten minutes ago, so
-      // redeemable on chain for another twenty: a replacement would let the
-      // buyer be charged twice.
+      // redeemable on chain (eip155, D-24) for another 110 minutes: a
+      // replacement would let the buyer be charged twice.
       const { id } = await seedSettled(1, '-10 minutes');
       await payments.lapseRedemption(org, id, 'EscrowWindowLimitExceeded');
       await expect(replace(id, 2)).rejects.toMatchObject({ driverError: { code: '23514' } });
       expect(await seqOf(id)).toBe('1');
       expect((await row(id)).redemption_replaced_at).toBeNull();
 
-      // Past expires_at + 1,920 s it goes through.
+      // Past Solana's expires_at + 1,920 s it is still refused on eip155 ...
       await dataSource.query(
         `UPDATE payment_intents SET "expires_at" = now() - interval '1921 seconds' WHERE "id" = $1`,
+        [id],
+      );
+      await expect(replace(id, 2)).rejects.toMatchObject({ driverError: { code: '23514' } });
+
+      // ... and past expires_at + 7,320 s it goes through.
+      await dataSource.query(
+        `UPDATE payment_intents SET "expires_at" = now() - interval '7321 seconds' WHERE "id" = $1`,
         [id],
       );
       expect(await replace(id, 2)).toBe(true);
@@ -521,6 +531,11 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'EvmSlashRecordsBackfill1762400000100',
+      'EvmSlashRecords1762400000090',
+      'PaymentIntentRedemptionRetry1762400000080',
+      'VoucherSeqDebtReplacementPerChain1762400000070',
+      'AgentCredentialTokenLast41762400000062',
       'AgentCredentialPendingDelegate1762400000061',
       'AgentCredentialScopes1762400000060',
       'BindingTestRunAuthMode1762400000050',

@@ -764,16 +764,26 @@ export class VoucherService {
       });
     }
 
-    // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
-    // or below it can never be redeemed: served, it would lapse into buyer
-    // debt (review 2026-10-15 P-2). After the
-    // replay check, so a seq refused here was never used: stale, retryable
-    // with a fresh seq (final review N-6).
+    // A seq at or below the escrow's `seqHigh`. On a chain that admits only
+    // `seq > seqHigh` (Solana) it can never be redeemed: served, it would
+    // lapse into buyer debt (review 2026-10-15 P-2). After the replay check,
+    // so a seq refused there was never used: stale, retryable with a fresh seq
+    // (final review N-6). On a chain whose replay rule is per seq (`eip155`,
+    // D-23) it is still redeemable unless the chain says it is used.
     if (input.escrow && BigInt(voucher.seq) <= input.escrow.seqHigh) {
-      throw PaymentErrors.voucherSeqStale({
-        account: input.agentAccount,
-        actual: voucher.seq,
-      });
+      const adapter = this.chains.resolve(input.chainId);
+      if (typeof adapter.isVoucherSeqUsedOnChain !== 'function') {
+        throw PaymentErrors.voucherSeqStale({
+          account: input.agentAccount,
+          actual: voucher.seq,
+        });
+      }
+      if (await adapter.isVoucherSeqUsedOnChain(input.agentAccount, BigInt(voucher.seq))) {
+        throw PaymentErrors.voucherSeqAlreadyUsed({
+          account: input.agentAccount,
+          actual: voucher.seq,
+        });
+      }
     }
   }
 
@@ -831,8 +841,8 @@ export class VoucherService {
         // The three fields `redeem_voucher` cannot reconstruct minutes later.
         // The signature is the buyer's and no key here could produce it again;
         // `resourceHash` hashes a `resource` string that a binding may since have
-        // changed; `issuedAt` is both a signed field and the instant the 2,220s
-        // redemption deadline runs from. The resource hash is the CHAIN's —
+        // changed; `issuedAt` is both a signed field and the instant the
+        // redemption deadline (2,220s on Solana, 7,620s on eip155) runs from. The resource hash is the CHAIN's —
         // sha256 on Solana, keccak256 on eip155 — because it is replayed as
         // signed bytes and nothing recomputes it.
         voucherSignature: input.signed.signature,
@@ -921,6 +931,10 @@ export class VoucherService {
   ): VoucherAdmission | undefined {
     const escrow = input.escrow ?? null;
     if (escrow === null && delegation === null && !always) return undefined;
+    // A chain whose replay rule is per seq (D-23) redeems a lower seq after a
+    // higher one, so being below an admitted seq is no reason to refuse.
+    const anySeqOrder =
+      typeof this.chains.resolve(input.chainId).isVoucherSeqUsedOnChain === 'function';
 
     const nowSeconds = Math.floor(Date.now() / 1000);
     const amount = BigInt(voucher.amount.amount);
@@ -973,16 +987,19 @@ export class VoucherService {
           });
         }
         // Below a seq already admitted for this payer and still bound for the
-        // chain: that one's redemption advances `seqHigh` past this one, which
-        // then dies and lapses into buyer debt (review 2026-10-15 P-2). Under
-        // the payer's lock, so two admissions cannot both pass it. Equal is
-        // this very seq admitted by a concurrent call — a replay; below is a
+        // chain: on a chain that admits only `seq > seqHigh`, that one's
+        // redemption advances `seqHigh` past this one, which then dies and
+        // lapses into buyer debt (review 2026-10-15 P-2). Under the payer's
+        // lock, so two admissions cannot both pass it. Equal is this very seq
+        // admitted by a concurrent call — a replay, on every chain; below is a
         // seq never used, signed out of order beside a parallel call — stale,
-        // retryable with a fresh seq (final review N-6).
+        // retryable with a fresh seq (final review N-6), except on a chain that
+        // redeems any order (D-23), where it is admitted.
         if (
           open.maxSeq !== undefined &&
           open.maxSeq !== null &&
-          BigInt(voucher.seq) <= open.maxSeq
+          (BigInt(voucher.seq) === open.maxSeq ||
+            (!anySeqOrder && BigInt(voucher.seq) < open.maxSeq))
         ) {
           const refusal =
             BigInt(voucher.seq) === open.maxSeq

@@ -1,7 +1,7 @@
 import { CronExpression } from '@nestjs/schedule';
 
 import {
-  REDEEM_GRACE_SECONDS,
+  redeemGraceSeconds,
   REDEMPTION_DEADLINE_MARGIN_SECONDS,
 } from './voucher-redemption.constants';
 
@@ -44,11 +44,13 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
  *
  * A rail-B intent still `VERIFYING` this long after its voucher's `expiresAt`
  * is settled as served and unverified by the expiry sweep — the rule a failed
- * verification enqueue already follows. The EVM contract accepts the voucher
- * until `expiresAt + REDEEM_GRACE_SECONDS` (1,800 s) with NO clock-skew
- * allowance (`AssayEscrow.sol:784`, mirrored by `evm-voucher-prevalidation.ts`),
- * so settling at 900 s leaves the per-minute redemption job about 15 minutes to
- * collect it. Without it a late verdict (judge queue backed up, worker down)
+ * verification enqueue already follows. The chain accepts the voucher until
+ * `expiresAt + redeemGraceSeconds` — 1,800 s on Solana, 7,200 s on eip155
+ * (D-24), with NO clock-skew allowance on EVM (`AssayEscrow.redeem…`, mirrored
+ * by `evm-voucher-prevalidation.ts`) — so settling at 900 s leaves the
+ * per-minute redemption job about 15 minutes to collect it on Solana, and
+ * about 105 minutes on eip155. One value for both chains: it bounds how long a
+ * served call waits for its verdict, not how long the chain waits. Without it a late verdict (judge queue backed up, worker down)
  * left a served call whose voucher could no longer be redeemed
  * (no-platform-debt design, A13).
  */
@@ -67,8 +69,9 @@ export const PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS = REDEMPTION_DEADLINE_MARG
 /**
  * The latest a rail-B intent may settle, in seconds past its voucher's
  * `expiresAt`, and still be handed to the redemption job: the chain's deadline
- * (`expiresAt + REDEEM_GRACE_SECONDS`, no skew on EVM) less
- * {@link PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS} — 1,740 s.
+ * (`expiresAt + redeemGraceSeconds(chainId)`, no skew on EVM) less
+ * {@link PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS} — 1,740 s on Solana, 7,140 s
+ * on eip155. `caipId` is the intent's chain id (or any CAIP id on it).
  *
  * A passing verdict that lands later — the worker or the sweep was down — is
  * still applied (`SETTLED`: the call was served), but its voucher is NOT handed
@@ -76,8 +79,9 @@ export const PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS = REDEMPTION_DEADLINE_MARG
  * turns it into buyer debt in the same statement (the hold stays open, nobody
  * is credited, the buyer re-signs). The platform never pays for a late verdict.
  */
-export const PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS =
-  REDEEM_GRACE_SECONDS - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS;
+export function paymentIntentVerdictDeadlineLatestSeconds(caipId: string): number {
+  return redeemGraceSeconds(caipId) - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS;
+}
 
 /** What `redemption_last_error` names when a verdict settled past the latest above. */
 export const LATE_VERDICT_LAPSE_CAUSE = 'VerdictPastRedemptionDeadline';

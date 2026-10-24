@@ -817,7 +817,7 @@ export class McpToolCallService {
    *    is allocated, and the call is refused with `PAYMENT_REQUIRED` carrying
    *    every field the voucher must bind. Nothing else happens — no intent, no
    *    hold, no provider call — so an agent that never pays costs nothing but a
-   *    seq, and holes are free under `seq > seq_high`.
+   *    seq, and holes are free (on eip155 within `MAX_SEQ_GAP` of `seqHigh`).
    * 2. **With the voucher.** The offer is re-drawn PINNED to the provider the
    *    requirement named, `VoucherService.redeem` checks every field against
    *    what this server computes itself and holds the price, and the call is

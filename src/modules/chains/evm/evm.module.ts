@@ -47,6 +47,7 @@ import {
   parseDepositLookbackBlocks,
 } from './evm-escrow-deposit-logs.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
+import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { EvmMinimumStakeReader } from './evm-minimum-stake-reader.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
@@ -380,6 +381,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         redeemer: never,
         alerts: never,
         tightenDelay: EvmTightenDelayProbe,
+        slashRecords: EvmSlashRecordRepository | undefined,
       ) =>
         new EvmVoucherRedeemer(
           clients,
@@ -388,10 +390,19 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           alerts,
           { now: () => Date.now() },
           tightenDelay,
+          slashRecords ?? null,
         ),
       // The REDEEMER, not the relayer: `redeemVoucher[Batch]` accepts only
       // `Config.params().redeemer` as sender.
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ALERT_PORT, EvmTightenDelayProbe],
+      inject: [
+        EVM_RPC_CLIENTS,
+        EVM_DEPLOYMENTS,
+        EVM_REDEEMER,
+        ALERT_PORT,
+        EvmTightenDelayProbe,
+        // Review 2026-10-24 wave 2 M-2: who caused a provider's stake shortfall.
+        { token: EvmSlashRecordRepository, optional: true },
+      ],
     },
     {
       /**

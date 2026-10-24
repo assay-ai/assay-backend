@@ -420,7 +420,8 @@ describe('the vendored ABI matches the compiled contracts', () => {
  * the audit fix round's seven appended), and at 9f036a3 (91: the simplify
  * round removed four), and at 3d8fc8e (95: redeem into hold appended four), and on
  * `chore/clean-and-rename` (94: `AdminChangeRequiresOwner` removed with
- * `updateConfig`'s `newAdmin` argument).
+ * `updateConfig`'s `newAdmin` argument), and for D-23 (94: `VoucherSeqUsed`
+ * replaced `VoucherSeqNotIncreasing` in place, `cast sig` 0x903423c2).
  * Each selector is `cast sig '<Name>()'`
  * on the pinned Foundry build (1.2.1-nightly), the last seven viem's keccak
  * cross-checked against the compiled ABIs. `target-branch-pin.spec.ts` checks
@@ -465,7 +466,7 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x98edbdd3', 'SignatureDeadlineTooFar'],
   ['0x4bd574ec', 'BadNonce'],
   ['0x517f98f0', 'VoucherSeqZero'],
-  ['0x7b2de8e8', 'VoucherSeqNotIncreasing'],
+  ['0x903423c2', 'VoucherSeqUsed'],
   ['0xfe1f88bd', 'VoucherSeqGapTooLarge'],
   ['0x157fd87e', 'VoucherExpired'],
   ['0x7ec15438', 'VoucherNotYetValid'],

@@ -28,13 +28,15 @@ import { RoutingCandidate, RoutingContext } from './routing.types';
  * A standing withdrawal is not "the buyer is short". `withdraw()` pays
  * `min(requested, balance)` and reads no outstanding-voucher state; the escrow
  * may hold plenty right now. What makes the quote wrong is the CLOCK: a
- * withdrawal requested at `T` matures at `T + 3600`, a voucher is redeemable
- * until `expiresAt + 1800`, and `expiresAt` may be `300` past `issuedAt`. A
- * voucher signed at `T + 1381` or later can therefore still be redeemable after
- * the withdrawal has been taken, and the redemption then fails
+ * withdrawal requested at `T` matures at `T + 3600` on Solana (`T + 10800` on
+ * eip155, D-24), a voucher is redeemable until `expiresAt + 1800` (`+ 7200` on
+ * eip155), and `expiresAt` may be `300` past `issuedAt`. A voucher signed at
+ * `T + 1381` (`T + 3181` on eip155) or later can therefore still be redeemable
+ * after the withdrawal has been taken, and the redemption then fails
  * `EscrowInsufficient` with the provider having already served. The contract's
- * own half of this is real and asserted at deployment (`3600 > 2220`, so a
- * voucher signed *before* the request cannot outlive the delay) — and Solana's
+ * own half of this is real and asserted at deployment (`3600 > 2220` on
+ * Solana, `10800 > 7620` on eip155, so a voucher signed *before* the request
+ * cannot outlive the delay) — and Solana's
  * `withdraw.rs` has no such check either, so this gate is parity rather than a
  * port defect.
  *

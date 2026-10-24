@@ -88,11 +88,11 @@ if (!ANVIL_NET) throw new Error(`no anvil entry for ${CHAIN} in ${MCP_DEPLOYMENT
 const caipAddress = (caip: string): string => caip.slice(caip.lastIndexOf(':') + 1);
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
-  config: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5',
-  stake: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
+  config: '0x7d4F60198a1519074ce1E316911E2f130643231c',
+  stake: '0xAfe1e699d188Ab5042B693978E889D7c5085F710',
   escrow: caipAddress(ANVIL_NET.escrow),
   asset: caipAddress(ANVIL_NET.asset),
-  escrowImplementation: '0x2d3568a0a37A86A961B7970446e78620Bc93cFc0',
+  escrowImplementation: '0xB2DD7cC50D95c3F1B4Cce9613dD4B6308876bD82',
   admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
   owner: '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
@@ -374,7 +374,11 @@ async function main(): Promise<void> {
   });
   const voucherFor = async (who: typeof delegate, seq: string, amount: bigint) => {
     const requirement = requirementFor(seq, amount);
-    const { wire: voucher, typedData } = signer.buildVoucher(requirement, await chainNow(), 'anvil');
+    const { wire: voucher, typedData } = signer.buildVoucher(
+      requirement,
+      await chainNow(),
+      'anvil',
+    );
     const signature = await who.signTypedData(typedData as never);
     return {
       voucher: {

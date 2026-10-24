@@ -1,4 +1,4 @@
-import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 
 /**
@@ -125,6 +125,22 @@ export interface VoucherRedeemerPort {
    */
   readonly maxBatchSize: number;
 
+  /**
+   * Whether this chain's replay rule makes a payer's vouchers ORDER-sensitive,
+   * for the chain `id` names (a CAIP-2 chain, CAIP-10 account or CAIP-19 asset).
+   *
+   * `true` on Solana: `redeem_voucher` admits `seq > seq_high` and nothing
+   * else, so a lower seq that lands after a higher one is dead for good. The
+   * redemption pass then takes a payer's vouchers in ascending seq and holds
+   * back the later ones while an earlier one has not landed.
+   *
+   * `false` on `eip155`: `AssayEscrow` admits each `(payer, seq)` once, in any
+   * order (D-23), so a voucher being retried holds nothing back.
+   *
+   * Optional: absent is `true`, the safe answer.
+   */
+  requiresAscendingSeq?(id: ChainId | AccountId | AssetId): boolean;
+
   redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome>;
 
   /**
@@ -146,9 +162,10 @@ export interface VoucherRedeemerPort {
    * chain, or `null` when none of them did. Throws when it cannot tell yet (one
    * is still pending, or the RPC did not answer).
    *
-   * Asked when a voucher comes back `VoucherSeqNotIncreasing`: that is also what
-   * a voucher that ALREADY landed gets, and closing it as buyer debt would
-   * charge the buyer a second time (review 2026-10-15 P-1). Optional: a chain
+   * Asked when a voucher comes back `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (`eip155`, D-23) — or any other terminal refusal: that is
+   * also what a voucher that ALREADY landed gets, and closing it as buyer debt
+   * would charge the buyer a second time (review 2026-10-15 P-1). Optional: a chain
    * without it has that refusal closed at once.
    */
   findLanding?(request: RedeemVoucherRequest, txRefs: readonly string[]): Promise<string | null>;
@@ -163,6 +180,42 @@ export interface VoucherRedeemerPort {
    * without it decides from the recorded refusals alone.
    */
   providerBelowMinimumStake?(request: RedeemVoucherRequest): Promise<boolean>;
+
+  /**
+   * Whether the voucher's provider is below the chain's minimum FREE stake
+   * (bonded − pending penalties) ONLY because of slash records it did not
+   * cause: records this platform never planned (the slash watcher flagged
+   * them foreign) or records signed by a verifier key that can no longer sign
+   * (revoked, e.g. stolen). Without those reservations it would be at or above
+   * the minimum. A live read; throws when it cannot tell. `false` when the
+   * provider is not below the minimum, or is below it for its own reasons.
+   *
+   * Asked when a voucher is refused `ProviderBelowMinimumStake` (review
+   * 2026-10-24 wave 2 M-2): such a refusal is not recorded as the provider's
+   * fault, so it is retried until the voucher's on-chain deadline, and only
+   * a voucher that dies of it is forfeited — under its own cause.
+   * Optional: a chain without it treats every such refusal as the provider's.
+   */
+  providerShortOnlyByUnplannedSlashes?(request: RedeemVoucherRequest): Promise<boolean>;
+
+  /**
+   * What the chain's own record of this `(payer, seq)` says about this voucher
+   * — a live read. A record naming the voucher's provider and amount answers
+   * its status: `'HELD'`, `'COLLECTED'` or `'REFUNDED'`; `'MISMATCH'`: a record
+   * exists for another provider or amount; `'NONE'`: the seq is unused.
+   * Throws when it cannot tell.
+   *
+   * Asked when the chain refuses a voucher because its seq is used and none of
+   * the intent's own transactions shows the landing. Only a `HELD` record (or a
+   * `COLLECTED` one this platform's own ledger attributes to the voucher) is a
+   * landing to commit; anything else is an anomaly, never a new redemption and
+   * never buyer debt (review 2026-10-24 F-L3). Optional: a chain without
+   * per-seq records keeps the old close.
+   */
+  usedSeqRecord?(request: RedeemVoucherRequest): Promise<UsedSeqRecord>;
 }
+
+/** See {@link VoucherRedeemerPort.usedSeqRecord}. */
+export type UsedSeqRecord = 'HELD' | 'COLLECTED' | 'REFUNDED' | 'MISMATCH' | 'NONE';
 
 export const VOUCHER_REDEEMER = 'VOUCHER_REDEEMER';

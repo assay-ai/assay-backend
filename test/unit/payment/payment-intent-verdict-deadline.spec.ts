@@ -7,14 +7,15 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
+import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
   PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS,
-  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+  paymentIntentVerdictDeadlineLatestSeconds,
 } from '@modules/payment/constants/payment-intent.constants';
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
-  REDEEM_GRACE_SECONDS,
+  redeemGraceSeconds,
 } from '@modules/payment/constants/voucher-redemption.constants';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
@@ -35,6 +36,8 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 const NOW = new Date('2026-10-16T12:00:00Z');
 const PRICE = MoneyUtil.of(1_000_000n, ASSET_IDS.USDC_SOLANA_DEVNET, 6);
+const SOLANA = CHAIN_IDS.SOLANA_DEVNET;
+const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
 
 function due(id: string): DuePaymentIntent {
   return {
@@ -165,6 +168,7 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
       status: PaymentIntentStatus.VERIFYING,
       price: PRICE,
       rail: PaymentRail.RAIL_B_VOUCHER,
+      chainId: SOLANA,
       expiresAt: tooLate,
     }));
 
@@ -177,6 +181,27 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
         name: 'voucher_verdict_deadline_debt',
         details: { count: 2 },
       }),
+    );
+  });
+
+  it('D-24: an hour past expiry is too late on Solana but still redeemable on eip155', async () => {
+    const { service, intents, alerts } = build([due('sol-1'), due('evm-1')]);
+    const anHourAgo = new Date(NOW.getTime() - 3_600_000);
+    intents.findById.mockImplementation(async (_org: string, id: string) => ({
+      id,
+      status: PaymentIntentStatus.VERIFYING,
+      price: PRICE,
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      chainId: id.startsWith('evm') ? EVM : SOLANA,
+      expiresAt: anHourAgo,
+    }));
+
+    const report = await service.sweep(NOW);
+
+    expect(report.verdictDeadlineSettled).toBe(2);
+    // Only the Solana one became debt (1,740 s < 3,600 s < 7,140 s).
+    expect(alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'voucher_verdict_deadline_debt', details: { count: 1 } }),
     );
   });
 
@@ -210,28 +235,38 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
     expect(report).toMatchObject({ backstopped: 1, holdsReleased: 1 });
   });
 
-  it('leaves the redemption job time to collect before the chain refuses the voucher', () => {
-    // The EVM contract redeems until expiresAt + grace with NO skew
-    // (AssayEscrow.sol:784); the sweep settles at expiresAt + deadline, and the
-    // redemption cron runs every minute.
-    const redeemableFor = REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS;
-    expect(PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS).toBe(900);
-    expect(redeemableFor).toBeGreaterThanOrEqual(10 * 60);
-  });
+  it.each([SOLANA, EVM])(
+    'leaves the redemption job time to collect before %s refuses the voucher',
+    (chainId) => {
+      // The chain redeems until expiresAt + grace (NO skew on EVM); the sweep
+      // settles at expiresAt + deadline, and the redemption cron runs every minute.
+      const redeemableFor = redeemGraceSeconds(chainId) - PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS;
+      expect(PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS).toBe(900);
+      expect(redeemableFor).toBeGreaterThanOrEqual(10 * 60);
+    },
+  );
 
-  it('M3: the latest a voucher is handed to redemption is derived from the chain deadline', () => {
-    // No skew on the chain side: the old 120 + 1,800 - 300 left 180 s, not 300.
-    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBe(
-      REDEEM_GRACE_SECONDS - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS,
-    );
-    // One redemption pass before the chain's deadline (review-buyer-debt M2):
-    // a PASS that the chain would still redeem goes to redemption.
-    expect(REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBe(60);
-    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeGreaterThan(
-      PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
-    );
-    expect(CLOCK_SKEW_TOLERANCE_SECONDS).toBeGreaterThan(0); // and not part of the bound
-  });
+  it.each([
+    [SOLANA, 1_740],
+    [EVM, 7_140],
+  ])(
+    'M3: the latest a voucher is handed to redemption on %s is derived from the chain deadline',
+    (chainId, latest) => {
+      const grace = redeemGraceSeconds(chainId);
+      // No skew on the chain side: the old 120 + 1,800 - 300 left 180 s, not 300.
+      expect(paymentIntentVerdictDeadlineLatestSeconds(chainId)).toBe(
+        grace - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS,
+      );
+      expect(paymentIntentVerdictDeadlineLatestSeconds(chainId)).toBe(latest);
+      // One redemption pass before the chain's deadline (review-buyer-debt M2):
+      // a PASS that the chain would still redeem goes to redemption.
+      expect(grace - paymentIntentVerdictDeadlineLatestSeconds(chainId)).toBe(60);
+      expect(paymentIntentVerdictDeadlineLatestSeconds(chainId)).toBeGreaterThan(
+        PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+      );
+      expect(CLOCK_SKEW_TOLERANCE_SECONDS).toBeGreaterThan(0); // and not part of the bound
+    },
+  );
 });
 
 describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () => {

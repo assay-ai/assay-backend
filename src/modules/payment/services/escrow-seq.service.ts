@@ -48,7 +48,8 @@ export interface NextSeq {
  * `UPDATE … RETURNING`. It is the only durable record of what this platform has
  * handed out, and a counter a cache flush could reset would re-issue numbers a
  * buyer has already signed for; the chain would then refuse the *later* of the
- * two with `VoucherSeqNotIncreasing`, after the call had been served.
+ * two with `VoucherSeqNotIncreasing` (Solana) or `VoucherSeqUsed` (eip155),
+ * after the call had been served.
  *
  * `oldest_pending_seq` survives as a **reported** figure, cached in Redis for
  * two seconds. Nothing refuses on it any more.
@@ -76,10 +77,12 @@ export class EscrowSeqService {
    * free under `seq > seq_high`.
    *
    * `chainSeqHigh`, when the caller has read the escrow, raises `next_seq` past
-   * it first. The program admits `seq > seq_high` and nothing else, and a buyer can
-   * be ahead of this table — they redeemed somewhere this database did not
-   * record, or it was restored from a backup — and a number at or below the
-   * chain's is refused only AFTER the call it paid for was served. The raise is
+   * it first. The Solana program admits `seq > seq_high` and nothing else, and a
+   * buyer can be ahead of this table — they redeemed somewhere this database
+   * did not record, or it was restored from a backup — and a number at or below
+   * the chain's is refused only AFTER the call it paid for was served. On
+   * eip155 (D-23) such a number may well be used already, and the gap cap
+   * anchors on `seqHigh`, so allocating above it is right there too. The raise is
    * monotonic (`bumpNextSeqTo`), so a stale read can never rewind the counter.
    *
    * With `chainSeqHigh` known, a seq more than {@link VOUCHER_MAX_SEQ_GAP} above

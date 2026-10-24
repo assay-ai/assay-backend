@@ -399,7 +399,7 @@ const runE2: K3Step = async (c) => {
 const runE3: K3Step = async (c) => {
   const evm = evmDir();
   const cases: readonly [string, string][] = [
-    ['test_boundary_theSequenceMustStrictlyIncrease', 'seq <= seqHigh reverts'],
+    ['test_boundary_eachSeqIsRedeemedExactlyOnce', 'a used seq reverts VoucherSeqUsed (D-23)'],
     ['test_wrongSigner_aMalleatedSignatureIsRefused', 'a high-s malleation reverts'],
     [
       'test_aVoucherSignedForOneChainDoesNotVerifyOnAnother',

@@ -20,7 +20,7 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { NEXT_SEQ_RATE_LIMITER, NEXT_SEQ_RATE_LIMITS } from '../constants/escrow-seq.constants';
-import { DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS } from '../constants/voucher-redemption.constants';
+import { debtReplaceableAfterExpirySeconds } from '../constants/voucher-redemption.constants';
 import { VOUCHER_MAX_TTL_SECONDS } from '../constants/voucher.constants';
 import { PaymentErrors } from '../errors/payment.errors';
 import { SignedVoucher } from '../ports/voucher.types';
@@ -380,15 +380,15 @@ export class BuyerDebtService {
 
 /**
  * When the debt's current voucher is past its on-chain deadline (`expiresAt +
- * REDEEM_GRACE_SECONDS`, plus clock skew), so it can never be redeemed and a
+ * redeemGraceSeconds` of the debt's chain, plus clock skew), so it can never be redeemed and a
  * replacement at a higher seq cannot charge the buyer twice. A debt lapsed on
  * `VoucherExpired` is past it already; one lapsed earlier (a permanent refusal,
  * a buyer tightening at the margin) waits for it. The voucher_seq trigger
- * (migration 1760900000000) enforces the same bound.
+ * (migration 1762400000070) enforces the same per-chain bound.
  */
 function replaceableAtOf(debt: OutstandingDebt): Date {
   return new Date(
-    new Date(debt.expiresAt).getTime() + DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS * 1000,
+    new Date(debt.expiresAt).getTime() + debtReplaceableAfterExpirySeconds(debt.chainId) * 1000,
   );
 }
 

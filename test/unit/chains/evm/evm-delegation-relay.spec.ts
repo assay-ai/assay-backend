@@ -157,7 +157,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
       [
         // D-21: `validUntil >= now + TIGHTEN_DELAY` at the block that lands it,
         // which may be as late as the signed deadline (chain time + 300).
-        'a horizon less than an hour after the deadline',
+        'a horizon less than the tighten delay after the deadline',
         {
           validUntil: BigInt(
             NOW_SECONDS +
@@ -182,7 +182,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
       });
     });
 
-    it('accepts a horizon exactly an hour after the signed deadline (D-21)', async () => {
+    it('accepts a horizon exactly the tighten delay after the signed deadline (D-21, D-24)', async () => {
       const validUntil = BigInt(
         NOW_SECONDS +
           EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS +

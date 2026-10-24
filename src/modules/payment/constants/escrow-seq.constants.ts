@@ -1,5 +1,6 @@
 /**
- * The voucher sequence rule, as the settlement program enforces it.
+ * The voucher sequence rule, as the Solana settlement program enforces it.
+ * (`eip155` is different since D-23: see the end of this comment.)
  *
  * There is no bitmap any more. `BuyerEscrow` keeps a single `seq_high`, and
  * `redeem_voucher` admits a voucher on exactly one condition:
@@ -22,6 +23,20 @@
  * — so the redemption job submits a buyer's vouchers in ascending seq and
  * serialises per buyer. That rule lives in `VoucherRedemptionService`, and it is
  * the whole of what replaced this file's arithmetic.
+ *
+ * **On eip155 (`AssayEscrow`, D-23) the rule is per seq instead:**
+ *
+ * ```text
+ * seq == 0                           ->  VoucherSeqZero
+ * held(payer, seq) has a record      ->  VoucherSeqUsed   (never deleted)
+ * seq > seqHigh + MAX_SEQ_GAP        ->  VoucherSeqGapTooLarge
+ * otherwise                          ->  redeem, and seqHigh = max(seqHigh, seq)
+ * ```
+ *
+ * So there a lower seq that lands after a higher one is still paid, and the
+ * redemption job neither orders nor serialises (`requiresAscendingSeq` is
+ * `false`). The allocator still hands out seqs above `seqHigh`: that keeps the
+ * gap cap, which anchors on `seqHigh`, meaningful.
  */
 
 /**

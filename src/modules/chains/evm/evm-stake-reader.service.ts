@@ -13,6 +13,7 @@ import { AccountId, ChainId, parseAccountId, toAssetId } from '../ports/caip.typ
 import { ASSAY_CONFIG_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
+import { freeBondedStake } from './evm-voucher-prevalidation';
 
 /** The ten fields `stakeOf` returns, by name. `__gap` is on the wire and ignored. */
 export interface EvmProviderStakeStruct {
@@ -46,10 +47,11 @@ export const DEFAULT_EVM_PARAMS_TTL_MS = 60_000;
 /**
  * `OnChainStakeReaderPort` over `AssayStake.stakeOf`.
  *
- * ## `bonded` alone is the routable figure
+ * ## FREE `bonded` is the routable figure
  *
- * `_redeem` reads `bondedOf(provider) < p.minimumStake`, and `AssayStake`'s own
- * note says why: stake the provider has already asked to take out is not
+ * `_redeem` reads `freeBondedOf(provider) < p.minimumStake` — `bonded −
+ * pendingSlash` (D-26), reported as `freeBonded` — and `AssayStake`'s own
+ * note says why `bonded` and never `bonded + unbonding`: stake the provider has already asked to take out is not
  * backing anybody's traffic, even though it stays slashable for the whole
  * unbonding period. Folding `unbonding` into `bonded` here would let a provider
  * request a full unstake and go on serving paid traffic for the entire period
@@ -142,6 +144,8 @@ export class EvmStakeReader implements OnChainStakeReaderPort {
           account: entry.account,
           // `bonded` and `unbonding`, never summed. Two fields, two questions.
           bonded: MoneyUtil.of(stake.bonded.toString(), asset, decimals),
+          // What the redeem gate reads (D-26): bonded less standing reservations.
+          freeBonded: MoneyUtil.of(freeBondedStake(stake).toString(), asset, decimals),
           unbonding: MoneyUtil.of(stake.unbonding.toString(), asset, decimals),
           // `0` is "nothing unbonding", not 1970.
           unbondingStartedAt: startedAt === 0n ? null : new Date(Number(startedAt) * 1000),

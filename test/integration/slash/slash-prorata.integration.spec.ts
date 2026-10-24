@@ -37,8 +37,9 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
 /**
  * G7 on EVM, end to end over a real Postgres built from every migration:
  * a window-level SLA case is proposed as one verifier-signed attestation per
- * harmed agent (pro rata by the price of their DATA_FAIL calls), in ONE
- * Multicall3 batch, waits out both clocks, and executes — every due case's
+ * harmed agent (pro rata by the price of their DATA_FAIL calls), one
+ * transaction each (never a Multicall3 batch, review 2026-10-23 L-1), waits
+ * out both clocks, and executes — every due case's
  * parts in one batch — paying each agent 60% of its part and the treasury
  * 30%, with nothing booked to the ledger.
  *
@@ -150,14 +151,16 @@ describe('pro-rata EVM slash, against a real database', () => {
     });
   }
 
-  it('proposes one attestation per harmed agent, pro rata, in ONE batch, with deterministic ids', async () => {
+  it('proposes one attestation per harmed agent, pro rata, each in its own transaction, with deterministic ids', async () => {
     const seeded = await seedWindow(250_001n);
 
     const tally = await services.execution.proposeDue(nowOf());
 
     expect(tally).toEqual({ proposed: 1, refused: 0, failed: 0 });
-    expect(multicallSends()).toHaveLength(1);
-    expect(chain.sent).toHaveLength(1);
+    // Never through Multicall3: a failed sub-call would leave its signed
+    // attestation unused in public calldata (review 2026-10-23 L-1).
+    expect(multicallSends()).toHaveLength(0);
+    expect(chain.sent).toHaveLength(3);
 
     const parts = await services.partsRepository.findForEpoch(
       (await load(seeded)).organizationId,

@@ -57,6 +57,9 @@ class FakeEvmChain {
   grants = new Map<string, Grant>();
   walletAccepts = false;
   delegationReads = 0;
+  /** `payer:seq` (payer lower case) whose `held(payer, seq)` record exists (D-23). */
+  usedSeqs = new Set<string>();
+  heldReads = 0;
 
   async readContract(args: { functionName: string; args: readonly unknown[] }): Promise<unknown> {
     if (args.functionName === 'delegationOf') {
@@ -73,6 +76,17 @@ class FakeEvmChain {
           revoked: false,
         }
       );
+    }
+    if (args.functionName === 'held') {
+      this.heldReads += 1;
+      const [payer, seq] = args.args as [string, bigint];
+      return {
+        provider: '0x0000000000000000000000000000000000000000',
+        amount: 0n,
+        takeRateBps: 0,
+        status: this.usedSeqs.has(`${payer.toLowerCase()}:${seq}`) ? 2 : 0,
+        collectableAt: 0n,
+      };
     }
     if (args.functionName === 'isValidSignature') {
       return this.walletAccepts ? ERC1271_MAGIC_VALUE : '0xffffffff';
@@ -296,40 +310,42 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
   });
 
   /**
-   * REGRESSION (review 2026-10-15 P-2): the chain admits a voucher only on
-   * `seq > seqHigh`. One at or below it was served and then absorbed at
-   * redemption — the buyer got the call free and the platform paid. It is
-   * refused at admission instead, and so is one below a seq already admitted
-   * for this payer (that one will push `seqHigh` past it).
+   * D-23: `AssayEscrow` admits each `(payer, seq)` once, in any order, so a
+   * seq at or below `seqHigh` — or below a seq already admitted — is still
+   * redeemable and is served. Only a seq the chain reports used
+   * (`held(payer, seq)`) is refused at admission. (On Solana, where the chain
+   * admits only `seq > seqHigh`, both are refused as stale — review
+   * 2026-10-15 P-2, final review N-6.)
    */
-  describe('a seq the chain has already passed', () => {
-    /**
-     * Final review N-6: a seq that was never used but was passed — parallel
-     * calls signed out of order — is refused as STALE, retryable ("request a
-     * new seq"), not as "already used", which a client reads as final.
-     */
-    it('refuses a seq at or below the escrow seqHigh as stale, and reserves nothing', async () => {
+  describe('a seq at or below the chain’s high-water mark', () => {
+    it('admits an unused seq at or below the escrow seqHigh', async () => {
       const call = input(payer);
       const seq = BigInt(call.signed.voucher.seq);
-      await rejects(
-        service.redeem({ ...call, escrow: escrow({ seqHigh: seq }) }),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
-      );
-      await rejects(
-        service.redeem({ ...call, escrow: escrow({ seqHigh: seq + 1n }) }),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
-      );
       await expect(
         service.redeem({ ...call, escrow: escrow({ seqHigh: seq + 1n }) }),
-      ).rejects.toThrow(/request a new seq/);
-      expect(intents.created).toHaveLength(0);
-
-      await expect(
-        service.redeem({ ...call, escrow: escrow({ seqHigh: seq - 1n }) }),
       ).resolves.toMatchObject({ status: PaymentIntentStatus.FUNDS_SECURED });
+      expect(chain.heldReads).toBe(1);
     });
 
-    it('still names a replay of a passed seq as already used', async () => {
+    it('does not read held() for a seq above seqHigh', async () => {
+      const call = input(payer);
+      const seq = BigInt(call.signed.voucher.seq);
+      await service.redeem({ ...call, escrow: escrow({ seqHigh: seq - 1n }) });
+      expect(chain.heldReads).toBe(0);
+    });
+
+    it('refuses a seq the chain reports used as already used, and reserves nothing', async () => {
+      const call = input(payer);
+      const seq = BigInt(call.signed.voucher.seq);
+      chain.usedSeqs.add(`${payer.address.toLowerCase()}:${seq}`);
+      await rejects(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq }) }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('still names a replay of an admitted seq as already used', async () => {
       const call = input(payer);
       const seq = BigInt(call.signed.voucher.seq);
       await service.redeem({ ...call, escrow: escrow({ seqHigh: seq - 1n }) });
@@ -339,12 +355,14 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       );
     });
 
-    it('refuses a seq below one already admitted for the payer as stale, under the lock', async () => {
+    it('admits a seq below one already admitted for the payer', async () => {
       const lower = input(payer, { escrow: escrow() });
       const higher = input(payer, { escrow: escrow() });
       await service.redeem(higher);
-      await rejects(service.redeem(lower), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE);
-      expect(intents.created).toHaveLength(1);
+      await expect(service.redeem(lower)).resolves.toMatchObject({
+        status: PaymentIntentStatus.FUNDS_SECURED,
+      });
+      expect(intents.created).toHaveLength(2);
     });
   });
 

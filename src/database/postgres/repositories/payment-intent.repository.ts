@@ -3,7 +3,12 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
-import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import {
+  REDEMPTION_DEADLINE_MARGIN_SECONDS,
+  REDEMPTION_RETRY_BASE_SECONDS,
+  REDEMPTION_RETRY_MAX_SECONDS,
+  redeemGraceIntervalSql,
+} from '@modules/payment/constants/voucher-redemption.constants';
 import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -806,7 +811,10 @@ export interface UnsettledVoucherTotals {
   readonly total: bigint;
   /** The largest single one: what a per-voucher cap must still allow. */
   readonly largest: bigint;
-  /** The last instant the chain still redeems one of them (`expires_at` + grace), or null. */
+  /**
+   * The last instant the chain still redeems one of them (`expires_at` + the
+   * row's chain grace: 7,200 s on eip155, 1,800 s on Solana), or null.
+   */
   readonly redeemableUntil: Date | null;
   /**
    * `Σ price_amount` redeemed at or after `since`: what a counter read at
@@ -819,13 +827,14 @@ export interface UnsettledVoucherTotals {
  * A rail-B intent the chain has not redeemed and still can: in flight
  * (`CREATED`, not expired) or served with its hold open, and not past the
  * chain's redemption grace — past that it is lost already, whatever the caps.
+ * The grace is the row's own chain's (`redeemGraceIntervalSql`).
  */
 const UNSETTLED_VOUCHER_SQL =
   `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
   // Redeemed into the escrow's hold already (G3.B1): not unsettled.
   ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "held_at" IS NULL AND "status" IN (` +
   [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
-  `) AND "expires_at" > now() - interval '${REDEEM_GRACE_SECONDS} seconds'))`;
+  `) AND "expires_at" > now() - ${redeemGraceIntervalSql('"chain_id"')}))`;
 
 /**
  * A rail-B intent the chain's window counter cannot contain yet, given the
@@ -1083,7 +1092,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * load-bearing.** The chain permits out-of-order redemption, but `seq_high`
    * only advancing past holds that have already been decided is what keeps the
    * in-flight gap meaningful: `next_seq − oldest_pending_seq` bounds
-   * `next_seq − seq_high` only while the redemptions go up in sequence.
+   * `next_seq − seq_high` only while the redemptions go up in sequence. (On a
+   * chain that requires ascending seq; see `orderedBySeq` below.)
    *
    * **Deliberately cross-organization.** The job runs in the scheduler, per
    * asset, on behalf of no tenant — and the ordering above is per *buyer
@@ -1097,6 +1107,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * rail-B row written before voucher v2 has no signature to replay and never
    * will, so returning it would put a permanently unredeemable row at the head
    * of every pass.
+   *
+   * `orderedBySeq: false` is for a chain that admits each `(payer, seq)` once
+   * in any order (`eip155`, D-23): a row is then never held back by a LOWER seq
+   * of its payer — still open, or behind a payer-side block — only by its own
+   * blocked parties. The default keeps both hold-backs (Solana). Such a queue
+   * is not ordered by `(agent_account, voucher_seq)`: a row in its retry
+   * back-off is left out, and the batch is filled round-robin by payer and by
+   * provider (review 2026-10-23 I-1) — see the query below.
    */
   async findAwaitingRedemption(
     assetId: string,
@@ -1104,7 +1122,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     rail: string,
     limit: number,
     exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+    options: { readonly orderedBySeq?: boolean } = {},
   ): Promise<RedeemableIntent[]> {
+    const orderedBySeq = options.orderedBySeq ?? true;
     const query = this.createQueryBuilder('intent')
       .select('intent.organizationId', 'organizationId')
       .addSelect('intent.id', 'id')
@@ -1144,7 +1164,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
       // Redeemed into the escrow's hold already (G3.B1): its hold stays open
       // until `HeldCollectionJob` collects or a dispute refunds it.
-      .andWhere('intent.heldAt IS NULL')
+      .andWhere('intent.heldAt IS NULL');
+
+    if (orderedBySeq) {
       // A row waits while a LOWER seq of its payer is still in flight or open
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
@@ -1153,8 +1175,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // redemption window (final review N-1): past `expires_at` + grace the
       // chain refuses it anyway, so it is only a hole, and waiting on it to
       // the 24 h hold backstop would let every later voucher expire too.
-      // Per payer account, not per asset: the seq is the escrow's.
-      .andWhere(
+      // Per payer account, not per asset: the seq is the escrow's. Not on a
+      // chain that admits any order (D-23): nothing there can die of it.
+      query.andWhere(
         `NOT EXISTS (
            SELECT 1 FROM payment_intents earlier
             WHERE earlier.organization_id IS NOT NULL
@@ -1162,12 +1185,13 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND earlier.rail = :rail
               AND earlier.voucher_seq IS NOT NULL
               AND earlier.voucher_seq < intent.voucher_seq
-              AND earlier.expires_at > now() - interval '${REDEEM_GRACE_SECONDS} seconds'
+              AND earlier.expires_at > now() - ${redeemGraceIntervalSql('earlier.chain_id')}
               AND (earlier.status IN (:...earlierOpenStatuses)
                    OR (earlier.status = 'CREATED' AND earlier.expires_at > now()))
          )`,
         { earlierOpenStatuses: [...OPEN_HOLD_STATUSES] },
       );
+    }
 
     if (
       exclude.organizationIds.length > 0 ||
@@ -1178,7 +1202,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // queue, has a blocked party. Leaving out only the blocked row would let
       // the payer's later seqs through, and redeeming one of those advances
       // `seq_high` past the held one and kills it. Done in the query, BEFORE
-      // the LIMIT, so held rows can never fill the pass (audit E-1).
+      // the LIMIT, so held rows can never fill the pass (audit E-1). On a
+      // chain that admits any order (D-23) only the row's OWN parties count.
       //
       // Payer-side parties only — the payer's organization, the payer and the
       // delegate. A blocked provider or payee is NOT left out: the pass makes
@@ -1198,18 +1223,74 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND held.voucher_seq IS NOT NULL
               AND held.voucher_signature IS NOT NULL
               AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
-              AND held.voucher_seq <= intent.voucher_seq
+              AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
               AND (${blockedPartySql('held')})
          )`,
         blockedPartyParams(exclude),
       );
     }
 
-    return query
-      .orderBy('intent.agentAccount', 'ASC')
-      .addOrderBy('intent.voucherSeq', 'ASC')
-      .limit(limit)
-      .getRawMany<RedeemableIntent>();
+    if (orderedBySeq) {
+      return query
+        .orderBy('intent.agentAccount', 'ASC')
+        .addOrderBy('intent.voucherSeq', 'ASC')
+        .limit(limit)
+        .getRawMany<RedeemableIntent>();
+    }
+
+    // Any order (D-23): nothing holds a payer's rows back any more, so the
+    // pass is kept FAIR instead (review 2026-10-23 I-1). A row the chain
+    // refused with a retryable error waits out its back-off
+    // (`recordRedemptionRetry`), and the batch is filled ROUND-ROBIN by payer
+    // and by provider: every payer's and every provider's first row comes
+    // before anybody's second, so no payer and no provider can take the batch
+    // while somebody else is waiting — and a lone busy one still fills it.
+    // Within a round, rows never refused come first, then the nearest deadline.
+    query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
+    const [inner, parameters] = query.getQueryAndParameters();
+    const rows = (await this.manager.query(
+      `SELECT ranked.* FROM (
+         SELECT queue.*,
+                row_number() OVER (PARTITION BY queue."agentAccount"
+                                   ORDER BY queue."expiresAt", queue."voucherSeq") AS "payerRound",
+                row_number() OVER (PARTITION BY queue."providerAccount"
+                                   ORDER BY queue."expiresAt", queue."agentAccount",
+                                            queue."voucherSeq") AS "providerRound"
+           FROM (${inner}) queue
+       ) ranked
+       ORDER BY GREATEST(ranked."payerRound", ranked."providerRound") ASC,
+                (ranked."redemptionLastError" IS NOT NULL) ASC,
+                ranked."expiresAt" ASC,
+                ranked."agentAccount" ASC,
+                ranked."voucherSeq" ASC
+       LIMIT $${parameters.length + 1}`,
+      [...parameters, limit],
+    )) as (RedeemableIntent & { payerRound?: unknown; providerRound?: unknown })[];
+    return rows.map(({ payerRound: _payer, providerRound: _provider, ...row }) => row);
+  }
+
+  /**
+   * A retryable refusal of this voucher (review 2026-10-23 I-1): it is not
+   * attempted again for 1, 2, 4, 8, then 10 minutes — but never past its last
+   * pass, `REDEMPTION_DEADLINE_MARGIN_SECONDS` before its on-chain deadline
+   * (`expires_at` + the chain's grace), so a provider that tops up its stake
+   * or a buyer that re-grants is still met in time. Read only on a chain that
+   * admits any seq order.
+   */
+  async recordRedemptionRetry(organizationId: string, id: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_attempts" = "redemption_attempts" + 1,
+              "redemption_retry_at" = LEAST(
+                now() + LEAST(interval '${REDEMPTION_RETRY_MAX_SECONDS} seconds',
+                              interval '${REDEMPTION_RETRY_BASE_SECONDS} seconds'
+                                * power(2, LEAST("redemption_attempts", 4))),
+                GREATEST(now(),
+                         "expires_at" + ${redeemGraceIntervalSql('"chain_id"')}
+                           - interval '${REDEMPTION_DEADLINE_MARGIN_SECONDS} seconds'))
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id],
+    );
   }
 
   /**
@@ -3199,7 +3280,8 @@ async function readUnsettledVouchers(
        COUNT(*) FILTER (WHERE ${UNSETTLED_VOUCHER_SQL})::int AS "count",
        COALESCE(SUM("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "total",
        COALESCE(MAX("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "largest",
-       MAX("expires_at") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "latestExpiry",
+       MAX("expires_at" + ${redeemGraceIntervalSql('"chain_id"')})
+         FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "redeemableUntil",
        COALESCE(SUM("price_amount") FILTER (
          WHERE "status" = '${SETTLED_STATUS}'
            AND COALESCE("held_at", "hold_released_at") >= $3::timestamptz
@@ -3218,16 +3300,14 @@ async function readUnsettledVouchers(
     count: number;
     total: string;
     largest: string;
-    latestExpiry: Date | null;
+    redeemableUntil: Date | null;
     redeemedSince: string;
   }>;
-  const latest = row?.latestExpiry ? new Date(row.latestExpiry) : null;
   return {
     count: Number(row?.count ?? 0),
     total: BigInt(row?.total ?? '0'),
     largest: BigInt(row?.largest ?? '0'),
-    redeemableUntil:
-      latest === null ? null : new Date(latest.getTime() + REDEEM_GRACE_SECONDS * 1000),
+    redeemableUntil: row?.redeemableUntil ? new Date(row.redeemableUntil) : null,
     redeemedSince: BigInt(row?.redeemedSince ?? '0'),
   };
 }
