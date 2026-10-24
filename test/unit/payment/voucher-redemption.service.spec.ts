@@ -7,8 +7,9 @@ import {
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
-  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
-  REDEEM_GRACE_SECONDS,
+  debtReplaceableAfterExpirySeconds,
+  maxVoucherRedeemableLifeSeconds,
+  redeemGraceSeconds,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
 } from '@modules/payment/constants/voucher-redemption.constants';
@@ -50,6 +51,8 @@ const PROVIDER_ACCOUNT = `${CHAIN_IDS.SOLANA_DEVNET}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZ
 const PROVIDER_ORG = 'org-22222222-2222-4222-8222-222222222222';
 
 const NOW_SECONDS = 1_800_000_000;
+/** Solana's redemption grace, the chain every row here is on unless it says otherwise. */
+const REDEEM_GRACE_SECONDS = redeemGraceSeconds(USDC);
 
 function pending(seq: number, overrides: Partial<RedeemableIntent> = {}): RedeemableIntent {
   return {
@@ -203,7 +206,7 @@ describe('VoucherRedemptionService.run', () => {
 
   it('warns once when a hold outlives the window the program will still accept', async () => {
     const overdue = pending(1, {
-      voucherIssuedAt: String(NOW_SECONDS - MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS - 1),
+      voucherIssuedAt: String(NOW_SECONDS - maxVoucherRedeemableLifeSeconds(USDC) - 1),
     });
     const { service, redeemer, alerts } = build([overdue]);
     redeemer.outcome = RedeemOutcomeKind.RETRY;
@@ -799,6 +802,83 @@ describe('VoucherRedemptionService — a buyer tightening is retried until the d
 
     expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
     expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  /**
+   * D-24: the grace is per chain. `AssayEscrow` redeems until `expiresAt +
+   * 7200`, the Solana program until `expiresAt + 1800`.
+   */
+  describe('the redemption deadline per chain (D-24)', () => {
+    const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
+    const EVM_BUYER = `${CHAIN_IDS.ROBINHOOD_TESTNET}:0x${'11'.repeat(20)}`;
+    const evmRow = (expiresAtSeconds: number) =>
+      pending(1, {
+        assetId: USDG,
+        agentAccount: EVM_BUYER,
+        expiresAt: new Date(expiresAtSeconds * 1000),
+      });
+
+    it('reads 7,200 s on eip155 and 1,800 s on Solana', () => {
+      expect(redeemGraceSeconds(USDG)).toBe(7_200);
+      expect(redeemGraceSeconds(CHAIN_IDS.ROBINHOOD_TESTNET)).toBe(7_200);
+      expect(redeemGraceSeconds(USDC)).toBe(1_800);
+      expect(redeemGraceSeconds(BUYER)).toBe(1_800);
+      expect(maxVoucherRedeemableLifeSeconds(USDG)).toBe(7_620);
+      expect(maxVoucherRedeemableLifeSeconds(USDC)).toBe(2_220);
+      expect(debtReplaceableAfterExpirySeconds(USDG)).toBe(7_320);
+      expect(debtReplaceableAfterExpirySeconds(USDC)).toBe(1_920);
+    });
+
+    it('an eip155 voucher one Solana grace past expiry is still retried, not debt', async () => {
+      const { service, redeemer, payments } = build([evmRow(NOW_SECONDS - 1_800 + 60)]);
+      redeemer.outcome = RedeemOutcomeKind.RETRY;
+      redeemer.programError = 'DelegateIsRevoked';
+
+      await service.run(USDG);
+
+      expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    });
+
+    it('an eip155 voucher one pass before expiresAt + 7,200 becomes buyer debt', async () => {
+      const { service, redeemer, payments } = build([evmRow(NOW_SECONDS - 7_200 + 60)]);
+      redeemer.outcome = RedeemOutcomeKind.RETRY;
+      redeemer.programError = 'DelegateIsRevoked';
+
+      await service.run(USDG);
+
+      expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
+    });
+
+    it('warns overdue on eip155 only past 7,620 s from issue', async () => {
+      const young = build([
+        pending(1, {
+          assetId: USDG,
+          agentAccount: EVM_BUYER,
+          voucherIssuedAt: String(NOW_SECONDS - 2_221),
+        }),
+      ]);
+      young.redeemer.outcome = RedeemOutcomeKind.RETRY;
+      await young.service.run(USDG);
+      expect(young.alerts.emitted.map((alert) => alert.name)).not.toContain(
+        VOUCHER_REDEMPTION_ALERTS.OVERDUE,
+      );
+
+      const old = build([
+        pending(1, {
+          assetId: USDG,
+          agentAccount: EVM_BUYER,
+          voucherIssuedAt: String(NOW_SECONDS - 7_621),
+        }),
+      ]);
+      old.redeemer.outcome = RedeemOutcomeKind.RETRY;
+      await old.service.run(USDG);
+      expect(old.alerts.emitted).toContainEqual(
+        expect.objectContaining({
+          name: VOUCHER_REDEMPTION_ALERTS.OVERDUE,
+          details: expect.objectContaining({ deadlineSeconds: 7_620 }),
+        }),
+      );
+    });
   });
 
   it('a stake refusal is not a buyer tightening: still retried at the deadline', async () => {

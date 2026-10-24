@@ -144,6 +144,17 @@ export interface ChainAdapter {
     nowSeconds: number,
   ): Promise<VoucherAuthorityAnswer>;
   /**
+   * Whether `(payer, seq)` is already used on chain — on a chain whose replay
+   * rule is per seq, in any order (`eip155`, D-23: `held(payer, seq)` has a
+   * record, and records are never deleted). Its presence is the answer to
+   * "may a seq at or below the escrow's `seqHigh` still be redeemed": there,
+   * yes, unless this says it is used.
+   *
+   * Absent on a chain that admits only `seq > seqHigh` (Solana), where a seq at
+   * or below the mark is dead. Throws when the chain cannot be read.
+   */
+  isVoucherSeqUsedOnChain?(payer: AccountId, seq: bigint): Promise<boolean>;
+  /**
    * `resource`'s hash exactly as this chain's voucher signs it, in the form
    * this chain's redeemer takes back.
    *

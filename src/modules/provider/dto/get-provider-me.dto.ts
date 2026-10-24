@@ -85,7 +85,8 @@ export class ProviderSlashHoldDto {
     description:
       'SLASH_WINDOW_FULL: the slash window is full and an upheld penalty waits to execute. ' +
       'STAKE_FULLY_RESERVED: pending penalties reserve all but less than one penalty of the ' +
-      'stake. BONDED_BELOW_MINIMUM: bonded stake is below the minimum.',
+      'stake. BONDED_BELOW_MINIMUM: free bonded stake (bonded minus pending penalties) is below ' +
+      'the minimum.',
   })
   reasons: string[];
 

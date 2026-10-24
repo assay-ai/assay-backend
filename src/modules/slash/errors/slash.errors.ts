@@ -32,6 +32,10 @@ export enum SlashErrorCode {
   SLASH_NOTHING_STANDING = 'SLASH_NOTHING_STANDING',
   /** B18: an operator action on a stuck case whose guard does not hold (or no longer holds). */
   SLASH_MANUAL_ACTION_REFUSED = 'SLASH_MANUAL_ACTION_REFUSED',
+  /** Review 2026-10-23 M-1: every unsent part pays a buyer linked to the provider. */
+  SLASH_LINKED_BENEFICIARY = 'SLASH_LINKED_BENEFICIARY',
+  /** Review 2026-10-23 M-1: signing now would exceed the provider's on-chain window for the day. */
+  SLASH_PROVIDER_DAILY_BUDGET = 'SLASH_PROVIDER_DAILY_BUDGET',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -231,6 +235,37 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * penalty (one minor unit of rounding allowed). Nothing was signed; the case stays PROPOSING and
    * a `BENEFICIARY_REFUSED` timeline entry names every part that failed.
    */
+  /**
+   * Review 2026-10-23 M-1 (self-slashing): every part left to sign pays a buyer
+   * linked to the provider — the provider's own organization, the publisher
+   * of the tool, or a wallet the provider enrolled. Those parts are REFUSED
+   * and nothing was signed for them.
+   */
+  linkedBeneficiary: {
+    code: SlashErrorCode.SLASH_LINKED_BENEFICIARY,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: refused before signing — every remaining ` +
+      `beneficiary is linked to the provider`,
+  },
+  /**
+   * Review 2026-10-23 M-1: the provider's attestations signed in the last
+   * rolling day, plus this case's, would exceed its on-chain slash window
+   * (`atRisk × slashCapBps`). Nothing was signed; the case stays PROPOSING and
+   * is retried as the day rolls on, so no record is signed that the window
+   * could never execute.
+   */
+  providerDailyBudget: {
+    code: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: not signed yet — ${context?.signed ?? '?'} ` +
+      `already holds provider ${context?.providerId ?? ''}'s slash window at the new records' ` +
+      `door (pending records with a door in that rolling day plus its executions) or its ` +
+      `pending backlog (at most 7 windows), or its free stake ` +
+      `(${context?.freeStake ?? '?'}) cannot cover it: ${context?.wanted ?? '?'} more would ` +
+      `exceed ${context?.allowance ?? '?'}`,
+  },
   beneficiaryEvidenceRefused: {
     code: SlashErrorCode.SLASH_BENEFICIARY_EVIDENCE_REFUSED,
     statusCode: 409,

@@ -4,6 +4,7 @@ import { RedeemableIntent } from '@database/postgres/repositories/payment-intent
 import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { redeemGraceSeconds } from '@modules/payment/constants/voucher-redemption.constants';
 import {
   RedeemOutcome,
   RedeemOutcomeKind,
@@ -64,6 +65,8 @@ interface Options {
   /** The live stake read: a boolean, or an Error to throw. Absent: the redeemer cannot read. */
   readonly belowMinimum?: boolean | Error;
   readonly blocklist?: ReturnType<typeof noBlocks>;
+  /** Short of free stake only because of unplanned / dead-key slash records (M-2). */
+  readonly unplannedShort?: boolean | Error;
 }
 
 function build(rows: RedeemableIntent[], options: Options = {}) {
@@ -85,6 +88,13 @@ function build(rows: RedeemableIntent[], options: Options = {}) {
   if (options.belowMinimum !== undefined) {
     const answer = options.belowMinimum;
     redeemer.providerBelowMinimumStake = jest.fn(async () => {
+      if (answer instanceof Error) throw answer;
+      return answer;
+    });
+  }
+  if (options.unplannedShort !== undefined) {
+    const answer = options.unplannedShort;
+    redeemer.providerShortOnlyByUnplannedSlashes = jest.fn(async () => {
       if (answer instanceof Error) throw answer;
       return answer;
     });
@@ -389,5 +399,175 @@ describe('VoucherRedemptionService — a blocked buyer freezes collection (L4)',
 
     expect(pass2.payments.lapseRedemption).not.toHaveBeenCalled();
     expect(pass2.intents.releaseHold).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Review 2026-10-24 wave 2 M-2: a provider below its minimum free stake only
+ * because of slash records it did not cause (records this platform never
+ * planned, or signed by a revoked verifier key) is not at fault. Its vouchers
+ * are retried until their deadline, the refusal is not sticky, and only a
+ * voucher that dies of it is forfeited — under its own cause.
+ */
+describe('VoucherRedemptionService — a shortfall from unplanned slash records (M-2)', () => {
+  const UNPLANNED = 'ProviderStakeHeldByUnplannedSlash';
+
+  it('records the refusal under its own, non-sticky name and keeps retrying', async () => {
+    const { service, payments, intents } = build([row()], {
+      outcome: RedeemOutcomeKind.RETRY,
+      programError: 'ProviderBelowMinimumStake',
+      unplannedShort: true,
+    });
+
+    await service.run(USDC);
+
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(ORG, 'intent-1', UNPLANNED);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+  });
+
+  it('a later refusal replaces it: it is not the provider’s fault', async () => {
+    const { service, payments } = build([row({ redemptionLastError: UNPLANNED })], {
+      outcome: RedeemOutcomeKind.RETRY,
+      programError: 'EscrowWindowLimitExceeded',
+      unplannedShort: true,
+    });
+
+    await service.run(USDC);
+
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'EscrowWindowLimitExceeded',
+    );
+  });
+
+  it('a buyer-caused close after it is not turned into the provider’s forfeit', async () => {
+    // The reaper released the records; the buyer then revoked its delegate.
+    const { service, payments, intents } = build([row({ redemptionLastError: UNPLANNED })], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'DelegateIsRevoked',
+      belowMinimum: false,
+    });
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
+  });
+
+  it('a voucher that dies of it at its deadline is forfeited under that cause, never buyer debt', async () => {
+    const { service, payments, intents } = build([row({ redemptionLastError: UNPLANNED })], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'VoucherExpired',
+      // Released since: the live read says fine. It still died of the shortfall.
+      belowMinimum: false,
+    });
+
+    await service.run(USDC);
+
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}${UNPLANNED}`,
+    );
+  });
+
+  it('a live read of the shortfall never decides a close the stake did not refuse (N-2)', async () => {
+    // `VoucherExpired` with no stake refusal recorded: the shortfall seen live
+    // is not the provider's fault, so the close keeps its buyer-side handling.
+    const { service, payments, intents } = build([row()], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'VoucherExpired',
+      belowMinimum: true,
+      unplannedShort: true,
+    });
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
+  });
+
+  it('a buyer-caused close DURING the shortfall is buyer debt, not the provider’s forfeit (N-2)', async () => {
+    // A thief's records still stand (not yet released); the buyer revokes its
+    // delegate, and the escrow checks the delegate before the stake gate.
+    const { service, payments, intents } = build([row()], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'DelegateIsRevoked',
+      belowMinimum: true,
+      unplannedShort: true,
+    });
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
+    expect(payments.recordRedemptionError).not.toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      expect.stringContaining(PROVIDER_FORFEIT_PREFIX),
+    );
+  });
+
+  it('a buyer tightening at its deadline during the shortfall is buyer debt too (N-2)', async () => {
+    const { service, payments, intents } = build(
+      [
+        row({
+          redemptionLastError: UNPLANNED,
+          // Inside the last pass before the voucher's on-chain deadline.
+          expiresAt: new Date((NOW - redeemGraceSeconds(USDC) + 5) * 1000),
+        }),
+      ],
+      {
+        outcome: RedeemOutcomeKind.RETRY,
+        programError: 'DelegateWindowLimitExceeded',
+        belowMinimum: true,
+        unplannedShort: true,
+      },
+    );
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'DelegateWindowLimitExceeded',
+    );
+  });
+
+  it('a provider below its minimum for its own reasons is unchanged: sticky, provider-caused', async () => {
+    const { service, payments } = build([row()], {
+      outcome: RedeemOutcomeKind.RETRY,
+      programError: 'ProviderBelowMinimumStake',
+      unplannedShort: false,
+    });
+
+    await service.run(USDC);
+
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'ProviderBelowMinimumStake',
+    );
+  });
+
+  it('an unreadable attribution falls back to the provider’s fault, as before', async () => {
+    const { service, payments } = build([row()], {
+      outcome: RedeemOutcomeKind.RETRY,
+      programError: 'ProviderBelowMinimumStake',
+      unplannedShort: new Error('rpc down'),
+    });
+
+    await service.run(USDC);
+
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'ProviderBelowMinimumStake',
+    );
   });
 });

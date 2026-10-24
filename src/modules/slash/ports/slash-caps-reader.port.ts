@@ -16,7 +16,18 @@ export interface SlashCaps {
   readonly windowAllowanceMinor: bigint;
   /** `(bonded + unbonding) − pendingSlash` — what other standing judgements have not reserved. */
   readonly freeStakeMinor: bigint;
-  /** `params.verifierDailyCap` — the most one verifier key may take per rolling day. */
+  /**
+   * `pendingSlash` — every standing (`Pending` or `Disputed`) record's
+   * reservation, this platform's or not. Already subtracted in
+   * `freeStakeMinor`; never counted against the window, which only
+   * executions consume (review 2026-10-24 wave 2 M-1). Kept for the log.
+   */
+  readonly pendingSlashMinor: bigint;
+  /**
+   * `params.verifierDailyCap`. Kept in the ParamSet, but no longer applied by
+   * `executeSlash` (review 2026-10-23 M-1): read for display only, never a
+   * ceiling a plan or a keeper waits on.
+   */
   readonly verifierDailyCapMinor: bigint;
   /** `params.slashAgentBps` / `slashPlatformBps`, for the dust floor and the report. */
   readonly agentBps: number;

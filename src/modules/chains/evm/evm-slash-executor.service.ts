@@ -203,17 +203,19 @@ const CANCEL_LOOKUP_CHUNKS = 5;
  *
  * ## Batching
  *
- * `proposeSlash` and `executeSlash` have no `msg.sender` restriction, so a
- * window's per-agent judgements go out in ONE `Multicall3.aggregate3` per
- * chunk of {@link EvmSlashExecutorConfig.batchSize}, every call
- * `allowFailure: true`. A multicall receipt carries no per-call return data,
- * so each chunk is:
+ * `executeSlash` has no `msg.sender` restriction, so the due executions go
+ * out in ONE `Multicall3.aggregate3` per chunk of
+ * {@link EvmSlashExecutorConfig.batchSize}, every call `allowFailure: true`.
+ * Proposals do NOT: each carries a signed attestation, and a failed sub-call
+ * would leave it valid and unused in public calldata (review 2026-10-23 L-1),
+ * so each goes in its own transaction ({@link proposeBatch}). A multicall
+ * receipt carries no per-call return data, so each execution chunk is:
  *
  *  1. **simulated** with `eth_call`, which returns `Result[]` — a call that
  *     would fail is taken out of the batch before any gas is spent;
  *  2. estimated and sent;
- *  3. **confirmed from the receipt's events** (`SlashProposed`,
- *     `SlashExecuted`), matched on the indexed `requestId`.
+ *  3. **confirmed from the receipt's events** (`SlashExecuted`), matched on
+ *     the indexed `requestId`.
  *
  * Anything that failed in simulation, failed inside the batch, or cannot be
  * confirmed (the send threw — it may have landed) is **retried once through
@@ -276,6 +278,7 @@ export class EvmSlashExecutor
       penaltyCeilingMinor: BigInt(params.penaltyAmount),
       windowAllowanceMinor: (atRisk * BigInt(params.slashCapBps)) / 10_000n,
       freeStakeMinor: atRisk > pending ? atRisk - pending : 0n,
+      pendingSlashMinor: pending,
       verifierDailyCapMinor: BigInt(params.verifierDailyCap),
       agentBps: Number(params.slashAgentBps),
       platformBps: Number(params.slashPlatformBps),
@@ -408,35 +411,23 @@ export class EvmSlashExecutor
     return this.proposeOne(request);
   }
 
+  /**
+   * One transaction per judgement, never a `Multicall3` batch (review
+   * 2026-10-23 L-1). A proposal carries a signed attestation in its calldata;
+   * inside `aggregate3` with `allowFailure: true` a sub-call that failed on
+   * chain still published its valid, unused attestation in a successful
+   * transaction, and with `allowFailure: false` one failing item would publish
+   * every other one's. Alone, each attestation is signed immediately before
+   * its own simulation and send (`proposeOne`), and only a revert between that
+   * simulation and inclusion can expose it — that one, for its validity of
+   * {@link ATTESTATION_VALIDITY_SECONDS}. Proposals are a few per window, so
+   * the throughput is the relayer's, one receipt each. Executions carry no
+   * signature and stay batched.
+   */
   async proposeBatch(
     requests: readonly SlashProposalRequest[],
   ): Promise<readonly SlashBatchOutcome<SlashProposalResult>[]> {
-    return this.batch<SlashProposalRequest, SlashProposalResult>(requests, {
-      // The single retry signs AFRESH, always. A batch's attestations were
-      // signed before a send that may have taken minutes (or timed out), and
-      // reusing one would turn a slow RPC into `AttestationExpired`.
-      single: (request) => this.proposeOne(request),
-      prepare: async (request) => {
-        // Already on chain: adopt without signing anything.
-        const adopted = await this.adoptIfPresent(request);
-        if (adopted) return { done: adopted };
-        return { callData: (await this.attest(request)).callData };
-      },
-      confirm: async (request, receipt, hash) => {
-        if (
-          !receiptHasEvent(
-            receipt,
-            this.deployment(request.chainId).stake,
-            'SlashProposed',
-            request.requestId,
-          )
-        ) {
-          return null;
-        }
-        return this.proposalResultFromRecord(request, hash, false);
-      },
-      instruction: 'proposeSlash',
-    });
+    return oneByOne(requests, (request) => this.proposeOne(request));
   }
 
   // ── Phase two ───────────────────────────────────────────────────────────
@@ -452,7 +443,10 @@ export class EvmSlashExecutor
    *
    * **All or wait** (assay-evm 9f036a3): `executeSlash` pays exactly the
    * record's `reserved`, or reverts `SlashWindowNotDrained` while the
-   * provider's or the verifier key's rolling window cannot take all of it.
+   * provider's rolling window cannot take all of it. (The verifier key's own
+   * daily window is no longer applied at execution, review 2026-10-23 M-1:
+   * shared by every provider, it let one provider's self-slashes crowd out
+   * everybody else's.)
    * There is no partial payment, so nothing has to be simulated or deferred
    * to keep a case from being cut short by order: a part that cannot be paid
    * whole waits (a WAIT) and the next tick retries it.
@@ -495,6 +489,42 @@ export class EvmSlashExecutor
       ? cancelReasonFromEvm(Number((cancelled.args as { reason: number }).reason))
       : undefined;
     return { signature: hash, cancelledAt, ...(reason ? { reason } : {}) };
+  }
+
+  /**
+   * `expireSlash` for many records at once (review 2026-10-24 wave 2 M-2):
+   * through `Multicall3` where the chain has one, else one transaction each,
+   * with the same simulate-then-send, adopt-or-retry-singly rules as
+   * `executeBatch`. `expireSlash` is permissionless, so the relayer sends it;
+   * since assay-evm D-27 it releases at once a record whose verifier can no
+   * longer sign. A record already released makes its row fail
+   * (`SlashNotPending`) without touching the others.
+   */
+  async expireBatch(
+    requests: readonly SlashCancelRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashCancelResult>[]> {
+    return this.batch<SlashCancelRequest, SlashCancelResult>(requests, {
+      single: (request) => this.expire(request),
+      prepare: async (request) => ({
+        callData: encodeFunctionData({
+          abi: ASSAY_STAKE_SLASH_ABI,
+          functionName: 'expireSlash',
+          args: [bytes32(request.requestId)],
+        }),
+      }),
+      confirm: async (request, receipt, hash) => {
+        const stake = this.deployment(request.chainId).stake;
+        const cancelled = findEvent(receipt, stake, 'SlashCancelled', request.requestId);
+        if (!cancelled) return null;
+        const args = cancelled.args as { cancelledAt: bigint; reason: number };
+        return {
+          signature: hash,
+          cancelledAt: secondsToDate(BigInt(args.cancelledAt)),
+          reason: cancelReasonFromEvm(Number(args.reason)),
+        };
+      },
+      instruction: 'expireSlash',
+    });
   }
 
   /**
@@ -1542,15 +1572,6 @@ function findEvent(
     }
   }
   return null;
-}
-
-function receiptHasEvent(
-  receipt: Receipt,
-  stake: `0x${string}`,
-  eventName: 'SlashProposed',
-  requestId: string,
-): boolean {
-  return findEvent(receipt, stake, eventName, requestId) !== null;
 }
 
 function refusal(

@@ -349,16 +349,28 @@ describe('findDustParts', () => {
 });
 
 describe('minimumSplittablePenalty', () => {
-  it('is the smallest applied amount whose 60/30 split moves a unit', () => {
-    // bpsOf(1, 6000) = 0 and bpsOf(1, 3000) = 0 → PenaltyTooSmallToSplit.
-    // bpsOf(2, 6000) = 1 → the agent receives a unit.
-    expect(minimumSplittablePenalty(6_000, 3_000)).toBe(2n);
+  it('is the smallest penalty whose agent AND platform shares are both non-zero (aa2f84a)', () => {
+    // bpsOf(3, 3000) = 0 → PenaltyTooSmallToSplit at proposal; bpsOf(4, 3000) = 1,
+    // bpsOf(4, 6000) = 2.
+    expect(minimumSplittablePenalty(6_000, 3_000)).toBe(4n);
     expect(minimumSplittablePenalty(10_000, 0)).toBe(1n);
     expect(minimumSplittablePenalty(100, 100)).toBe(100n);
+    // The agent term binds when it is the smaller share.
+    expect(minimumSplittablePenalty(2_000, 7_000)).toBe(5n);
+    // No platform share: only the agent's must be non-zero.
+    expect(minimumSplittablePenalty(6_000, 0)).toBe(2n);
   });
 
-  it('refuses a split that can never pay anybody', () => {
+  it('matches the contract rule for every small penalty at 60/30', () => {
+    const bpsOf = (a: bigint, bps: number) => (a * BigInt(bps)) / 10_000n;
+    const accepted = (a: bigint) => bpsOf(a, 6_000) > 0n && bpsOf(a, 3_000) > 0n;
+    const minimum = minimumSplittablePenalty(6_000, 3_000);
+    for (let a = 1n; a < 50n; a += 1n) expect(accepted(a)).toBe(a >= minimum);
+  });
+
+  it('refuses a split with no agent share', () => {
     expect(() => minimumSplittablePenalty(0, 0)).toThrow(/never/);
+    expect(() => minimumSplittablePenalty(0, 3_000)).toThrow(/never/);
   });
 });
 

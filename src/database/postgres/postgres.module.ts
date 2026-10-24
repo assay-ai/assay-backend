@@ -100,6 +100,8 @@ import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
 import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
 import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
+import { EvmSlashRecordEntity } from './entities/evm-slash-record.entity';
+import { EvmSlashRecordRepository } from './repositories/evm-slash-record.repository';
 import { EscrowWithdrawalEventEntity } from './entities/escrow-withdrawal-event.entity';
 import { EscrowWithdrawalEventRepository } from './repositories/escrow-withdrawal-event.repository';
 import { OAuthClientEntity } from './entities/oauth-client.entity';
@@ -194,6 +196,7 @@ export const entities = [
   EvmChainStateEntity,
   ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
+  EvmSlashRecordEntity,
   EscrowWithdrawalEventEntity,
   OAuthClientEntity,
   OAuthAuthorizationCodeEntity,
@@ -257,6 +260,7 @@ export const repositories = [
   AgentRepository,
   AccountBlockRepository,
   EvmChainStateRepository,
+  EvmSlashRecordRepository,
   EscrowWithdrawalEventRepository,
   OAuthClientRepository,
   OAuthAuthorizationCodeRepository,

@@ -26,6 +26,8 @@ import {
 } from './chain-state/evm-chain-state.indexer';
 import { EvmSlashHoldMonitor } from './evm-slash-hold.monitor';
 import { EvmVerifierExpiryMonitor } from './evm-verifier-expiry.monitor';
+import { EVM_SLASH_EXPIRER, EvmRevokedVerifierReaper } from './evm-revoked-verifier.reaper';
+import { EvmSlashExecutor } from './evm-slash-executor.service';
 import { ChainErrors } from '../errors/chains.errors';
 import { isChainId } from '../ports/caip.types';
 
@@ -138,6 +140,11 @@ function readConfirmations(raw: string | undefined): number {
     // The provider slash hold: stop routing paid calls to a provider whose
     // penalties cannot be collected promptly.
     EvmSlashHoldMonitor,
+    // Review 2026-10-24 wave 2 M-2: release (expireSlash, permissionless, sent
+    // by the relayer) every standing record of a verifier key that can no
+    // longer sign, so a stolen-and-revoked key cannot keep payments halted.
+    { provide: EVM_SLASH_EXPIRER, useExisting: EvmSlashExecutor },
+    EvmRevokedVerifierReaper,
   ],
 })
 export class EvmSchedulerModule {}

@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
+import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import {
   SLASH_CHAIN_RULINGS,
@@ -34,6 +35,12 @@ export const EVM_SLASH_WATCH_MAX_BLOCKS = 10_000n;
 
 /** Blocks per `eth_getLogs` call; most providers refuse wider ranges. */
 export const EVM_SLASH_WATCH_CHUNK = 2_000n;
+
+/**
+ * Most blocks one tick back-fills into `evm_slash_records` per chain (review
+ * 2026-10-24 wave 3 N-3), on top of the forward read.
+ */
+export const EVM_SLASH_BACKFILL_MAX_BLOCKS = 100_000n;
 
 /**
  * Where a chain with no cursor, no `EVM_CHAIN_STATE_FROM_BLOCK` and no recorded
@@ -73,6 +80,7 @@ export interface SlashProposedLog {
     readonly verifier?: `0x${string}`;
     readonly beneficiary?: `0x${string}`;
     readonly penalty?: bigint;
+    readonly reserved?: bigint;
     readonly executableAt?: bigint;
     readonly disputedAt?: bigint;
     readonly arbiter?: `0x${string}`;
@@ -156,9 +164,13 @@ export class EvmSlashProposalWatcher {
       EvmChainStateIndexerConfig,
       'fromBlock' | 'confirmations'
     > | null = null,
+    // Every record seen, for the revoked-verifier reaper and the redeemer's
+    // fault attribution (review 2026-10-24 wave 2 M-2).
+    @Optional() private readonly records: EvmSlashRecordRepository | null = null,
   ) {}
 
-  @Cron(EVM_SLASH_WATCH_CRON)
+  // Ticks never overlap: a back-filling tick reads more than the forward range.
+  @Cron(EVM_SLASH_WATCH_CRON, { waitForCompletion: true })
   async handleWatch(): Promise<void> {
     try {
       await this.check();
@@ -213,27 +225,20 @@ export class EvmSlashProposalWatcher {
           (safeHead > EVM_SLASH_WATCH_INITIAL_LOOKBACK
             ? safeHead - EVM_SLASH_WATCH_INITIAL_LOOKBACK
             : 0n));
-    if (start > safeHead) return [];
+    if (start > safeHead) {
+      await this.backfillAfterForward(chainId, deployment, client, cursor, known ?? null, cursor);
+      return [];
+    }
     const end =
       safeHead - start + 1n > EVM_SLASH_WATCH_MAX_BLOCKS
         ? start + EVM_SLASH_WATCH_MAX_BLOCKS - 1n
         : safeHead;
 
-    const logs: SlashProposedLog[] = [];
-    for (let from = start; from <= end; from += EVM_SLASH_WATCH_CHUNK) {
-      const to = from + EVM_SLASH_WATCH_CHUNK - 1n < end ? from + EVM_SLASH_WATCH_CHUNK - 1n : end;
-      logs.push(
-        ...(await client.getContractEvents({
-          address: deployment.stake,
-          abi: ASSAY_SLASH_WATCH_EVENTS_ABI,
-          fromBlock: from,
-          toBlock: to,
-        })),
-      );
-    }
+    const logs = await this.readLogs(client, deployment, start, end);
 
     const proposed = logs.filter((log) => log.eventName === 'SlashProposed');
-    const { findings, late } = await this.compare(chainId, proposed);
+    const { findings, late } = await this.compare(chainId, proposed, true);
+    await this.rememberRecords(chainId, proposed, findings, logs);
     await this.readoptLate(chainId, late);
     // A failure here throws before the cursor moves, so the range is re-read
     // and the (idempotent) mirror is retried next tick.
@@ -250,6 +255,7 @@ export class EvmSlashProposalWatcher {
     // Only after the comparison and its alerts: a failure above re-reads the
     // same range next tick rather than skipping it.
     await this.writeCursor(chainId, end);
+    await this.backfillAfterForward(chainId, deployment, client, cursor, known ?? null, end);
     if (this.slashHolds) {
       const authorities = new Set(
         logs
@@ -261,9 +267,15 @@ export class EvmSlashProposalWatcher {
     return findings;
   }
 
+  /**
+   * `alert`: false for the back-fill, which only classifies (foreign or not).
+   * Those records were already compared, alerted on and re-adopted when the
+   * forward read first passed them.
+   */
   private async compare(
     chainId: ChainId,
     logs: readonly SlashProposedLog[],
+    alert: boolean,
   ): Promise<{ findings: SlashWatchFinding[]; late: SlashProposedLog[] }> {
     const ids = logs
       .map((log) => log.args.requestId?.toLowerCase().replace(/^0x/, ''))
@@ -292,13 +304,15 @@ export class EvmSlashProposalWatcher {
       const part = stored.get(requestId);
       if (!part) {
         findings.push({ chainId, kind: 'UNKNOWN', requestId });
+        if (!alert) continue;
         await this.alerts.emit({
           severity: AlertSeverity.CRITICAL,
           name: EVM_SLASH_WATCH_ALERTS.UNKNOWN,
           summary:
             `A slash record on ${chainId} was proposed that this platform never planned. ` +
-            `Treat the verifier key as compromised: see the runbook (revokeVerifier / pause / cancelSlash) ` +
-            `before executableAt`,
+            `Treat the verifier key as compromised: it already reserves the provider's stake and ` +
+            `can halt its payments. See the runbook (revokeVerifier; the reaper then releases ` +
+            `its records) before executableAt`,
           details: onChain,
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
           dedupeKey: `${chainId}:${requestId}`,
@@ -311,6 +325,7 @@ export class EvmSlashProposalWatcher {
       const penaltyDiffers = BigInt(part.penaltyAmount) !== (log.args.penalty ?? 0n);
       if (beneficiaryDiffers || penaltyDiffers) {
         findings.push({ chainId, kind: 'MISMATCH', requestId });
+        if (!alert) continue;
         await this.alerts.emit({
           severity: AlertSeverity.CRITICAL,
           name: EVM_SLASH_WATCH_ALERTS.MISMATCH,
@@ -328,12 +343,168 @@ export class EvmSlashProposalWatcher {
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
           dedupeKey: `${chainId}:${requestId}`,
         });
-      } else if (part.chainStatus === 'REFUSED') {
+      } else if (alert && part.chainStatus === 'REFUSED') {
         // Review S-5: a straggler given up on whose transaction landed late.
         late.push(log);
       }
     }
     return { findings, late };
+  }
+
+  /**
+   * After the forward read (or a tick with nothing new for it). A chain this
+   * watcher starts on now (no cursor before this tick) reads every record
+   * from here on: there is nothing before it to back-fill. One it was already
+   * reading before `evm_slash_records` existed is back-filled from the deploy
+   * block. A failure never undoes the forward read: it is retried next tick
+   * from the back-fill's own durable cursor.
+   */
+  private async backfillAfterForward(
+    chainId: ChainId,
+    deployment: EvmDeployment,
+    client: EvmSlashWatchClient,
+    cursorBefore: bigint | null,
+    deployBlock: bigint | null,
+    forwardCursor: bigint | null,
+  ): Promise<void> {
+    if (!this.records) return;
+    try {
+      if (cursorBefore === null || forwardCursor === null) {
+        await this.cursors.saveSlashBackfill(chainId, null, true);
+      } else {
+        await this.backfill(chainId, deployment, client, deployBlock, forwardCursor);
+      }
+    } catch (error) {
+      this.logger.error(`slash record back-fill on ${chainId} failed: ${describe(error)}`);
+    }
+  }
+
+  /** `SlashProposed` and the ruling events of the Stake in `[from, to]`, in chunks. */
+  private async readLogs(
+    client: EvmSlashWatchClient,
+    deployment: EvmDeployment,
+    start: bigint,
+    end: bigint,
+  ): Promise<SlashProposedLog[]> {
+    const logs: SlashProposedLog[] = [];
+    for (let from = start; from <= end; from += EVM_SLASH_WATCH_CHUNK) {
+      const to = from + EVM_SLASH_WATCH_CHUNK - 1n < end ? from + EVM_SLASH_WATCH_CHUNK - 1n : end;
+      logs.push(
+        ...(await client.getContractEvents({
+          address: deployment.stake,
+          abi: ASSAY_SLASH_WATCH_EVENTS_ABI,
+          fromBlock: from,
+          toBlock: to,
+        })),
+      );
+    }
+    return logs;
+  }
+
+  /**
+   * Back-fills `evm_slash_records` on a chain whose forward cursor had already
+   * passed older `SlashProposed` events when the table was created (review
+   * 2026-10-24 wave 3 N-3), so the reaper and the redeemer's attribution know
+   * those records too. From the deploy block (`EVM_CHAIN_STATE_FROM_BLOCK`,
+   * else the deployment's `disputeUpgradeBlock`) up to the forward cursor,
+   * {@link EVM_SLASH_BACKFILL_MAX_BLOCKS} per tick, with the same log reader.
+   *
+   * Records only: each `SlashProposed` (foreign when no part matches it,
+   * classified silently — it was alerted on when first read) and each close
+   * (`SlashCancelled`, `SlashExecuted`). Ranges go up in block order and up to
+   * the forward cursor, so a record's close is always read after its
+   * proposal, and every write is idempotent (a re-read never re-opens a
+   * record). Nothing is mirrored onto cases: the forward read did that. The
+   * progress is durable; done once it reaches the forward cursor.
+   */
+  private async backfill(
+    chainId: ChainId,
+    deployment: EvmDeployment,
+    client: EvmSlashWatchClient,
+    deployBlock: bigint | null,
+    forwardCursor: bigint,
+  ): Promise<void> {
+    if (!this.records) return;
+    const state = await this.cursors.findSlashBackfill(chainId);
+    if (state.done) return;
+    if (deployBlock === null) {
+      this.logger.error(
+        `slash records on ${chainId} cannot be back-filled: neither EVM_CHAIN_STATE_FROM_BLOCK ` +
+          `nor the deployment's disputeUpgradeBlock is set. Records proposed before ` +
+          `evm_slash_records existed are not reaped or attributed; see the runbook`,
+      );
+      await this.cursors.saveSlashBackfill(chainId, null, true);
+      return;
+    }
+    const start = state.cursor !== null ? state.cursor + 1n : deployBlock;
+    if (start > forwardCursor) {
+      await this.cursors.saveSlashBackfill(chainId, null, true);
+      return;
+    }
+    const end =
+      forwardCursor - start + 1n > EVM_SLASH_BACKFILL_MAX_BLOCKS
+        ? start + EVM_SLASH_BACKFILL_MAX_BLOCKS - 1n
+        : forwardCursor;
+    const logs = await this.readLogs(client, deployment, start, end);
+    const proposed = logs.filter((log) => log.eventName === 'SlashProposed');
+    const { findings } = await this.compare(chainId, proposed, false);
+    await this.rememberRecords(chainId, proposed, findings, logs);
+    const done = end >= forwardCursor;
+    await this.cursors.saveSlashBackfill(chainId, end, done);
+    this.logger.log(
+      `slash records on ${chainId} back-filled through block ${end}` +
+        (done ? ' — caught up with the watcher' : ` of ${forwardCursor}`) +
+        ` (${proposed.length} proposal(s), ${findings.length} foreign)`,
+    );
+  }
+
+  /**
+   * Keeps every `SlashProposed` in `evm_slash_records` — foreign when the
+   * comparison found it UNKNOWN or MISMATCH — and closes each record this
+   * range executed or cancelled (review 2026-10-24 wave 2 M-2). Throws before
+   * the cursor moves, so a failed write is re-read next tick; every write is
+   * idempotent.
+   */
+  private async rememberRecords(
+    chainId: ChainId,
+    proposed: readonly SlashProposedLog[],
+    findings: readonly SlashWatchFinding[],
+    logs: readonly SlashProposedLog[],
+  ): Promise<void> {
+    if (!this.records) return;
+    const foreign = new Set(findings.map((finding) => finding.requestId));
+    const seen = proposed.flatMap((log) => {
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
+      if (!requestId || !log.args.provider || !log.args.verifier) return [];
+      return [
+        {
+          chainId,
+          requestId,
+          provider: log.args.provider.toLowerCase(),
+          verifier: log.args.verifier.toLowerCase(),
+          reserved: log.args.reserved ?? log.args.penalty ?? 0n,
+          executableAt: log.args.executableAt
+            ? new Date(Number(log.args.executableAt) * 1000)
+            : null,
+          foreign: foreign.has(requestId),
+          blockNumber: log.blockNumber ?? null,
+          transactionHash: log.transactionHash ?? null,
+        },
+      ];
+    });
+    await this.records.recordProposed(seen);
+
+    for (const log of logs) {
+      if (log.eventName !== 'SlashCancelled' && log.eventName !== 'SlashExecuted') continue;
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
+      if (!requestId) continue;
+      const at = log.eventName === 'SlashCancelled' ? log.args.cancelledAt : log.args.executedAt;
+      await this.records.markClosed(
+        chainId,
+        [requestId],
+        at ? new Date(Number(at) * 1000) : new Date(),
+      );
+    }
   }
 
   /**

@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import {
   decodeFunctionData,
   encodeAbiParameters,
@@ -9,6 +10,8 @@ import {
 import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
 import {
+  EVM_CLOCK_DRIFT_ALERT,
+  EVM_EXPIRY_HELD_LOG_TAG,
   EVM_REDEEM_BATCH_BASE_GAS,
   EVM_REDEEM_PER_VOUCHER_GAS,
   EvmVoucherRedeemer,
@@ -105,6 +108,8 @@ interface ChainState {
   redeemer: string;
   minimumStake: bigint;
   bonded: bigint;
+  /** `stakeOf(provider).pendingSlash`: reserved by standing slash records. */
+  pendingSlash: bigint;
   /** Per payer ADDRESS (lower case). Anything absent uses `HEALTHY_ESCROW`. */
   escrows: Record<string, Record<string, bigint>>;
   /** `payer:delegate` (lower case) → the delegate's grant. */
@@ -123,6 +128,17 @@ interface ChainState {
   effective: Record<string, readonly [bigint, bigint, bigint, bigint]>;
   /** Every function the multicalls read, in order. */
   read: string[];
+  /**
+   * `payer:seq` (payer lower case) → `HeldStatus` (1 Held, 2 Collected,
+   * 3 Refunded). Anything absent is 0, `None`: the seq is unused.
+   */
+  held: Record<string, number>;
+  /** `block.timestamp` as Multicall3 answers it; `NOW` unless a test moves it. */
+  blockTimestamp: number;
+  /** `payer:seq` → the provider and amount the held record names. */
+  heldTerms: Record<string, { provider: string; amount: bigint }>;
+  /** This process's wall clock, seconds. */
+  wallClock: number;
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -131,6 +147,7 @@ function harness(overrides: Partial<ChainState> = {}) {
     redeemer: REDEEMER,
     minimumStake: 50_000_000n,
     bonded: 50_000_000n,
+    pendingSlash: 0n,
     escrows: {},
     delegations: {},
     simulateRevert: null,
@@ -140,6 +157,10 @@ function harness(overrides: Partial<ChainState> = {}) {
     tightenDelay: false,
     effective: {},
     read: [],
+    held: {},
+    blockTimestamp: NOW,
+    heldTerms: {},
+    wallClock: NOW,
     ...overrides,
   };
 
@@ -153,8 +174,20 @@ function harness(overrides: Partial<ChainState> = {}) {
         const key = String(args[0]).toLowerCase();
         return { ...HEALTHY_ESCROW, ...(state.escrows[key] ?? {}) };
       }
-      case 'bondedOf':
-        return state.bonded;
+      case 'stakeOf':
+        return { bonded: state.bonded, unbonding: 0n, pendingSlash: state.pendingSlash };
+      case 'getCurrentBlockTimestamp':
+        return BigInt(state.blockTimestamp);
+      case 'held': {
+        const key = `${String(args[0]).toLowerCase()}:${String(args[1])}`;
+        return {
+          provider: state.heldTerms[key]?.provider ?? PROVIDER,
+          amount: state.heldTerms[key]?.amount ?? 0n,
+          takeRateBps: 0,
+          status: state.held[key] ?? 0,
+          collectableAt: 0n,
+        };
+      }
       case 'delegationOf': {
         const key = `${String(args[0]).toLowerCase()}:${String(args[1]).toLowerCase()}`;
         return {
@@ -244,7 +277,7 @@ function harness(overrides: Partial<ChainState> = {}) {
     new Map([[TESTNET, DEPLOYMENT]]),
     redeemerPort,
     alerts,
-    { now: () => NOW * 1000 },
+    { now: () => state.wallClock * 1000 },
     { isLive: async () => state.tightenDelay },
   );
 
@@ -295,10 +328,10 @@ describe('EvmVoucherRedeemer', () => {
   });
 
   it('never submits a voucher pre-validation refused, and still reports it', async () => {
-    // Payer 1's escrow has already redeemed seq 10, so their voucher is stale.
+    // Payer 1's escrow has already used seq 10, so their voucher is dead.
     // Submitting it would revert the batch and take two good ones with it.
     const { redeemer, sendCall } = harness({
-      escrows: { [payerAddress(1).toLowerCase()]: { seqHigh: 10n } },
+      held: { [`${payerAddress(1).toLowerCase()}:10`]: 1 },
     });
 
     const outcomes = await redeemer.redeemBatch([request(0), request(1), request(2)]);
@@ -308,8 +341,77 @@ describe('EvmVoucherRedeemer', () => {
       payerAddress(2).toLowerCase(),
     ]);
     expect(outcomes.map((o) => o.kind)).toEqual(['REDEEMED', 'UNREDEEMABLE', 'REDEEMED']);
-    expect(outcomes[1].programError).toBe('VoucherSeqNotIncreasing');
+    expect(outcomes[1].programError).toBe('VoucherSeqUsed');
     expect(outcomes[1].signature).toBeNull();
+  });
+
+  /** D-23: each `(payer, seq)` once, in any order. */
+  describe('per-seq replay (D-23)', () => {
+    it('redeems a lower seq after a higher one: seq <= seqHigh is not refused', async () => {
+      const { redeemer, sendCall, state } = harness({
+        escrows: { [payerAddress(0).toLowerCase()]: { seqHigh: 11n } },
+      });
+
+      const outcome = await redeemer.redeem(request(0, { seq: '10' }));
+
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+      expect(state.read).toContain('held');
+    });
+
+    it.each([
+      ['held', 1],
+      ['collected', 2],
+      ['refunded', 3],
+    ])('refuses a %s seq as VoucherSeqUsed, and sends nothing', async (_, status) => {
+      const { redeemer, sendCall } = harness({
+        held: { [`${payerAddress(0).toLowerCase()}:10`]: status },
+      });
+
+      const outcome = await redeemer.redeem(request(0));
+
+      expect(outcome).toEqual({
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        signature: null,
+        programError: 'VoucherSeqUsed',
+      });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    it('batches several seqs of ONE payer, out of order, in one transaction', async () => {
+      const { redeemer, sendCall } = harness();
+
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { seq: '12' }),
+        request(0, { seq: '10' }),
+        request(0, { seq: '11' }),
+      ]);
+
+      expect(outcomes.map((o) => o.kind)).toEqual(['REDEEMED', 'REDEEMED', 'REDEEMED']);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+      expect(calledFunction(sendCall.mock.calls[0][0])).toBe('redeemVoucherBatch');
+      expect(batchedPayers(sendCall.mock.calls[0][0])).toHaveLength(3);
+    });
+
+    it('applies an earlier item’s spend to the next one of the same payer', async () => {
+      // 1.5 USDG in the escrow: the first 1.0 settles, the second does not fit
+      // and is left out instead of reverting the batch.
+      const { redeemer, sendCall } = harness({
+        escrows: { [payerAddress(0).toLowerCase()]: { balance: 1_500_000n } },
+      });
+
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { seq: '10' }),
+        request(0, { seq: '11' }),
+      ]);
+
+      expect(outcomes.map((o) => o.programError)).toEqual([null, 'EscrowInsufficient']);
+      expect(batchedPayers(sendCall.mock.calls[0][0])).toHaveLength(1);
+    });
+
+    it('says it does not require ascending seq', () => {
+      expect(harness().redeemer.requiresAscendingSeq()).toBe(false);
+    });
   });
 
   it('sends nothing at all when pre-validation refuses every item', async () => {
@@ -332,6 +434,158 @@ describe('EvmVoucherRedeemer', () => {
 
     const fine = harness();
     await expect(fine.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(false);
+  });
+
+  it('reads FREE bonded stake: bonded less what standing slash records reserve (D-26)', async () => {
+    // 60 bonded, 11 reserved by pending/disputed records: 49 free, below 50.
+    const reserved = harness({ bonded: 60_000_000n, pendingSlash: 11_000_000n });
+    await expect(reserved.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(true);
+    const outcomes = await reserved.redeemer.redeemBatch([request(0)]);
+    expect(outcomes.map((o) => [o.kind, o.programError])).toEqual([
+      ['RETRY', 'ProviderBelowMinimumStake'],
+    ]);
+    expect(reserved.sendCall).not.toHaveBeenCalled();
+    expect(reserved.state.read).toContain('stakeOf');
+
+    // Exactly the minimum free passes; more reserved than bonded floors at zero.
+    const exact = harness({ bonded: 60_000_000n, pendingSlash: 10_000_000n });
+    await expect(exact.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(false);
+    const over = harness({ bonded: 60_000_000n, pendingSlash: 90_000_000n });
+    await expect(over.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(true);
+  });
+
+  describe('decides expiry on the chain clock, not this process’s (review 2026-10-23 L-4)', () => {
+    const deadline = NOW + 60 + EVM_CONSTANTS.REDEEM_GRACE_SECONDS;
+
+    it('redeems a voucher the wall clock calls expired while the chain still accepts it', async () => {
+      const { redeemer, sendCall } = harness({
+        blockTimestamp: deadline - 5,
+        wallClock: deadline + 30,
+      });
+      const outcome = await redeemer.redeem(request(0));
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses VoucherExpired once the chain is past the deadline, the wall clock within tolerance', async () => {
+      // The chain 101 s ahead of the wall clock: inside the 120 s tolerance.
+      const { redeemer, sendCall, state } = harness({ wallClock: deadline - 100 });
+      state.blockTimestamp = deadline + 1;
+      const outcome = await redeemer.redeem(request(0));
+      expect(outcome).toMatchObject({
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'VoucherExpired',
+      });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    describe('a chain clock more than 120 s ahead never finalizes an expiry alone', () => {
+      let warn: jest.SpyInstance;
+      beforeEach(() => {
+        warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      });
+      afterEach(() => warn.mockRestore());
+
+      it('holds the decision (bare RETRY, tagged log) while the wall clock says the voucher is live', async () => {
+        const { redeemer, sendCall, state } = harness();
+        state.blockTimestamp = deadline + 1; // 7,261 s ahead of the wall clock
+        const outcome = await redeemer.redeem(request(0));
+        expect(outcome).toEqual({
+          kind: RedeemOutcomeKind.RETRY,
+          signature: null,
+          programError: null,
+        });
+        expect(sendCall).not.toHaveBeenCalled();
+        expect(warn.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+          EVM_EXPIRY_HELD_LOG_TAG,
+        );
+
+        // Batched too.
+        const batch = await redeemer.redeemBatch([request(0), request(1)]);
+        expect(batch.map((o) => [o.kind, o.programError])).toEqual([
+          [RedeemOutcomeKind.RETRY, null],
+          [RedeemOutcomeKind.RETRY, null],
+        ]);
+      });
+
+      it('holds a VoucherExpired the simulation answers, too', async () => {
+        const { redeemer, state } = harness();
+        state.blockTimestamp = NOW + 121;
+        state.simulateRevert = 'VoucherExpired';
+        await expect(redeemer.redeem(request(0))).resolves.toMatchObject({
+          kind: RedeemOutcomeKind.RETRY,
+          programError: null,
+        });
+      });
+
+      it('finalizes it once the wall clock (plus the tolerance) is past the deadline as well', async () => {
+        const { redeemer, state } = harness({ wallClock: deadline - 119 });
+        state.blockTimestamp = deadline + 200; // 319 s ahead
+        await expect(redeemer.redeem(request(0))).resolves.toMatchObject({
+          kind: RedeemOutcomeKind.UNREDEEMABLE,
+          programError: 'VoucherExpired',
+        });
+      });
+    });
+
+    it('alerts when block.timestamp is more than 120 s from the wall clock, and not within it', async () => {
+      const near = harness();
+      near.state.blockTimestamp = NOW + 120;
+      await near.redeemer.redeem(request(0));
+      expect(near.emitted.filter((a) => a.name === EVM_CLOCK_DRIFT_ALERT)).toHaveLength(0);
+
+      const far = harness();
+      far.state.blockTimestamp = NOW - 121;
+      await far.redeemer.redeem(request(0));
+      const drift = far.emitted.filter((a) => a.name === EVM_CLOCK_DRIFT_ALERT);
+      expect(drift).toHaveLength(1);
+      expect(drift[0].details).toMatchObject({ driftSeconds: -121 });
+    });
+  });
+
+  describe('usedSeqRecord: what held(payer, seq) says about this voucher (M-B1)', () => {
+    const key = `${payerAddress(0).toLowerCase()}:10`;
+
+    it.each([
+      [1, 'HELD'],
+      [2, 'COLLECTED'],
+      [3, 'REFUNDED'],
+    ])(
+      'answers the status (%s → %s) when the record names this voucher’s provider and amount (F-L3)',
+      async (status, expected) => {
+        const { redeemer } = harness({
+          held: { [key]: status },
+          heldTerms: { [key]: { provider: PROVIDER, amount: 1_000_000n } },
+        });
+        await expect(redeemer.usedSeqRecord(request(0))).resolves.toBe(expected);
+      },
+    );
+
+    it('cannot tell (throws) on a HeldStatus this build does not know', async () => {
+      const { redeemer } = harness({
+        held: { [key]: 4 },
+        heldTerms: { [key]: { provider: PROVIDER, amount: 1_000_000n } },
+      });
+      await expect(redeemer.usedSeqRecord(request(0))).rejects.toThrow(/HeldStatus 4/);
+    });
+
+    it('MISMATCH when it names another provider or another amount', async () => {
+      const other = harness({
+        held: { [key]: 2 },
+        heldTerms: { [key]: { provider: payerAddress(9), amount: 1_000_000n } },
+      });
+      await expect(other.redeemer.usedSeqRecord(request(0))).resolves.toBe('MISMATCH');
+      const amount = harness({
+        held: { [key]: 1 },
+        heldTerms: { [key]: { provider: PROVIDER, amount: 999_999n } },
+      });
+      await expect(amount.redeemer.usedSeqRecord(request(0))).resolves.toBe('MISMATCH');
+    });
+
+    it('NONE when the seq is unused', async () => {
+      const { redeemer } = harness();
+      await expect(redeemer.usedSeqRecord(request(0))).resolves.toBe('NONE');
+    });
   });
 
   it('retries SINGLY when the batch reverts, and never re-submits the batch', async () => {
@@ -391,7 +645,7 @@ describe('EvmVoucherRedeemer', () => {
     // The refused item is not in the batch and must not be in the retry either
     // — its outcome came from the pre-validation and is still the right one.
     const { redeemer, sendCall } = harness({
-      escrows: { [payerAddress(1).toLowerCase()]: { seqHigh: 10n } },
+      held: { [`${payerAddress(1).toLowerCase()}:10`]: 2 },
     });
     sendCall.mockResolvedValueOnce({
       hash: '0xbad',
@@ -406,17 +660,17 @@ describe('EvmVoucherRedeemer', () => {
     // 1 batch + 2 singles. The refused one was never sent, twice over.
     expect(sendCall).toHaveBeenCalledTimes(3);
     expect(outcomes[1].kind).toBe(RedeemOutcomeKind.UNREDEEMABLE);
-    expect(outcomes[1].programError).toBe('VoucherSeqNotIncreasing');
+    expect(outcomes[1].programError).toBe('VoucherSeqUsed');
   });
 
-  it('refuses two vouchers from the SAME payer in one batch', async () => {
-    // `seq` is per payer: the second copy would fail `seq > seqHigh` because
-    // the first already advanced it, and take the whole batch with it.
-    const { redeemer } = harness();
+  it('refuses the SAME voucher twice in one batch, before anything is read', async () => {
+    // The second copy would fail `VoucherSeqUsed` because the first already
+    // used the seq, and take the whole batch with it.
+    const { redeemer, sendCall, state } = harness();
 
-    await expect(redeemer.redeemBatch([request(0), request(0, { seq: '11' })])).rejects.toThrow(
-      /payer/i,
-    );
+    await expect(redeemer.redeemBatch([request(0), request(0)])).rejects.toThrow(/twice/i);
+    expect(state.read).toEqual([]);
+    expect(sendCall).not.toHaveBeenCalled();
   });
 
   it('refuses a batch of 65 and accepts a batch of 64', async () => {
@@ -450,7 +704,7 @@ describe('EvmVoucherRedeemer', () => {
     ['ProgramPaused', RedeemOutcomeKind.PAUSED],
     ['NotRedeemer', RedeemOutcomeKind.MISCONFIGURED],
     ['AssetDecimalsNotSix', RedeemOutcomeKind.MISCONFIGURED],
-    ['VoucherSeqNotIncreasing', RedeemOutcomeKind.UNREDEEMABLE],
+    ['VoucherSeqUsed', RedeemOutcomeKind.UNREDEEMABLE],
     ['SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
     ['MalleableSignature', RedeemOutcomeKind.UNREDEEMABLE],
     ['VoucherSeqGapTooLarge', RedeemOutcomeKind.UNREDEEMABLE],
@@ -796,8 +1050,8 @@ describe('EvmVoucherRedeemer', () => {
   });
 
   /**
-   * REGRESSION (review 2026-10-15 P-1): `VoucherSeqNotIncreasing` is also what
-   * a voucher that already landed gets. The redeemer records each transaction
+   * REGRESSION (review 2026-10-15 P-1): `VoucherSeqUsed` (D-23; formerly
+   * `VoucherSeqNotIncreasing`) is also what a voucher that already landed gets. The redeemer records each transaction
    * before its broadcast, and can say afterwards whether one of them redeemed
    * this voucher — so the job commits it instead of absorbing it.
    */
@@ -904,5 +1158,101 @@ describe('EvmVoucherRedeemer', () => {
       const redeemer = chainWith(() => []);
       await expect(redeemer.findLanding(request(0), [PENDING])).rejects.toThrow(/pending/);
     });
+  });
+});
+
+/**
+ * Review 2026-10-24 wave 2 M-2: is the provider short of FREE stake only
+ * because of records it did not cause (foreign, or signed by a dead key)?
+ */
+describe('EvmVoucherRedeemer.providerShortOnlyByUnplannedSlashes (M-2)', () => {
+  const MINIMUM = 100_000_000n;
+  const id = (n: number) => n.toString(16).padStart(64, '0');
+
+  function build(
+    stake: { bonded: bigint; pendingSlash: bigint },
+    records: { requestId: string; reserved: bigint; status: number; provider?: string }[],
+  ) {
+    const multicalls: unknown[] = [];
+    const client = {
+      readContract: async () => undefined,
+      multicall: async (args: { contracts: { functionName: string; args: unknown[] }[] }) => {
+        multicalls.push(args);
+        return args.contracts.map((call) => {
+          if (call.functionName === 'params') return { minimumStake: MINIMUM };
+          if (call.functionName === 'stakeOf') return { ...stake, unbonding: 0n };
+          const record = records.find((r) => `0x${r.requestId}` === call.args[0])!;
+          return {
+            provider: record.provider ?? PROVIDER,
+            status: record.status,
+            reserved: record.reserved,
+          };
+        });
+      },
+    };
+    const asked: [string, string][] = [];
+    const redeemer = new EvmVoucherRedeemer(
+      new Map([[TESTNET, client as unknown as EvmReaderClient]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      {} as EvmRelayerPort,
+      { emit: async () => undefined } as unknown as AlertPort,
+      { now: () => NOW * 1000 },
+      null,
+      {
+        standingNotPlanned: async (chainId: string, provider: string) => {
+          asked.push([chainId, provider]);
+          return records.map(({ requestId, reserved }) => ({ requestId, reserved }));
+        },
+      },
+    );
+    return { redeemer, multicalls, asked };
+  }
+
+  it('is true when only the unplanned reservations take free stake below the minimum', async () => {
+    // bonded 150, pending 51 (51 stolen-key records of 1): free 99 < 100; without them 150.
+    const { redeemer, asked } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 1 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(true);
+    expect(asked).toEqual([[TESTNET, PROVIDER.toLowerCase()]]);
+  });
+
+  it('is false when the provider is below the minimum for its own reasons too', async () => {
+    // bonded 90 < 100 whatever is reserved.
+    const { redeemer } = build({ bonded: 90_000_000n, pendingSlash: 1_000_000n }, [
+      { requestId: id(1), reserved: 1_000_000n, status: 4 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('is false when its own records keep it short after the unplanned ones are taken out', async () => {
+    // pending 60 = 10 unplanned + 50 of its own: without the 10, free is 140 - 50 = 90 < 100.
+    const { redeemer } = build({ bonded: 140_000_000n, pendingSlash: 60_000_000n }, [
+      { requestId: id(1), reserved: 10_000_000n, status: 1 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('counts only records the chain still holds against this provider', async () => {
+    const { redeemer } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 3 }, // already cancelled
+      { requestId: id(2), reserved: 51_000_000n, status: 1, provider: payerAddress(9) },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('is false, and reads nothing on chain, when there is no unplanned record', async () => {
+    const { redeemer, multicalls } = build({ bonded: 0n, pendingSlash: 0n }, []);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+    expect(multicalls).toEqual([]);
+  });
+
+  it('reuses one answer per provider for a short while', async () => {
+    const { redeemer, multicalls } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 1 },
+    ]);
+    await redeemer.providerShortOnlyByUnplannedSlashes(request(0));
+    await redeemer.providerShortOnlyByUnplannedSlashes(request(1));
+    expect(multicalls).toHaveLength(1);
   });
 });

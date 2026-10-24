@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 import {
+  EVM_SLASH_BACKFILL_MAX_BLOCKS,
   EVM_SLASH_WATCH_ALERTS,
   EVM_SLASH_WATCH_CHUNK,
   EVM_SLASH_WATCH_INITIAL_LOOKBACK,
@@ -44,20 +45,31 @@ function build(options: {
   disputeUpgradeBlock?: bigint;
   knownStatus?: string;
   indexer?: { fromBlock: ReadonlyMap<ChainId, bigint>; confirmations?: number };
+  records?: unknown;
+  /** Logs by range, in place of `logs` (first range only). */
+  logsIn?: (from: bigint, to: bigint) => SlashProposedLog[];
+  backfill?: { cursor: bigint | null; done: boolean };
 }) {
   const alerts: Alert[] = [];
   const ranges: [bigint, bigint][] = [];
   // The durable cursor (review S-4).
   const db = new Map<string, bigint>(options.cursor ? [[CHAIN, BigInt(options.cursor)]] : []);
+  const backfill = { ...(options.backfill ?? { cursor: null, done: false }) };
   const cursors = {
     findSlashWatchCursor: async (chainId: string) => db.get(chainId) ?? null,
     saveSlashWatchCursor: async (chainId: string, block: bigint) => void db.set(chainId, block),
+    findSlashBackfill: async () => ({ ...backfill }),
+    saveSlashBackfill: async (_chainId: string, block: bigint | null, done: boolean) => {
+      if (block !== null) backfill.cursor = block;
+      if (done) backfill.done = true;
+    },
   };
   const client = {
     getBlockNumber: async () => options.head,
     getContractEvents: async (args: { fromBlock: bigint; toBlock: bigint; address: string }) => {
       expect(args.address).toBe(STAKE);
       ranges.push([args.fromBlock, args.toBlock]);
+      if (options.logsIn) return options.logsIn(args.fromBlock, args.toBlock);
       return ranges.length === 1 ? (options.logs ?? []) : [];
     },
   };
@@ -86,8 +98,9 @@ function build(options: {
     options.rulings ? ({ get: () => options.rulings } as never) : null,
     (options.slashHolds ?? null) as never,
     options.indexer ?? null,
+    (options.records ?? null) as never,
   );
-  return { watcher, alerts, ranges, cursor: () => db.get(CHAIN)?.toString() };
+  return { watcher, alerts, ranges, backfill, cursor: () => db.get(CHAIN)?.toString() };
 }
 
 describe('EvmSlashProposalWatcher — alerts on slash records this platform did not plan', () => {
@@ -383,5 +396,219 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       await watcher.check();
       expect(cursor()).toBeUndefined();
     });
+  });
+});
+
+describe('EvmSlashProposalWatcher — remembers every record (review 2026-10-24 wave 2 M-2)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('stores ours and the foreign ones, flagged, and closes what the range cancelled or executed', async () => {
+    const proposed: unknown[] = [];
+    const closed: [string, string[], Date][] = [];
+    const records = {
+      recordProposed: async (rows: unknown[]) => void proposed.push(...rows),
+      markClosed: async (chainId: string, ids: string[], at: Date) =>
+        void closed.push([chainId, ids, at]),
+    };
+    const cancelled: SlashProposedLog = {
+      eventName: 'SlashCancelled',
+      args: { requestId: `0x${'b'.repeat(64)}`, reason: 2, cancelledAt: 1_800_000_100n },
+      transactionHash: null,
+      blockNumber: 101n,
+    };
+    const { watcher, cursor } = build({
+      head: 500n,
+      logs: [
+        {
+          ...event(KNOWN, AGENT, 1_000_000n),
+          args: { ...event(KNOWN, AGENT, 1_000_000n).args, reserved: 900_000n },
+        },
+        event(ROGUE, ATTACKER, 1_000_000n),
+        cancelled,
+      ],
+      records,
+    });
+    await watcher.check();
+
+    expect(proposed).toEqual([
+      expect.objectContaining({
+        chainId: CHAIN,
+        requestId: KNOWN,
+        provider: '0x00000000000000000000000000000000000000c1',
+        verifier: '0x00000000000000000000000000000000000000d1',
+        reserved: 900_000n,
+        foreign: false,
+      }),
+      expect.objectContaining({ requestId: ROGUE, reserved: 1_000_000n, foreign: true }),
+    ]);
+    expect(closed).toEqual([[CHAIN, ['b'.repeat(64)], new Date(1_800_000_100_000)]]);
+    expect(cursor()).toBeDefined();
+  });
+
+  it('does not move the cursor when the records cannot be written', async () => {
+    const records = {
+      recordProposed: async () => {
+        throw new Error('db down');
+      },
+      markClosed: async () => undefined,
+    };
+    const { watcher, cursor } = build({
+      head: 500n,
+      cursor: '100',
+      logs: [event(ROGUE, ATTACKER, 1n)],
+      records,
+    });
+    await watcher.check();
+    expect(cursor()).toBe('100');
+  });
+});
+
+describe('EvmSlashProposalWatcher — back-fills records from before the table (review 2026-10-24 wave 3 N-3)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const memoryRecords = () => {
+    const proposed: { requestId: string; foreign: boolean }[] = [];
+    const closed: string[] = [];
+    return {
+      proposed,
+      closed,
+      recordProposed: async (rows: { requestId: string; foreign: boolean }[]) =>
+        void proposed.push(...rows),
+      markClosed: async (_chainId: string, ids: string[]) => void closed.push(...ids),
+    };
+  };
+  const at = (log: SlashProposedLog, block: bigint): SlashProposedLog => ({
+    ...log,
+    blockNumber: block,
+  });
+
+  it('needs none on a chain the watcher starts on now', async () => {
+    const records = memoryRecords();
+    const { watcher, ranges, backfill } = build({
+      head: 500n,
+      disputeUpgradeBlock: 10n,
+      records,
+    });
+    await watcher.check();
+    const safe = 500n - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS);
+    expect(ranges).toEqual([[10n, safe]]);
+    expect(backfill.done).toBe(true);
+  });
+
+  it('reads from the deploy block up to the forward cursor, records silently, then stops', async () => {
+    const records = memoryRecords();
+    const old = at(event(ROGUE, ATTACKER, 1n), 50n);
+    const ours = at(event(KNOWN, AGENT, 1_000_000n), 60n);
+    const closedLater: SlashProposedLog = {
+      eventName: 'SlashCancelled',
+      args: { requestId: `0x${ROGUE}`, reason: 2, cancelledAt: 1_800_000_100n },
+      transactionHash: null,
+      blockNumber: 150n,
+    };
+    const all = [old, ours, closedLater];
+    const rulings = {
+      recordCancelled: jest.fn(async () => true),
+      recordLateProposal: jest.fn(),
+    };
+    const { watcher, ranges, backfill, alerts } = build({
+      head: 500n,
+      cursor: '200',
+      disputeUpgradeBlock: 10n,
+      records,
+      rulings,
+      knownStatus: 'REFUSED',
+      logsIn: (from, to) => all.filter((log) => log.blockNumber! >= from && log.blockNumber! <= to),
+    });
+    await watcher.check();
+
+    const safe = 500n - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS);
+    expect(ranges).toEqual([
+      [201n, safe],
+      [10n, safe],
+    ]);
+    expect(records.proposed).toEqual([
+      expect.objectContaining({ requestId: ROGUE, foreign: true }),
+      expect.objectContaining({ requestId: KNOWN, foreign: false }),
+    ]);
+    // Its close is read after its proposal, in the same pass.
+    expect(records.closed).toEqual([ROGUE]);
+    // Already alerted on, mirrored and re-adopted when the forward read first passed them.
+    expect(alerts).toEqual([]);
+    expect(rulings.recordCancelled).not.toHaveBeenCalled();
+    expect(rulings.recordLateProposal).not.toHaveBeenCalled();
+    expect(backfill).toEqual({ cursor: safe, done: true });
+
+    ranges.length = 0;
+    await watcher.check();
+    expect(ranges).toEqual([]);
+  });
+
+  it('pages a long history over ticks, from its own durable cursor', async () => {
+    const records = memoryRecords();
+    const head = 3n * EVM_SLASH_BACKFILL_MAX_BLOCKS;
+    const forward = head - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS);
+    const { watcher, ranges, backfill } = build({
+      head,
+      cursor: (forward - 1n).toString(),
+      disputeUpgradeBlock: 1n,
+      records,
+      logsIn: () => [],
+    });
+    await watcher.check();
+    const backfilled = ranges.slice(1);
+    expect(backfilled[0][0]).toBe(1n);
+    expect(backfilled[backfilled.length - 1][1]).toBe(EVM_SLASH_BACKFILL_MAX_BLOCKS);
+    expect(backfill).toEqual({ cursor: EVM_SLASH_BACKFILL_MAX_BLOCKS, done: false });
+
+    ranges.length = 0;
+    await watcher.check();
+    expect(ranges[0][0]).toBe(EVM_SLASH_BACKFILL_MAX_BLOCKS + 1n);
+  });
+
+  it('says so, and gives up, with no deploy block configured', async () => {
+    const records = memoryRecords();
+    const { watcher, ranges, backfill } = build({ head: 500n, cursor: '200', records });
+    await watcher.check();
+    expect(ranges).toHaveLength(1);
+    expect(backfill.done).toBe(true);
+    expect(Logger.prototype.error).toHaveBeenCalledWith(
+      expect.stringContaining('cannot be back-filled'),
+    );
+  });
+
+  it('keeps the forward read when the back-fill fails, and retries it next tick', async () => {
+    let fail = true;
+    const records = {
+      recordProposed: async (rows: unknown[]) => {
+        if (fail && rows.length > 0) throw new Error('db down');
+      },
+      markClosed: async () => undefined,
+    };
+    const old = at(event(ROGUE, ATTACKER, 1n), 50n);
+    const { watcher, backfill, cursor, alerts } = build({
+      head: 500n,
+      cursor: '200',
+      disputeUpgradeBlock: 10n,
+      records,
+      logsIn: (from, to) => (from <= 50n && to >= 50n ? [old] : []),
+    });
+    await watcher.check();
+    const safe = 500n - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS);
+    expect(cursor()).toBe(safe.toString());
+    expect(backfill).toEqual({ cursor: null, done: false });
+    expect(alerts).toEqual([]);
+
+    fail = false;
+    await watcher.check();
+    expect(backfill).toEqual({ cursor: safe, done: true });
   });
 });

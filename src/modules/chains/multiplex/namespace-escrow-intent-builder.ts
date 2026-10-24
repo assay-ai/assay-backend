@@ -15,7 +15,7 @@ import { implementationFor } from './namespace-dispatch';
  * answerable question while one chain existed and stopped being one here: Solana
  * reads `Config.withdraw_delay_seconds` off the chain, where an admin
  * `update_config` can move it inside `MIN/MAX_WITHDRAW_DELAY_SECONDS`, and EVM
- * has a compile-time `WITHDRAW_DELAY_SECONDS = 3600` in `Constants.sol` with no
+ * has a compile-time `WITHDRAW_DELAY_SECONDS = 3 * 3600` in `Constants.sol` with no
  * getter at all. Answering with whichever implementation happened to be first in
  * the map would put one chain's countdown on the other chain's screen.
  *

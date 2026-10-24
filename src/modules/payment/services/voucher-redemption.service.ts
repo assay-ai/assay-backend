@@ -20,9 +20,9 @@ import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
-  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  maxVoucherRedeemableLifeSeconds,
   PROVIDER_FORFEIT_PREFIX,
-  REDEEM_GRACE_SECONDS,
+  redeemGraceSeconds,
   REDEMPTION_DEADLINE_MARGIN_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
@@ -32,6 +32,7 @@ import {
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
+  UsedSeqRecord,
   VOUCHER_REDEEMER,
   VoucherRedeemerPort,
 } from '../ports/voucher-redeemer.port';
@@ -39,6 +40,9 @@ import { PaymentIntentService } from './payment-intent.service';
 
 // Re-exported: callers and specs have always imported it from here.
 export { PROVIDER_FORFEIT_PREFIX };
+
+/** The eip155 refusal of a seq that already has an on-chain record (D-23). */
+const SEQ_USED = 'VoucherSeqUsed';
 
 /**
  * Refusals the PROVIDER causes. A voucher that dies of one — refused with it
@@ -51,6 +55,8 @@ export { PROVIDER_FORFEIT_PREFIX };
  * when it finally closes — even if the block was lifted in between.
  */
 const PROVIDER_CAUSED_ERRORS: ReadonlySet<string> = new Set([
+  // Unless it is only because of slash records the provider did not cause:
+  // see `UNPLANNED_SLASH_SHORTFALL`.
   'ProviderBelowMinimumStake',
   'ProviderBlocked',
   'PayeeBlocked',
@@ -76,6 +82,23 @@ function recordedProviderCause(stored: string | null | undefined): string | null
   const head = bare.split(' ')[0];
   return PROVIDER_CAUSED_ERRORS.has(head) ? head : null;
 }
+
+/**
+ * `ProviderBelowMinimumStake` when the provider is short of free stake ONLY
+ * because of slash records it did not cause — records this platform never
+ * planned, or records a revoked (e.g. stolen) verifier key signed (review
+ * 2026-10-24 wave 2 M-2). This service's own name, recorded on the intent in
+ * place of the program error.
+ *
+ * It is NOT in {@link PROVIDER_CAUSED_ERRORS}: it is not sticky, a later
+ * refusal replaces it, and it never turns a close the buyer caused into the
+ * provider's forfeit. The voucher is retried until its on-chain deadline (the
+ * reaper is releasing those records meanwhile); one that dies of it — closed
+ * `VoucherExpired` with this as its last refusal — is forfeited under this
+ * cause: the buyer is not charged, nobody is paid, the platform pays nothing.
+ */
+const UNPLANNED_SLASH_SHORTFALL = 'ProviderStakeHeldByUnplannedSlash';
+const BELOW_MINIMUM = 'ProviderBelowMinimumStake';
 
 /**
  * Refusals the BUYER causes by tightening its own grant or caps: a revoked
@@ -115,16 +138,20 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  * This is the one caller that retires such a hold, and it does so only after a
  * transaction has confirmed and only while naming its signature.
  *
- * ## Ascending `seq`, per buyer, and it is now load-bearing
+ * ## Ascending `seq`, per buyer — where the chain needs it
  *
- * The settlement program admits a voucher on `seq > escrow.seq_high` and
- * nothing else. There is no replay bitmap and no out-of-order window: **a lower
- * seq that lands after a higher one is dead, permanently.** Redeeming seq 40
- * before seq 7 does not delay seq 7, it destroys it — the call was served and
- * its voucher can no longer be collected.
+ * Whether order matters is the CHAIN's answer
+ * ({@link VoucherRedeemerPort.requiresAscendingSeq}), asked once per pass.
  *
- * Two rules keep that from happening, and both are in this file:
+ * **Solana (`true`).** The settlement program admits a voucher on
+ * `seq > escrow.seq_high` and nothing else. There is no replay bitmap and no
+ * out-of-order window: **a lower seq that lands after a higher one is dead,
+ * permanently.** Redeeming seq 40 before seq 7 does not delay seq 7, it
+ * destroys it — the call was served and its voucher can no longer be
+ * collected. Three rules keep that from happening:
  *
+ * - the queue holds a row back while a lower seq of its payer is still open,
+ *   and leaves out a payer's later seqs behind a blocked one (the repository);
  * - the batch is ordered `(agent_account, voucher_seq)` ascending, by the
  *   repository's own query, so a buyer's oldest voucher is always reached
  *   first; and
@@ -135,6 +162,13 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  *
  * Skipping costs at most one tick of latency for that buyer and nothing at all
  * for every other buyer in the batch, because the skip is per account.
+ *
+ * **`eip155` (`false`).** `AssayEscrow` admits each `(payer, seq)` once, in any
+ * order (D-23): a lower seq landing after a higher one is still paid. None of
+ * the three hold-backs applies — a voucher that is retried, held or broken
+ * holds back nothing of its payer's — and a batch may carry several of one
+ * payer's vouchers, never the same one twice. The ascending order is kept; it
+ * is harmless.
  *
  * ## Who bears an unredeemable voucher: never the platform
  *
@@ -185,6 +219,13 @@ export class VoucherRedemptionService {
    * the payee is asked live per row instead of being taken as unblocked.
    */
   private chainBlockedKnown = true;
+  /**
+   * Whether this pass's chain admits any seq order, so a retryable refusal
+   * backs off (`recordRedemptionRetry`) instead of being met again on every
+   * pass (review 2026-10-23 I-1). Solana keeps one row per payer in its queue
+   * and retries every pass, as it always has.
+   */
+  private retryBackoff = false;
 
   constructor(
     private readonly payments: PaymentIntentRepository,
@@ -194,7 +235,7 @@ export class VoucherRedemptionService {
     @Inject(VOUCHER_REDEEMER) private readonly redeemer: VoucherRedeemerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly blocklist: AccountBlocklistService,
-    /** Injected so a test can age a hold without waiting 37 minutes. */
+    /** Injected so a test can age a hold without waiting out the chain's window. */
     @Optional() private readonly now: () => number = () => Date.now(),
     // The ON-CHAIN pause and blocklist (D-19). Optional: without it the
     // contract's own refusal is what the pass meets.
@@ -217,24 +258,37 @@ export class VoucherRedemptionService {
     // check below stays as a second line for a block that lands mid-pass.
     const exclusions = await this.exclusions(asset);
     await this.recordProviderBlocks(asset, exclusions);
-    const pending = await this.payments.findAwaitingRedemption(
-      asset,
-      PaymentIntentStatus.SETTLED,
-      PaymentRail.RAIL_B_VOUCHER,
-      VOUCHER_REDEMPTION_BATCH,
-      exclusions,
-    );
+    // Asked of the chain, once per pass: see the class comment.
+    const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;
+    this.retryBackoff = !ordered;
+    const pending = ordered
+      ? await this.payments.findAwaitingRedemption(
+          asset,
+          PaymentIntentStatus.SETTLED,
+          PaymentRail.RAIL_B_VOUCHER,
+          VOUCHER_REDEMPTION_BATCH,
+          exclusions,
+        )
+      : await this.payments.findAwaitingRedemption(
+          asset,
+          PaymentIntentStatus.SETTLED,
+          PaymentRail.RAIL_B_VOUCHER,
+          VOUCHER_REDEMPTION_BATCH,
+          exclusions,
+          { orderedBySeq: false },
+        );
     this.loggedHolds.clear();
 
     if (pending.length === 0) {
       return;
     }
 
-    // Buyers whose current voucher did not land. Every later seq of theirs in
-    // this batch is skipped — see the class comment: submitting it would
-    // advance `seq_high` past the one still being retried and kill it outright.
-    // A throw counts as "did not land" for the same reason a `RETRY` does: this
-    // process does not know whether the transaction reached the chain.
+    // Buyers whose current voucher did not land. On a chain that requires
+    // ascending seq every later seq of theirs in this batch is skipped — see
+    // the class comment: submitting it would advance `seq_high` past the one
+    // still being retried and kill it outright. A throw counts as "did not
+    // land" for the same reason a `RETRY` does: this process does not know
+    // whether the transaction reached the chain. Elsewhere it is unused.
     const blocked = new Set<string>();
 
     // `maxBatchSize` is the CHAIN's answer, not a policy of this service:
@@ -242,7 +296,7 @@ export class VoucherRedemptionService {
     // transaction for a second, so `1` runs the loop below unchanged and
     // Solana's behaviour is byte-identical to what it has always been.
     if (this.redeemer.maxBatchSize > 1) {
-      return this.runBatched(pending, blocked);
+      return this.runBatched(pending, blocked, ordered);
     }
 
     for (const row of pending) {
@@ -258,7 +312,7 @@ export class VoucherRedemptionService {
         if (!forfeit.settled) blocked.add(row.agentAccount);
         continue;
       }
-      if (blocked.has(row.agentAccount)) {
+      if (ordered && blocked.has(row.agentAccount)) {
         this.logger.log(
           `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
             `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
@@ -308,21 +362,26 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * One pass, in batches of `maxBatchSize`, **one row per payer per batch**.
+   * One pass, in batches of `maxBatchSize`.
    *
-   * Rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the FIRST row
-   * per payer is that payer's lowest unredeemed seq — exactly the one that must
-   * land before any later one of theirs. Taking one per payer therefore
-   * satisfies the ordering rule and `redeemVoucherBatch`'s no-duplicates rule at
-   * once: the same payer twice in one batch reverts the batch, because the first
-   * copy already advanced `seqHigh`.
+   * Where the chain requires ascending seq (`ordered`), **one row per payer per
+   * batch**: rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the
+   * FIRST row per payer is that payer's lowest unredeemed seq — exactly the one
+   * that must land before any later one of theirs — and a payer who was
+   * blocked is skipped from then on.
+   *
+   * Where it does not (`eip155`, D-23), a batch may carry several of one
+   * payer's vouchers, but **never the same `(payer, seq)` twice**: the second
+   * copy would revert the whole batch with `VoucherSeqUsed`. A blocked payer's
+   * later vouchers still go.
    *
    * The rows a batch could not carry are not dropped — they are carried into the
-   * next one, and a payer who was blocked is skipped from then on.
+   * next one.
    */
   private async runBatched(
     pending: readonly RedeemableIntent[],
     blocked: Set<string>,
+    ordered: boolean,
   ): Promise<void> {
     let queue: readonly RedeemableIntent[] = pending;
 
@@ -344,7 +403,7 @@ export class VoucherRedemptionService {
           if (!forfeit.settled) blocked.add(row.agentAccount);
           continue;
         }
-        if (blocked.has(row.agentAccount)) {
+        if (ordered && blocked.has(row.agentAccount)) {
           this.logger.log(
             `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
               `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
@@ -352,7 +411,9 @@ export class VoucherRedemptionService {
           );
           continue;
         }
-        if (batch.length >= this.redeemer.maxBatchSize || seen.has(row.agentAccount)) {
+        // One per payer where order matters; one per (payer, seq) everywhere.
+        const slot = ordered ? row.agentAccount : `${row.agentAccount}#${row.voucherSeq}`;
+        if (batch.length >= this.redeemer.maxBatchSize || seen.has(slot)) {
           carried.push(row);
           continue;
         }
@@ -365,7 +426,7 @@ export class VoucherRedemptionService {
           continue;
         }
 
-        seen.add(row.agentAccount);
+        seen.add(slot);
         batch.push({ row, request: built.request, issuedAt: built.issuedAt });
       }
 
@@ -445,7 +506,8 @@ export class VoucherRedemptionService {
    *
    * **Blocking a buyer freezes collection.** The hold stays open and the
    * provider is not paid while the block stands. The chain refuses a voucher
-   * after `expiresAt + REDEEM_GRACE_SECONDS` (about 30 minutes after the call)
+   * after `expiresAt + redeemGraceSeconds` (about 30 minutes after the call on
+   * Solana, about two hours on eip155)
    * with `VoucherExpired`, so a block that lasts longer than that does not
    * "resume": the next pass after the unblock meets `UNREDEEMABLE`, and the
    * call becomes buyer debt ({@link lapse}) — the platform pays nothing. A
@@ -752,11 +814,15 @@ export class VoucherRedemptionService {
           outcome.programError !== null &&
           recordedProviderCause(row.redemptionLastError) === null
         ) {
-          await this.payments.recordRedemptionError(
-            row.organizationId,
-            row.id,
-            outcome.programError,
-          );
+          // Below the minimum only because of records the provider did not
+          // cause: recorded under its own, non-sticky name (review 2026-10-24
+          // wave 2 M-2) and retried until the deadline like any other.
+          const recorded =
+            outcome.programError === BELOW_MINIMUM &&
+            (await this.shortOnlyByUnplannedSlashes(row, request))
+              ? UNPLANNED_SLASH_SHORTFALL
+              : outcome.programError;
+          await this.payments.recordRedemptionError(row.organizationId, row.id, recorded);
         }
         // A buyer tightening still refusing one pass before the voucher's
         // deadline: no re-grant came, and the next attempt can only be
@@ -770,8 +836,14 @@ export class VoucherRedemptionService {
         ) {
           return this.closeUnredeemable(row, request, outcome.programError, false);
         }
-        // Not settled: this buyer's later vouchers wait a tick. See the class
-        // comment — going ahead of a retryable seq makes it unredeemable.
+        // Any order: this row waits out a back-off, so a run of refusals
+        // cannot fill every pass ahead of rows that would redeem (I-1).
+        if (this.retryBackoff) {
+          await this.payments.recordRedemptionRetry(row.organizationId, row.id);
+        }
+        // Not settled: on a chain that requires ascending seq this buyer's
+        // later vouchers wait a tick. See the class comment — going ahead of a
+        // retryable seq there makes it unredeemable.
         return { stop: false, settled: false };
 
       case RedeemOutcomeKind.UNREDEEMABLE: {
@@ -781,7 +853,7 @@ export class VoucherRedemptionService {
         // revoked and the chain answers `DelegateIsRevoked` (review #2, M1).
         const recorded = recordedProviderCause(row.redemptionLastError);
         if (recorded !== null) {
-          return this.closeUnredeemable(row, request, recorded, true);
+          return this.closeUnredeemable(row, request, recorded, true, outcome.programError);
         }
         // `VoucherExpired` ends a run of retries and no longer says why; the
         // refusal recorded on the last RETRY does.
@@ -789,7 +861,15 @@ export class VoucherRedemptionService {
           outcome.programError === 'VoucherExpired'
             ? (row.redemptionLastError ?? outcome.programError)
             : outcome.programError;
-        return this.closeUnredeemable(row, request, cause, isProviderCaused(cause));
+        return this.closeUnredeemable(
+          row,
+          request,
+          cause,
+          // A voucher that died of an unplanned-slash shortfall is forfeited
+          // at its deadline, under that cause, never made buyer debt (M-2).
+          isProviderCaused(cause) || cause === UNPLANNED_SLASH_SHORTFALL,
+          outcome.programError,
+        );
       }
 
       case RedeemOutcomeKind.PAUSED:
@@ -816,8 +896,8 @@ export class VoucherRedemptionService {
    * provider ({@link forfeit}) or turned into buyer debt ({@link lapse}). The
    * platform never pays.
    *
-   * Every refusal, not only `VoucherSeqNotIncreasing`: a voucher that ALREADY
-   * landed gets that one, or `VoucherExpired` when the retry comes after its
+   * Every refusal, not only `VoucherSeqNotIncreasing` (Solana) or
+   * `VoucherSeqUsed` (`eip155`): a voucher that ALREADY landed gets that one, or `VoucherExpired` when the retry comes after its
    * deadline, which is checked first (final review N-2). Closing it without
    * looking charges the buyer a second time (review 2026-10-15 P-1). The seq
    * is dead on chain — or, for a forfeit, never going to be redeemed — so
@@ -828,6 +908,8 @@ export class VoucherRedemptionService {
     request: RedeemVoucherRequest,
     cause: string | null,
     forfeit: boolean,
+    /** The chain's own refusal that closes it, when there is one. */
+    refusedWith: string | null = null,
   ): Promise<{ stop: boolean; settled: boolean }> {
     if (
       forfeit &&
@@ -855,6 +937,11 @@ export class VoucherRedemptionService {
           `answers "not found" for a mined one (final review N-7).`,
       );
       return { stop: false, settled: true };
+    }
+    if (refusedWith === SEQ_USED && this.redeemer.usedSeqRecord) {
+      // The seq is used on chain and none of our transactions shows it: the
+      // chain's own record decides, before any forfeit or debt (M-B1).
+      return this.closeSeqUsedUnobserved(row, request, cause);
     }
     if (forfeit) {
       await this.forfeit(row, cause ?? 'unknown');
@@ -890,11 +977,144 @@ export class VoucherRedemptionService {
   }
 
   /**
+   * `VoucherSeqUsed` (eip155, D-23) means `held(payer, seq)` exists: this seq
+   * was redeemed. The redeemer is the platform's key and the seq is unique per
+   * payer account, so in practice the landing is ours, unobserved. Asked of
+   * the record itself:
+   *
+   * - it names this voucher's provider and amount and is still `Held` →
+   *   committed as a redemption (`unobserved:seq=`, which reads the hold off
+   *   the record) and paged as a WARN. The buyer is not asked to pay a second
+   *   time;
+   * - it names them and is `Collected`, and this platform's own row already
+   *   records the hold (`held_status` HELD or COLLECTED) → the landing is ours
+   *   and already booked; the hold sync books the collection. Nothing new;
+   * - it is `Refunded`, `Collected` with nothing of ours to attribute it to,
+   *   or names another provider or amount → an anomaly, paged CRITICAL. Never
+   *   booked as a new redemption and NOT buyer debt: the hold stays open for a
+   *   human (review 2026-10-24 F-L3);
+   * - it says the seq is unused (a node behind the one that refused) or cannot
+   *   be read → the hold stays open and the next pass asks again.
+   *
+   * `settled: true` in every case: the seq is used on chain, so nothing of
+   * this payer's can be stepped over by going ahead.
+   */
+  private async closeSeqUsedUnobserved(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+    cause: string | null,
+  ): Promise<{ stop: boolean; settled: boolean }> {
+    let record: UsedSeqRecord;
+    try {
+      record = (await this.redeemer.usedSeqRecord?.(request)) ?? 'NONE';
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED} and the chain's ` +
+          `record of the seq could not be read: ${describe(error)}. The hold stays open.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    const price = MoneyUtil.of(row.priceAmount, row.assetId as AssetId, row.decimals);
+    const details = {
+      intentId: row.id,
+      buyer: row.agentAccount,
+      provider: row.providerAccount ?? 'unknown',
+      seq: row.voucherSeq,
+      amount: MoneyUtil.format(price),
+      lastRefusal: cause ?? 'none',
+    };
+
+    if (record === 'COLLECTED' && (await this.ownHoldRecorded(row))) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}; the escrow's record ` +
+          `is Collected and this platform's row already records the hold — nothing new is booked.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    if (record === 'HELD') {
+      await this.intents.commitRedeemedHold(
+        row.organizationId,
+        row.id,
+        `unobserved:seq=${row.voucherSeq}`,
+      );
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}; no transaction ` +
+          `of its own shows the landing, but the escrow's record names its provider and amount. ` +
+          `Committed as redeemed unobserved — not buyer debt.`,
+      );
+      await this.alerts.emit({
+        severity: AlertSeverity.WARN,
+        name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_UNOBSERVED,
+        summary:
+          `A rail-B voucher was found redeemed on chain by no transaction this process ` +
+          `recorded; committed from the escrow's held(payer, seq) record`,
+        details,
+        aggregation: AlertAggregation.PER_EVENT,
+      });
+      return { stop: false, settled: true };
+    }
+
+    if (record === 'NONE' && !this.pastLandingWindow(row)) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED} but the record ` +
+          `read says the seq is unused (a lagging node?). The hold stays open for the next pass.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    const what =
+      record === 'NONE'
+        ? 'still reads unused'
+        : record === 'MISMATCH'
+          ? 'names another provider or amount'
+          : record === 'REFUNDED'
+            ? 'names this voucher but was REFUNDED'
+            : 'names this voucher but was COLLECTED with no hold of ours recorded';
+    this.logger.error(
+      `CRITICAL: intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}, and the ` +
+        `escrow's record of that seq ${what}. ` +
+        `Not booked as a redemption, not buyer debt: the hold stays open until a human decides.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_ANOMALY,
+      summary:
+        `A rail-B voucher's seq is used on chain by a record that is not this voucher ` +
+        `(${record}); the hold stays open and nobody is charged until a human decides`,
+      details: { ...details, record },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: row.id,
+      suppressionWindowSeconds: 24 * 60 * 60,
+    });
+    return { stop: false, settled: true };
+  }
+
+  /**
+   * Whether this platform's own row already records the voucher's hold — the
+   * redemption was booked (`held_status` HELD) or its collection too
+   * (COLLECTED) — so a `Collected` record on chain is attributable to it.
+   * Unreadable reads as "no": the caller then raises the anomaly and keeps the
+   * hold open, which is the safe side.
+   */
+  private async ownHoldRecorded(row: RedeemableIntent): Promise<boolean> {
+    try {
+      const intent = await this.intents.findById(row.organizationId, row.id);
+      return intent.heldStatus === 'HELD' || intent.heldStatus === 'COLLECTED';
+    } catch (error) {
+      this.logger.warn(`Intent ${row.id}: its hold record could not be read: ${describe(error)}`);
+      return false;
+    }
+  }
+
+  /**
    * Why the provider is at fault for this voucher right now, as a forfeit
    * cause; `null` when it is not; `undefined` when that cannot be told.
    *
    * - its bonded stake is below the chain's minimum (a live read through the
-   *   redeemer; a chain without one is not asked), or
+   *   redeemer; a chain without one is not asked) for its own reasons — a
+   *   shortfall only from slash records it did not cause is `null`, or
    * - it or its payee is blocked (the platform blocklist, this pass's on-chain
    *   snapshot, or a live read of the payee).
    */
@@ -907,14 +1127,48 @@ export class VoucherRedemptionService {
     if ((await this.isBlockedLive(row.providerAccount)) === true) return 'PayeeBlockedOnChain';
     if (!this.redeemer.providerBelowMinimumStake) return null;
     try {
-      return (await this.redeemer.providerBelowMinimumStake(request))
-        ? 'ProviderBelowMinimumStake'
-        : null;
+      if (!(await this.redeemer.providerBelowMinimumStake(request))) return null;
+      // Short only because of records the provider did not cause: not its
+      // fault, so the close keeps its buyer-side handling. Only a voucher whose
+      // own refusal was that shortfall (recorded as `UNPLANNED_SLASH_SHORTFALL`
+      // on a RETRY, then `VoucherExpired`) is forfeited under it — never a
+      // close the buyer caused (review 2026-10-24 wave 3 N-2).
+      return (await this.shortOnlyByUnplannedSlashes(row, request)) ? null : BELOW_MINIMUM;
     } catch (error) {
       this.logger.warn(
         `Intent ${row.id}: the provider's stake could not be read live: ${describe(error)}`,
       );
       return undefined;
+    }
+  }
+
+  /**
+   * Whether the provider is below its minimum free stake only because of
+   * slash records it did not cause (review 2026-10-24 wave 2 M-2). `false`
+   * when the chain cannot tell or the read fails: the refusal is then the
+   * provider's, exactly as before.
+   */
+  private async shortOnlyByUnplannedSlashes(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+  ): Promise<boolean> {
+    if (!this.redeemer.providerShortOnlyByUnplannedSlashes) return false;
+    try {
+      const short = await this.redeemer.providerShortOnlyByUnplannedSlashes(request);
+      if (short) {
+        this.logger.warn(
+          `Intent ${row.id} (seq ${row.voucherSeq}): its provider is below the minimum free ` +
+            `stake only because of slash records it did not cause (unplanned, or signed by a ` +
+            `revoked verifier key). Not the provider's fault; retried until its deadline.`,
+        );
+      }
+      return short;
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id}: whether its provider's stake shortfall is its own could not be ` +
+          `read: ${describe(error)}`,
+      );
+      return false;
     }
   }
 
@@ -1009,11 +1263,11 @@ export class VoucherRedemptionService {
 
   /**
    * Whether the voucher is within {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} of
-   * its on-chain deadline (`expiresAt + REDEEM_GRACE_SECONDS`): the last pass
-   * that can still redeem it.
+   * its on-chain deadline (`expiresAt + redeemGraceSeconds`, per the row's
+   * chain): the last pass that can still redeem it.
    */
   private atRedemptionDeadline(row: RedeemableIntent): boolean {
-    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + REDEEM_GRACE_SECONDS;
+    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + redeemGraceSeconds(row.assetId);
     return Math.floor(this.now() / 1000) >= deadline - REDEMPTION_DEADLINE_MARGIN_SECONDS;
   }
 
@@ -1022,7 +1276,7 @@ export class VoucherRedemptionService {
     return (
       Math.floor(row.expiresAt.getTime() / 1000) +
       CLOCK_SKEW_TOLERANCE_SECONDS +
-      REDEEM_GRACE_SECONDS +
+      redeemGraceSeconds(row.assetId) +
       LANDING_SETTLE_SECONDS
     );
   }
@@ -1153,7 +1407,7 @@ export class VoucherRedemptionService {
    * Overdue holds need an alert.
    *
    * Counted from `issued_at` rather than from the intent's own timestamps,
-   * because `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` is the chain's window and the
+   * because `maxVoucherRedeemableLifeSeconds` is the chain's window and the
    * chain counts from the signed field. Once past it the next pass will come
    * back `VoucherExpired` and the call becomes buyer debt — so this fires
    * *before* the collection fails, not after it.
@@ -1164,7 +1418,8 @@ export class VoucherRedemptionService {
     programError: string | null,
   ): Promise<void> {
     const ageSeconds = Math.floor(this.now() / 1000) - issuedAt;
-    if (ageSeconds <= MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS) {
+    const deadlineSeconds = maxVoucherRedeemableLifeSeconds(row.assetId);
+    if (ageSeconds <= deadlineSeconds) {
       return;
     }
 
@@ -1173,13 +1428,13 @@ export class VoucherRedemptionService {
       name: VOUCHER_REDEMPTION_ALERTS.OVERDUE,
       summary:
         `A rail-B hold is ${ageSeconds}s old and still not redeemed — past the ` +
-        `${MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS}s the program will still accept`,
+        `${deadlineSeconds}s the chain will still accept`,
       details: {
         intentId: row.id,
         buyer: row.agentAccount,
         seq: row.voucherSeq,
         ageSeconds,
-        deadlineSeconds: MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+        deadlineSeconds,
         lastRefusal: programError ?? 'none',
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,

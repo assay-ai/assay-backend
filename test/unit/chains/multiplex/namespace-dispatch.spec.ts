@@ -229,6 +229,18 @@ describe('a namespace multiplexer', () => {
       await expect(withLanding.findLanding(request(SOLANA_ACCOUNT), ['sig'])).resolves.toBeNull();
     });
 
+    it('answers requiresAscendingSeq per chain, and true where a chain gives none', () => {
+      const ordered = new NamespaceVoucherRedeemer(
+        new Map<ChainNamespace, VoucherRedeemerPort>([
+          [ChainNamespace.SOLANA, solana],
+          [ChainNamespace.EIP155, { ...evm, requiresAscendingSeq: () => false }],
+        ]),
+      );
+
+      expect(ordered.requiresAscendingSeq(EVM_ACCOUNT)).toBe(false);
+      expect(ordered.requiresAscendingSeq(SOLANA_ACCOUNT)).toBe(true);
+    });
+
     it('routes a single redemption on the payer chain', async () => {
       solana.redeem.mockResolvedValue({ kind: RedeemOutcomeKind.REDEEMED });
 

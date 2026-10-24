@@ -119,8 +119,6 @@ interface State {
   records: Map<string, SlashRecordState>;
   stakes: Map<string, Stake>;
   balances: Map<string, bigint>;
-  /** `verifierWindows` — internal on chain; no getter. */
-  keyWindow: { slashedInWindow: bigint; windowStartedAt: bigint };
 }
 
 export class FakeStakeChain {
@@ -145,7 +143,6 @@ export class FakeStakeChain {
     records: new Map(),
     stakes: new Map(),
     balances: new Map(),
-    keyWindow: { slashedInWindow: 0n, windowStartedAt: 0n },
   };
   /** Test hooks: make the next N RPCs of a kind fail like a flaky node. */
   failNextCalls = 0;
@@ -477,18 +474,11 @@ export class FakeStakeChain {
     if (this.revoked) throw new Revert('VerifierRevoked');
     const stake = state.stakes.get(rec.provider)!;
     // All or wait (assay-evm 9f036a3): `applied == reserved`, or revert while
-    // either rolling window cannot take all of it.
+    // the provider's rolling window cannot take all of it. The verifier key's
+    // own window is no longer applied (review 2026-10-23 M-1).
     const providerCarried = decay(stake.slashedInWindow, stake.slashWindowStartedAt, this.now);
-    const keyCarried = decay(
-      state.keyWindow.slashedInWindow,
-      state.keyWindow.windowStartedAt,
-      this.now,
-    );
     const applied = rec.reserved;
-    if (
-      providerCarried + applied > rec.capAllowance ||
-      keyCarried + applied > this.params.verifierDailyCap
-    ) {
+    if (providerCarried + applied > rec.capAllowance) {
       throw new Revert('SlashWindowNotDrained');
     }
     const agentAmount = (applied * BigInt(this.params.slashAgentBps)) / 10_000n;
@@ -498,7 +488,6 @@ export class FakeStakeChain {
     stake.bonded -= agentAmount + platformAmount;
     stake.slashedInWindow = providerCarried + applied;
     stake.slashWindowStartedAt = this.now;
-    state.keyWindow = { slashedInWindow: keyCarried + applied, windowStartedAt: this.now };
     rec.applied = applied;
     rec.executedAt = this.now;
     rec.status = 2;
@@ -640,7 +629,6 @@ function cloneState(state: State): State {
     records: new Map([...state.records].map(([key, value]) => [key, { ...value }])),
     stakes: new Map([...state.stakes].map(([key, value]) => [key, { ...value }])),
     balances: new Map(state.balances),
-    keyWindow: { ...state.keyWindow },
   };
 }
 

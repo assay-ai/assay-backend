@@ -29,8 +29,9 @@ import type { SlashRecordSnapshot } from '../ports/slash-executor.port';
  *   the agent account ascending, so the answer never depends on row order.
  * - **Bounded by the contract.** `proposeSlash` refuses a `penalty` above
  *   `params.penaltyAmount`, and the provider's rolling window admits at most
- *   `slashCapBps` of the stake at risk; `executeSlash` also stops at the
- *   verifier key's daily cap. When any of these binds, the WHOLE plan is
+ *   `slashCapBps` of the stake at risk (the verifier key's daily cap is no
+ *   longer applied by `executeSlash`, review 2026-10-23 M-1). When either
+ *   binds, the WHOLE plan is
  *   scaled down — the total is reduced and re-split by the same weights — so
  *   no agent's share is clipped while another's is not. What bound is
  *   recorded in {@link ProRataPlan.binding}, and every part keeps its
@@ -61,14 +62,14 @@ export interface ProRataCaps {
   readonly perPartCeiling: bigint;
   /**
    * The most all the parts together may take. The caller passes the smallest
-   * of the provider's per-window allowance (`atRisk × slashCapBps`), the stake
-   * not already reserved by other judgements, and the verifier key's daily cap.
+   * of the provider's per-window allowance (`atRisk × slashCapBps`) and the
+   * stake not already reserved by other judgements.
    */
   readonly totalCeiling: bigint;
   /**
    * The smallest part the contract can ever pay —
-   * {@link minimumSplittablePenalty} (2 units at 60/30). A smaller part would
-   * revert `PenaltyTooSmallToSplit` at every execution until it expired, so
+   * {@link minimumSplittablePenalty} (4 units at 60/30). A smaller part would
+   * be refused `PenaltyTooSmallToSplit` at every proposal, so
    * it is left out and its share RE-SPLIT among the other agents by the same
    * weights: the total signed for is unchanged.
    */
@@ -284,14 +285,25 @@ export function findDustParts(
 }
 
 /**
- * The smallest `applied` that `executeSlash` can split without reverting
- * `PenaltyTooSmallToSplit` — the smallest `a` for which
- * `⌊a·agentBps/10⁴⌋ + ⌊a·platformBps/10⁴⌋ ≥ 1`, i.e. `⌈10⁴ / max(bps)⌉`.
+ * The smallest penalty `proposeSlash` accepts as splittable (assay-evm
+ * aa2f84a, review 2026-10-23 L-1) under the CURRENT split: the agent share
+ * `⌊a·agentBps/10⁴⌋` must be non-zero, and so must the platform share
+ * `⌊a·platformBps/10⁴⌋` whenever `platformBps > 0`. That is
+ * `max(⌈10⁴/agentBps⌉, ⌈10⁴/platformBps⌉)` — the platform term only when
+ * `platformBps > 0` — e.g. 4 units at 60/30, 1 at 100/0. Derived from the
+ * bps read live, never a constant: a part below it is refused
+ * `PenaltyTooSmallToSplit` at proposal and would be retried for ever. It also
+ * clears `executeSlash`'s own check (`agent + platform ≥ 1`), which is weaker.
  */
 export function minimumSplittablePenalty(agentBps: number, platformBps: number): bigint {
-  const largest = BigInt(Math.max(agentBps, platformBps));
-  if (largest <= 0n) throw new Error('a split with no agent or platform share can never pay');
-  return (10_000n + largest - 1n) / largest;
+  if (agentBps <= 0) {
+    throw new Error('a split with no agent share can never pay (the contract refuses it)');
+  }
+  const ceilDiv = (bps: number) => (10_000n + BigInt(bps) - 1n) / BigInt(bps);
+  const forAgent = ceilDiv(agentBps);
+  if (platformBps <= 0) return forAgent;
+  const forPlatform = ceilDiv(platformBps);
+  return forAgent > forPlatform ? forAgent : forPlatform;
 }
 
 /**

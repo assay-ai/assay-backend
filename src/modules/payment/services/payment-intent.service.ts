@@ -34,7 +34,7 @@ import {
   PAYMENT_INTENT_FUNDS_SECURED_REASON,
   PAYMENT_INTENT_HOLD_TTL_MS,
   PAYMENT_INTENT_TTL_MS,
-  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
+  paymentIntentVerdictDeadlineLatestSeconds,
 } from '../constants/payment-intent.constants';
 import {
   DEBT_VOIDED_PREFIX,
@@ -627,7 +627,7 @@ export class PaymentIntentService {
       //
       // Not when the verdict came too late for the voucher (review #2, M3;
       // review-buyer-debt M2): past `expiresAt +
-      // PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS` — one redemption pass
+      // paymentIntentVerdictDeadlineLatestSeconds(chainId)` — one redemption pass
       // before the chain's own deadline — no pass can collect it. The call was
       // served, so it is still SETTLED, as buyer debt at once (the lapse was
       // written with the status above): the hold stays open, nobody is
@@ -685,7 +685,7 @@ export class PaymentIntentService {
   private pastRedemptionLatest(intent: PaymentIntent): boolean {
     return (
       Date.now() >
-      intent.expiresAt.getTime() + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS * 1000
+      intent.expiresAt.getTime() + paymentIntentVerdictDeadlineLatestSeconds(intent.chainId) * 1000
     );
   }
 

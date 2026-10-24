@@ -194,6 +194,10 @@ const WAIT_ERRORS: ReadonlySet<string> = new Set([
   'SlashCapExceeded',
   'VerifierDailyCapExceeded',
   'PenaltyTooSmallToSplit',
+  // Also, on EVM since D-26, `proposeSlash`'s refusal of a judgement the
+  // provider's FREE stake cannot cover in full: nothing is written, the
+  // attestation is not consumed, and it is proposed again (freshly signed)
+  // once other records release their reservations. Never final.
   'NothingToSlash',
   // EVM (follow-up C2): `executeSlash` refuses a payment a rolling window
   // (the provider's or the key's) would cut below `min(reserved, atRisk)`,

@@ -3,6 +3,7 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import {
   decayWindow,
   PrevalidationState,
+  prevalidateBatch,
   prevalidateVoucher,
 } from '@modules/chains/evm/evm-voucher-prevalidation';
 
@@ -41,12 +42,13 @@ const STATE: PrevalidationState = {
   paused: false,
   redeemerIsUs: true,
   seqHigh: 9n,
+  seqUsed: false,
   maxVoucherAmount: 2_000_000n,
   maxPerWindow: 10_000_000n,
   spentInWindow: 0n,
   windowStartedAt: NOW - 3_600,
   balance: 5_000_000n,
-  providerBonded: 50_000_000n,
+  providerFreeBonded: 50_000_000n,
   minimumStake: 50_000_000n,
 };
 
@@ -62,9 +64,9 @@ describe('prevalidateVoucher', () => {
     ['InvalidVoucherWindow', { expiresAt: GOOD.issuedAt }],
     ['VoucherLifetimeTooLong', { expiresAt: GOOD.issuedAt + 301n }],
     ['VoucherNotYetValid', { issuedAt: BigInt(NOW) + 121n, expiresAt: BigInt(NOW) + 200n }],
-    ['VoucherExpired', { issuedAt: BigInt(NOW - 2_000), expiresAt: BigInt(NOW - 1_900) }],
+    // Past expiresAt + 7,200 (D-24; Solana keeps 1,800).
+    ['VoucherExpired', { issuedAt: BigInt(NOW - 7_400), expiresAt: BigInt(NOW - 7_201) }],
     ['VoucherSeqZero', { seq: 0n }],
-    ['VoucherSeqNotIncreasing', { seq: 9n }],
     ['VoucherExceedsPerCallLimit', { amount: 2_000_001n }],
   ])('names %s', (expected, patch) => {
     expect(prevalidateVoucher({ ...GOOD, ...patch }, STATE)).toBe(expected);
@@ -73,8 +75,9 @@ describe('prevalidateVoucher', () => {
   it.each([
     ['NotRedeemer', { redeemerIsUs: false }],
     ['ProgramPaused', { paused: true }],
+    ['VoucherSeqUsed', { seqUsed: true }],
     ['EscrowWindowLimitExceeded', { spentInWindow: 9_500_000n }],
-    ['ProviderBelowMinimumStake', { providerBonded: 49_999_999n }],
+    ['ProviderBelowMinimumStake', { providerFreeBonded: 49_999_999n }],
     ['EscrowInsufficient', { balance: 999_999n }],
   ])('names %s from the state', (expected, patch) => {
     expect(prevalidateVoucher(GOOD, { ...STATE, ...patch })).toBe(expected);
@@ -92,7 +95,7 @@ describe('prevalidateVoucher', () => {
     ).toBeNull();
     expect(
       prevalidateVoucher(
-        { ...GOOD, issuedAt: BigInt(NOW - 1_900), expiresAt: BigInt(NOW - 1_800) },
+        { ...GOOD, issuedAt: BigInt(NOW - 7_300), expiresAt: BigInt(NOW - 7_200) },
         STATE,
       ),
     ).toBeNull();
@@ -103,16 +106,47 @@ describe('prevalidateVoucher', () => {
     expect(
       prevalidateVoucher(GOOD, { ...STATE, spentInWindow: 9_000_000n, windowStartedAt: NOW }),
     ).toBeNull();
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 50_000_000n })).toBeNull();
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 50_000_000n })).toBeNull();
     expect(prevalidateVoucher(GOOD, { ...STATE, balance: 1_000_000n })).toBeNull();
   });
 
   it('reports the FIRST refusal when several apply, in the contract order', () => {
-    // A voucher that is both stale and over the per-call limit must report
-    // VoucherSeqNotIncreasing, because that is what the chain would say — and a
+    // A voucher whose seq is used and that is over the per-call limit must
+    // report VoucherSeqUsed, because that is what the chain would say — and a
     // job that reports the other one sends the operator to the wrong screen.
     const both = { ...GOOD, seq: 1n, amount: STATE.maxVoucherAmount + 1n };
-    expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqNotIncreasing');
+    expect(prevalidateVoucher(both, { ...STATE, seqUsed: true })).toBe('VoucherSeqUsed');
+    // Zero comes before used.
+    expect(prevalidateVoucher({ ...GOOD, seq: 0n }, { ...STATE, seqUsed: true })).toBe(
+      'VoucherSeqZero',
+    );
+  });
+
+  /**
+   * D-23: the replay rule is per `(payer, seq)`, in any order. `seqHigh` is
+   * only the anchor of the gap cap.
+   */
+  describe('the per-seq replay rule (D-23)', () => {
+    it('accepts an unused seq at or below seqHigh: a lower seq after a higher one', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: 9n }, STATE)).toBeNull();
+      expect(prevalidateVoucher({ ...GOOD, seq: 1n }, { ...STATE, seqHigh: 500n })).toBeNull();
+    });
+
+    it('refuses a used seq — held, collected or refunded — wherever it sits', () => {
+      // A refunded seq stays used: records are never deleted.
+      expect(prevalidateVoucher({ ...GOOD, seq: 9n }, { ...STATE, seqUsed: true })).toBe(
+        'VoucherSeqUsed',
+      );
+      expect(prevalidateVoucher({ ...GOOD, seq: 20n }, { ...STATE, seqUsed: true })).toBe(
+        'VoucherSeqUsed',
+      );
+    });
+
+    it('never names VoucherSeqNotIncreasing, which eip155 no longer has', () => {
+      for (const seq of [1n, 9n, 10n]) {
+        expect(prevalidateVoucher({ ...GOOD, seq }, STATE)).not.toBe('VoucherSeqNotIncreasing');
+      }
+    });
   });
 
   describe('the seq jump cap (D-17: seq <= seqHigh + MAX_SEQ_GAP)', () => {
@@ -128,14 +162,18 @@ describe('prevalidateVoucher', () => {
       );
     });
 
-    it('comes right after VoucherSeqNotIncreasing and before the spending checks', () => {
+    it('comes right after VoucherSeqUsed and before the spending checks', () => {
       // Too far ahead AND over the per-call limit: the chain reports the gap.
       const both = { ...GOOD, seq: STATE.seqHigh + gap + 1n, amount: STATE.maxVoucherAmount + 1n };
       expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqGapTooLarge');
-      // And a stale seq is still VoucherSeqNotIncreasing, never a gap.
-      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh }, STATE)).toBe(
-        'VoucherSeqNotIncreasing',
-      );
+      // Too far ahead AND used: the chain reports the use.
+      expect(
+        prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh + gap + 1n }, { ...STATE, seqUsed: true }),
+      ).toBe('VoucherSeqUsed');
+    });
+
+    it('applies only above seqHigh, so a seq below it is never a gap', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: 1n }, { ...STATE, seqHigh: gap * 3n })).toBeNull();
     });
   });
 
@@ -143,7 +181,7 @@ describe('prevalidateVoucher', () => {
     // Divergence 4 puts ProviderBelowMinimumStake at the Anchor position, after
     // the spending limits and before the balance. A voucher that fails both
     // must report the stake.
-    const state = { ...STATE, providerBonded: 0n, balance: 0n };
+    const state = { ...STATE, providerFreeBonded: 0n, balance: 0n };
     expect(prevalidateVoucher(GOOD, state)).toBe('ProviderBelowMinimumStake');
   });
 
@@ -166,8 +204,8 @@ describe('prevalidateVoucher', () => {
 
   it('reads bonded stake alone, and a strict less-than against the floor', () => {
     // `_redeem` is `bondedOf(provider) < p.minimumStake`. Equal passes.
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 50_000_000n })).toBeNull();
-    expect(prevalidateVoucher(GOOD, { ...STATE, providerBonded: 49_999_999n })).toBe(
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 50_000_000n })).toBeNull();
+    expect(prevalidateVoucher(GOOD, { ...STATE, providerFreeBonded: 49_999_999n })).toBe(
       'ProviderBelowMinimumStake',
     );
   });
@@ -225,6 +263,100 @@ describe('prevalidateVoucher — a delegate-signed voucher', () => {
     expect(prevalidateVoucher(GOOD, withGrant({ maxVoucherAmount: 999_999n }))).toBe(
       'DelegateVoucherExceedsPerCallLimit',
     );
+  });
+});
+
+/**
+ * `redeemVoucherBatch` runs `_redeem` item by item, so each item sees the
+ * effects of the earlier ones of its payer. Since D-23 one payer's items may
+ * share a batch in any order.
+ */
+describe('prevalidateBatch', () => {
+  const item = (voucher: Partial<EvmVoucher>, state: Partial<PrevalidationState> = {}) => ({
+    voucher: { ...GOOD, ...voucher },
+    state: { ...STATE, ...state },
+  });
+
+  it('accepts one payer’s seqs out of order, a lower one after a higher one', () => {
+    expect(prevalidateBatch([item({ seq: 12n }), item({ seq: 10n }), item({ seq: 11n })])).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it('refuses the second copy of the same voucher as VoucherSeqUsed', () => {
+    expect(prevalidateBatch([item({ seq: 10n }), item({ seq: 10n })])).toEqual([
+      null,
+      'VoucherSeqUsed',
+    ]);
+  });
+
+  it('a refused item has no effect: its seq is not used by it', () => {
+    // The first copy is over the balance and left out of the batch, so the
+    // second copy (a smaller amount on the same seq) is the one the chain sees.
+    expect(
+      prevalidateBatch([
+        item({ seq: 10n, amount: 2_000_000n }, { balance: 1_000_000n }),
+        item({ seq: 10n }, { balance: 1_000_000n }),
+      ]),
+    ).toEqual(['EscrowInsufficient', null]);
+  });
+
+  it('raises seqHigh for the gap check of later items', () => {
+    const gap = BigInt(EVM_CONSTANTS.MAX_SEQ_GAP);
+    // Alone, seqHigh + gap + 5 is too far. After an item at seqHigh + gap it is not.
+    expect(prevalidateBatch([item({ seq: STATE.seqHigh + gap + 5n })])).toEqual([
+      'VoucherSeqGapTooLarge',
+    ]);
+    expect(
+      prevalidateBatch([
+        item({ seq: STATE.seqHigh + gap }),
+        item({ seq: STATE.seqHigh + gap + 5n }),
+      ]),
+    ).toEqual([null, null]);
+  });
+
+  it('spends the payer’s balance and window item by item', () => {
+    expect(
+      prevalidateBatch([
+        item({ seq: 10n }, { balance: 1_500_000n }),
+        item({ seq: 11n }, { balance: 1_500_000n }),
+      ]),
+    ).toEqual([null, 'EscrowInsufficient']);
+    expect(
+      prevalidateBatch([
+        item({ seq: 10n }, { maxPerWindow: 1_500_000n }),
+        item({ seq: 11n }, { maxPerWindow: 1_500_000n }),
+      ]),
+    ).toEqual([null, 'EscrowWindowLimitExceeded']);
+  });
+
+  it('spends a delegate’s own window too', () => {
+    const grant = {
+      maxVoucherAmount: 1_000_000n,
+      maxPerWindow: 1_500_000n,
+      spentInWindow: 0n,
+      windowStartedAt: NOW - 3_600,
+      validUntil: BigInt(NOW + 86_400),
+      revoked: false,
+    };
+    const signed = (seq: bigint) => ({
+      ...item({ seq }, { delegation: grant }),
+      delegate: '0x00000000000000000000000000000000000000De',
+    });
+    expect(prevalidateBatch([signed(10n), signed(11n)])).toEqual([
+      null,
+      'DelegateWindowLimitExceeded',
+    ]);
+  });
+
+  it('keeps two payers apart', () => {
+    const other = '0x0000000000000000000000000000000000000002' as const;
+    expect(prevalidateBatch([item({ seq: 10n }), item({ seq: 10n, payer: other })])).toEqual([
+      null,
+      null,
+    ]);
   });
 });
 

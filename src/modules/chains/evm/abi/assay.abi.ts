@@ -275,6 +275,14 @@ export const MULTICALL3_ABI = parseAbi([
 ]);
 
 /**
+ * `Multicall3.getCurrentBlockTimestamp` — the chain's clock, read inside the
+ * same `multicall` as the state it is compared with (review 2026-10-23 L-4).
+ */
+export const MULTICALL3_CLOCK_ABI = parseAbi([
+  'function getCurrentBlockTimestamp() view returns (uint256 timestamp)',
+]);
+
+/**
  * Only what a deposit path needs.
  *
  * USDG has neither EIP-2612 nor EIP-3009 — measured (`docs/chain-facts.md` in
