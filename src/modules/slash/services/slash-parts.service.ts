@@ -68,6 +68,13 @@ const SLASH_EXECUTION_GRACE_MS_FOR_PARTS = 7 * 24 * 60 * 60 * 1000;
 /** `SLASH_WINDOW_SECONDS` (86,400): the provider's rolling slash window on chain. */
 const SLASH_PROVIDER_WINDOW_MS = 86_400 * 1000;
 
+/**
+ * `proposeSlash`'s refusal of a judgement the provider's free stake cannot
+ * cover in full (assay-evm D-26): nothing is written and the attestation is not
+ * consumed, so it is retried, never final.
+ */
+const FREE_STAKE_SHORT = 'NothingToSlash';
+
 /** One case handed to {@link SlashPartsService.executeMany}. */
 export interface PartitionedCase {
   readonly proposal: SlashProposalEntity;
@@ -102,7 +109,9 @@ export interface PartitionedCase {
  *   `executeBatch` ({@link executeMany}) — on EVM, `Multicall3`.
  * - **No self-slashing** (review 2026-10-23 M-1): a part whose beneficiary is
  *   linked to the provider is never signed, and no more is signed against a
- *   provider per rolling day than its on-chain window can execute.
+ *   provider than its free stake can pay and its on-chain window can execute,
+ *   counting every record still standing, whatever its age (review
+ *   2026-10-24 F-M1).
  * - **Partial outcomes, never silent**: a part refused while its siblings
  *   landed is marked `REFUSED` and the case proceeds with the rest; a part
  *   that executed while a sibling failed keeps the case out of any state that
@@ -168,8 +177,8 @@ export class SlashPartsService {
       // Follow-up C5: every beneficiary is a payer of the failed calls, and no
       // part exceeds that payer's share of the formula penalty.
       await this.assertBeneficiariesPaid(proposal, provider, chainId, todo);
-      // Review 2026-10-23 M-1: no more signed against this provider per day
-      // than its on-chain window can execute.
+      // Review 2026-10-23 M-1 / 2026-10-24 F-M1: no more signed against this
+      // provider than its free stake can pay and its window can execute.
       await this.assertWithinProviderDailyBudget(proposal, provider, chainId, todo, now);
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
@@ -240,8 +249,15 @@ export class SlashPartsService {
         : null;
       const nearTheDoor =
         earliestDoor !== null && now.getTime() >= earliestDoor - this.config.stragglerDeadlineMs;
+      // `NothingToSlash` is not counted against the attempts (D-26): the
+      // provider's free stake cannot cover the part in full YET, the chain
+      // wrote nothing and the attestation was never consumed — every retry
+      // signs a fresh one — so it waits for other records to release their
+      // reservations. Only the siblings' door gives it up.
       const outOfAttempts = stragglers.every(
-        (straggler) => straggler.attempts >= this.config.stragglerMaxAttempts,
+        (straggler) =>
+          straggler.reason !== FREE_STAKE_SHORT &&
+          straggler.attempts >= this.config.stragglerMaxAttempts,
       );
       if (landed.length === 0 || (!nearTheDoor && !outOfAttempts)) throw transient;
 
@@ -323,14 +339,25 @@ export class SlashPartsService {
 
   /**
    * Refuses (transiently: nothing signed, the case stays PROPOSING and is
-   * retried) when the attestations signed against this provider in the last
-   * rolling day plus `parts` would exceed the provider's on-chain slash window
-   * — `capAllowance`, `atRisk × slashCapBps`, the most `executeSlash` admits
-   * per 86,400 s. Records beyond it could only wait and expire, and the
-   * window is first come, first served, so whoever filled it first would
-   * decide which judgements are paid (review 2026-10-23 M-1). A case with
-   * nothing else signed that day always goes: its plan is already capped at
-   * the window.
+   * retried) when `parts` would take the provider's slash budget past what its
+   * stake can pay (review 2026-10-23 M-1, review 2026-10-24 F-M1):
+   *
+   * - **free stake.** `proposeSlash` refuses (`NothingToSlash`, nothing
+   *   written) a judgement the provider's free stake (`atRisk −
+   *   pendingSlash`, read live) cannot cover in full, so nothing is signed
+   *   that the chain would refuse.
+   * - **the window.** What already holds the budget — every record still
+   *   standing (`Pending` or `Disputed`, at ANY age: a disputed record keeps
+   *   its reservation for up to 30 days) plus what the last rolling day
+   *   executed — plus `parts` must fit `capAllowance` (`atRisk ×
+   *   slashCapBps`, the most `executeSlash` admits per 86,400 s). "Standing"
+   *   is the larger of this platform's own standing parts and the chain's
+   *   `pendingSlash`, which also counts records this platform did not sign
+   *   and call-level cases that have no parts. So a provider cannot freeze
+   *   more than one window of its stake with records it disputes itself,
+   *   and records beyond the window are never signed only to wait and expire.
+   *   A case with nothing else holding the budget always goes: its plan is
+   *   already capped at the window.
    */
   private async assertWithinProviderDailyBudget(
     proposal: SlashProposalEntity,
@@ -342,26 +369,39 @@ export class SlashPartsService {
     if (!this.caps) {
       throw ChainErrors.programNotConfigured({ what: 'a slash caps reader for ' + chainId });
     }
-    const signed = await this.parts.signedAgainstProviderSince(
-      proposal.providerId,
-      chainId,
-      new Date(now.getTime() - SLASH_PROVIDER_WINDOW_MS),
-    );
-    if (signed === 0n) return;
-    const { windowAllowanceMinor } = await this.caps.readCaps({ chainId, provider });
+    const [own, caps] = await Promise.all([
+      this.parts.committedAgainstProvider(
+        proposal.providerId,
+        chainId,
+        new Date(now.getTime() - SLASH_PROVIDER_WINDOW_MS),
+      ),
+      this.caps.readCaps({ chainId, provider }),
+    ]);
     const wanted = parts.reduce((sum, part) => sum + BigInt(part.penaltyAmount), 0n);
-    if (signed + wanted <= windowAllowanceMinor) return;
+    const standing = own.standing > caps.pendingSlashMinor ? own.standing : caps.pendingSlashMinor;
+    const committed = standing + own.executedSince;
+
+    let allowance: bigint | null = null;
+    if (wanted > caps.freeStakeMinor) {
+      allowance = caps.freeStakeMinor;
+    } else if (committed > 0n && committed + wanted > caps.windowAllowanceMinor) {
+      allowance = caps.windowAllowanceMinor;
+    }
+    if (allowance === null) return;
+
     this.logger.warn(
-      `slash case ${proposal.id}: not signed yet — ${signed} already signed against provider ` +
-        `${proposal.providerId} in the last day, plus ${wanted}, exceeds its window of ` +
-        `${windowAllowanceMinor}`,
+      `slash case ${proposal.id}: not signed yet — ${committed} already holds provider ` +
+        `${proposal.providerId}'s slash budget (standing ${standing}, executed in the last day ` +
+        `${own.executedSince}); ${wanted} more does not fit (free stake ` +
+        `${caps.freeStakeMinor}, window ${caps.windowAllowanceMinor})`,
     );
     throw SlashErrors.providerDailyBudget({
       proposalId: proposal.id,
       providerId: proposal.providerId,
-      signed: signed.toString(),
+      signed: committed.toString(),
       wanted: wanted.toString(),
-      allowance: windowAllowanceMinor.toString(),
+      allowance: allowance.toString(),
+      freeStake: caps.freeStakeMinor.toString(),
     });
   }
 

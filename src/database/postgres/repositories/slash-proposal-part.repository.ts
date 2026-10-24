@@ -171,28 +171,44 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
   }
 
   /**
-   * What this platform has signed against one provider on one chain since
-   * `since` (review 2026-10-23 M-1): the reservation (else the penalty) of
-   * every part, of any case and epoch, proposed on chain after it and still
-   * standing or executed. Cancelled and refused parts take nothing from the
-   * provider's window. Minor units.
+   * What this platform's parts hold of one provider's slash budget on one
+   * chain (review 2026-10-24 F-M1), split in two, minor units:
+   *
+   * - `standing`: the reservation (else the penalty) of every part, of any
+   *   case, epoch and AGE, still `PENDING` or `DISPUTED` — what still sits in
+   *   the provider's on-chain `pendingSlash`. A record the provider disputes
+   *   keeps its reservation for up to 30 days, so counting only the last day
+   *   let a provider freeze its whole stake with records it disputes itself.
+   * - `executedSince`: the same figure for parts `EXECUTED` after
+   *   `executedSince` (their execution time, else their proposal time) — what
+   *   the provider's rolling window has already paid out.
+   *
+   * Cancelled (and expired) and refused parts hold nothing.
    */
-  async signedAgainstProviderSince(
+  async committedAgainstProvider(
     providerId: string,
     chainId: string,
-    since: Date,
-  ): Promise<bigint> {
+    executedSince: Date,
+  ): Promise<{ standing: bigint; executedSince: bigint }> {
     const [row] = (await this.manager.query(
-      `SELECT COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount)), 0)::text AS "signed"
+      `SELECT
+         COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount))
+           FILTER (WHERE part.chain_status IN ('PENDING', 'DISPUTED')), 0)::text AS "standing",
+         COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount))
+           FILTER (WHERE part.chain_status = 'EXECUTED'
+                     AND COALESCE(part.executed_at, part.chain_proposed_at) > $3), 0)::text
+           AS "executedSince"
          FROM slash_proposal_parts part
          JOIN slash_proposals proposal ON proposal.id = part.proposal_id
         WHERE proposal.provider_id = $1
           AND proposal.asset_id LIKE $2
-          AND part.chain_status IN ('PENDING', 'DISPUTED', 'EXECUTED')
-          AND part.chain_proposed_at > $3`,
-      [providerId, `${chainId}/%`, since],
-    )) as { signed: string }[];
-    return BigInt(row?.signed ?? '0');
+          AND part.chain_status IN ('PENDING', 'DISPUTED', 'EXECUTED')`,
+      [providerId, `${chainId}/%`, executedSince],
+    )) as { standing: string; executedSince: string }[];
+    return {
+      standing: BigInt(row?.standing ?? '0'),
+      executedSince: BigInt(row?.executedSince ?? '0'),
+    };
   }
 
   /** One case's parts at one epoch, in agent order — the order they were planned in. */

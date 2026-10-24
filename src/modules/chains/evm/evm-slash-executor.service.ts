@@ -278,6 +278,7 @@ export class EvmSlashExecutor
       penaltyCeilingMinor: BigInt(params.penaltyAmount),
       windowAllowanceMinor: (atRisk * BigInt(params.slashCapBps)) / 10_000n,
       freeStakeMinor: atRisk > pending ? atRisk - pending : 0n,
+      pendingSlashMinor: pending,
       verifierDailyCapMinor: BigInt(params.verifierDailyCap),
       agentBps: Number(params.slashAgentBps),
       platformBps: Number(params.slashPlatformBps),

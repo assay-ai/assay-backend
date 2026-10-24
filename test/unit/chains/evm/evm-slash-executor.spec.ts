@@ -416,6 +416,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
       penaltyCeilingMinor: 1_000_000n,
       windowAllowanceMinor: 20_000_000n, // 10% of 200 USDG at risk
       freeStakeMinor: 199_000_000n, // minus reqA's 1 USDG reservation
+      pendingSlashMinor: 1_000_000n,
       verifierDailyCapMinor: 500_000_000n,
       agentBps: 6000,
       platformBps: 3000,

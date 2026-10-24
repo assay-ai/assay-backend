@@ -17,6 +17,12 @@ export interface SlashCaps {
   /** `(bonded + unbonding) − pendingSlash` — what other standing judgements have not reserved. */
   readonly freeStakeMinor: bigint;
   /**
+   * `pendingSlash` — every standing (`Pending` or `Disputed`) record's
+   * reservation, this platform's or not. The on-chain half of the provider
+   * budget (review 2026-10-24 F-M1).
+   */
+  readonly pendingSlashMinor: bigint;
+  /**
    * `params.verifierDailyCap`. Kept in the ParamSet, but no longer applied by
    * `executeSlash` (review 2026-10-23 M-1): read for display only, never a
    * ceiling a plan or a keeper waits on.

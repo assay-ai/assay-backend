@@ -30,12 +30,13 @@ const revert = (name: string) =>
 
 class FakeParts {
   rows: SlashProposalPartEntity[] = [];
-  /** What `signedAgainstProviderSince` answers, and every `since` it was asked. */
-  signedToday = 0n;
+  /** What `committedAgainstProvider` answers, and every `executedSince` it was asked. */
+  standing = 0n;
+  executedToday = 0n;
   readonly signedAsked: Date[] = [];
-  async signedAgainstProviderSince(_providerId: string, _chainId: string, since: Date) {
-    this.signedAsked.push(since);
-    return this.signedToday;
+  async committedAgainstProvider(_providerId: string, _chainId: string, executedSince: Date) {
+    this.signedAsked.push(executedSince);
+    return { standing: this.standing, executedSince: this.executedToday };
   }
   async findForEpoch(organizationId: string, proposalId: string, chainEpoch: number) {
     return this.rows
@@ -136,6 +137,7 @@ const CAPS: SlashCaps = {
   penaltyCeilingMinor: 1_000_000n,
   windowAllowanceMinor: 20_000_000n,
   freeStakeMinor: 199_000_000n,
+  pendingSlashMinor: 0n,
   verifierDailyCapMinor: 500_000_000n,
   agentBps: 6000,
   platformBps: 3000,
@@ -279,8 +281,8 @@ describe('SlashPartsService.propose', () => {
         [agent(1), '200'],
         [agent(2), '100'],
       ]);
-      // 19,999,800 signed against this provider in the last day + 300 > 20,000,000.
-      parts.signedToday = CAPS.windowAllowanceMinor - 200n;
+      // 19,999,800 executed against this provider in the last day + 300 > 20,000,000.
+      parts.executedToday = CAPS.windowAllowanceMinor - 200n;
       const now = new Date('2026-10-20T12:00:00Z');
 
       await expect(service.propose(proposal, '0xprovider', now)).rejects.toMatchObject({
@@ -291,9 +293,88 @@ describe('SlashPartsService.propose', () => {
       expect(parts.rows.every((row) => row.chainStatus === 'NONE')).toBe(true);
 
       // The day rolls on: it fits.
-      parts.signedToday = CAPS.windowAllowanceMinor - 300n;
+      parts.executedToday = CAPS.windowAllowanceMinor - 300n;
       await expect(service.propose(proposal, '0xprovider', now)).resolves.toMatchObject({
         status: 'PENDING',
+      });
+    });
+
+    describe('review 2026-10-24 F-M1: every standing record holds the budget', () => {
+      const withCaps = async <T>(patch: Partial<SlashCaps>, run: () => Promise<T>) => {
+        const original = { ...CAPS };
+        Object.assign(CAPS, patch);
+        try {
+          return await run();
+        } finally {
+          Object.assign(CAPS, original);
+        }
+      };
+
+      it('counts a standing (e.g. self-disputed) record of any age, not only the last day', async () => {
+        const { service, proposal, executor, parts } = build([[agent(1), '300']]);
+        // Disputed weeks ago and still reserved: nothing executed today.
+        parts.standing = CAPS.windowAllowanceMinor - 200n;
+        await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+        });
+        expect(executor.batches).toEqual([]);
+
+        // Released (cancelled, expired or executed long ago): it goes.
+        parts.standing = 0n;
+        await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+          status: 'PENDING',
+        });
+      });
+
+      it('counts the chain’s pendingSlash when it is larger than this platform’s own parts', async () => {
+        const { service, proposal, executor } = build([[agent(1), '300']]);
+        await withCaps({ pendingSlashMinor: CAPS.windowAllowanceMinor - 200n }, async () => {
+          await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+            errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+          });
+        });
+        expect(executor.batches).toEqual([]);
+      });
+
+      it('never signs more than the free stake can pay, even with nothing else standing', async () => {
+        const { service, proposal, executor, parts } = build([[agent(1), '300']]);
+        // Planned while the stake was free; another record took it since.
+        await (service as unknown as { plan: (...args: unknown[]) => Promise<unknown> }).plan(
+          proposal,
+          CHAIN,
+          '0xprovider',
+        );
+        await withCaps({ freeStakeMinor: 299n }, async () => {
+          await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+            errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
+          });
+        });
+        expect(executor.batches).toEqual([]);
+        expect(parts.rows.every((row) => row.chainStatus === 'NONE')).toBe(true);
+      });
+
+      it('keeps retrying a part the chain refuses NothingToSlash; it is not a straggler to give up', async () => {
+        const { service, proposal, executor, parts } = build([
+          [agent(1), '200'],
+          [agent(2), '100'],
+        ]);
+        executor.proposeFails.set(agent(2).split(':')[2], revert('NothingToSlash'));
+
+        // Far past the attempt cap (3), far from the siblings' door.
+        for (let attempt = 1; attempt <= 6; attempt += 1) {
+          await expect(service.propose(proposal, '0xprovider', T0)).rejects.toBeDefined();
+        }
+        expect(parts.rows[1]).toMatchObject({
+          chainStatus: 'NONE',
+          chainLastError: 'NothingToSlash',
+        });
+
+        // Free stake back: it lands.
+        executor.proposeFails.delete(agent(2).split(':')[2]);
+        await expect(service.propose(proposal, '0xprovider', T0)).resolves.toMatchObject({
+          status: 'PENDING',
+          reservedMinor: '300',
+        });
       });
     });
 
