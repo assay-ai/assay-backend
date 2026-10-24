@@ -30,13 +30,20 @@ const revert = (name: string) =>
 
 class FakeParts {
   rows: SlashProposalPartEntity[] = [];
-  /** What `committedAgainstProvider` answers, and every `executedSince` it was asked. */
-  standing = 0n;
+  /** What `committedAgainstProvider` answers, and every bound it was asked with. */
+  pendingDue = 0n;
   executedToday = 0n;
   readonly signedAsked: Date[] = [];
-  async committedAgainstProvider(_providerId: string, _chainId: string, executedSince: Date) {
+  readonly dueByAsked: Date[] = [];
+  async committedAgainstProvider(
+    _providerId: string,
+    _chainId: string,
+    executedSince: Date,
+    dueBy: Date,
+  ) {
     this.signedAsked.push(executedSince);
-    return { standing: this.standing, executedSince: this.executedToday };
+    this.dueByAsked.push(dueBy);
+    return { pendingDue: this.pendingDue, executedSince: this.executedToday };
   }
   async findForEpoch(organizationId: string, proposalId: string, chainEpoch: number) {
     return this.rows
@@ -299,7 +306,7 @@ describe('SlashPartsService.propose', () => {
       });
     });
 
-    describe('review 2026-10-24 F-M1: every standing record holds the budget', () => {
+    describe('review 2026-10-24 F-M1 / wave 2 M-1: what holds the window, what holds free stake', () => {
       const withCaps = async <T>(patch: Partial<SlashCaps>, run: () => Promise<T>) => {
         const original = { ...CAPS };
         Object.assign(CAPS, patch);
@@ -310,30 +317,39 @@ describe('SlashPartsService.propose', () => {
         }
       };
 
-      it('counts a standing (e.g. self-disputed) record of any age, not only the last day', async () => {
+      it('counts pending parts due within the coming day against the window', async () => {
         const { service, proposal, executor, parts } = build([[agent(1), '300']]);
-        // Disputed weeks ago and still reserved: nothing executed today.
-        parts.standing = CAPS.windowAllowanceMinor - 200n;
-        await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+        const now = new Date('2026-10-20T12:00:00Z');
+        parts.pendingDue = CAPS.windowAllowanceMinor - 200n;
+        await expect(service.propose(proposal, '0xprovider', now)).rejects.toMatchObject({
           errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
         });
         expect(executor.batches).toEqual([]);
+        // The planning horizon: due now or within the coming rolling day.
+        expect(parts.dueByAsked[0].getTime()).toBe(now.getTime() + 86_400_000);
 
-        // Released (cancelled, expired or executed long ago): it goes.
-        parts.standing = 0n;
-        await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+        // Executed, cancelled or expired since: it goes.
+        parts.pendingDue = 0n;
+        await expect(service.propose(proposal, '0xprovider', now)).resolves.toMatchObject({
           status: 'PENDING',
         });
       });
 
-      it('counts the chain’s pendingSlash when it is larger than this platform’s own parts', async () => {
+      it('does not count the chain’s pendingSlash against the window, only against free stake', async () => {
         const { service, proposal, executor } = build([[agent(1), '300']]);
-        await withCaps({ pendingSlashMinor: CAPS.windowAllowanceMinor - 200n }, async () => {
-          await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
-            errorCode: SlashErrorCode.SLASH_PROVIDER_DAILY_BUDGET,
-          });
-        });
-        expect(executor.batches).toEqual([]);
+        // A full window reserved on chain (disputed or foreign records), stake still free.
+        await withCaps(
+          {
+            pendingSlashMinor: CAPS.windowAllowanceMinor,
+            freeStakeMinor: 179_000_000n,
+          },
+          async () => {
+            await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+              status: 'PENDING',
+            });
+          },
+        );
+        expect(executor.batches).toEqual([{ kind: 'propose', size: 1 }]);
       });
 
       it('never signs more than the free stake can pay, even with nothing else standing', async () => {
@@ -1068,5 +1084,44 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
       errorCode: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
       publicContext: { reason: expect.stringContaining('could not be read') },
     });
+  });
+});
+
+/**
+ * Regression for review 2026-10-24 wave 2 M-1 (from the reviewer's PoC): a
+ * provider that disputes one window of records signed against it (e.g.
+ * against its own sybil buyers) must not block every honest case for the 30
+ * days the disputes can stand, while it keeps being paid. Disputed records
+ * hold only its free stake — which the chain reflects in `pendingSlash` —
+ * never its execution window.
+ */
+describe('review 2026-10-24 wave 2 M-1: a disputed window does not freeze honest cases', () => {
+  it('signs an honest case on each of 30 days while one window of disputed records stands', async () => {
+    const original = { ...CAPS };
+    // 200 USDG at risk; window 20 USDG. One window disputed: pendingSlash 20 USDG,
+    // free 179 USDG, freeBonded 180 >= minimum 100 — still paid on chain.
+    Object.assign(CAPS, {
+      pendingSlashMinor: CAPS.windowAllowanceMinor,
+      freeStakeMinor: 179_000_000n,
+    });
+    try {
+      for (let day = 0; day < 30; day += 1) {
+        const { service, proposal, executor, parts } = build([[agent(1), '300']]);
+        // Disputed parts are not "pending and due"; nothing executed today.
+        parts.pendingDue = 0n;
+        parts.executedToday = 0n;
+        const now = new Date(Date.UTC(2026, 9, 24 + day, 12));
+        await expect(
+          service.propose(
+            { ...proposal, id: `case-${day}` } as SlashProposalEntity,
+            '0xprovider',
+            now,
+          ),
+        ).resolves.toMatchObject({ status: 'PENDING' });
+        expect(executor.batches).toEqual([{ kind: 'propose', size: 1 }]);
+      }
+    } finally {
+      Object.assign(CAPS, original);
+    }
   });
 });

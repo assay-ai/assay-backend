@@ -107,12 +107,13 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
     ).resolves.toEqual([]);
   });
 
-  it('sums every standing part of any age, and the parts executed in the last day', async () => {
+  it('sums the pending parts due within the horizon and the parts executed in the last day, never a disputed one', async () => {
     const insert = (
       status: string,
       penalty: string,
       proposedAgo: string,
       reserved: string | null,
+      executableIn = '0 hours',
     ) =>
       dataSource.query(
         `INSERT INTO slash_proposal_parts (organization_id, proposal_id, chain_epoch, window_id,
@@ -121,7 +122,7 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
            chain_proposed_at, chain_executable_at, chain_reserved, executed_at, applied_amount,
            agent_amount, platform_amount)
          VALUES ($1, $2, 0, $3, $4, $4, 1, $5, $5, $5, $5, 'NONE', $6, $7::varchar,
-                 now() - $8::interval, now(), $9,
+                 now() - $8::interval, now() + $10::interval, $9,
                  CASE WHEN $7::text = 'EXECUTED' THEN now() - $8::interval END,
                  CASE WHEN $7::text = 'EXECUTED' THEN $5::numeric END,
                  CASE WHEN $7::text = 'EXECUTED' THEN 0 END,
@@ -136,24 +137,31 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
           status,
           proposedAgo,
           reserved,
+          executableIn,
         ],
       );
-    await insert('PENDING', '100', '1 hour', '90'); // its reservation counts
+    await insert('PENDING', '100', '1 hour', '90'); // due now: its reservation counts
     await insert('EXECUTED', '200', '23 hours', null); // executed inside the rolling day
     await insert('EXECUTED', '250', '30 hours', null); // executed before it: released
-    await insert('DISPUTED', '300', '2 hours', null);
+    await insert('DISPUTED', '300', '2 hours', null); // cannot execute: free stake only
     await insert('CANCELLED', '400', '1 hour', null); // takes nothing from the window
     await insert('REFUSED', '500', '1 hour', null);
-    await insert('PENDING', '600', '25 hours', null); // still standing: counts (F-M1)
-    await insert('DISPUTED', '700', '40 days', null); // self-disputed long ago: still counts
+    await insert('PENDING', '600', '25 hours', null, '20 hours'); // due within the horizon
+    await insert('PENDING', '650', '1 hour', null, '72 hours'); // due past it: not yet
+    await insert('DISPUTED', '700', '40 days', null); // self-disputed long ago: not counted
 
     const since = new Date(Date.now() - 86_400_000);
-    await expect(parts.committedAgainstProvider(providerOrg, CHAIN, since)).resolves.toEqual({
-      standing: 1690n,
-      executedSince: 200n,
-    });
-    await expect(parts.committedAgainstProvider(providerOrg, 'eip155:1', since)).resolves.toEqual({
-      standing: 0n,
+    const dueBy = new Date(Date.now() + 86_400_000);
+    await expect(parts.committedAgainstProvider(providerOrg, CHAIN, since, dueBy)).resolves.toEqual(
+      {
+        pendingDue: 690n,
+        executedSince: 200n,
+      },
+    );
+    await expect(
+      parts.committedAgainstProvider(providerOrg, 'eip155:1', since, dueBy),
+    ).resolves.toEqual({
+      pendingDue: 0n,
       executedSince: 0n,
     });
   });

@@ -340,23 +340,24 @@ export class SlashPartsService {
   /**
    * Refuses (transiently: nothing signed, the case stays PROPOSING and is
    * retried) when `parts` would take the provider's slash budget past what its
-   * stake can pay (review 2026-10-23 M-1, review 2026-10-24 F-M1):
+   * stake can pay (review 2026-10-23 M-1, review 2026-10-24 F-M1 and wave 2
+   * M-1). The two halves meter what the chain meters, and nothing else:
    *
    * - **free stake.** `proposeSlash` refuses (`NothingToSlash`, nothing
    *   written) a judgement the provider's free stake (`atRisk −
    *   pendingSlash`, read live) cannot cover in full, so nothing is signed
-   *   that the chain would refuse.
-   * - **the window.** What already holds the budget — every record still
-   *   standing (`Pending` or `Disputed`, at ANY age: a disputed record keeps
-   *   its reservation for up to 30 days) plus what the last rolling day
-   *   executed — plus `parts` must fit `capAllowance` (`atRisk ×
-   *   slashCapBps`, the most `executeSlash` admits per 86,400 s). "Standing"
-   *   is the larger of this platform's own standing parts and the chain's
-   *   `pendingSlash`, which also counts records this platform did not sign
-   *   and call-level cases that have no parts. So a provider cannot freeze
-   *   more than one window of its stake with records it disputes itself,
-   *   and records beyond the window are never signed only to wait and expire.
-   *   A case with nothing else holding the budget always goes: its plan is
+   *   that the chain would refuse. EVERY standing record — `Pending` or
+   *   `Disputed`, ours or not, of any age — counts here and only here: that
+   *   is where the chain reserves it, and D-26 already stops the provider's
+   *   income once the reservations take its free stake below the minimum.
+   * - **the window.** Only executions consume the provider's rolling window
+   *   (`executeSlash`, `capAllowance` = `atRisk × slashCapBps` per 86,400 s),
+   *   so only what the last day executed plus this platform's `Pending`
+   *   parts whose door opens within the coming day (the planning horizon)
+   *   are counted against it, with `parts`. A `Disputed` record cannot
+   *   execute until the arbiter rules, so it never holds the window: one day
+   *   of records a provider disputes itself cannot block honest cases.
+   *   A case with nothing else holding the window always goes: its plan is
    *   already capped at the window.
    */
   private async assertWithinProviderDailyBudget(
@@ -374,12 +375,12 @@ export class SlashPartsService {
         proposal.providerId,
         chainId,
         new Date(now.getTime() - SLASH_PROVIDER_WINDOW_MS),
+        new Date(now.getTime() + SLASH_PROVIDER_WINDOW_MS),
       ),
       this.caps.readCaps({ chainId, provider }),
     ]);
     const wanted = parts.reduce((sum, part) => sum + BigInt(part.penaltyAmount), 0n);
-    const standing = own.standing > caps.pendingSlashMinor ? own.standing : caps.pendingSlashMinor;
-    const committed = standing + own.executedSince;
+    const committed = own.pendingDue + own.executedSince;
 
     let allowance: bigint | null = null;
     if (wanted > caps.freeStakeMinor) {
@@ -390,10 +391,11 @@ export class SlashPartsService {
     if (allowance === null) return;
 
     this.logger.warn(
-      `slash case ${proposal.id}: not signed yet — ${committed} already holds provider ` +
-        `${proposal.providerId}'s slash budget (standing ${standing}, executed in the last day ` +
-        `${own.executedSince}); ${wanted} more does not fit (free stake ` +
-        `${caps.freeStakeMinor}, window ${caps.windowAllowanceMinor})`,
+      `slash case ${proposal.id}: not signed yet — ${wanted} does not fit provider ` +
+        `${proposal.providerId}'s slash budget (free stake ${caps.freeStakeMinor}, ` +
+        `pendingSlash ${caps.pendingSlashMinor}; window ${caps.windowAllowanceMinor} of which ` +
+        `${committed} is held: pending and due ${own.pendingDue}, executed in the last day ` +
+        `${own.executedSince})`,
     );
     throw SlashErrors.providerDailyBudget({
       proposalId: proposal.id,
