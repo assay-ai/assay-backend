@@ -34,6 +34,18 @@ import { isRevert } from './evm-voucher-authority';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
+import { slashStatusFromEvm } from './evm-slash-status';
+
+/** The read the redeemer needs from `evm_slash_records` (review 2026-10-24 wave 2 M-2). */
+export interface UnplannedSlashRecords {
+  standingNotPlanned(
+    chainId: string,
+    provider: string,
+  ): Promise<readonly { requestId: string; reserved: bigint }[]>;
+}
+
+/** How long one provider's "short only by unplanned slashes" answer is reused. */
+const UNPLANNED_SLASH_ANSWER_TTL_MS = 30_000;
 
 /**
  * The gas a redemption transaction is given, as `base + perVoucher × n`.
@@ -251,7 +263,14 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
      * chain is read the pre-upgrade way: stored caps, a revocation final at once.
      */
     private readonly tightenDelay: Pick<EvmTightenDelayProbe, 'isLive'> | null = null,
+    /**
+     * The slash records the watcher saw. Absent, every `ProviderBelowMinimumStake`
+     * is the provider's own (the behaviour before review 2026-10-24 wave 2 M-2).
+     */
+    private readonly slashRecords: UnplannedSlashRecords | null = null,
   ) {}
+
+  private readonly unplannedAnswers = new Map<string, { at: number; short: boolean }>();
 
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
     const chainId = this.chainOf(request);
@@ -304,6 +323,80 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   async providerBelowMinimumStake(request: RedeemVoucherRequest): Promise<boolean> {
     const [state] = await this.readState(this.chainOf(request), [request]);
     return state.providerFreeBonded < state.minimumStake;
+  }
+
+  /**
+   * Whether the provider is below the minimum FREE stake only because of
+   * standing records it did not cause — foreign to this platform, or signed by
+   * a verifier key that can no longer sign (review 2026-10-24 wave 2 M-2).
+   *
+   * Reads `stakeOf`, `params().minimumStake` and each such record's
+   * `slashRecordOf` live in one multicall; only records still `Pending` or
+   * `Disputed` against this provider count, at their on-chain `reserved`.
+   * `true` iff `bonded − pendingSlash < minimum` AND
+   * `bonded − (pendingSlash − unplanned) ≥ minimum`. A provider with no such
+   * record costs no RPC call. One answer per provider is reused for 30 s.
+   */
+  async providerShortOnlyByUnplannedSlashes(request: RedeemVoucherRequest): Promise<boolean> {
+    if (!this.slashRecords) return false;
+    const chainId = this.chainOf(request);
+    const provider = this.addressOf(request.provider, chainId);
+    const key = `${chainId}:${provider}`;
+    const cached = this.unplannedAnswers.get(key);
+    const now = this.config.now();
+    if (cached && now - cached.at < UNPLANNED_SLASH_ANSWER_TTL_MS) return cached.short;
+
+    const records = await this.slashRecords.standingNotPlanned(chainId, provider.toLowerCase());
+    let short = false;
+    if (records.length > 0) {
+      const deployment = this.deployment(chainId);
+      const results = await this.client(chainId).multicall({
+        contracts: [
+          {
+            address: getAddress(deployment.config),
+            abi: ASSAY_CONFIG_ABI,
+            functionName: 'params',
+            args: [],
+          },
+          {
+            address: getAddress(deployment.stake),
+            abi: ASSAY_STAKE_ABI,
+            functionName: 'stakeOf',
+            args: [provider] as readonly unknown[],
+          },
+          ...records.map((record) => ({
+            address: getAddress(deployment.stake),
+            abi: ASSAY_STAKE_ABI,
+            functionName: 'slashRecordOf',
+            args: [`0x${record.requestId}`] as readonly unknown[],
+          })),
+        ],
+        allowFailure: false,
+      });
+      const minimum = BigInt((results[0] as { minimumStake: bigint }).minimumStake);
+      const stake = results[1] as { bonded: bigint; pendingSlash: bigint };
+      const bonded = BigInt(stake.bonded);
+      const pending = BigInt(stake.pendingSlash);
+      let unplanned = 0n;
+      for (const raw of results.slice(2) as {
+        provider: string;
+        status: number | bigint;
+        reserved: bigint;
+      }[]) {
+        const status = slashStatusFromEvm(Number(raw.status));
+        if (status !== 'PENDING' && status !== 'DISPUTED') continue;
+        if (getAddress(raw.provider) !== provider) continue;
+        unplanned += BigInt(raw.reserved);
+      }
+      const free = freeBondedStake({ bonded, pendingSlash: pending });
+      const freeWithout = freeBondedStake({
+        bonded,
+        pendingSlash: pending > unplanned ? pending - unplanned : 0n,
+      });
+      short = free < minimum && freeWithout >= minimum;
+    }
+    this.unplannedAnswers.set(key, { at: now, short });
+    return short;
   }
 
   /**

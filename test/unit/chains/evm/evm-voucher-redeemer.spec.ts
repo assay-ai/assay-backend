@@ -1160,3 +1160,99 @@ describe('EvmVoucherRedeemer', () => {
     });
   });
 });
+
+/**
+ * Review 2026-10-24 wave 2 M-2: is the provider short of FREE stake only
+ * because of records it did not cause (foreign, or signed by a dead key)?
+ */
+describe('EvmVoucherRedeemer.providerShortOnlyByUnplannedSlashes (M-2)', () => {
+  const MINIMUM = 100_000_000n;
+  const id = (n: number) => n.toString(16).padStart(64, '0');
+
+  function build(
+    stake: { bonded: bigint; pendingSlash: bigint },
+    records: { requestId: string; reserved: bigint; status: number; provider?: string }[],
+  ) {
+    const multicalls: unknown[] = [];
+    const client = {
+      readContract: async () => undefined,
+      multicall: async (args: { contracts: { functionName: string; args: unknown[] }[] }) => {
+        multicalls.push(args);
+        return args.contracts.map((call) => {
+          if (call.functionName === 'params') return { minimumStake: MINIMUM };
+          if (call.functionName === 'stakeOf') return { ...stake, unbonding: 0n };
+          const record = records.find((r) => `0x${r.requestId}` === call.args[0])!;
+          return {
+            provider: record.provider ?? PROVIDER,
+            status: record.status,
+            reserved: record.reserved,
+          };
+        });
+      },
+    };
+    const asked: [string, string][] = [];
+    const redeemer = new EvmVoucherRedeemer(
+      new Map([[TESTNET, client as unknown as EvmReaderClient]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      {} as EvmRelayerPort,
+      { emit: async () => undefined } as unknown as AlertPort,
+      { now: () => NOW * 1000 },
+      null,
+      {
+        standingNotPlanned: async (chainId: string, provider: string) => {
+          asked.push([chainId, provider]);
+          return records.map(({ requestId, reserved }) => ({ requestId, reserved }));
+        },
+      },
+    );
+    return { redeemer, multicalls, asked };
+  }
+
+  it('is true when only the unplanned reservations take free stake below the minimum', async () => {
+    // bonded 150, pending 51 (51 stolen-key records of 1): free 99 < 100; without them 150.
+    const { redeemer, asked } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 1 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(true);
+    expect(asked).toEqual([[TESTNET, PROVIDER.toLowerCase()]]);
+  });
+
+  it('is false when the provider is below the minimum for its own reasons too', async () => {
+    // bonded 90 < 100 whatever is reserved.
+    const { redeemer } = build({ bonded: 90_000_000n, pendingSlash: 1_000_000n }, [
+      { requestId: id(1), reserved: 1_000_000n, status: 4 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('is false when its own records keep it short after the unplanned ones are taken out', async () => {
+    // pending 60 = 10 unplanned + 50 of its own: without the 10, free is 140 - 50 = 90 < 100.
+    const { redeemer } = build({ bonded: 140_000_000n, pendingSlash: 60_000_000n }, [
+      { requestId: id(1), reserved: 10_000_000n, status: 1 },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('counts only records the chain still holds against this provider', async () => {
+    const { redeemer } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 3 }, // already cancelled
+      { requestId: id(2), reserved: 51_000_000n, status: 1, provider: payerAddress(9) },
+    ]);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+  });
+
+  it('is false, and reads nothing on chain, when there is no unplanned record', async () => {
+    const { redeemer, multicalls } = build({ bonded: 0n, pendingSlash: 0n }, []);
+    await expect(redeemer.providerShortOnlyByUnplannedSlashes(request(0))).resolves.toBe(false);
+    expect(multicalls).toEqual([]);
+  });
+
+  it('reuses one answer per provider for a short while', async () => {
+    const { redeemer, multicalls } = build({ bonded: 150_000_000n, pendingSlash: 51_000_000n }, [
+      { requestId: id(1), reserved: 51_000_000n, status: 1 },
+    ]);
+    await redeemer.providerShortOnlyByUnplannedSlashes(request(0));
+    await redeemer.providerShortOnlyByUnplannedSlashes(request(1));
+    expect(multicalls).toHaveLength(1);
+  });
+});

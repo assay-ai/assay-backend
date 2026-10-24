@@ -44,6 +44,7 @@ function build(options: {
   disputeUpgradeBlock?: bigint;
   knownStatus?: string;
   indexer?: { fromBlock: ReadonlyMap<ChainId, bigint>; confirmations?: number };
+  records?: unknown;
 }) {
   const alerts: Alert[] = [];
   const ranges: [bigint, bigint][] = [];
@@ -86,6 +87,7 @@ function build(options: {
     options.rulings ? ({ get: () => options.rulings } as never) : null,
     (options.slashHolds ?? null) as never,
     options.indexer ?? null,
+    (options.records ?? null) as never,
   );
   return { watcher, alerts, ranges, cursor: () => db.get(CHAIN)?.toString() };
 }
@@ -383,5 +385,73 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       await watcher.check();
       expect(cursor()).toBeUndefined();
     });
+  });
+});
+
+describe('EvmSlashProposalWatcher — remembers every record (review 2026-10-24 wave 2 M-2)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('stores ours and the foreign ones, flagged, and closes what the range cancelled or executed', async () => {
+    const proposed: unknown[] = [];
+    const closed: [string, string[], Date][] = [];
+    const records = {
+      recordProposed: async (rows: unknown[]) => void proposed.push(...rows),
+      markClosed: async (chainId: string, ids: string[], at: Date) =>
+        void closed.push([chainId, ids, at]),
+    };
+    const cancelled: SlashProposedLog = {
+      eventName: 'SlashCancelled',
+      args: { requestId: `0x${'b'.repeat(64)}`, reason: 2, cancelledAt: 1_800_000_100n },
+      transactionHash: null,
+      blockNumber: 101n,
+    };
+    const { watcher, cursor } = build({
+      head: 500n,
+      logs: [
+        {
+          ...event(KNOWN, AGENT, 1_000_000n),
+          args: { ...event(KNOWN, AGENT, 1_000_000n).args, reserved: 900_000n },
+        },
+        event(ROGUE, ATTACKER, 1_000_000n),
+        cancelled,
+      ],
+      records,
+    });
+    await watcher.check();
+
+    expect(proposed).toEqual([
+      expect.objectContaining({
+        chainId: CHAIN,
+        requestId: KNOWN,
+        provider: '0x00000000000000000000000000000000000000c1',
+        verifier: '0x00000000000000000000000000000000000000d1',
+        reserved: 900_000n,
+        foreign: false,
+      }),
+      expect.objectContaining({ requestId: ROGUE, reserved: 1_000_000n, foreign: true }),
+    ]);
+    expect(closed).toEqual([[CHAIN, ['b'.repeat(64)], new Date(1_800_000_100_000)]]);
+    expect(cursor()).toBeDefined();
+  });
+
+  it('does not move the cursor when the records cannot be written', async () => {
+    const records = {
+      recordProposed: async () => {
+        throw new Error('db down');
+      },
+      markClosed: async () => undefined,
+    };
+    const { watcher, cursor } = build({
+      head: 500n,
+      cursor: '100',
+      logs: [event(ROGUE, ATTACKER, 1n)],
+      records,
+    });
+    await watcher.check();
+    expect(cursor()).toBe('100');
   });
 });

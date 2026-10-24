@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
+import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import {
   SLASH_CHAIN_RULINGS,
@@ -73,6 +74,7 @@ export interface SlashProposedLog {
     readonly verifier?: `0x${string}`;
     readonly beneficiary?: `0x${string}`;
     readonly penalty?: bigint;
+    readonly reserved?: bigint;
     readonly executableAt?: bigint;
     readonly disputedAt?: bigint;
     readonly arbiter?: `0x${string}`;
@@ -156,6 +158,9 @@ export class EvmSlashProposalWatcher {
       EvmChainStateIndexerConfig,
       'fromBlock' | 'confirmations'
     > | null = null,
+    // Every record seen, for the revoked-verifier reaper and the redeemer's
+    // fault attribution (review 2026-10-24 wave 2 M-2).
+    @Optional() private readonly records: EvmSlashRecordRepository | null = null,
   ) {}
 
   @Cron(EVM_SLASH_WATCH_CRON)
@@ -234,6 +239,7 @@ export class EvmSlashProposalWatcher {
 
     const proposed = logs.filter((log) => log.eventName === 'SlashProposed');
     const { findings, late } = await this.compare(chainId, proposed);
+    await this.rememberRecords(chainId, proposed, findings, logs);
     await this.readoptLate(chainId, late);
     // A failure here throws before the cursor moves, so the range is re-read
     // and the (idempotent) mirror is retried next tick.
@@ -297,8 +303,9 @@ export class EvmSlashProposalWatcher {
           name: EVM_SLASH_WATCH_ALERTS.UNKNOWN,
           summary:
             `A slash record on ${chainId} was proposed that this platform never planned. ` +
-            `Treat the verifier key as compromised: see the runbook (revokeVerifier / pause / cancelSlash) ` +
-            `before executableAt`,
+            `Treat the verifier key as compromised: it already reserves the provider's stake and ` +
+            `can halt its payments. See the runbook (revokeVerifier; the reaper then releases ` +
+            `its records) before executableAt`,
           details: onChain,
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
           dedupeKey: `${chainId}:${requestId}`,
@@ -334,6 +341,55 @@ export class EvmSlashProposalWatcher {
       }
     }
     return { findings, late };
+  }
+
+  /**
+   * Keeps every `SlashProposed` in `evm_slash_records` — foreign when the
+   * comparison found it UNKNOWN or MISMATCH — and closes each record this
+   * range executed or cancelled (review 2026-10-24 wave 2 M-2). Throws before
+   * the cursor moves, so a failed write is re-read next tick; every write is
+   * idempotent.
+   */
+  private async rememberRecords(
+    chainId: ChainId,
+    proposed: readonly SlashProposedLog[],
+    findings: readonly SlashWatchFinding[],
+    logs: readonly SlashProposedLog[],
+  ): Promise<void> {
+    if (!this.records) return;
+    const foreign = new Set(findings.map((finding) => finding.requestId));
+    const seen = proposed.flatMap((log) => {
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
+      if (!requestId || !log.args.provider || !log.args.verifier) return [];
+      return [
+        {
+          chainId,
+          requestId,
+          provider: log.args.provider.toLowerCase(),
+          verifier: log.args.verifier.toLowerCase(),
+          reserved: log.args.reserved ?? log.args.penalty ?? 0n,
+          executableAt: log.args.executableAt
+            ? new Date(Number(log.args.executableAt) * 1000)
+            : null,
+          foreign: foreign.has(requestId),
+          blockNumber: log.blockNumber ?? null,
+          transactionHash: log.transactionHash ?? null,
+        },
+      ];
+    });
+    await this.records.recordProposed(seen);
+
+    for (const log of logs) {
+      if (log.eventName !== 'SlashCancelled' && log.eventName !== 'SlashExecuted') continue;
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
+      if (!requestId) continue;
+      const at = log.eventName === 'SlashCancelled' ? log.args.cancelledAt : log.args.executedAt;
+      await this.records.markClosed(
+        chainId,
+        [requestId],
+        at ? new Date(Number(at) * 1000) : new Date(),
+      );
+    }
   }
 
   /**
