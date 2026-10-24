@@ -171,51 +171,56 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
   }
 
   /**
-   * What this platform's parts hold of one provider's rolling slash WINDOW
-   * on one chain, split in two, minor units (review 2026-10-24 F-M1, then
-   * review 2026-10-24 wave 2 M-1). The window is metered as the chain meters
-   * it: only executions consume it (`executeSlash`), never a standing record.
+   * What this platform's parts hold of one provider's slash budget on one
+   * chain, minor units (review 2026-10-24 F-M1, wave 2 M-1, wave 3 N-1). The
+   * window is metered as the chain meters it: only executions consume it
+   * (`executeSlash`, one window per rolling 86,400 s), never a standing record.
+   * `windowOpensAfter` is the start of the rolling day that ends at the NEW
+   * record's own door (its proposal time + the slash delay).
    *
-   * - `pendingDue`: the reservation (else the penalty) of every part still
-   *   `PENDING` whose door opens at or before `dueBy` (or whose door is not
-   *   known yet) — what will compete with a new part for the window.
-   *   `DISPUTED` parts are NOT counted: a disputed record cannot execute
-   *   until the arbiter rules, so it holds only the provider's free stake
-   *   (which `pendingSlash` already reflects), never its window. Counting it
-   *   let one day of records the provider disputes itself block every honest
-   *   case for up to 30 days.
-   * - `executedSince`: the same figure for parts `EXECUTED` after
-   *   `executedSince` (their execution time, else their proposal time) — what
-   *   the provider's rolling window has already paid out.
+   * - `pendingInWindow`: the reservation (else the penalty) of every part
+   *   still `PENDING` whose door opens after `windowOpensAfter` — what will
+   *   compete with the new part for the window its door opens in. A
+   *   freshly proposed part (door days out) counts here.
+   * - `executedInWindow`: the same figure for parts `EXECUTED` after
+   *   `windowOpensAfter` (their execution time, else their proposal time).
+   * - `pendingTotal`: every part still `PENDING`, of any door — the backlog
+   *   the chain must execute before each record's grace runs out.
    *
-   * Disputed, cancelled (and expired) and refused parts hold nothing here.
+   * `DISPUTED` parts are counted in none of them: a disputed record cannot
+   * execute until the arbiter rules, so it holds only the provider's free
+   * stake (which `pendingSlash` already reflects), never its window. Counting
+   * it let one day of records the provider disputes itself block every honest
+   * case for up to 30 days. Cancelled (and expired) and refused parts hold
+   * nothing here.
    */
   async committedAgainstProvider(
     providerId: string,
     chainId: string,
-    executedSince: Date,
-    dueBy: Date,
-  ): Promise<{ pendingDue: bigint; executedSince: bigint }> {
+    windowOpensAfter: Date,
+  ): Promise<{ pendingInWindow: bigint; executedInWindow: bigint; pendingTotal: bigint }> {
     const [row] = (await this.manager.query(
       `SELECT
          COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount))
-           FILTER (WHERE part.chain_status = 'PENDING'
-                     AND (part.chain_executable_at IS NULL OR part.chain_executable_at <= $4)),
-           0)::text AS "pendingDue",
+           FILTER (WHERE part.chain_status = 'PENDING' AND part.chain_executable_at > $3),
+           0)::text AS "pendingInWindow",
          COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount))
            FILTER (WHERE part.chain_status = 'EXECUTED'
                      AND COALESCE(part.executed_at, part.chain_proposed_at) > $3), 0)::text
-           AS "executedSince"
+           AS "executedInWindow",
+         COALESCE(SUM(COALESCE(part.chain_reserved, part.penalty_amount))
+           FILTER (WHERE part.chain_status = 'PENDING'), 0)::text AS "pendingTotal"
          FROM slash_proposal_parts part
          JOIN slash_proposals proposal ON proposal.id = part.proposal_id
         WHERE proposal.provider_id = $1
           AND proposal.asset_id LIKE $2
           AND part.chain_status IN ('PENDING', 'EXECUTED')`,
-      [providerId, `${chainId}/%`, executedSince, dueBy],
-    )) as { pendingDue: string; executedSince: string }[];
+      [providerId, `${chainId}/%`, windowOpensAfter],
+    )) as { pendingInWindow: string; executedInWindow: string; pendingTotal: string }[];
     return {
-      pendingDue: BigInt(row?.pendingDue ?? '0'),
-      executedSince: BigInt(row?.executedSince ?? '0'),
+      pendingInWindow: BigInt(row?.pendingInWindow ?? '0'),
+      executedInWindow: BigInt(row?.executedInWindow ?? '0'),
+      pendingTotal: BigInt(row?.pendingTotal ?? '0'),
     };
   }
 

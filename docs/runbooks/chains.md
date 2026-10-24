@@ -237,6 +237,15 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - A dispute freezes only the part it names: the case's other parts keep
     executing (`chainStatus` stays `PENDING`, `chainDisputedParts` counts the
     disputed ones; `DISPUTED` means every live part is disputed).
+  - **Do not uphold more than about 7 windows per provider within 7 days.**
+    `executeSlash` takes at most one window (`atRisk × slashCapBps`) per
+    provider per rolling day, all or wait, and an upheld record expires unpaid
+    7 days after it becomes executable. Upheld records all start their 7 days
+    at once, so a mass uphold beyond 7 windows loses the overflow. Spread
+    larger upholds over days. The backend itself signs a provider's records at
+    most one window per rolling day of doors (measured at each new record's own
+    door, proposal + slash delay) and keeps at most 7 windows of them
+    `Pending`; a case beyond that waits (`SLASH_PROVIDER_DAILY_BUDGET`, retried).
   - A block intent for one of the platform's own addresses (treasury, redeemer,
     a verifier key, admin, owner, arbiter, the three contracts) is refused with
     `422 CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE`; each is read live.
