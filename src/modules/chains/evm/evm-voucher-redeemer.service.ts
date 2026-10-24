@@ -24,6 +24,7 @@ import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment, MULTICALL3_ADDRESS } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
+  freeBondedStake,
   PrevalidationDelegation,
   PrevalidationState,
   prevalidateBatch,
@@ -71,6 +72,14 @@ export const EVM_CLOCK_DRIFT_ALERT = 'evm_chain_clock_drift';
  * every voucher's deadline, withdrawal and revocation with it.
  */
 export const EVM_CLOCK_DRIFT_WARN_SECONDS = 120;
+
+/**
+ * The fixed tag on the log line of an expiry decision held because the chain's
+ * clock ran ahead of this process's by more than
+ * {@link EVM_CLOCK_DRIFT_WARN_SECONDS}: what a log-based counter or a later
+ * alert keys on.
+ */
+export const EVM_EXPIRY_HELD_LOG_TAG = 'evm_voucher_expiry_held_chain_clock_ahead';
 
 export interface EvmVoucherRedeemerConfig {
   /** Milliseconds, `Date.now()`'s own unit. The chain's timestamps are seconds. */
@@ -254,7 +263,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // refusal is now different has to be reported as what it is now.
     const refusal = prevalidateVoucher(voucher, state);
     if (refusal !== null) {
-      return this.outcomeFor(refusal, null);
+      return this.decided(chainId, refusal, voucher, state);
     }
 
     // Simulated with the redeemer as sender and the gas it will be sent with,
@@ -263,7 +272,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const args = [voucher, this.signatureOf(request)] as const;
     const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasFor(1));
     if (simulated !== null) {
-      return this.outcomeFor(simulated, null);
+      return this.decided(chainId, simulated, voucher, state);
     }
 
     const result = await this.redeemer.sendCall({
@@ -284,23 +293,25 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     if (result.status === 'SUCCESS') {
       return { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null };
     }
-    return this.outcomeFor(result.revertReason, null);
+    return this.decided(chainId, result.revertReason, voucher, state);
   }
 
   /**
-   * The provider's bonded stake against `params().minimumStake`, read live in
-   * the same multicall the pre-validator uses, so the two cannot disagree on
-   * what "below the minimum" means.
+   * The provider's FREE bonded stake (`bonded − pendingSlash`, D-26) against
+   * `params().minimumStake`, read live in the same multicall the pre-validator
+   * uses, so the two cannot disagree on what "below the minimum" means.
    */
   async providerBelowMinimumStake(request: RedeemVoucherRequest): Promise<boolean> {
     const [state] = await this.readState(this.chainOf(request), [request]);
-    return state.providerBonded < state.minimumStake;
+    return state.providerFreeBonded < state.minimumStake;
   }
 
   /**
    * `held(payer, seq)` against this voucher: whether the record that makes the
-   * seq used names this voucher's provider and amount (D-23). Asked after a
-   * `VoucherSeqUsed` that none of the intent's own transactions explains.
+   * seq used names this voucher's provider and amount (D-23), and if so its
+   * status — `Held`, `Collected` or `Refunded` (review 2026-10-24 F-L3). Asked
+   * after a `VoucherSeqUsed` that none of the intent's own transactions
+   * explains.
    */
   async usedSeqRecord(request: RedeemVoucherRequest): Promise<UsedSeqRecord> {
     const chainId = this.chainOf(request);
@@ -311,12 +322,20 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       functionName: 'held',
       args: [voucher.payer, voucher.seq],
     })) as { provider: string; amount: bigint; status: number | bigint };
-    // `HeldStatus.None` is 0: the seq is unused.
-    if (Number(record.status) === 0) return 'NONE';
-    return getAddress(record.provider) === voucher.provider &&
-      BigInt(record.amount) === voucher.amount
-      ? 'MATCH'
-      : 'MISMATCH';
+    // `HeldStatus`: 0 None (the seq is unused), 1 Held, 2 Collected, 3 Refunded.
+    const status = Number(record.status);
+    if (status === 0) return 'NONE';
+    if (
+      getAddress(record.provider) !== voucher.provider ||
+      BigInt(record.amount) !== voucher.amount
+    ) {
+      return 'MISMATCH';
+    }
+    if (status === 1) return 'HELD';
+    if (status === 2) return 'COLLECTED';
+    if (status === 3) return 'REFUNDED';
+    // Unknown to this build: "cannot tell", so the hold waits for a human.
+    throw new Error(`held(payer, seq) answered HeldStatus ${status}, which has no meaning here`);
   }
 
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
@@ -351,7 +370,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       .map((_, index) => index)
       .filter((index) => refusals[index] === null);
     if (admissible.length === 0) {
-      return refusals.map((name) => this.outcomeFor(name, null));
+      return refusals.map((name, i) => this.decided(chainId, name, vouchers[i], states[i]));
     }
 
     // SIMULATE the batch first, with the gas it will be sent with. A batch the
@@ -372,7 +391,9 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         `A redemption batch of ${admissible.length} would revert with ${simulated}; ` +
           `nothing was broadcast — redeeming the items singly`,
       );
-      const outcomes: RedeemOutcome[] = refusals.map((name) => this.outcomeFor(name, null));
+      const outcomes: RedeemOutcome[] = refusals.map((name, i) =>
+        this.decided(chainId, name, vouchers[i], states[i]),
+      );
       for (const index of admissible) {
         outcomes[index] = await this.redeem(requests[index]);
       }
@@ -401,7 +422,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return refusals.map((name, index) =>
         refusals[index] === null
           ? { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null }
-          : this.outcomeFor(name, null),
+          : this.decided(chainId, name, vouchers[index], states[index]),
       );
     }
 
@@ -415,7 +436,9 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         `${result.revertReason ?? 'an unreadable reason'}; retrying the items singly`,
     );
 
-    const outcomes: RedeemOutcome[] = refusals.map((name) => this.outcomeFor(name, null));
+    const outcomes: RedeemOutcome[] = refusals.map((name, i) =>
+      this.decided(chainId, name, vouchers[i], states[i]),
+    );
     for (const index of admissible) {
       outcomes[index] = await this.redeem(requests[index]);
     }
@@ -531,8 +554,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   }
 
   /**
-   * `msg.sender`, `paused()`, every payer's escrow, every provider's bonded
-   * stake, every voucher's `held(payer, seq)` record (whether the seq is
+   * `msg.sender`, `paused()`, every payer's escrow, every provider's stake
+   * (for its free bonded stake, D-26), every voucher's `held(payer, seq)` record (whether the seq is
    * already used, D-23) and the block's own timestamp — in **one**
    * `multicall`. Windows and deadlines are pre-validated against that
    * timestamp, not this process's clock (review 2026-10-23 L-4). On an escrow with the tighten delay (D-21)
@@ -574,10 +597,13 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
             functionName: 'escrowOf',
             args: [payer] as readonly unknown[],
           })),
+          // `stakeOf`, not `bondedOf`: the redeem gate reads FREE bonded stake,
+          // `bonded − pendingSlash` (D-26). Computed here from the struct
+          // (`freeBondedStake`), which every deployed AssayStake answers.
           ...providers.map((provider) => ({
             address: getAddress(deployment.stake),
             abi: ASSAY_STAKE_ABI,
-            functionName: 'bondedOf',
+            functionName: 'stakeOf',
             args: [provider] as readonly unknown[],
           })),
           ...(effective
@@ -689,7 +715,10 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         spentInWindow: bigint;
         windowStartedAt: bigint;
       };
-      const bonded = results[2 + payers.length + index] as bigint;
+      const stake = results[2 + payers.length + index] as {
+        bonded: bigint;
+        pendingSlash: bigint;
+      };
       const caps = effectiveCaps(index);
       // `HeldStatus.None` is 0: anything else means the seq is used for good.
       const held = results[heldOffset + index] as { status: number | bigint };
@@ -704,7 +733,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         spentInWindow: escrow.spentInWindow,
         windowStartedAt: Number(escrow.windowStartedAt),
         balance: escrow.balance,
-        providerBonded: bonded,
+        providerFreeBonded: freeBondedStake(stake),
         minimumStake: params.minimumStake,
         delegation: grants.get(index) ?? null,
       };
@@ -825,6 +854,42 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
    * `RETRY` and never `UNREDEEMABLE`: closing a hold because we could not read
    * the reason is how a buyer is put in debt for nothing.
    */
+  /**
+   * {@link outcomeFor}, except that a `VoucherExpired` is NOT made final while
+   * the chain's clock — one RPC node's `block.timestamp` — runs more than
+   * {@link EVM_CLOCK_DRIFT_WARN_SECONDS} ahead of this process's and the
+   * voucher is still live at `wall + tolerance` (review 2026-10-24, chain clock
+   * robustness). `VoucherExpired` is terminal — buyer debt or a provider
+   * forfeit — and a node answering a future time must not decide that alone.
+   * The decision is held: a bare `RETRY` (no program error, so nothing
+   * recorded on the intent changes), and one warning line tagged
+   * {@link EVM_EXPIRY_HELD_LOG_TAG} for whatever counts or pages on it. Once
+   * the wall clock agrees, the next pass finalizes it.
+   */
+  private decided(
+    chainId: ChainId,
+    name: string | null,
+    voucher: EvmVoucher,
+    state: PrevalidationState,
+  ): RedeemOutcome {
+    if (name === 'VoucherExpired') {
+      const wallSeconds = Math.floor(this.config.now() / 1000);
+      const ahead = state.nowSeconds - wallSeconds;
+      const deadline = voucher.expiresAt + BigInt(EVM_CONSTANTS.REDEEM_GRACE_SECONDS);
+      const trusted = BigInt(wallSeconds + EVM_CLOCK_DRIFT_WARN_SECONDS);
+      if (ahead > EVM_CLOCK_DRIFT_WARN_SECONDS && trusted <= deadline) {
+        this.logger.warn(
+          `${EVM_EXPIRY_HELD_LOG_TAG} ${chainId}: seq ${voucher.seq} of ${voucher.payer} was ` +
+            `refused VoucherExpired on a block.timestamp ${ahead}s ahead of this process's ` +
+            `clock (tolerance ${EVM_CLOCK_DRIFT_WARN_SECONDS}s); its deadline ${deadline} is ` +
+            `not past by the wall clock, so the decision is held and retried`,
+        );
+        return { kind: RedeemOutcomeKind.RETRY, signature: null, programError: null };
+      }
+    }
+    return this.outcomeFor(name, null);
+  }
+
   private outcomeFor(name: string | null, signature: string | null): RedeemOutcome {
     const programError = name ?? 'UNKNOWN_REVERT:none';
 

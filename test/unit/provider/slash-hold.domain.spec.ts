@@ -29,16 +29,19 @@ describe('slashHoldReasons', () => {
     expect(slashHoldReasons(healthy, { recordWaiting: false, windowRefused: true })).toEqual([]);
   });
 
+  // Condition 2 alone: no minimum, so the D-26 free-bonded check (3) stays quiet.
+  const noMinimum = { ...healthy, minimumStake: 0n };
+
   it('2. atRisk - pendingSlash < penaltyAmount', () => {
-    expect(slashHoldReasons({ ...healthy, pendingSlash: 99_000_001n }, idle)).toEqual([
+    expect(slashHoldReasons({ ...noMinimum, pendingSlash: 99_000_001n }, idle)).toEqual([
       SlashHoldReason.STAKE_FULLY_RESERVED,
     ]);
     // Free stake of exactly one penalty still backs it (review S-6).
-    expect(slashHoldReasons({ ...healthy, pendingSlash: 99_000_000n }, idle)).toEqual([]);
+    expect(slashHoldReasons({ ...noMinimum, pendingSlash: 99_000_000n }, idle)).toEqual([]);
   });
 
   it('2. leaves out the reservations of records frozen by an on-chain dispute', () => {
-    const reserved = { ...healthy, pendingSlash: 100_000_000n };
+    const reserved = { ...noMinimum, pendingSlash: 100_000_000n };
     expect(slashHoldReasons(reserved, idle)).toEqual([SlashHoldReason.STAKE_FULLY_RESERVED]);
     expect(slashHoldReasons({ ...reserved, disputedReserved: 1_000_000n }, idle)).toEqual([]);
     // Never below zero.
@@ -51,6 +54,20 @@ describe('slashHoldReasons', () => {
     expect(slashHoldReasons({ ...healthy, bonded: 49_999_999n }, idle)).toEqual([
       SlashHoldReason.BONDED_BELOW_MINIMUM,
     ]);
+  });
+
+  it('3. FREE bonded < minimumStake (D-26): every reservation counts, disputed ones included', () => {
+    // 100 bonded, 50.000001 reserved: 49.999999 free, below 50 — the chain stops paying.
+    const reserved = { ...healthy, pendingSlash: 50_000_001n };
+    expect(slashHoldReasons(reserved, idle)).toEqual([SlashHoldReason.BONDED_BELOW_MINIMUM]);
+    expect(slashHoldReasons({ ...reserved, disputedReserved: 50_000_001n }, idle)).toEqual([
+      SlashHoldReason.BONDED_BELOW_MINIMUM,
+    ]);
+    // Exactly the minimum free still routes; more reserved than bonded floors at zero.
+    expect(slashHoldReasons({ ...healthy, pendingSlash: 50_000_000n }, idle)).toEqual([]);
+    expect(
+      slashHoldReasons({ ...healthy, unbonding: 200_000_000n, pendingSlash: 150_000_000n }, idle),
+    ).toEqual([SlashHoldReason.BONDED_BELOW_MINIMUM]);
   });
 });
 

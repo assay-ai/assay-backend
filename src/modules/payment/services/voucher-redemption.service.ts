@@ -957,11 +957,17 @@ export class VoucherRedemptionService {
    * payer account, so in practice the landing is ours, unobserved. Asked of
    * the record itself:
    *
-   * - it names this voucher's provider and amount → committed as a redemption
-   *   (`unobserved:seq=`, which reads the hold off the record) and paged as a
-   *   WARN. The buyer is not asked to pay a second time;
-   * - it names another provider or amount → an anomaly, paged CRITICAL. NOT
-   *   buyer debt: the hold stays open for a human;
+   * - it names this voucher's provider and amount and is still `Held` →
+   *   committed as a redemption (`unobserved:seq=`, which reads the hold off
+   *   the record) and paged as a WARN. The buyer is not asked to pay a second
+   *   time;
+   * - it names them and is `Collected`, and this platform's own row already
+   *   records the hold (`held_status` HELD or COLLECTED) → the landing is ours
+   *   and already booked; the hold sync books the collection. Nothing new;
+   * - it is `Refunded`, `Collected` with nothing of ours to attribute it to,
+   *   or names another provider or amount → an anomaly, paged CRITICAL. Never
+   *   booked as a new redemption and NOT buyer debt: the hold stays open for a
+   *   human (review 2026-10-24 F-L3);
    * - it says the seq is unused (a node behind the one that refused) or cannot
    *   be read → the hold stays open and the next pass asks again.
    *
@@ -994,7 +1000,15 @@ export class VoucherRedemptionService {
       lastRefusal: cause ?? 'none',
     };
 
-    if (record === 'MATCH') {
+    if (record === 'COLLECTED' && (await this.ownHoldRecorded(row))) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}; the escrow's record ` +
+          `is Collected and this platform's row already records the hold — nothing new is booked.`,
+      );
+      return { stop: false, settled: true };
+    }
+
+    if (record === 'HELD') {
       await this.intents.commitRedeemedHold(
         row.organizationId,
         row.id,
@@ -1025,10 +1039,18 @@ export class VoucherRedemptionService {
       return { stop: false, settled: true };
     }
 
+    const what =
+      record === 'NONE'
+        ? 'still reads unused'
+        : record === 'MISMATCH'
+          ? 'names another provider or amount'
+          : record === 'REFUNDED'
+            ? 'names this voucher but was REFUNDED'
+            : 'names this voucher but was COLLECTED with no hold of ours recorded';
     this.logger.error(
       `CRITICAL: intent ${row.id} (seq ${row.voucherSeq}) was refused ${SEQ_USED}, and the ` +
-        `escrow's record of that seq ${record === 'NONE' ? 'still reads unused' : 'names another provider or amount'}. ` +
-        `Not buyer debt: the hold stays open until a human decides.`,
+        `escrow's record of that seq ${what}. ` +
+        `Not booked as a redemption, not buyer debt: the hold stays open until a human decides.`,
     );
     await this.alerts.emit({
       severity: AlertSeverity.CRITICAL,
@@ -1042,6 +1064,23 @@ export class VoucherRedemptionService {
       suppressionWindowSeconds: 24 * 60 * 60,
     });
     return { stop: false, settled: true };
+  }
+
+  /**
+   * Whether this platform's own row already records the voucher's hold — the
+   * redemption was booked (`held_status` HELD) or its collection too
+   * (COLLECTED) — so a `Collected` record on chain is attributable to it.
+   * Unreadable reads as "no": the caller then raises the anomaly and keeps the
+   * hold open, which is the safe side.
+   */
+  private async ownHoldRecorded(row: RedeemableIntent): Promise<boolean> {
+    try {
+      const intent = await this.intents.findById(row.organizationId, row.id);
+      return intent.heldStatus === 'HELD' || intent.heldStatus === 'COLLECTED';
+    } catch (error) {
+      this.logger.warn(`Intent ${row.id}: its hold record could not be read: ${describe(error)}`);
+      return false;
+    }
   }
 
   /**

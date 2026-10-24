@@ -15,6 +15,7 @@ import {
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
+  UsedSeqRecord,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { AlertAggregation, AlertSeverity } from '@shared/alerting';
@@ -165,10 +166,10 @@ class EvmChainRedeemer {
  * say whether the record that makes the seq used is this voucher's (M-B1).
  */
 class EvmRecordRedeemer extends EvmChainRedeemer {
-  record: 'MATCH' | 'MISMATCH' | 'NONE' | Error = 'MATCH';
+  record: UsedSeqRecord | Error = 'HELD';
   readonly asked: RedeemVoucherRequest[] = [];
 
-  async usedSeqRecord(r: RedeemVoucherRequest): Promise<'MATCH' | 'MISMATCH' | 'NONE'> {
+  async usedSeqRecord(r: RedeemVoucherRequest): Promise<UsedSeqRecord> {
     this.asked.push(r);
     if (this.record instanceof Error) throw this.record;
     return this.record;
@@ -183,6 +184,7 @@ function build(
   const refs = new Map<string, string[]>();
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
+    findById: jest.fn().mockResolvedValue({ heldStatus: null }),
     releaseHold: jest.fn().mockResolvedValue(true),
   };
   const payments = {
@@ -368,6 +370,50 @@ describe('VoucherRedemptionService — VoucherSeqUsed on eip155 (D-23)', () => {
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
         }),
       );
+    });
+
+    it.each([
+      ['REFUNDED', null],
+      ['COLLECTED', null],
+    ] as const)(
+      'a %s record of this voucher with no hold of ours recorded is an anomaly: never booked, no debt (F-L3)',
+      async (record, heldStatus) => {
+        const redeemer = new EvmRecordRedeemer(async () => undefined);
+        redeemer.used.add('1');
+        redeemer.record = record;
+        const { service, intents, payments, alerts } = build(redeemer);
+        intents.findById.mockResolvedValue({ heldStatus });
+
+        await service.run(USDC);
+
+        expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+        expect(payments.lapseRedemption).not.toHaveBeenCalled();
+        expect(intents.releaseHold).not.toHaveBeenCalled();
+        expect(alerts.emit).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: VOUCHER_REDEMPTION_ALERTS.SEQ_USED_ANOMALY,
+            severity: AlertSeverity.CRITICAL,
+            details: expect.objectContaining({ record }),
+          }),
+        );
+      },
+    );
+
+    it('a COLLECTED record our own row already holds is ours: nothing new booked, nothing paged (F-L3)', async () => {
+      for (const heldStatus of ['HELD', 'COLLECTED']) {
+        const redeemer = new EvmRecordRedeemer(async () => undefined);
+        redeemer.used.add('1');
+        redeemer.record = 'COLLECTED';
+        const { service, intents, payments, alerts } = build(redeemer);
+        intents.findById.mockResolvedValue({ heldStatus });
+
+        await service.run(USDC);
+
+        expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+        expect(payments.lapseRedemption).not.toHaveBeenCalled();
+        expect(intents.releaseHold).not.toHaveBeenCalled();
+        expect(alerts.emit).not.toHaveBeenCalled();
+      }
     });
 
     it('decides before a forfeit too: a provider cause on record does not release a held payment', async () => {

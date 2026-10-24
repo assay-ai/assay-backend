@@ -23,7 +23,12 @@ export enum SlashHoldReason {
    * left out of `pendingSlash` (see {@link SlashHoldStakeReading.disputedReserved}).
    */
   STAKE_FULLY_RESERVED = 'STAKE_FULLY_RESERVED',
-  /** `bonded < minimumStake`. */
+  /**
+   * FREE bonded stake below the minimum: `bonded − pendingSlash < minimumStake`
+   * (assay-evm D-26), the redeem gate's own rule — every standing record's
+   * reservation counts here, disputed ones included, because the chain counts
+   * them. The value keeps its stored name.
+   */
   BONDED_BELOW_MINIMUM = 'BONDED_BELOW_MINIMUM',
 }
 
@@ -38,9 +43,13 @@ export interface SlashHoldStakeReading {
   readonly minimumStake: bigint;
   /**
    * The part of `pendingSlash` reserved by this platform's records that stand
-   * `DISPUTED` on chain. Left out of the reservation check: filing a dispute
-   * does not affect routing (review S-6), even though the record keeps its
-   * reservation until the arbiter rules or the 30-day timeout ends it.
+   * `DISPUTED` on chain. Left out of the reservation check
+   * (`STAKE_FULLY_RESERVED`, review S-6), even though the record keeps its
+   * reservation until the arbiter rules or the 30-day timeout ends it. NOT
+   * left out of the free-bonded minimum (`BONDED_BELOW_MINIMUM`): since D-26
+   * the chain's redeem gate counts every reservation, so a provider whose
+   * disputed records push its free bonded stake below the minimum is not paid,
+   * and must not be routed paid calls.
    */
   readonly disputedReserved?: bigint;
 }
@@ -76,7 +85,10 @@ export function slashHoldReasons(
     reasons.push(SlashHoldReason.STAKE_FULLY_RESERVED);
   }
 
-  if (stake.bonded < stake.minimumStake) reasons.push(SlashHoldReason.BONDED_BELOW_MINIMUM);
+  // D-26: the redeem gate reads `bonded − pendingSlash` (all of it, disputed
+  // records included), so the hold does too.
+  const freeBonded = stake.bonded > stake.pendingSlash ? stake.bonded - stake.pendingSlash : 0n;
+  if (freeBonded < stake.minimumStake) reasons.push(SlashHoldReason.BONDED_BELOW_MINIMUM);
   return reasons;
 }
 

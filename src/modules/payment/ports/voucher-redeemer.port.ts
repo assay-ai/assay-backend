@@ -183,19 +183,22 @@ export interface VoucherRedeemerPort {
 
   /**
    * What the chain's own record of this `(payer, seq)` says about this voucher
-   * — a live read. `'MATCH'`: a record exists and names the voucher's provider
-   * and amount; `'MISMATCH'`: a record exists for another provider or amount;
-   * `'NONE'`: the seq is unused. Throws when it cannot tell.
+   * — a live read. A record naming the voucher's provider and amount answers
+   * its status: `'HELD'`, `'COLLECTED'` or `'REFUNDED'`; `'MISMATCH'`: a record
+   * exists for another provider or amount; `'NONE'`: the seq is unused.
+   * Throws when it cannot tell.
    *
    * Asked when the chain refuses a voucher because its seq is used and none of
-   * the intent's own transactions shows the landing: a matching record means
-   * it landed unobserved and is committed, never turned into buyer debt.
-   * Optional: a chain without per-seq records keeps the old close.
+   * the intent's own transactions shows the landing. Only a `HELD` record (or a
+   * `COLLECTED` one this platform's own ledger attributes to the voucher) is a
+   * landing to commit; anything else is an anomaly, never a new redemption and
+   * never buyer debt (review 2026-10-24 F-L3). Optional: a chain without
+   * per-seq records keeps the old close.
    */
   usedSeqRecord?(request: RedeemVoucherRequest): Promise<UsedSeqRecord>;
 }
 
 /** See {@link VoucherRedeemerPort.usedSeqRecord}. */
-export type UsedSeqRecord = 'MATCH' | 'MISMATCH' | 'NONE';
+export type UsedSeqRecord = 'HELD' | 'COLLECTED' | 'REFUNDED' | 'MISMATCH' | 'NONE';
 
 export const VOUCHER_REDEEMER = 'VOUCHER_REDEEMER';

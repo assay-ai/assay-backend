@@ -83,6 +83,17 @@ export interface OnChainStake {
    */
   readonly bonded: Money;
   /**
+   * {@link bonded} less what standing slash records reserve — `bonded −
+   * pendingSlash`, floored at zero — on a chain whose redeem gate reads that
+   * (assay-evm D-26: `AssayEscrow` refuses `ProviderBelowMinimumStake` below
+   * the minimum FREE stake, so a provider cannot freeze its stake with records
+   * it disputes itself and keep being paid). **This is the routing figure when
+   * present**: routing on `bonded` would admit paid calls the chain then
+   * refuses to pay. Absent on a chain without that rule (Solana), where
+   * {@link bonded} is the figure. Display keeps {@link bonded}.
+   */
+  readonly freeBonded?: Money;
+  /**
    * Stake the provider has asked to take out, still inside the unbonding
    * period. **Never routing input** — see {@link bonded}.
    *
