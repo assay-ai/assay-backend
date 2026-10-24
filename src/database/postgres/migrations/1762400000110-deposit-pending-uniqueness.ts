@@ -34,6 +34,27 @@ export class DepositPendingUniqueness1762400000110 implements MigrationInterface
   name = 'DepositPendingUniqueness1762400000110';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // Fail loud before building, as the sibling resolution migration does. The
+    // very incident this closes could have committed two DEPOSIT_PENDING rows
+    // for one signature; if any such pair survives here, a bare CREATE UNIQUE
+    // INDEX would throw mid-migration, roll back, and block the deploy — and
+    // `ledger_entries`' append-only trigger makes the duplicate painful to
+    // remove. Surface the offending signatures instead of a raw 23505 so the
+    // operator can run a reviewed repair first.
+    const dups: Array<{ chain_tx_ref: string }> = await queryRunner.query(`
+      SELECT "chain_tx_ref" FROM "ledger_entries"
+      WHERE "entry_type" = 'DEPOSIT_PENDING' AND "chain_tx_ref" IS NOT NULL
+      GROUP BY "chain_tx_ref" HAVING count(*) > 1
+    `);
+    if (dups.length > 0) {
+      const refs = dups.map((d) => d.chain_tx_ref).join(', ');
+      throw new Error(
+        `Cannot build uq_ledger_entries_deposit_pending: ${dups.length} signature(s) ` +
+          `already have more than one DEPOSIT_PENDING row (${refs}). Resolve the duplicate ` +
+          `pending credits before applying this migration.`,
+      );
+    }
+
     await queryRunner.query(`
       CREATE UNIQUE INDEX "uq_ledger_entries_deposit_pending"
         ON "ledger_entries" ("chain_tx_ref")
