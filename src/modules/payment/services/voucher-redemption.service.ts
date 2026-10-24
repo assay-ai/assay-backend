@@ -101,7 +101,6 @@ const UNPLANNED_SLASH_SHORTFALL = 'ProviderStakeHeldByUnplannedSlash';
 const BELOW_MINIMUM = 'ProviderBelowMinimumStake';
 
 /**
- * Refusals the BUYER causes by tightening its own grant or caps/**
  * Refusals the BUYER causes by tightening its own grant or caps: a revoked
  * or expired delegate, a lowered per-voucher or window cap. Each is retried
  * until {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} before the voucher's
@@ -1114,7 +1113,8 @@ export class VoucherRedemptionService {
    * cause; `null` when it is not; `undefined` when that cannot be told.
    *
    * - its bonded stake is below the chain's minimum (a live read through the
-   *   redeemer; a chain without one is not asked), or
+   *   redeemer; a chain without one is not asked) for its own reasons — a
+   *   shortfall only from slash records it did not cause is `null`, or
    * - it or its payee is blocked (the platform blocklist, this pass's on-chain
    *   snapshot, or a live read of the payee).
    */
@@ -1128,9 +1128,12 @@ export class VoucherRedemptionService {
     if (!this.redeemer.providerBelowMinimumStake) return null;
     try {
       if (!(await this.redeemer.providerBelowMinimumStake(request))) return null;
-      return (await this.shortOnlyByUnplannedSlashes(row, request))
-        ? UNPLANNED_SLASH_SHORTFALL
-        : BELOW_MINIMUM;
+      // Short only because of records the provider did not cause: not its
+      // fault, so the close keeps its buyer-side handling. Only a voucher whose
+      // own refusal was that shortfall (recorded as `UNPLANNED_SLASH_SHORTFALL`
+      // on a RETRY, then `VoucherExpired`) is forfeited under it — never a
+      // close the buyer caused (review 2026-10-24 wave 3 N-2).
+      return (await this.shortOnlyByUnplannedSlashes(row, request)) ? null : BELOW_MINIMUM;
     } catch (error) {
       this.logger.warn(
         `Intent ${row.id}: the provider's stake could not be read live: ${describe(error)}`,

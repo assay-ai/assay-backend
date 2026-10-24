@@ -166,7 +166,9 @@ platform, or signed by a key that can no longer sign), its in-flight vouchers ar
 fault: the refusal is recorded as `ProviderStakeHeldByUnplannedSlash`, not as
 `ProviderBelowMinimumStake`, and the voucher is retried until its on-chain deadline (the redeem
 grace). Only a voucher that dies of it is forfeited, under that cause (the buyer is not charged and
-nobody is paid). A provider below the minimum for its own reasons is treated as before.
+nobody is paid). A close the buyer caused (a revoked delegate, a lowered cap, a short escrow) is
+handled as it always is, buyer debt, even while such records stand: the shortfall is never read live
+as the provider's fault. A provider below the minimum for its own reasons is treated as before.
 
 For a single record when the key itself is still trusted (for example a mismatch traced to a database
 edit): **`AssayStake.cancelSlash(<requestId>)`** from the arbiter.
