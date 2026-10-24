@@ -68,8 +68,8 @@ export interface ProRataCaps {
   readonly totalCeiling: bigint;
   /**
    * The smallest part the contract can ever pay —
-   * {@link minimumSplittablePenalty} (2 units at 60/30). A smaller part would
-   * revert `PenaltyTooSmallToSplit` at every execution until it expired, so
+   * {@link minimumSplittablePenalty} (4 units at 60/30). A smaller part would
+   * be refused `PenaltyTooSmallToSplit` at every proposal, so
    * it is left out and its share RE-SPLIT among the other agents by the same
    * weights: the total signed for is unchanged.
    */
@@ -285,14 +285,25 @@ export function findDustParts(
 }
 
 /**
- * The smallest `applied` that `executeSlash` can split without reverting
- * `PenaltyTooSmallToSplit` — the smallest `a` for which
- * `⌊a·agentBps/10⁴⌋ + ⌊a·platformBps/10⁴⌋ ≥ 1`, i.e. `⌈10⁴ / max(bps)⌉`.
+ * The smallest penalty `proposeSlash` accepts as splittable (assay-evm
+ * aa2f84a, review 2026-10-23 L-1) under the CURRENT split: the agent share
+ * `⌊a·agentBps/10⁴⌋` must be non-zero, and so must the platform share
+ * `⌊a·platformBps/10⁴⌋` whenever `platformBps > 0`. That is
+ * `max(⌈10⁴/agentBps⌉, ⌈10⁴/platformBps⌉)` — the platform term only when
+ * `platformBps > 0` — e.g. 4 units at 60/30, 1 at 100/0. Derived from the
+ * bps read live, never a constant: a part below it is refused
+ * `PenaltyTooSmallToSplit` at proposal and would be retried for ever. It also
+ * clears `executeSlash`'s own check (`agent + platform ≥ 1`), which is weaker.
  */
 export function minimumSplittablePenalty(agentBps: number, platformBps: number): bigint {
-  const largest = BigInt(Math.max(agentBps, platformBps));
-  if (largest <= 0n) throw new Error('a split with no agent or platform share can never pay');
-  return (10_000n + largest - 1n) / largest;
+  if (agentBps <= 0) {
+    throw new Error('a split with no agent share can never pay (the contract refuses it)');
+  }
+  const ceilDiv = (bps: number) => (10_000n + BigInt(bps) - 1n) / BigInt(bps);
+  const forAgent = ceilDiv(agentBps);
+  if (platformBps <= 0) return forAgent;
+  const forPlatform = ceilDiv(platformBps);
+  return forAgent > forPlatform ? forAgent : forPlatform;
 }
 
 /**

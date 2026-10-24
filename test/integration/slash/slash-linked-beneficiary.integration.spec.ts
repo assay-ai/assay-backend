@@ -107,7 +107,7 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
     ).resolves.toEqual([]);
   });
 
-  it('sums what was signed against the provider in the window, standing or executed only', async () => {
+  it('sums every standing part of any age, and the parts executed in the last day', async () => {
     const insert = (
       status: string,
       penalty: string,
@@ -122,7 +122,7 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
            agent_amount, platform_amount)
          VALUES ($1, $2, 0, $3, $4, $4, 1, $5, $5, $5, $5, 'NONE', $6, $7::varchar,
                  now() - $8::interval, now(), $9,
-                 CASE WHEN $7::text = 'EXECUTED' THEN now() END,
+                 CASE WHEN $7::text = 'EXECUTED' THEN now() - $8::interval END,
                  CASE WHEN $7::text = 'EXECUTED' THEN $5::numeric END,
                  CASE WHEN $7::text = 'EXECUTED' THEN 0 END,
                  CASE WHEN $7::text = 'EXECUTED' THEN 0 END)`,
@@ -139,16 +139,22 @@ describe('M-1: linked beneficiaries and the provider’s daily budget, against a
         ],
       );
     await insert('PENDING', '100', '1 hour', '90'); // its reservation counts
-    await insert('EXECUTED', '200', '23 hours', null);
+    await insert('EXECUTED', '200', '23 hours', null); // executed inside the rolling day
+    await insert('EXECUTED', '250', '30 hours', null); // executed before it: released
     await insert('DISPUTED', '300', '2 hours', null);
     await insert('CANCELLED', '400', '1 hour', null); // takes nothing from the window
     await insert('REFUSED', '500', '1 hour', null);
-    await insert('PENDING', '600', '25 hours', null); // outside the rolling day
+    await insert('PENDING', '600', '25 hours', null); // still standing: counts (F-M1)
+    await insert('DISPUTED', '700', '40 days', null); // self-disputed long ago: still counts
 
     const since = new Date(Date.now() - 86_400_000);
-    await expect(parts.signedAgainstProviderSince(providerOrg, CHAIN, since)).resolves.toBe(590n);
-    await expect(parts.signedAgainstProviderSince(providerOrg, 'eip155:1', since)).resolves.toBe(
-      0n,
-    );
+    await expect(parts.committedAgainstProvider(providerOrg, CHAIN, since)).resolves.toEqual({
+      standing: 1690n,
+      executedSince: 200n,
+    });
+    await expect(parts.committedAgainstProvider(providerOrg, 'eip155:1', since)).resolves.toEqual({
+      standing: 0n,
+      executedSince: 0n,
+    });
   });
 });
