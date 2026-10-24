@@ -229,7 +229,7 @@ describe('CachingSessionSource', () => {
     await guarded.resolve('t');
     blocked = true;
     await expect(guarded.resolve('t')).rejects.toMatchObject({
-      errorCode: 'AUTH_ORGANIZATION_SUSPENDED',
+      errorCode: 'ACCOUNT_BLOCKED',
     });
   });
 });

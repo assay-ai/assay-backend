@@ -1,7 +1,7 @@
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { AgentScope, CurrentSession, RequireAgentScope, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { GetReceiptParamsDto, GetReceiptResponseDto } from '../dto/get-receipt.dto';
@@ -26,6 +26,7 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 @ApiTags('Receipts')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@RequireAgentScope(AgentScope.ACTIVITY_READ)
 @Controller('receipts')
 export class ReceiptsController {
   constructor(

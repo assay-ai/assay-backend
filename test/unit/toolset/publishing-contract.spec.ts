@@ -1,4 +1,5 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { AGENT_SCOPES } from '@shared/auth/agent-scope';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
@@ -40,6 +41,7 @@ const session = (callerKind: McpCallerKind): McpSession => ({
   label: null,
   callerKind,
   paymentsAllowed: true,
+  scopes: AGENT_SCOPES,
 });
 
 /** The T2 publishing REST contract: bodies are validated before a service runs; writes are a person's. */
@@ -152,9 +154,11 @@ describe('toolset publishing REST contract', () => {
     expect((await http().put('/org/handle').set(as(MACHINE)).send({ handle: 'acme' })).status).toBe(
       403,
     );
-    // Reads are fine for a machine credential of the organization.
-    expect((await http().get(`/toolsets/${ID}/versions`).set(as(MACHINE))).status).toBe(200);
-    expect((await http().get('/org/handle').set(as(MACHINE))).status).toBe(200);
+    // Toolset management is a person's, reads included, whatever a key holds.
+    expect((await http().get(`/toolsets/${ID}/versions`).set(as(MACHINE))).status).toBe(403);
+    expect((await http().get('/org/handle').set(as(MACHINE))).status).toBe(403);
+    expect((await http().get(`/toolsets/${ID}/versions`).set(as(HUMAN))).status).toBe(200);
+    expect((await http().get('/org/handle').set(as(HUMAN))).status).toBe(200);
   });
 
   it('validates a copy and a version path', async () => {

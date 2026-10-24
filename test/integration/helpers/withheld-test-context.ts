@@ -1,4 +1,4 @@
-import { PaymentIntentRedemptionRetry1762400000060 } from '@database/postgres/migrations/1762400000060-payment-intent-redemption-retry';
+import { PaymentIntentRedemptionRetry1762400000080 } from '@database/postgres/migrations/1762400000080-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
@@ -203,7 +203,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       PaymentIntentDisputeHold1761800000000,
       ToolBindingAuthMode1762000000002,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
-      PaymentIntentRedemptionRetry1762400000060,
+      PaymentIntentRedemptionRetry1762400000080,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',

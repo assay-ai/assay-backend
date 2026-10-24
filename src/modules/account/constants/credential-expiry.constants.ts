@@ -32,3 +32,9 @@ export const CREDENTIAL_EXPIRY_SWEEP_CONFIG = 'CREDENTIAL_EXPIRY_SWEEP_CONFIG';
 export interface CredentialExpirySweepConfig {
   readonly now: () => number;
 }
+
+/** A new API key's lifetime when `POST /agents/:agentId/credentials` names none. */
+export const CREDENTIAL_DEFAULT_LIFETIME_DAYS = 90;
+
+/** The longest lifetime a new API key may have. There is no "never". */
+export const CREDENTIAL_MAX_LIFETIME_DAYS = 365;

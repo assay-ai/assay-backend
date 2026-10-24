@@ -29,7 +29,7 @@ function buildCredential(expiresAt: Date): AgentCredentialEntity {
     name: 'CI deploy',
     issuedVia: CredentialIssuedVia.API_KEY,
     oauthClientId: null,
-    prefix: 'assay_live_ab12',
+    tokenLast4: '2fds',
     tokenHash: 'hash',
     scopes: [],
     lastUsedAt: null,
@@ -110,15 +110,15 @@ describe('CredentialExpirySweepService', () => {
   it.each([
     [
       -6 * ONE_DAY_MS,
-      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expires Sep 1, 00:00 UTC. Renew it before then.',
+      'Key "CI deploy" (assay_sk_live_…2fds) of "research-bot" expires Sep 1, 00:00 UTC. Renew it before then.',
     ],
     [
       -12 * 60 * 60 * 1000,
-      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expires Sep 1, 00:00 UTC. Renew it now or this agent stops working.',
+      'Key "CI deploy" (assay_sk_live_…2fds) of "research-bot" expires Sep 1, 00:00 UTC. Renew it now or this agent stops working.',
     ],
     [
       60 * 60 * 1000,
-      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expired and can no longer authenticate. Make a new key to keep this agent running.',
+      'Key "CI deploy" (assay_sk_live_…2fds) of "research-bot" expired and can no longer authenticate. Make a new key to keep this agent running.',
     ],
   ])('writes the body with names and a readable time (offset %d ms)', async (offset, body) => {
     const { service, notifications, agents } = buildHarness(
@@ -203,7 +203,7 @@ describe('CredentialExpirySweepService', () => {
         ...buildCredential(expiresAt),
         issuedVia: CredentialIssuedVia.OAUTH,
         oauthClientId: 'client-row-1',
-        prefix: null,
+        tokenLast4: null,
         tokenHash: null,
       } as unknown as AgentCredentialEntity;
     }

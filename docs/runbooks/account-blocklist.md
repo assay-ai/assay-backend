@@ -37,7 +37,7 @@ without its `A-9` register entry is an intervention nobody can audit.
 
 | Where | Refused | Code |
 | --- | --- | --- |
-| Agent machine credential (`assay_sk_live_…`) | everything | `AUTH_ORGANIZATION_SUSPENDED` (org) / `ACCOUNT_BLOCKED` (wallet) |
+| Agent machine credential (`assay_sk_live_…`) | everything | `ACCOUNT_BLOCKED` ("Your account is blocked by Assay" for the org; the role for a wallet) |
 | Dashboard session (Privy, or a config-file token) | every non-`GET` route; `GET`s stay open | same |
 | the MCP host (tools/list, tools/call on every path), public demo | everything | same |
 | New payment intent (every rail) | payer org, payer account, provider org, payout account, voucher delegate | `ACCOUNT_BLOCKED` |

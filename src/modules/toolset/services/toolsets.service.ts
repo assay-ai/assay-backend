@@ -675,7 +675,7 @@ export function entryContractTerms(
   };
 }
 
-function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): ToolsetEntryDto {
+export function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): ToolsetEntryDto {
   return {
     position: row.position,
     toolId: row.toolId,
@@ -696,6 +696,11 @@ function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): Tool
     // From the review state (§7.6): a provider tool with no approved version.
     notReviewed: tool?.kind === ToolKind.PROVIDER && tool.approvedVersion == null,
     toolVisibility: tool?.visibility ?? 'LISTED',
+    // Not served any more (BUG-X-05): removed, its own takedown standing, or
+    // its handle's — the same rule that drops it from `tools/list`.
+    takenDown: Boolean(
+      tool && (tool.status === ToolStatus.REMOVED || tool.takenDownAt || tool.handleRemovedAt),
+    ),
   };
 }
 

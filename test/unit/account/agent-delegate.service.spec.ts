@@ -30,6 +30,8 @@ class FakeRedis {
 interface FakeRow {
   delegateAccount: string | null;
   delegateBoundAt: Date | null;
+  pendingDelegateAccount?: string | null;
+  pendingDelegateRequestedAt?: Date | null;
   revokedAt?: Date | null;
   expiresAt?: Date | null;
 }
@@ -40,12 +42,20 @@ class FakeCredentials {
   async findOneBy({ id }: { id: string }) {
     return this.rows.get(id) ?? null;
   }
-  async update(
-    criteria: { organizationId: string; id: string },
-    patch: { delegateAccount: string; delegateBoundAt: Date },
-  ) {
+  async update(criteria: { organizationId: string; id: string }, patch: Partial<FakeRow>) {
     this.updates.push({ criteria, patch });
     this.rows.set(criteria.id, { ...this.rows.get(criteria.id), ...patch });
+  }
+  /** Mirrors the repository's conditional first bind (M1). */
+  async bindDelegateIfUnbound(_org: string, id: string, delegate: string, boundAt: Date) {
+    const row = this.rows.get(id);
+    const current = row?.delegateAccount ?? null;
+    if (current !== null && current.toLowerCase() !== delegate.toLowerCase()) return false;
+    await this.update(
+      { organizationId: _org, id },
+      { delegateAccount: delegate, delegateBoundAt: boundAt },
+    );
+    return true;
   }
   /** Mirrors the repository: other, not revoked, same key case-insensitively. */
   private holders(delegate: string, except: string) {
@@ -53,7 +63,8 @@ class FakeCredentials {
       ([id, row]) =>
         id !== except &&
         !row.revokedAt &&
-        row.delegateAccount?.toLowerCase() === delegate.toLowerCase(),
+        (row.delegateAccount?.toLowerCase() === delegate.toLowerCase() ||
+          row.pendingDelegateAccount?.toLowerCase() === delegate.toLowerCase()),
     );
   }
   async findOtherDelegateHolders(delegate: string, except: string) {
@@ -181,6 +192,142 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     expect((await service.current(session())).delegate).toBe(`${CHAIN}:${delegateKey.address}`);
   });
 
+  describe('approvalUrl: the enable-paid link, from the configured web origin', () => {
+    const WEB = 'https://portal.example.test';
+    const A = `${CHAIN}:${delegateKey.address}`;
+    const B = `${CHAIN}:${otherKey.address}`;
+    let withHost: AgentDelegateService;
+    beforeEach(() => {
+      const adapter = new EvmChainAdapter(new Map(), new Map([[CHAIN, deployment(CHAIN)]]), [
+        CHAIN,
+      ]);
+      withHost = new AgentDelegateService(
+        credentials as never,
+        new ChainAdapterRegistry([adapter], [CHAIN]),
+        redis as never,
+        delegations as never,
+        null,
+        { webAppUrl: WEB, mcpPublicUrl: 'https://mcp.example.test' },
+      );
+    });
+
+    it('is null while no key is bound or pending', async () => {
+      expect((await withHost.bindingStatus(session())).approvalUrl).toBeNull();
+    });
+
+    it('names the bound key, then the pending one once a rebinding waits', async () => {
+      credentials.rows.set('cred-1', { delegateAccount: A, delegateBoundAt: new Date() });
+      expect((await withHost.bindingStatus(session())).approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${delegateKey.address}`,
+      );
+
+      credentials.rows.set('cred-1', {
+        delegateAccount: A,
+        delegateBoundAt: new Date(),
+        pendingDelegateAccount: B,
+        pendingDelegateRequestedAt: new Date(),
+      });
+      expect((await withHost.current(session())).approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${otherKey.address}`,
+      );
+    });
+
+    it('is on the bind answer too', async () => {
+      const challenge = await withHost.challenge(session(), delegateKey.address);
+      const { signature } = await signWith(challenge);
+      const bound = await withHost.bind(session(), challenge.challengeId, signature);
+      expect(bound.approvalUrl).toBe(
+        `${WEB}/agents/enable-paid?credential=cred-1#key=${delegateKey.address}`,
+      );
+    });
+  });
+
+  describe('rebinding: a new key never silently replaces a bound one (D3)', () => {
+    const A = `${CHAIN}:${delegateKey.address}`;
+    const B = `${CHAIN}:${otherKey.address}`;
+
+    async function bindOther(s = session()) {
+      const challenge = await service.challenge(s, otherKey.address);
+      const { signature } = await signWith(challenge, otherKey);
+      return service.bind(s, challenge.challengeId, signature);
+    }
+
+    it('the first key binds at once (status ACTIVE)', async () => {
+      const { challenge, signature } = await signChallenge();
+      const bound = await service.bind(session(), challenge.challengeId, signature);
+      expect(bound).toMatchObject({ status: 'ACTIVE', delegate: A, pendingDelegate: null });
+    });
+
+    it('a second key waits for approval; the bound key stays and keeps signing', async () => {
+      credentials.rows.set('cred-1', {
+        delegateAccount: A,
+        delegateBoundAt: new Date('2026-10-01T00:00:00.000Z'),
+      });
+
+      const answer = await bindOther();
+
+      expect(answer).toMatchObject({
+        status: 'PENDING_APPROVAL',
+        delegate: A,
+        boundAt: '2026-10-01T00:00:00.000Z',
+        pendingDelegate: B,
+      });
+      expect(answer.pendingSince).toEqual(expect.any(String));
+      const row = credentials.rows.get('cred-1')!;
+      expect(row.delegateAccount).toBe(A);
+      expect(row.pendingDelegateAccount).toBe(B);
+      expect(await service.bindingStatus(session())).toMatchObject({
+        bound: true,
+        delegate: A,
+        pendingDelegate: B,
+      });
+    });
+
+    it('a newer proof replaces an older pending key, never the bound one', async () => {
+      const C = `${CHAIN}:0x1111111111111111111111111111111111111111`;
+      credentials.rows.set('cred-1', {
+        delegateAccount: A,
+        delegateBoundAt: new Date('2026-10-01T00:00:00.000Z'),
+        pendingDelegateAccount: C,
+        pendingDelegateRequestedAt: new Date('2026-10-02T00:00:00.000Z'),
+      });
+
+      await bindOther();
+
+      expect(credentials.rows.get('cred-1')).toMatchObject({
+        delegateAccount: A,
+        pendingDelegateAccount: B,
+      });
+    });
+
+    it('proving the bound key again is no rebinding (status ACTIVE)', async () => {
+      credentials.rows.set('cred-1', {
+        delegateAccount: A,
+        delegateBoundAt: new Date('2026-10-01T00:00:00.000Z'),
+      });
+      const { challenge, signature } = await signChallenge();
+
+      const answer = await service.bind(session(), challenge.challengeId, signature);
+
+      expect(answer).toMatchObject({ status: 'ACTIVE', delegate: A, pendingDelegate: null });
+    });
+
+    it('refuses a pending key another live credential already waits with', async () => {
+      credentials.rows.set('cred-1', { delegateAccount: A, delegateBoundAt: new Date() });
+      credentials.rows.set('cred-2', {
+        delegateAccount: null,
+        delegateBoundAt: null,
+        pendingDelegateAccount: B,
+        pendingDelegateRequestedAt: new Date(),
+      });
+
+      await expect(bindOther()).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+      });
+      expect(credentials.rows.get('cred-1')!.pendingDelegateAccount).toBeUndefined();
+    });
+  });
+
   describe('GET /agents/me/delegate — the agent label and paidCalls (§7.10 item 1, R-PAY-3)', () => {
     const DELEGATE = `${CHAIN}:${delegateKey.address}`;
     const bound = () =>
@@ -197,6 +344,9 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         boundAt: null,
         paidCalls: null,
         paidCallsUnknown: false,
+        pendingDelegate: null,
+        pendingSince: null,
+        approvalUrl: null,
       });
       expect(delegations.reads).toEqual([]);
     });
@@ -217,6 +367,9 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
           validUntil: new Date(1_900_000_000 * 1000).toISOString(),
         },
         paidCallsUnknown: false,
+        pendingDelegate: null,
+        pendingSince: null,
+        approvalUrl: null,
       });
       expect(delegations.reads).toEqual([session().agentAccount]);
     });
@@ -231,6 +384,9 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         boundAt: '2026-10-01T00:00:00.000Z',
         paidCalls: null,
         paidCallsUnknown: true,
+        pendingDelegate: null,
+        pendingSince: null,
+        approvalUrl: null,
       });
     });
 
@@ -373,6 +529,9 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         bound: true,
         delegate: DELEGATE,
         boundAt: '2026-10-01T00:00:00.000Z',
+        pendingDelegate: null,
+        pendingSince: null,
+        approvalUrl: null,
       });
     });
 
@@ -383,6 +542,9 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
         bound: false,
         delegate: null,
         boundAt: null,
+        pendingDelegate: null,
+        pendingSince: null,
+        approvalUrl: null,
       });
     });
 
@@ -467,7 +629,7 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     });
 
     it('answers a lost race on the unique index as ALREADY_BOUND', async () => {
-      credentials.update = async () => {
+      credentials.bindDelegateIfUnbound = async () => {
         throw Object.assign(new Error('duplicate key'), {
           code: '23505',
           constraint: 'uq_agent_credentials_delegate_live',
@@ -479,6 +641,31 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
           errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
         },
       );
+    });
+
+    /**
+     * M1: two first binds race on one credential. Both read "no key"; the
+     * one that writes second finds a key there and must not overwrite it.
+     */
+    it('a first bind that loses the race to another key is ACCOUNT_DELEGATE_BIND_CONFLICT', async () => {
+      const winner = `${CHAIN}:${otherKey.address}`;
+      const read = credentials.findOneBy.bind(credentials);
+      // The read sees no key; the other bind lands right after it.
+      credentials.findOneBy = async (criteria: { id: string }) => {
+        const row = await read(criteria);
+        credentials.rows.set(criteria.id, {
+          ...credentials.rows.get(criteria.id),
+          delegateAccount: winner,
+          delegateBoundAt: new Date(),
+        });
+        return row;
+      };
+      const { challenge, signature } = await signChallenge();
+      await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject(
+        { errorCode: 'ACCOUNT_DELEGATE_BIND_CONFLICT', statusCode: 409 },
+      );
+      expect(credentials.rows.get('cred-1')?.delegateAccount).toBe(winner);
+      expect(credentials.rows.get('cred-1')?.pendingDelegateAccount ?? null).toBeNull();
     });
 
     it('checks only after the proof: a wrong key learns nothing', async () => {

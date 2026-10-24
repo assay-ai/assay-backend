@@ -529,12 +529,12 @@ describe('account blocks, against a real database and Redis', () => {
       expect(JSON.stringify(read.body)).toContain('matches');
       const refused = await unmarked('person');
       expect(refused.status).toBe(403);
-      expect(JSON.stringify(refused.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
+      expect(JSON.stringify(refused.body)).toContain('ACCOUNT_BLOCKED');
 
       // Blocked machine credential: refused outright, the read-only POST too.
       const machine = await lookup('machine');
       expect(machine.status).toBe(403);
-      expect(JSON.stringify(machine.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
+      expect(JSON.stringify(machine.body)).toContain('ACCOUNT_BLOCKED');
 
       await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
       expect((await lookup('person')).status).toBe(200);

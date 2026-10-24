@@ -38,7 +38,39 @@ interface ThresholdRule {
 
 const percent = (value: number): string => `${(value * 100).toFixed(2)}%`;
 const days = (value: number): string => `${value.toFixed(1)}d`;
-const ms = (value: number): string => `${value}ms`;
+/**
+ * A duration in milliseconds, in words a person reads: `25 ms`, `2.3 s`,
+ * `1 min 5 s`, `18 h 35 min`, `2 d 3 h`. Display only (BUG-OPS-CORE-05: the
+ * raw value carried float noise, `66913636.010000005ms`); the thresholds are
+ * compared on the number, never on this text.
+ */
+export function formatDurationMs(value: number): string {
+  if (!Number.isFinite(value)) return `${value} ms`;
+  const sign = value < 0 ? '-' : '';
+  const abs = Math.abs(value);
+  if (abs < 1000) return `${sign}${trimDecimal(abs)} ms`;
+  if (abs < 60_000) return `${sign}${trimDecimal(abs / 1000)} s`;
+  const totalSeconds = Math.floor(abs / 1000);
+  const pair = (big: number, bigUnit: string, small: number, smallUnit: string) =>
+    `${sign}${big} ${bigUnit}${small > 0 ? ` ${small} ${smallUnit}` : ''}`;
+  if (totalSeconds < 3600) {
+    return pair(Math.floor(totalSeconds / 60), 'min', totalSeconds % 60, 's');
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 24 * 60) {
+    return pair(Math.floor(totalMinutes / 60), 'h', totalMinutes % 60, 'min');
+  }
+  const totalHours = Math.floor(totalMinutes / 60);
+  return pair(Math.floor(totalHours / 24), 'd', totalHours % 24, 'h');
+}
+
+/** One decimal at most, never rounded up past the unit: `2.34` is `2.3`, `25` stays `25`. */
+function trimDecimal(value: number): string {
+  const tenths = Math.floor(value * 10) / 10;
+  return Number.isInteger(tenths) ? String(tenths) : tenths.toFixed(1);
+}
+
+const ms = formatDurationMs;
 
 /**
  * Every golden-signal threshold — do not "round" or "simplify" a number here;

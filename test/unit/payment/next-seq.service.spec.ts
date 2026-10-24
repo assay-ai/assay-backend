@@ -51,10 +51,18 @@ describe('NextSeqService.issue (GET /escrow/next-seq)', () => {
     expect(limiter.take).toHaveBeenCalledWith('credential:cred-1');
   });
 
-  it('passes null when the payer has no escrow on chain', async () => {
-    const { service, seqs } = build(true, null);
-    await issue(service);
-    expect(seqs.allocate).toHaveBeenCalledWith(ORG, ACCOUNT, null);
+  it('refuses with 409 when the payer has no escrow on chain, allocating nothing (BUG-SEC-02)', async () => {
+    const { service, seqs, escrow } = build(true, null);
+
+    await expectErrorCodeAsync(() => issue(service), PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN);
+    expect(escrow.read).toHaveBeenCalledTimes(1);
+    expect(seqs.allocate).not.toHaveBeenCalled();
+  });
+
+  it('still hands out a seq for an open escrow that was never redeemed (seqHigh 0)', async () => {
+    const { service, seqs } = build(true, { seqHigh: 0n });
+    await expect(issue(service)).resolves.toMatchObject({ seq: '42' });
+    expect(seqs.allocate).toHaveBeenCalledWith(ORG, ACCOUNT, 0n);
   });
 
   it('refuses with 429 over the rate limit, before allocating or reading the chain', async () => {

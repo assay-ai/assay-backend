@@ -135,7 +135,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       new OAuthGrantWriter(dataSource, credentialRepository, realAudit),
       realAudit,
       epoch,
-      { issuer: MCP },
+      { issuer: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentialRepository,
@@ -593,7 +593,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     expect(page.items[0]).toMatchObject({
       id: g.credentialId,
       issuedVia: 'OAUTH',
-      prefix: null,
+      hint: null,
       revokedAt: expect.any(Date),
       oauthClient: {
         clientId: builtin.clientId,

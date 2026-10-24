@@ -36,6 +36,7 @@ import {
   resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from '../helpers/test-database';
+import { AgentScope } from '@shared/auth/agent-scope';
 
 /**
  * BUG-R2-B4-01, against the real migrations: every audited write appends its
@@ -197,11 +198,11 @@ describe('audit_log_entries — the writer and its call sites', () => {
     expect(await entries()).toHaveLength(1);
   });
 
-  it('credentials: created and revoked, with no token, prefix or hash in any entry', async () => {
+  it('credentials: created and revoked, with no token, hint or hash in any entry', async () => {
     const created = await credentials.create(
       organizationId,
       agentId,
-      { name: 'CI deploy', scopes: ['tools:call'] },
+      { name: 'CI deploy', scopes: [AgentScope.TOOLS_CALL] },
       actor,
     );
     await credentials.revoke(organizationId, agentId, created.id, actor);
@@ -217,7 +218,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       resourceType: 'agent_credential',
       resourceId: created.id,
       before: null,
-      after: { agentId, name: 'CI deploy', scopes: ['tools:call'], expiresAt: null },
+      after: { agentId, name: 'CI deploy', scopes: ['tools:call'], expiresAt: expect.any(String) },
     });
     expect(revoked).toMatchObject({
       action: 'credential.revoked',
@@ -233,7 +234,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       ]),
     );
     expect(stored).not.toContain(created.token);
-    expect(stored).not.toContain(created.prefix);
+    expect(stored).not.toContain(created.hint);
     expect(stored).not.toContain(digestToken(created.token));
   });
 

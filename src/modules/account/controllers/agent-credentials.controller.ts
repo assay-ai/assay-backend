@@ -50,10 +50,8 @@ import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 export class AgentCredentialsController {
   constructor(private readonly credentials: AgentCredentialsService) {}
 
-  // A person's read too: the list names every sibling credential, its prefix,
-  // its bound delegate key and its expiry, which a leaked machine token must
-  // not be able to enumerate. An agent reads its own binding through
-  // `GET /agents/me/delegate`.
+  // A person's read of every key of the agent. An agent credential is refused
+  // (no `@RequireAgentScope`): key metadata is the owner's.
   @Get()
   @TenantCache({ ttl: 5, vary: 'org', epochs: ['agents'] })
   @UseGuards(HumanSessionGuard)
@@ -86,6 +84,32 @@ export class AgentCredentialsController {
       session.organizationId,
       params.agentId,
       body,
+      auditActorOf(session),
+    );
+  }
+
+  // Discarding the payment key a credential waits with is the owner's act,
+  // like approving it: a key holder could otherwise only re-park its own.
+  @Delete(':id/pending-delegate')
+  @UseGuards(HumanSessionGuard)
+  @AllowedWhileBlocked()
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Discard the payment key waiting for approval — the bound key keeps signing',
+  })
+  @ApiResponse({ status: 204, description: 'Discarded, or nothing was pending' })
+  @ApiResponse({
+    status: 404,
+    description: 'No such credential under this agent, in this organization',
+  })
+  async discardPendingDelegate(
+    @CurrentSession() session: McpSession,
+    @Param() params: RevokeAgentCredentialParamsDto,
+  ): Promise<void> {
+    await this.credentials.discardPendingDelegate(
+      session.organizationId,
+      params.agentId,
+      params.id,
       auditActorOf(session),
     );
   }

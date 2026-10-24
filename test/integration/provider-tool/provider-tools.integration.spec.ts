@@ -414,7 +414,7 @@ describe('provider tools, against a real database and Redis', () => {
         name: 'acme__search_posts',
         handle: 'acme',
         localName: 'search_posts',
-        preview: 'mcp__acme__acme__search_posts',
+        preview: 'mcp__assay-acme__acme__search_posts',
         visibility: 'PRIVATE',
         status: 'DRAFT',
         notReviewed: true,

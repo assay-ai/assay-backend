@@ -119,6 +119,26 @@ describe('handleRelay', () => {
     expect(f.calls).toHaveLength(0);
   });
 
+  it.each(['https://api.goassay.ai/', 'https://GOASSAY.AI./x', 'https://egress-dev.goassay.ai/'])(
+    "blocks Assay's own host %s",
+    async (url) => {
+      const f = recorder();
+      await expectError(await handleRelay(req(envelope({ url })), env, f.impl), 'BLOCKED_TARGET');
+      expect(f.calls).toHaveLength(0);
+    },
+  );
+
+  it('reads DENIED_HOST_SUFFIXES, and lets a look-alike through', async () => {
+    const custom = { ...env, DENIED_HOST_SUFFIXES: 'example.org' };
+    await expectError(
+      await handleRelay(req(envelope({ url: 'https://x.example.org/' })), custom, recorder().impl),
+      'BLOCKED_TARGET',
+    );
+    const f = recorder();
+    await handleRelay(req(envelope({ url: 'https://goassay.ai.example.com/' })), env, f.impl);
+    expect(f.calls).toHaveLength(1);
+  });
+
   it('blocks userinfo in the URL', async () => {
     await expectError(
       await handleRelay(req(envelope({ url: 'https://u:p@p.test/' })), env, recorder().impl),

@@ -67,11 +67,17 @@ export class AgentCredentialDto {
   @ApiProperty({
     nullable: true,
     type: String,
-    description: 'Clear-text leading characters, for disambiguation only; null for an OAuth grant',
+    example: 'assay_sk_live_…2fds',
+    description:
+      'Recognises the key without revealing it: the fixed `assay_sk_live_` part, `…`, and the last 4 characters. ' +
+      'The only part of the key we keep. Null for an OAuth grant.',
   })
-  prefix: string | null;
+  hint: string | null;
 
-  @ApiProperty({ type: [String] })
+  @ApiProperty({
+    type: [String],
+    description: 'What the key may do: `tools:call`, `payments`, `activity:read`, `reports:write`',
+  })
   scopes: string[];
 
   @ApiPropertyOptional({ nullable: true })
@@ -100,6 +106,18 @@ export class AgentCredentialDto {
 
   @ApiPropertyOptional({ nullable: true })
   delegateBoundAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'CAIP-10 of a key the agent proved while `delegateAccount` was bound. It waits for the ' +
+      "payer's approval on enable-paid (`POST /escrow/delegates` for this key), which makes it " +
+      '`delegateAccount` in one step; until then the bound key keeps signing.',
+  })
+  pendingDelegateAccount: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  pendingDelegateRequestedAt: Date | null;
 
   @ApiProperty()
   createdAt: Date;

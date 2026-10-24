@@ -15,7 +15,13 @@ import { ProviderModule } from './provider.module';
 import { SlaWindowModule } from './sla-window.module';
 import { SlaWindowSweepJob } from './jobs/sla-window-sweep.job';
 import {
+  CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
+  ContractMinimumStakeFloors,
+} from '@modules/tool/services/contract-minimum-stake-floors.service';
+
+import {
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
+  liveMinimumStakeParameters,
   loadMinimumStakeParameters,
 } from './services/provider-stake.service';
 import { BindingStatsService } from './services/binding-stats.service';
@@ -51,10 +57,15 @@ import { StakeMonitorService } from './services/stake-monitor.service';
   // own comment.
   imports: [ProviderModule, ChainsModule, NotificationModule],
   providers: [
+    // The effective routing floor (config, raised to the contract minimum when
+    // stricter), so the monitor warns about the number routing gates on
+    // (review M-8). Its own instance: this module stays out of `ToolModule`.
+    CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
     {
       provide: PROVIDER_MINIMUM_STAKE_PARAMETERS,
-      useFactory: loadMinimumStakeParameters,
-      inject: [ConfigService],
+      useFactory: (config: ConfigService, floors: ContractMinimumStakeFloors) =>
+        liveMinimumStakeParameters(loadMinimumStakeParameters(config), floors.byChain),
+      inject: [ConfigService, ContractMinimumStakeFloors],
     },
     {
       provide: STAKE_MONITOR_CONFIG,

@@ -76,10 +76,14 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
-    'EvmSlashRecordsBackfill1762400000080',
-    'EvmSlashRecords1762400000070',
-    'PaymentIntentRedemptionRetry1762400000060',
-    'VoucherSeqDebtReplacementPerChain1762400000050',
+    'EvmSlashRecordsBackfill1762400000100',
+    'EvmSlashRecords1762400000090',
+    'PaymentIntentRedemptionRetry1762400000080',
+    'VoucherSeqDebtReplacementPerChain1762400000070',
+    'AgentCredentialTokenLast41762400000062',
+    'AgentCredentialPendingDelegate1762400000061',
+    'AgentCredentialScopes1762400000060',
+    'BindingTestRunAuthMode1762400000050',
     'PaymentIntentsCreatedIndex1762400000040',
     'ConnectUrlServerName1762400000030',
     'PaymentKeySpendIndexes1762400000020',

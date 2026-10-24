@@ -269,7 +269,7 @@ describe('buyer debt SQL, against a real database', () => {
       );
     const seqOf = async (id: string) => (await row(id)).voucher_seq;
 
-    it('is installed by 1760900000000, made per chain by 1762400000050, and enabled', async () => {
+    it('is installed by 1760900000000, made per chain by 1762400000070, and enabled', async () => {
       const [trigger] = (await dataSource.query(
         `SELECT t.tgenabled, p.prosrc
            FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
@@ -531,10 +531,14 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
-      'EvmSlashRecordsBackfill1762400000080',
-      'EvmSlashRecords1762400000070',
-      'PaymentIntentRedemptionRetry1762400000060',
-      'VoucherSeqDebtReplacementPerChain1762400000050',
+      'EvmSlashRecordsBackfill1762400000100',
+      'EvmSlashRecords1762400000090',
+      'PaymentIntentRedemptionRetry1762400000080',
+      'VoucherSeqDebtReplacementPerChain1762400000070',
+      'AgentCredentialTokenLast41762400000062',
+      'AgentCredentialPendingDelegate1762400000061',
+      'AgentCredentialScopes1762400000060',
+      'BindingTestRunAuthMode1762400000050',
       'PaymentIntentsCreatedIndex1762400000040',
       'ConnectUrlServerName1762400000030',
       'PaymentKeySpendIndexes1762400000020',

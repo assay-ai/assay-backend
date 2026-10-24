@@ -36,7 +36,7 @@ describe('OverviewService — each part is its route’s own service call', () =
       ),
       getDailySummaries: jest.fn().mockResolvedValue(marker('daily')),
     };
-    const toolCalls = { list: jest.fn().mockResolvedValue(marker('calls')) };
+    const toolCalls = { listPaid: jest.fn().mockResolvedValue(marker('calls')) };
     const refunds = { ofCalls: jest.fn().mockResolvedValue(new Map()) };
     const notifications = { list: jest.fn().mockResolvedValue(marker('notifications')) };
     const service = new OverviewService(
@@ -93,7 +93,7 @@ describe('OverviewService — each part is its route’s own service call', () =
       to: '2026-10-21T00:00:00.000Z',
       groupBy: ReceiptsSummaryGroupBy.TOOL,
     });
-    const [org, calls, check] = parts.toolCalls.list.mock.calls[0];
+    const [org, calls, check] = parts.toolCalls.listPaid.mock.calls[0];
     expect(org).toBe(ORG);
     expect(calls).toEqual(
       plainToInstance(ListToolCallsQueryDto, { limit: '6', sort: 'createdAt', order: 'desc' }),
@@ -141,7 +141,7 @@ describe('OverviewService — each part is its route’s own service call', () =
   it('takes the limits it is given', async () => {
     const parts = build();
     await parts.service.get(ORG, query({ at: AT, callsLimit: '2', alertsLimit: '9' }));
-    expect(parts.toolCalls.list.mock.calls[0][1]).toMatchObject({ limit: 2 });
+    expect(parts.toolCalls.listPaid.mock.calls[0][1]).toMatchObject({ limit: 2 });
     expect(parts.notifications.list.mock.calls[0][1]).toMatchObject({ limit: 9 });
   });
 

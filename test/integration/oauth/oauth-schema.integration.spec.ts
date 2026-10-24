@@ -89,18 +89,18 @@ describe('OAuth schema — real migrations', () => {
     organizationId?: string;
     agentId?: string;
     issuedVia?: string;
-    prefix?: string | null;
+    tokenLast4?: string | null;
     tokenHash?: string | null;
     oauthClientId?: string | null;
     expiresAt?: Date | null;
     revokedAt?: Date | null;
   }): Promise<string> {
-    const columns = ['organization_id', 'agent_id', 'name', 'prefix', 'token_hash'];
+    const columns = ['organization_id', 'agent_id', 'name', 'token_last4', 'token_hash'];
     const values: unknown[] = [
       row.organizationId ?? ORGANIZATION,
       row.agentId ?? randomUUID(),
       'test credential',
-      row.prefix === undefined ? 'assay_sk_live_ab' : row.prefix,
+      row.tokenLast4 === undefined ? '2fds' : row.tokenLast4,
       row.tokenHash === undefined ? digest(randomUUID()) : row.tokenHash,
     ];
     if (row.issuedVia !== undefined) {
@@ -140,7 +140,7 @@ describe('OAuth schema — real migrations', () => {
     return insertCredential({
       ...row,
       issuedVia: 'OAUTH',
-      prefix: null,
+      tokenLast4: null,
       tokenHash: null,
       oauthClientId: clientId,
     });
@@ -153,19 +153,39 @@ describe('OAuth schema — real migrations', () => {
     ).rejects.toMatchObject({ constraint: 'ck_agent_credentials_issued_via' });
   });
 
-  it('refuses an OAUTH row with a token_hash or prefix', async () => {
+  it('refuses an OAUTH row with a token_hash or token_last4', async () => {
     const client = await insertClient();
     await expect(
-      insertCredential({ issuedVia: 'OAUTH', prefix: null, oauthClientId: client.id }),
+      insertCredential({ issuedVia: 'OAUTH', tokenLast4: null, oauthClientId: client.id }),
     ).rejects.toMatchObject({ constraint: 'ck_agent_credentials_issued_via' });
     await expect(
       insertCredential({ issuedVia: 'OAUTH', tokenHash: null, oauthClientId: client.id }),
     ).rejects.toMatchObject({ constraint: 'ck_agent_credentials_issued_via' });
   });
 
+  it('keeps at most the last 4 characters of an API key in clear, and no prefix', async () => {
+    await expect(insertCredential({ tokenLast4: 'abcde' })).rejects.toMatchObject({
+      code: '22001',
+    });
+    await expect(insertCredential({ tokenLast4: 'abc' })).rejects.toMatchObject({
+      constraint: 'ck_agent_credentials_token_last4',
+    });
+    // A key created before the column has no hint.
+    await expect(insertCredential({ tokenLast4: null })).resolves.toEqual(expect.any(String));
+    const columns = (await dataSource.query(
+      `SELECT "column_name" FROM information_schema.columns WHERE "table_name" = 'agent_credentials'`,
+    )) as { column_name: string }[];
+    expect(columns.map((c) => c.column_name)).not.toContain('prefix');
+  });
+
   it('refuses an OAUTH row without oauth_client_id', async () => {
     await expect(
-      insertCredential({ issuedVia: 'OAUTH', prefix: null, tokenHash: null, oauthClientId: null }),
+      insertCredential({
+        issuedVia: 'OAUTH',
+        tokenLast4: null,
+        tokenHash: null,
+        oauthClientId: null,
+      }),
     ).rejects.toMatchObject({ constraint: 'ck_agent_credentials_issued_via' });
   });
 
@@ -217,7 +237,7 @@ describe('OAuth schema — real migrations', () => {
     expect(row).toMatchObject({
       issuedVia: 'OAUTH',
       oauthClientId: client.id,
-      prefix: null,
+      tokenLast4: null,
       tokenHash: null,
     });
   });

@@ -7,8 +7,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * cursor had already passed when the table was created. Without it, records
  * proposed before the table existed would never be reaped or attributed.
  */
-export class EvmSlashRecordsBackfill1762400000080 implements MigrationInterface {
-  name = 'EvmSlashRecordsBackfill1762400000080';
+export class EvmSlashRecordsBackfill1762400000100 implements MigrationInterface {
+  name = 'EvmSlashRecordsBackfill1762400000100';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

@@ -20,6 +20,25 @@ import { OperatorErrorCode, OperatorErrors } from '../errors/operator.errors';
 import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
 import { OperatorService } from './operator.service';
 
+/**
+ * Who may approve a queued action whose register row names no approver roles
+ * (none does today; a test keeps it that way). These are the roles the approve
+ * route admitted before `POLA` was added for the policy rows, so the narrow
+ * policy role can never approve outside the rows that name it (BUG-OPS-CORE-01).
+ */
+export const DEFAULT_APPROVER_ROLES: readonly OperatorRole[] = Object.freeze([
+  OperatorRole.ADJ,
+  OperatorRole.ADJL,
+  OperatorRole.TRE,
+  OperatorRole.OPS_ADMIN,
+]);
+
+/** The same fallback for turning down someone else's request (the reject route's old roles). */
+export const DEFAULT_REJECTER_ROLES: readonly OperatorRole[] = Object.freeze([
+  ...DEFAULT_APPROVER_ROLES,
+  OperatorRole.SRE,
+]);
+
 /** How long a queued action waits for its second person. */
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -228,14 +247,7 @@ export class OperatorApprovalService {
     const handler = this.handlerFor(row);
     // Cheap and early; the register checks it again, with the limit, inside
     // the action.
-    const definition = lookupOverride(handler.code);
-    if (definition && !approverRolesSatisfy(definition, approver.roles as OperatorRole[])) {
-      throw OperatorErrors.approverRoleRequired({
-        code: handler.code,
-        required: definition.approverRoles,
-        held: approver.roles,
-      });
-    }
+    this.assertMayDecide(handler.code, approver, DEFAULT_APPROVER_ROLES);
 
     const requester = this.directory.sessionOf(await this.directory.requireActive(row.requestedBy));
     const result = await handler.run(
@@ -258,15 +270,7 @@ export class OperatorApprovalService {
     if (row.status !== 'PENDING') throw OperatorErrors.approvalNotPending({ status: row.status });
 
     if (row.requestedBy !== operator.operatorId) {
-      const handler = this.handlerFor(row);
-      const definition = lookupOverride(handler.code);
-      if (definition && !approverRolesSatisfy(definition, operator.roles as OperatorRole[])) {
-        throw OperatorErrors.approverRoleRequired({
-          code: handler.code,
-          required: definition.approverRoles,
-          held: operator.roles,
-        });
-      }
+      this.assertMayDecide(this.handlerFor(row).code, operator, DEFAULT_REJECTER_ROLES);
     }
 
     if (!(await this.approvals.markRejected(id, operator.operatorId))) {
@@ -274,6 +278,33 @@ export class OperatorApprovalService {
       throw OperatorErrors.approvalNotPending({ status: now.status });
     }
     return { approval: (await this.toDtos([await this.require(id)]))[0] };
+  }
+
+  /**
+   * The second person must hold one of the row's `approverRoles`. A row that
+   * names none (or a code the register does not know) falls back to
+   * `fallback`, never to "any operator": the route admits `POL`/`POLA` for the
+   * policy rows, and they must not reach anything else through this door.
+   */
+  private assertMayDecide(
+    code: string,
+    operator: OperatorSession,
+    fallback: readonly OperatorRole[],
+  ): void {
+    const held = operator.roles as OperatorRole[];
+    const definition = lookupOverride(code);
+    const named = definition?.approverRoles;
+    const allowed =
+      definition && named
+        ? approverRolesSatisfy(definition, held)
+        : fallback.some((role) => held.includes(role));
+    if (!allowed) {
+      throw OperatorErrors.approverRoleRequired({
+        code,
+        required: named ?? fallback,
+        held: operator.roles,
+      });
+    }
   }
 
   private handlerFor(row: OperatorApprovalEntity): ApprovalHandler {

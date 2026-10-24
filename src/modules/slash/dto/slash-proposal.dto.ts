@@ -1,5 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsUUID } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { TransformToArray } from '@decorators/transform-to-array.decorator';
+import { ListQueryDto } from '@shared/api';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
@@ -15,6 +18,33 @@ export enum SlashProposalSource {
 }
 
 export { ArbitrationOutcome, DisputeClaimType, ResolutionKind, SlashProposalStatus };
+
+/**
+ * `GET /providers/me/slash-proposals` (BUG-DEMO-03): the provider's proposals
+ * as Assay records them, including those not yet on chain, which a list read
+ * from the chain cannot show.
+ */
+export class ListSlashProposalsQueryDto extends ListQueryDto {
+  @ApiPropertyOptional({
+    description:
+      '`false`: only proposals not yet on chain (`clocks.chainStatus` NONE or PROPOSING); ' +
+      '`true`: only those with an on-chain record. Absent: both',
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  })
+  onChain?: boolean;
+
+  @ApiPropertyOptional({ enum: SlashProposalStatus, isArray: true })
+  @IsOptional()
+  @IsEnum(SlashProposalStatus, { each: true })
+  @TransformToArray()
+  status?: SlashProposalStatus[];
+}
 
 export class SlashProposalIdParamsDto {
   @ApiProperty({ description: 'The slash proposal id' })

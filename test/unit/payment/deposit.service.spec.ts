@@ -1,3 +1,6 @@
+import { DEPOSIT_PAYMENT_SCHEMES } from '@modules/payment/domain/deposit-wire';
+import { EVM_PAYMENT_SCHEME } from '@modules/chains/evm/evm-chain.adapter';
+import { SOLANA_PAYMENT_SCHEME } from '@modules/chains/solana/solana.constants';
 import { TxRef } from '@modules/chains/ports/x402.types';
 import { X402_INVALID_REASON } from '@modules/chains/facilitator/facilitator.wire';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -631,6 +634,41 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
   });
 
+  it('a scheme other than exact: PAYMENT_UNSUPPORTED_SCHEME before the payload is decoded (BUG-BUY-MONEY-05)', async () => {
+    const adapter = fakeChainAdapter();
+    const facilitator = fakeFacilitator();
+    const harness = buildHarness({ adapter, facilitator });
+    const intent = await createdIntent(harness);
+
+    await expectErrorCodeAsync(
+      () =>
+        harness.service.settleDeposit(ORGANIZATION_ID, intent.id, {
+          ...dummyPayload(),
+          scheme: 'upto',
+        }),
+      PaymentErrorCode.PAYMENT_UNSUPPORTED_SCHEME,
+    );
+    expect(adapter.assertPayloadBoundToIntent).not.toHaveBeenCalled();
+    expect(facilitator.verify).not.toHaveBeenCalled();
+    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    expect(after.status).toBe(DepositIntentStatus.CREATED);
+  });
+
+  it('the exact scheme still reaches the network and payload check', async () => {
+    const adapter = fakeChainAdapter({
+      assertPayloadBoundToIntent: jest.fn().mockImplementation(() => {
+        throw ChainErrors.payloadNotBoundToIntent({ intentId: 'x', reason: 'checked' });
+      }),
+    });
+    const harness = buildHarness({ adapter });
+    const intent = await createdIntent(harness);
+
+    await expectErrorCodeAsync(
+      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
+    );
+  });
+
   it('memo missing: the adapter refuses binding before the facilitator is ever called', async () => {
     const adapter = fakeChainAdapter({
       assertPayloadBoundToIntent: jest.fn().mockImplementation(() => {
@@ -1017,3 +1055,12 @@ function dummyPayload() {
     payload: { transaction: 'ZmFrZQ==' },
   };
 }
+
+describe('DEPOSIT_PAYMENT_SCHEMES', () => {
+  it('is the schemes the deposit adapters quote, and nothing else', () => {
+    expect([...DEPOSIT_PAYMENT_SCHEMES].sort()).toEqual(
+      [...new Set([SOLANA_PAYMENT_SCHEME, EVM_PAYMENT_SCHEME])].sort(),
+    );
+    expect(DEPOSIT_PAYMENT_SCHEMES.has('upto')).toBe(false);
+  });
+});

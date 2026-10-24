@@ -598,6 +598,8 @@ describe('OAuth consent API — real database and Redis', () => {
       },
       returnTo: { kind: 'LOCAL_APP', display: 'an app on this computer' },
       scope: ['assay:agent', 'offline_access'],
+      // A third-party client's grant: free tool calls only (H2).
+      grantedScopes: ['tools:call'],
       agents: [
         {
           id: PERSON_A,
@@ -780,7 +782,7 @@ describe('OAuth consent API — real database and Redis', () => {
       await deny(rid, token),
     ]) {
       expect(response.status).toBe(403);
-      expect(response.body.error.code).toBe('AUTH_ORGANIZATION_SUSPENDED');
+      expect(response.body.error.code).toBe('ACCOUNT_BLOCKED');
     }
     expect((await store.take(rid))?.approval).toBeNull();
   });

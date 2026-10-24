@@ -254,6 +254,18 @@ describe('assertRelayableEndpoint', () => {
       }),
     );
   });
+  it("refuses one of Assay's own hosts, with the relay on or off", () => {
+    for (const endpoint of ['https://api.goassay.ai/x', 'https://GOASSAY.AI./x']) {
+      for (const relay of [true, false]) {
+        expect(() => assertRelayableEndpoint(endpoint, relay)).toThrow(
+          expect.objectContaining({
+            errorCode: ProviderErrorCode.PROVIDER_ENDPOINT_HOST_NOT_ALLOWED,
+          }),
+        );
+      }
+    }
+    expect(() => assertRelayableEndpoint('https://goassay.ai.example.com/x', true)).not.toThrow();
+  });
   it('accepts an https host name, and anything with the relay off', () => {
     expect(() => assertRelayableEndpoint('https://p.test:8443/x', true)).not.toThrow();
     expect(() => assertRelayableEndpoint('http://10.0.0.1:3000/x', false)).not.toThrow();

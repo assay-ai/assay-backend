@@ -17,6 +17,8 @@ export { encodeCursor, decodeCursor } from './cursor';
 export type { CursorPosition, DecodedCursor } from './cursor';
 export {
   paginate,
+  fetchKeysetRows,
+  mergeKeysetPages,
   toPage,
   resolveSort,
   applyTimeWindow,

@@ -8,6 +8,7 @@ import {
   RENAME_HANDLE_APPROVAL_ACTION,
 } from '@modules/operator/services/operator-moderation.service';
 import { TakedownReasonCode } from '@modules/toolset/domain/takedown-reason';
+import { ToolsetErrors } from '@modules/toolset/errors/toolset.errors';
 import { CutoffAction } from '@modules/toolset/services/toolset-moderation.service';
 
 const OPERATOR: OperatorSession = {
@@ -31,11 +32,12 @@ describe('OperatorModerationService', () => {
     },
   ) {
     const performed: { code: string; escalate?: boolean; organizationId: string | null }[] = [];
+    const afters: { code: string; after: unknown }[] = [];
     const overrides = {
       perform: jest.fn(
         async (
           context: Record<string, unknown>,
-          mutation: (runner: unknown) => Promise<{ value: unknown }>,
+          mutation: (runner: unknown) => Promise<{ value: unknown; after?: unknown }>,
         ) => {
           // The register refuses a two-person occurrence without an approver.
           if (
@@ -49,7 +51,9 @@ describe('OperatorModerationService', () => {
             escalate: context.escalateToTwoPerson as boolean | undefined,
             organizationId: context.organizationId as string | null,
           });
-          return (await mutation({ manager: {} })).value;
+          const result = await mutation({ manager: {} });
+          afters.push({ code: context.code as string, after: result.after });
+          return result.value;
         },
       ),
     };
@@ -87,6 +91,7 @@ describe('OperatorModerationService', () => {
       revert: jest.fn(async () => row),
       renameHandle: jest.fn(async () => ({ organizationId: 'org-1', aliasUntil: new Date() })),
       reassignHandle: jest.fn(async () => ({ fromOrganizationId: 'org-1' })),
+      assertHandleTargetsExist: jest.fn(async () => undefined),
       resolveReport: jest.fn(),
       relist: jest.fn(),
       afterCommit: jest.fn(async () => undefined),
@@ -100,10 +105,18 @@ describe('OperatorModerationService', () => {
       {
         findAnyById: async () => ({ id: 't1', ownerOrgId: 'org-1', visibility: 'PUBLIC' }),
       } as never,
-      { findOneBy: async () => cutoff } as never,
+      {
+        findOneBy: async () => cutoff,
+        manager: {
+          find: async (entity: { name: string }) =>
+            entity.name === 'ToolEntity'
+              ? [{ id: 'tool-1', name: 'acme__search_posts' }]
+              : [{ id: 't1', name: 'Acme kit' }],
+        },
+      } as never,
       { findOneBy: async () => null } as never,
     );
-    return { service, performed, queued, moderation, approvals };
+    return { service, performed, afters, queued, moderation, approvals };
   }
 
   it('registers its three two-person actions with the approvals queue', () => {
@@ -149,6 +162,48 @@ describe('OperatorModerationService', () => {
     expect(moderation.renameHandle).toHaveBeenCalled();
   });
 
+  it.each([
+    ['rename', ToolsetErrors.handleNotFound()],
+    ['reassign', ToolsetErrors.handleNotFound()],
+    ['reassign', ToolsetErrors.organizationNotFound()],
+  ] as const)(
+    'refuses a %s naming a target that does not exist before queueing (BUG-OPS-MARKET-02)',
+    async (kind, refusal) => {
+      const { service, queued, moderation } = build();
+      moderation.assertHandleTargetsExist.mockRejectedValueOnce(refusal);
+      const attempt =
+        kind === 'rename'
+          ? service.renameHandle(OPERATOR, 'no-such-handle', { ...BODY, newHandle: 'x-y' }, null)
+          : service.reassignHandle(
+              OPERATOR,
+              'no-such-handle',
+              { ...BODY, toOrganizationId: '00000000-0000-4000-8000-000000000000' },
+              null,
+            );
+      await expect(attempt).rejects.toMatchObject({
+        errorCode: refusal.errorCode,
+        statusCode: 404,
+      });
+      expect(queued).toEqual([]);
+    },
+  );
+
+  it('checks the handle and the target organization of a reassign, then queues it', async () => {
+    const { service, queued, moderation } = build();
+    const result = await service.reassignHandle(
+      OPERATOR,
+      'acme',
+      { ...BODY, toOrganizationId: '00000000-0000-4000-8000-000000000001' },
+      null,
+    );
+    expect(moderation.assertHandleTargetsExist).toHaveBeenCalledWith(
+      'acme',
+      '00000000-0000-4000-8000-000000000001',
+    );
+    expect(result).toMatchObject({ status: 'PENDING' });
+    expect(queued).toEqual(['handle.reassign']);
+  });
+
   it('rejects a pending cutoff with one operator, but lifting a confirmed one waits for two', async () => {
     const pending = build();
     await pending.service.revertCutoff(OPERATOR, 'c1', BODY, null);
@@ -164,6 +219,27 @@ describe('OperatorModerationService', () => {
     expect(result).toMatchObject({ status: 'PENDING' });
     expect(confirmed.queued).toEqual([LIFT_CUTOFF_APPROVAL_ACTION]);
     expect(confirmed.moderation.revert).not.toHaveBeenCalled();
+  });
+
+  it('names what the cutoff took down on the confirm and revert entries (BUG-OPS-MARKET-04)', async () => {
+    const { service, afters } = build({
+      id: 'c1',
+      confirmedAt: null,
+      targetType: 'TOOL',
+      targetId: 'tool-1',
+    });
+    (service as unknown as { cutoffs: { query: unknown } }).cutoffs.query = async () => [];
+    await service.confirmCutoff(OPERATOR, 'c1', BODY, null);
+    await service.revertCutoff(OPERATOR, 'c1', BODY, null);
+    const target = {
+      cutoffTargetType: 'TOOL',
+      cutoffTargetId: 'tool-1',
+      name: 'acme__search_posts',
+    };
+    expect(afters).toEqual([
+      { code: 'A-18', after: { confirmed: true, ...target } },
+      { code: 'A-19', after: { reverted: true, ...target } },
+    ]);
   });
 
   it('lists cutoffs with each target’s name, filtered by targetType', async () => {
