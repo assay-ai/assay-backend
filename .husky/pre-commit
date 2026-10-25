@@ -1,1 +1,2 @@
+sh scripts/check-commit-utc.sh commit
 npx --no -- lint-staged
