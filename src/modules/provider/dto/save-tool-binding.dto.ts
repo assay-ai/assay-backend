@@ -140,6 +140,7 @@ export class SaveToolBindingBodyDto {
   })
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayMaxSize(64)
   @IsString({ each: true })
   @Matches(CHAIN_ID_RE, {
     each: true,
@@ -337,6 +338,7 @@ export class UpdateToolBindingBodyDto {
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayMaxSize(64)
   @IsString({ each: true })
   @Matches(CHAIN_ID_RE, {
     each: true,
