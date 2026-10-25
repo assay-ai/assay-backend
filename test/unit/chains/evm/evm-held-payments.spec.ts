@@ -26,16 +26,30 @@ function build(
     live?: boolean;
     simulateRevert?: boolean;
     logs?: readonly unknown[];
+    estimate?: bigint | Error;
+    simulateError?: Error;
   } = {},
 ) {
-  const reads: Array<{ functionName: string; args: readonly unknown[]; account?: string }> = [];
-  const sent: Array<{ data: `0x${string}`; to: string; boundQueueWait?: boolean }> = [];
+  const reads: Array<{
+    functionName: string;
+    args: readonly unknown[];
+    account?: string;
+    gas?: bigint;
+  }> = [];
+  const sent: Array<{
+    data: `0x${string}`;
+    to: string;
+    boundQueueWait?: boolean;
+    gasLimit?: bigint;
+  }> = [];
   const revert = Object.assign(new Error('reverted'), { name: 'ContractFunctionRevertedError' });
+  const estimates: Array<{ functionName: string; account?: string }> = [];
   const client = {
     readContract: jest.fn(
       (args: { functionName: string; args: readonly unknown[]; account?: string }) => {
         reads.push(args);
         if (args.account) {
+          if (options.simulateError) return Promise.reject(options.simulateError);
           return options.simulateRevert ? Promise.reject(revert) : Promise.resolve(undefined);
         }
         return readResult instanceof Error
@@ -44,6 +58,11 @@ function build(
       },
     ),
     multicall: jest.fn(),
+    estimateContractGas: jest.fn((args: { functionName: string; account?: string }) => {
+      estimates.push(args);
+      const estimate = options.estimate ?? 100_000n;
+      return estimate instanceof Error ? Promise.reject(estimate) : Promise.resolve(estimate);
+    }),
     getTransactionReceipt: jest.fn(() => Promise.resolve(options.receipt ?? null)),
     getBlockNumber: jest.fn(() => Promise.resolve(100_000n)),
     getLogs: jest.fn(() => Promise.resolve(options.logs ?? [])),
@@ -61,7 +80,7 @@ function build(
     redeemer as never,
     options.live ? new Set([CHAIN]) : new Set(),
   );
-  return { service, reads, sent };
+  return { service, reads, sent, estimates };
 }
 
 function log(eventName: string, args: Record<string, unknown>, address: string = ESCROW) {
@@ -158,6 +177,85 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
       name: 'HeldSendRefusedError',
     });
     expect(sent).toEqual([]);
+  });
+
+  describe('gas limit (BUG-PROD-COLLECT-01)', () => {
+    const one = [{ payer: PAYER, seq: '1' }];
+    const three = [
+      { payer: PAYER, seq: '1' },
+      { payer: PAYER, seq: '2' },
+      { payer: PAYER, seq: '3' },
+    ];
+    const simulated = (reads: Array<{ account?: string; gas?: bigint }>) =>
+      reads.filter((read) => read.account).map((read) => read.gas);
+
+    it('sends with the estimate x 1.25, and pre-checks with the same limit', async () => {
+      const { service, sent, reads, estimates } = build(null, { estimate: 133_696n });
+      await service.collect(ASSET, one);
+      expect(estimates).toEqual([
+        expect.objectContaining({
+          functionName: 'collectHeld',
+          account: '0x5555555555555555555555555555555555555555',
+        }),
+      ]);
+      expect(sent[0].gasLimit).toBe(167_120n);
+      expect(simulated(reads)).toEqual([167_120n]);
+    });
+
+    it('caps the padded estimate at the ceiling (400k for one move)', async () => {
+      const { service, sent } = build(null, { estimate: 1_000_000n });
+      await service.refund(ASSET, one);
+      expect(sent[0].gasLimit).toBe(400_000n);
+    });
+
+    it('falls back to 180k when the estimate fails', async () => {
+      const { service, sent, reads } = build(null, { estimate: new Error('code 3') });
+      await service.collect(ASSET, one);
+      expect(sent[0].gasLimit).toBe(180_000n);
+      expect(simulated(reads)).toEqual([180_000n]);
+    });
+
+    it('scales a batch: fallback 180k + 60k each, ceiling 400k + 120k each', async () => {
+      const failed = build(null, { estimate: new Error('outage') });
+      await failed.service.collect(ASSET, three);
+      expect(failed.sent[0].gasLimit).toBe(300_000n);
+
+      const capped = build(null, { estimate: 2_000_000n });
+      await capped.service.collect(ASSET, three);
+      expect(capped.sent[0].gasLimit).toBe(640_000n);
+
+      const padded = build(null, { estimate: 167_287n });
+      await padded.service.collect(ASSET, three);
+      expect(padded.sent[0].gasLimit).toBe(209_109n);
+    });
+
+    it('names an empty revert as out of gas, with the limit and the estimate', async () => {
+      const empty = Object.assign(new Error('EVM RPC eth_call failed: code 3'), {
+        name: 'ContractFunctionRevertedError',
+      });
+      const withEstimate = build(null, { estimate: 100_000n, simulateError: empty });
+      await expect(withEstimate.service.collect(ASSET, one)).rejects.toMatchObject({
+        name: 'HeldSendRefusedError',
+        message: 'held send refused: out of gas at limit 125000 (estimate 100000)',
+      });
+      expect(withEstimate.sent).toEqual([]);
+
+      const noEstimate = build(null, { estimate: new Error('code 3'), simulateError: empty });
+      await expect(noEstimate.service.collect(ASSET, one)).rejects.toMatchObject({
+        message: 'held send refused: out of gas at limit 180000 (estimate failed)',
+      });
+    });
+
+    it('keeps the contract reason when the revert carries data', async () => {
+      const guarded = Object.assign(new Error('HeldNotYetCollectable'), {
+        name: 'ContractFunctionRevertedError',
+        signature: '0x3e5b55ad',
+      });
+      const { service } = build(null, { simulateError: guarded });
+      await expect(service.collect(ASSET, one)).rejects.toMatchObject({
+        message: 'held send refused: HeldNotYetCollectable',
+      });
+    });
   });
 
   describe('classifyRedemption — from the receipt (review P0-1)', () => {

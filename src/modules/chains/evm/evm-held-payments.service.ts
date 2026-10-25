@@ -24,9 +24,45 @@ import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import { isRevert } from './evm-voucher-authority';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
 
-/** Gas for one held move, and for each further one in a batch. */
-const HELD_BASE_GAS = 120_000n;
+/**
+ * The gas a held move is sent with is `eth_estimateGas` x 1.25, capped. When the
+ * estimate fails, a fixed limit: 180k for one move (a single collect uses ~109k
+ * warm, ~126.5k when the treasury or the provider holds 0, ~144k when both do;
+ * BUG-PROD-COLLECT-01), plus 60k for each further one in a batch.
+ */
+const HELD_FALLBACK_BASE_GAS = 180_000n;
 const HELD_PER_ITEM_GAS = 60_000n;
+/** The most a held move is sent with, whatever the estimate says. */
+const HELD_MAX_BASE_GAS = 400_000n;
+const HELD_MAX_PER_ITEM_GAS = 120_000n;
+/** The headroom over the estimate, as a ratio (125 / 100). */
+const HELD_ESTIMATE_NUM = 125n;
+const HELD_ESTIMATE_DEN = 100n;
+
+/** The gas estimate this needs beyond `EvmReaderClient`. */
+interface EstimateClient {
+  estimateContractGas(args: {
+    address: `0x${string}`;
+    abi: unknown;
+    functionName: string;
+    args: readonly unknown[];
+    account: `0x${string}`;
+  }): Promise<bigint>;
+}
+
+/** Whether a revert carried any return data (an out-of-gas revert carries none). */
+function hasRevertData(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    const node = current as { data?: unknown; raw?: unknown; signature?: unknown };
+    if (typeof node.raw === 'string' && node.raw.length > 2) return true;
+    if (typeof node.data === 'string' && node.data.length > 2) return true;
+    if (node.data !== null && typeof node.data === 'object') return true;
+    if (typeof node.signature === 'string' && node.signature.length > 2) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 /** The receipt reads this needs beyond `EvmReaderClient`. */
 interface ReceiptClient {
@@ -295,29 +331,44 @@ export class EvmHeldPayments implements HeldPaymentsPort {
             functionName: batch,
             args: [payers, seqs],
           });
-    const gasLimit = HELD_BASE_GAS + HELD_PER_ITEM_GAS * BigInt(keys.length - 1);
+    const functionName = keys.length === 1 ? single : batch;
+    const args = keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs];
+    const escrow = getAddress(this.deployment(chainId).escrow);
+    const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
+    const { gasLimit, estimate } = await this.gasFor(chainId, keys.length, {
+      address: escrow,
+      abi: ASSAY_ESCROW_HOLD_ABI,
+      functionName,
+      args,
+      account: sender,
+    });
     // `eth_call` first, as the redeemer, with the gas it will be sent with: a
     // refusal (pause, blocklist, wrong status, timing) costs nothing.
-    const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
     try {
       await this.client(chainId).readContract({
-        address: getAddress(this.deployment(chainId).escrow),
+        address: escrow,
         abi: ASSAY_ESCROW_HOLD_ABI,
-        functionName: keys.length === 1 ? single : batch,
-        args: keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs],
+        functionName,
+        args,
         account: sender,
         gas: gasLimit,
       } as Parameters<EvmReaderClient['readContract']>[0]);
     } catch (error) {
-      if (isRevert(error)) throw new HeldSendRefusedError((error as Error).message.slice(0, 200));
+      if (isRevert(error)) {
+        throw new HeldSendRefusedError(
+          hasRevertData(error)
+            ? (error as Error).message.slice(0, 200)
+            : `out of gas at limit ${gasLimit} (estimate ${estimate ?? 'failed'})`,
+        );
+      }
       throw error;
     }
     const result = await this.redeemer.sendCall({
       chainId,
-      to: toAccountId(chainId, getAddress(this.deployment(chainId).escrow)),
+      to: toAccountId(chainId, escrow),
       data,
       gasLimit,
-      purpose: `${keys.length === 1 ? single : batch} n=${keys.length}`,
+      purpose: `${functionName} n=${keys.length}`,
       // Never queue long behind the redemptions on the shared redeemer key:
       // give the send up, unsent, and let the next pass retry it.
       boundQueueWait: true,
@@ -328,6 +379,30 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       });
     }
     return { txRef: result.hash };
+  }
+
+  /** `eth_estimateGas` x 1.25, capped; the fixed fallback when the estimate fails. */
+  private async gasFor(
+    chainId: ChainId,
+    count: number,
+    call: Parameters<EstimateClient['estimateContractGas']>[0],
+  ): Promise<{ gasLimit: bigint; estimate: bigint | null }> {
+    const extra = BigInt(count - 1);
+    const client = this.client(chainId) as unknown as Partial<EstimateClient>;
+    let estimate: bigint | null = null;
+    try {
+      if (typeof client.estimateContractGas === 'function') {
+        estimate = BigInt(await client.estimateContractGas(call));
+      }
+    } catch {
+      // A refusal or an outage: the fixed limit, and the pre-check says why.
+    }
+    if (estimate === null || estimate <= 0n) {
+      return { gasLimit: HELD_FALLBACK_BASE_GAS + HELD_PER_ITEM_GAS * extra, estimate: null };
+    }
+    const ceiling = HELD_MAX_BASE_GAS + HELD_MAX_PER_ITEM_GAS * extra;
+    const padded = (estimate * HELD_ESTIMATE_NUM + HELD_ESTIMATE_DEN - 1n) / HELD_ESTIMATE_DEN;
+    return { gasLimit: padded < ceiling ? padded : ceiling, estimate };
   }
 
   private client(chainId: ChainId): EvmReaderClient {
