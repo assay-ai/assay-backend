@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
-import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId, ChainNamespace } from '@modules/chains/ports/caip.types';
 import { FACILITATOR_PORT, FacilitatorPort } from '@modules/chains/ports/facilitator.port';
 import { Money } from '@modules/chains/ports/money.types';
 import { ChainAdapter } from '@modules/chains/ports/chain-adapter.port';
@@ -317,6 +317,14 @@ export class DepositService {
     if (adapter.requiresFeePayer) {
       throw PaymentErrors.depositBroadcastUnsupported({ chainId: intent.chainId });
     }
+
+    // One transaction, one spelling. An EVM hash is case-insensitive hex — the
+    // node returns the same receipt for `0xabc…` and `0xABC…` — but the claim
+    // lookup and both single-use indexes compare `chain_tx_ref` byte for byte.
+    // Left raw, every case variant of one real deposit passed all three and was
+    // credited again. Canonicalize before anything reads or writes the hash.
+    // Only EVM: a Solana signature is base58, where case is significant.
+    transaction = canonicalTxRef(adapter, transaction);
 
     const claimed = await this.deposits.findByChainTxRef(organizationId, transaction);
     if (claimed && claimed.id !== intent.id) {
@@ -683,6 +691,13 @@ function describe(error: unknown): string {
 /** Bounded wait between chain reads. Local so this file adds no dependency. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The single stored form of a transaction reference: lowercase hex on EVM, untouched elsewhere. */
+function canonicalTxRef(adapter: ChainAdapter, transaction: TxRef): TxRef {
+  return adapter.namespace === ChainNamespace.EIP155
+    ? (transaction.toLowerCase() as TxRef)
+    : transaction;
 }
 
 /** Postgres `23505`, whatever driver wrapper it arrives inside — same check the rest of the codebase uses. */
