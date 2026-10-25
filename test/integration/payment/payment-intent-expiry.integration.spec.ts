@@ -240,6 +240,42 @@ describe('payment intent expiry sweep — holds always expire in the agent’s f
     expect(await context.held(secured.agentAccount)).toBe(0n);
   });
 
+  /**
+   * The same crash window on the void edge: `resolve()` commits
+   * PROVIDER_EXECUTING → VOIDED, then dies before `releaseHold`. VOIDED is
+   * terminal and no other pass reads it, so only the repair pass can return it.
+   */
+  it('repairs an intent voided by a caller that died before releasing the hold', async () => {
+    const secured = await overdueSecuredIntent('void-repair');
+    await context.intents.transition(
+      context.organizationId,
+      secured.id,
+      PaymentIntentStatus.FUNDS_SECURED,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+    );
+    await context.intents.transition(
+      context.organizationId,
+      secured.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VOIDED,
+      { reason: 'provider error' },
+    );
+    expect(await context.held(secured.agentAccount)).toBe(1_000_000n);
+
+    const report = await context.expiry.sweep();
+
+    expect(report).toMatchObject({ repaired: 1, failed: 0 });
+    const hold = await context.ledger.getHold(context.organizationId, secured.holdId as string);
+    expect(hold.status).toBe(LedgerHoldStatus.RELEASED);
+    expect(await context.available(secured.agentAccount)).toBe(5_000_000n);
+    expect(await context.held(secured.agentAccount)).toBe(0n);
+    const voided = await context.intents.findById(context.organizationId, secured.id);
+    expect(voided.holdReleasedAt).not.toBeNull();
+
+    // Repaired once: the next pass finds nothing left to release.
+    expect(await context.expiry.sweep()).toMatchObject({ repaired: 0 });
+  });
+
   it('sweeps a backlog of overdue intents in one pass', async () => {
     const labels = ['backlog-a', 'backlog-b', 'backlog-c'];
     const secured = [];

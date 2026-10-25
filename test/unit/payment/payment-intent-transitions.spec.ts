@@ -3,6 +3,7 @@ import {
   PAYMENT_INTENT_ALLOWED_TARGETS,
   PAYMENT_INTENT_EXPIRABLE_STATUSES,
   PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES,
+  PAYMENT_INTENT_RELEASED_TERMINAL_STATUSES,
   PAYMENT_INTENT_TERMINAL_STATUSES,
   PAYMENT_INTENT_TRANSITIONS,
   PaymentIntentTrigger,
@@ -269,6 +270,16 @@ describe('payment intent transition table — what the table derives', () => {
       PaymentIntentStatus.EXPIRED,
       PaymentIntentStatus.REFUNDED,
       PaymentIntentStatus.SETTLED,
+      PaymentIntentStatus.VOIDED,
+    ]);
+  });
+
+  // The repair pass releases any OPEN hold left on these: SETTLED must never be
+  // among them (its hold is committed, or on rail B awaits redemption).
+  it('the hold-releasing terminal states are exactly EXPIRED, REFUNDED and VOIDED', () => {
+    expect([...PAYMENT_INTENT_RELEASED_TERMINAL_STATUSES].sort()).toEqual([
+      PaymentIntentStatus.EXPIRED,
+      PaymentIntentStatus.REFUNDED,
       PaymentIntentStatus.VOIDED,
     ]);
   });

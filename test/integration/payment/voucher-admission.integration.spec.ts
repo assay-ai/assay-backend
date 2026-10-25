@@ -6,6 +6,7 @@ import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
+import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { computeRequestHash } from '@modules/payment/domain/request-hash';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
@@ -240,6 +241,24 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
 
     expect(admitted).toHaveLength(2);
     expect(refused).toEqual(Array(3).fill(PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED));
+  });
+
+  /**
+   * The escrow's own balance, under the same lock. After a withdrawal the
+   * ledger mirror still says 100 (it is never reduced by one) while the chain
+   * holds 1.3; the gate in `secureFunds` read the chain outside the lock, so
+   * K concurrent calls each saw the same spendable before any hold existed and
+   * all were served. Now exactly what the escrow covers is admitted.
+   */
+  it('admits only what the escrow balance covers when five vouchers arrive at once', async () => {
+    grant(500_000n, 10_000_000n);
+    const reading = escrow({ balance: usdg(1_300_000n) });
+    const { admitted, refused } = await race(
+      Array.from({ length: 5 }, () => () => input(delegate, 500_000n, reading)),
+    );
+
+    expect(admitted).toHaveLength(2);
+    expect(refused).toEqual(Array(3).fill(LedgerErrorCode.LEDGER_INSUFFICIENT_AVAILABLE_BALANCE));
   });
 
   it("counts a delegate's vouchers against the escrow's window too, and the payer's against neither cap of the delegate", async () => {

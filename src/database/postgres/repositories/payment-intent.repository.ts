@@ -773,6 +773,17 @@ export interface OpenVoucherTotals {
    * `scope.organizationId`.
    */
   readonly debts?: number;
+  /**
+   * The payer's escrow money already promised, read under the lock: every
+   * `OPEN` hold on the account and asset (the predicate
+   * `LedgerHoldRepository.sumOpenByAccount` subtracts), plus the rail-B
+   * vouchers admitted and not yet holding (`CREATED`, no hold, unexpired).
+   * Affordability checked outside the lock let K concurrent calls each see
+   * the same spendable before any of their holds existed, and all be served
+   * against one balance. Not read for a replacement: the debt being re-signed
+   * already holds its own amount.
+   */
+  readonly reserved?: bigint;
 }
 
 /** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
@@ -981,26 +992,30 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Intents already expired whose hold was never released.
+   * Terminal intents whose hold was never released.
    *
-   * The repair half of the sweep. A pass that expires an intent and then dies
-   * before the ledger call lands leaves money reserved for a call that will
-   * never happen, and the intent is no longer in an expirable status, so
-   * `findDueForExpiry` will never look at it again. Without this **nothing**
-   * returns it: the 24-hour hold backstop this comment used to name is
-   * unimplemented, `ledger_holds.expires_at` having no reader anywhere.
+   * The repair half of the sweep. Every edge into `EXPIRED`, `VOIDED` and
+   * `REFUNDED` is a RELEASE edge, and each is written as two steps — the status
+   * move, then `releaseHold`. A process that dies between them leaves money
+   * reserved for a call that is over, and the intent is no longer in a status
+   * any other pass reads: the hold backstop takes in-flight rows only, and
+   * `findClosedWithOpenHold` takes settled rail-B rows only. Without this
+   * **nothing** returns it — rail A's `available` stays short by the price,
+   * and on rail B the open hold keeps reducing spendable forever.
    *
-   * `expiredStatus` is the gate, and it is also the limit: a hold left open by
-   * a *terminal* intent is not `EXPIRED` and is not found here.
+   * Only holds still `OPEN`: a hold another writer already resolved has
+   * nothing to release, and selecting it would retry a row that can never
+   * succeed at the head of every batch.
    */
-  async findExpiredWithUnreleasedHold(
-    expiredStatus: string,
+  async findTerminalWithUnreleasedHold(
+    terminalStatuses: readonly string[],
     limit: number,
   ): Promise<DuePaymentIntent[]> {
     return this.selectSweepCandidates()
-      .where('intent.status = :expiredStatus', { expiredStatus })
-      .andWhere('intent.holdId IS NOT NULL')
+      .innerJoin('ledger_holds', 'hold', 'hold.id = intent.hold_id')
+      .where('intent.status IN (:...terminalStatuses)', { terminalStatuses })
       .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`hold.status = 'OPEN'`)
       .orderBy('intent.expiresAt', 'ASC')
       .limit(limit)
       .getRawMany<DuePaymentIntent>();
@@ -3232,8 +3247,30 @@ async function readVoucherAdmission(
     )) as Array<{ debts: number }>;
     debts = Number(owed?.debts ?? 0);
   }
+  let reserved: bigint | undefined;
+  if (replacing === null) {
+    const [promised] = (await manager.query(
+      `SELECT (
+         (SELECT COALESCE(SUM(h."amount"), 0) FROM "ledger_holds" h
+           WHERE h."account_id" = $1 AND h."asset_id" = $2 AND h."status" = 'OPEN'
+             AND NOT EXISTS (
+               SELECT 1 FROM "payment_intents" i
+                WHERE i."id" = h."intent_id" AND i."organization_id" IS NOT NULL
+                  AND i."rail" = 'RAIL_B_VOUCHER' AND i."held_status" = 'HELD'
+                  AND i."hold_id" = h."id"))
+         +
+         (SELECT COALESCE(SUM("price_amount"), 0) FROM "payment_intents"
+           WHERE "organization_id" IS NOT NULL AND "agent_account" = $1 AND "asset_id" = $2
+             AND "rail" = 'RAIL_B_VOUCHER' AND "status" = 'CREATED' AND "hold_id" IS NULL
+             AND "expires_at" > now())
+       )::text AS "reserved"`,
+      [scope.payer, scope.assetId],
+    )) as Array<{ reserved: string }>;
+    reserved = BigInt(promised?.reserved ?? '0');
+  }
   return {
     debts,
+    reserved,
     escrow: BigInt(totals?.escrow ?? '0'),
     delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
     pausedFor: pause ? Number(pause.paused_for) : null,

@@ -29,6 +29,7 @@ import {
   HoldEffect,
   PAYMENT_INTENT_EXPIRABLE_STATUSES,
   PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES,
+  PAYMENT_INTENT_RELEASED_TERMINAL_STATUSES,
   findPaymentIntentTransition,
 } from '../domain/payment-intent-transitions';
 import { PaymentIntentStatus } from '../ports/payment.types';
@@ -453,8 +454,8 @@ export class PaymentIntentExpiryService {
   }
 
   private async repair(limit: number): Promise<{ repaired: number; repairFailures: number }> {
-    const stranded = await this.intents.findExpiredWithUnreleasedHold(
-      PaymentIntentStatus.EXPIRED,
+    const stranded = await this.intents.findTerminalWithUnreleasedHold(
+      PAYMENT_INTENT_RELEASED_TERMINAL_STATUSES,
       limit,
     );
 
