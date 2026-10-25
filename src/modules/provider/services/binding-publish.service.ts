@@ -318,6 +318,7 @@ export class BindingPublishService {
         outcome: run.outcome as BindingTestOutcome,
         failedLayer: run.failedLayer as BindingTestLayer | null,
         ranAt: run.createdAt,
+        warnings: (run.report?.warnings ?? []).map((warning) => warning.code),
       });
     }
     return byMajor;
@@ -355,6 +356,7 @@ export class BindingPublishService {
       outcome: run.outcome as BindingTestOutcome,
       failedLayer: run.failedLayer as BindingTestLayer | null,
       ranAt: run.createdAt,
+      warnings: (run.report?.warnings ?? []).map((warning) => warning.code),
     };
   }
 

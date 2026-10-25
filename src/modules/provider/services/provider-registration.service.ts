@@ -379,6 +379,8 @@ export class ProviderRegistrationService {
   ): ProviderRegistrationRecordDto {
     return {
       id: provider.id,
+      // The signature audience: bindings carry `providerId === organizationId`.
+      providerId: provider.organizationId,
       legalName: provider.legalName,
       technicalContact: toContactDto(provider.technicalContact),
       ownerContact: toContactDto(provider.ownerContact),

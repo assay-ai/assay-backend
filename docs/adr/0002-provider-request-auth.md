@@ -68,7 +68,22 @@ Every outbound provider request is signed with Ed25519 in the style of RFC 9421,
 `assay`. Covered components in order: `@method`, `@authority`, `@path`, `@query`,
 `content-digest` (only when the request has a body), `x-assay-call-id`. Parameters:
 `created`, `expires` (created + 300 s), `nonce`, `keyid`, `alg="ed25519"`,
-`tag="assay-request"`. The body digest is `Content-Digest: sha-256=:<base64>:`.
+`tag="assay-request"`, `aud="<provider id>"`. The body digest is
+`Content-Digest: sha-256=:<base64>:`.
+
+- **Audience (`aud`).** The provider organization the request is made for — always the
+  calling binding's own `providerId` (= its organization id), never caller-chosen. Without
+  it a signature proved only "Assay sent this": endpoint ownership is never proven, so any
+  provider org could point a binding (a draft, a try run, a test run) at another provider's
+  origin and get requests that provider's verifier accepted. A verifier pins its own id
+  (`provider` option, required since `assay-provider-verify` 0.2) and refuses every other
+  audience (`WRONG_PROVIDER`). It is a parameter, not a covered header, so 0.1 verifiers —
+  which enforce an exact component list but sign the raw `@signature-params` — keep
+  verifying. Providers read their id from `GET /providers/me/registration`
+  (`registration.providerId`); the console's snippet fills it in.
+- **Signed only where it is checked:** `SIGNATURE` and `BOTH` bindings. An `API_KEY` or
+  `NONE` endpoint gains nothing from it, and a reseller's third-party API (called with the
+  reseller's own key) would only receive Assay's headers.
 
 - Keys come from `PROVIDER_REQUEST_SIGNING_KEYS` (`{keyId, secretKey}`), first entry
   signs. Production refuses to start without it.
@@ -93,7 +108,12 @@ Every outbound provider request is signed with Ed25519 in the style of RFC 9421,
 Failures that are the platform's (vault unavailable, signing failure) end a call as
 `PLATFORM_UNAVAILABLE` and never count against the provider's SLA. The endpoint tester
 sends credentialed and signed probes and warns when the endpoint also accepts
-unauthenticated calls.
+unauthenticated calls. On a signature endpoint that refuses an unsigned probe, it also sends
+one signed for a random foreign audience: accepting it (`ACCEPTS_FOREIGN_PROVIDER`) means
+the verifier checks that Assay signed but not for whom. That blocks publishing a
+`SIGNATURE`-only binding (`SIGNATURE_PROVIDER_CHECKED`) — so an org cannot publish a
+binding on someone else's signature-protected origin, and an honest provider is told to
+pin its id. `BOTH` keeps the API key as its lock and is only warned.
 
 ### 5. Removed
 

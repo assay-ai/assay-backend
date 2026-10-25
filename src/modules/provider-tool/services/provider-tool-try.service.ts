@@ -114,7 +114,7 @@ export class ProviderToolTryService {
       const started = Date.now();
       const response = await this.invoker.invoke({
         tool: throwawayTool(),
-        binding: throwawayBinding(organizationId, plan, timeoutMs),
+        binding: throwawayBinding(organizationId, plan, timeoutMs, signed),
         input: {},
         callId,
         timeoutMs,
@@ -218,7 +218,12 @@ function throwawayTool(): Tool {
 }
 
 /** The pasted request as a binding: endpoint = the full URL, every part a constant. */
-function throwawayBinding(organizationId: string, plan: TryPlan, timeoutMs: number): ToolBinding {
+function throwawayBinding(
+  organizationId: string,
+  plan: TryPlan,
+  timeoutMs: number,
+  signed: boolean,
+): ToolBinding {
   const target = new URL(plan.url);
   const endpoint = `${target.origin}${target.pathname}`;
   const query: Record<string, JsonValue> = {};
@@ -238,7 +243,9 @@ function throwawayBinding(organizationId: string, plan: TryPlan, timeoutMs: numb
     },
     responseMapping: {},
     timeoutMs,
-    authMode: BindingAuthMode.NONE,
+    // The invoker signs only a signature-mode binding; the audience is this
+    // organization, so another provider's verifier refuses the try run.
+    authMode: signed ? BindingAuthMode.SIGNATURE : BindingAuthMode.NONE,
   } as unknown as ToolBinding;
 }
 

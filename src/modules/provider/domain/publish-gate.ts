@@ -1,8 +1,13 @@
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict } from '@modules/tool/domain/routing/payout-gate';
 import { StakeGateVerdict } from '@modules/tool/domain/routing/stake-gate';
+import { BindingAuthMode } from '@modules/tool/ports/tool.types';
 
-import { BindingTestLayer, BindingTestOutcome } from '../ports/binding-test.types';
+import {
+  BindingTestLayer,
+  BindingTestOutcome,
+  BindingTestWarningCode,
+} from '../ports/binding-test.types';
 
 /**
  * The publish gate — *"an open door still has a step"*.
@@ -87,6 +92,15 @@ export enum PublishRequirement {
   API_KEY_CREDENTIALS = 'API_KEY_CREDENTIALS',
   /** `stake >= minimumStake` **on every settlement chain**, by `evaluateStakeGate`. */
   STAKE_AT_MINIMUM_ON_EVERY_CHAIN = 'STAKE_AT_MINIMUM_ON_EVERY_CHAIN',
+  /**
+   * A signature-only binding's endpoint refused the tester's request signed
+   * for another provider (no `ACCEPTS_FOREIGN_PROVIDER` on the run). With the
+   * signature as its only lock, a verifier that ignores `aud` would accept
+   * calls any provider org points at it — and an org pointing a binding at
+   * someone else's origin could publish it. Asked only for `SIGNATURE`;
+   * `BOTH` still has the API key.
+   */
+  SIGNATURE_PROVIDER_CHECKED = 'SIGNATURE_PROVIDER_CHECKED',
 }
 
 export interface PublishRequirementResult {
@@ -118,6 +132,8 @@ export interface PublishGateTestRun {
   readonly outcome: BindingTestOutcome;
   readonly failedLayer: BindingTestLayer | null;
   readonly ranAt: Date;
+  /** The run's warning codes; absent on a hand-built run (treated as none). */
+  readonly warnings?: readonly string[];
 }
 
 export interface PublishGateInput {
@@ -183,6 +199,9 @@ export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
   const requirements = [
     ...perMajor(input, testerRunRequirement, PublishRequirement.TESTER_RUN),
     ...perMajor(input, testerPassedRequirement, PublishRequirement.TESTER_PASSED),
+    ...(input.authMode === BindingAuthMode.SIGNATURE
+      ? perMajor(input, signatureProviderRequirement, PublishRequirement.SIGNATURE_PROVIDER_CHECKED)
+      : []),
     ...credentialRequirements(input),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
@@ -295,6 +314,35 @@ function testerPassedRequirement(input: PublishGateInput): PublishRequirementRes
   }
 
   return { requirement: PublishRequirement.TESTER_PASSED, met: true, code: null, detail: null };
+}
+
+/**
+ * Met when the counted run's endpoint refused a request signed for another
+ * provider. Unmet with no counted run, as the tester requirements are, so the
+ * checklist never ticks a check that was not made.
+ */
+function signatureProviderRequirement(input: PublishGateInput): PublishRequirementResult {
+  const { latestRun } = input;
+  const requirement = PublishRequirement.SIGNATURE_PROVIDER_CHECKED;
+  if (!latestRun || !countsFor(input, latestRun)) {
+    return {
+      requirement,
+      met: false,
+      code: 'tester_never_run',
+      detail: 'Run the tester to check that your verifier refuses other providers.',
+    };
+  }
+  if ((latestRun.warnings ?? []).includes(BindingTestWarningCode.ACCEPTS_FOREIGN_PROVIDER)) {
+    return {
+      requirement,
+      met: false,
+      code: 'accepts_foreign_provider',
+      detail:
+        'Your endpoint accepted a request Assay signed for another provider. Set your provider ' +
+        'id in the verifier (provider-verify 0.2 or later), then run the tester again.',
+    };
+  }
+  return { requirement, met: true, code: null, detail: null };
 }
 
 /**

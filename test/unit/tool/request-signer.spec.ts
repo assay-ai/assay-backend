@@ -24,34 +24,44 @@ describe('RequestSignerService', () => {
     });
 
   it('signs and the signature verifies', async () => {
-    const h = await signer.sign(req, NOW);
+    const h = await signer.sign(req, 'prov-test-1', NOW);
     expect(h['Signature-Input']).toMatch(/^assay=\("@method"/);
+    // The audience is the last parameter, so it is inside the signed params.
+    expect(h['Signature-Input']).toMatch(/;tag="assay-request";aud="prov-test-1"$/);
     expect(h['Signature']).toMatch(/^assay=:[A-Za-z0-9+/]+=*:$/);
     const nonce = /nonce="([^"]+)"/.exec(h['Signature-Input'])![1];
     const base = signatureBase(
       { ...req, headers: { ...req.headers, 'content-digest': h['Content-Digest'] } },
-      { created: 1760700000, expires: 1760700300, nonce, keyId: 'test-2026-10' },
+      {
+        created: 1760700000,
+        expires: 1760700300,
+        nonce,
+        keyId: 'test-2026-10',
+        audience: 'prov-test-1',
+      },
     );
     const sig = Buffer.from(h['Signature'].slice('assay=:'.length, -1), 'base64');
     expect(verify(null, Buffer.from(base), publicKey(), sig)).toBe(true);
   });
 
   it('uses a fresh nonce per call', async () => {
-    const a = await signer.sign(req, NOW);
-    const b = await signer.sign(req, NOW);
+    const a = await signer.sign(req, 'prov-test-1', NOW);
+    const b = await signer.sign(req, 'prov-test-1', NOW);
     expect(a['Signature-Input']).not.toBe(b['Signature-Input']);
   });
 
   it('omits Content-Digest when there is no body', async () => {
-    const h = await signer.sign({ ...req, body: undefined }, NOW);
+    const h = await signer.sign({ ...req, body: undefined }, 'prov-test-1', NOW);
     expect(h['Content-Digest']).toBeUndefined();
   });
 
   it('ignores a stale caller-supplied content-digest', async () => {
     const stale = { ...req, headers: { ...req.headers, 'Content-Digest': 'sha-256=:AAAA:' } };
-    const h = await signer.sign(stale, NOW);
+    const h = await signer.sign(stale, 'prov-test-1', NOW);
     expect(h['Content-Digest']).not.toBe('sha-256=:AAAA:');
-    expect(h['Content-Digest']).toBe((await signer.sign(req, NOW))['Content-Digest']);
+    expect(h['Content-Digest']).toBe(
+      (await signer.sign(req, 'prov-test-1', NOW))['Content-Digest'],
+    );
   });
 
   it('publishes a JWKS', () => {
@@ -74,7 +84,7 @@ describe('RequestSignerService', () => {
     } finally {
       process.env.NODE_ENV = prev;
     }
-    expect(await new RequestSignerService([]).sign(req, NOW)).toEqual({});
+    expect(await new RequestSignerService([]).sign(req, 'prov-test-1', NOW)).toEqual({});
   });
 
   it('matches the published test vectors', () => {

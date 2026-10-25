@@ -168,6 +168,14 @@ export class ProviderRegistrationRecordDto {
   @ApiProperty()
   id: string;
 
+  @ApiProperty({
+    description:
+      'Your provider id: the audience (`aud`) every Assay request signature to your endpoints ' +
+      'is made for. Set it as `provider` in your verifier so it refuses requests Assay signed ' +
+      'for anyone else. It is your organization id.',
+  })
+  providerId: string;
+
   @ApiProperty({ example: 'Example Vessel Data Ltd' })
   legalName: string;
 
