@@ -200,6 +200,30 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
   }
 
   /**
+   * The agent's live API-key credentials, for the per-agent cap. Live = not
+   * revoked and not expired; a revoked or expired row is kept for audit but
+   * does not count. Mirrors {@link countLiveOAuthForAgent} for the `API_KEY`
+   * issuance path. Pass `manager` to count inside the create transaction so
+   * the count sees uncommitted siblings.
+   */
+  async countLiveApiKeysForAgent(
+    organizationId: string,
+    agentId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const qb = manager
+      ? manager.createQueryBuilder(AgentCredentialEntity, 'credential')
+      : this.createQueryBuilder('credential');
+    return qb
+      .where('credential.organization_id = :organizationId', { organizationId })
+      .andWhere('credential.agent_id = :agentId', { agentId })
+      .andWhere('credential.issued_via = :apiKey', { apiKey: CredentialIssuedVia.API_KEY })
+      .andWhere('credential.revoked_at IS NULL')
+      .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
+      .getCount();
+  }
+
+  /**
    * {@link countLiveOAuthForAgent} for every agent of an organization at once,
    * as the consent page lists them: agent id → live OAuth grants. An agent
    * with none is absent.
