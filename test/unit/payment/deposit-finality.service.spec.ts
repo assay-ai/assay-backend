@@ -159,6 +159,31 @@ describe('DepositFinalityService audit rows (B7)', () => {
     await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ skipped: 1 });
     expect(audit.recordAfterCommit).not.toHaveBeenCalled();
   });
+
+  // HIGH-1 regression: a row whose resolution throws sat at the head of the
+  // `updatedAt ASC` queue and aborted every later pass, freezing every buyer's
+  // deposits. It must be skipped and left queued while the rest still drain.
+  it('skips a row whose resolution throws and still resolves the rows behind it', async () => {
+    const { service, deposits, ledger } = build(() => LANDED);
+    deposits.findSettledAwaitingFinality.mockResolvedValue([
+      { id: 'dep-poison', organizationId: 'org-1', chainId: CHAIN, chainTxRef: TX },
+      { id: 'dep-2', organizationId: 'org-1', chainId: CHAIN, chainTxRef: `0x${'cd'.repeat(32)}` },
+    ]);
+    // The poison row's confirm fails and its journal still shows no resolution,
+    // so `appendResolution` re-raises — the shape that used to abort the pass.
+    ledger.appendNow
+      .mockRejectedValueOnce(new Error('duplicate key value violates unique constraint'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(service.promotePendingDeposits(10)).resolves.toEqual({
+      checked: 2,
+      confirmed: 1,
+      rejected: 0,
+      skipped: 1,
+    });
+    expect(deposits.markFinalityResolved).toHaveBeenCalledTimes(1);
+    expect(deposits.markFinalityResolved).toHaveBeenCalledWith('org-1', 'dep-2', expect.any(Date));
+  });
 });
 
 describe('DepositFinalityService notices (B8)', () => {

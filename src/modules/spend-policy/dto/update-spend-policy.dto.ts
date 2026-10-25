@@ -1,21 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsBoolean,
-  IsInt,
-  IsOptional,
-  IsPositive,
-  IsString,
-  Matches,
-  MaxLength,
-} from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsPositive, IsString, MaxLength } from 'class-validator';
 
-/** Atomic units as a non-negative decimal integer string — same grammar as `MoneyDto.amount`. */
-// Bounded to 78 digits like the sibling money DTOs (toolset, agent-access): an
-// unbounded `\d+` let a PATCH store a cap too large for the u64 the read and
-// enforcement paths assume, which then threw on every read — the user corrupting
-// their own policy. The exact u64 ceiling is still enforced by `MoneyUtil` where
-// the cap is used, as it is for those siblings.
-const ATOMIC_AMOUNT_RE = /^\d{1,78}$/;
+import { IsAtomicAmount } from '@shared/decorators/is-atomic-amount.decorator';
 
 /**
  * `PATCH /spend-policy` — writes a new version at the calling agent's scope
@@ -51,7 +37,7 @@ export class UpdateSpendPolicyDto {
     description: 'Atomic units. `null` removes the per-call ceiling',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   perCallMax?: string | null;
 
   @ApiPropertyOptional({
@@ -59,7 +45,7 @@ export class UpdateSpendPolicyDto {
     description: 'Atomic units. `null` removes the daily cap',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   dailyCap?: string | null;
 
   @ApiPropertyOptional({
@@ -67,7 +53,7 @@ export class UpdateSpendPolicyDto {
     description: 'Atomic units. `null` removes the monthly cap',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   monthlyCap?: string | null;
 
   @ApiPropertyOptional({ nullable: true, description: '`null` removes the velocity limit' })
@@ -90,7 +76,7 @@ export class UpdateSpendPolicyDto {
     description: 'Atomic units. `null` removes the spend-per-hour velocity limit',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   maxSpendPerHour?: string | null;
 
   @ApiPropertyOptional({
@@ -98,7 +84,7 @@ export class UpdateSpendPolicyDto {
     description: 'Atomic units. `null` means every call spends without approval',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   requireApprovalAbove?: string | null;
 
   @ApiPropertyOptional({ description: 'Pause every paid call at this scope' })

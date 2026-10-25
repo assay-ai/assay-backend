@@ -17,6 +17,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+import { IsAtomicAmount } from '@shared/decorators/is-atomic-amount.decorator';
+
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
@@ -25,7 +27,6 @@ import { ListQueryDto } from '@shared/api';
 export const TOOLSET_SLUG_RE = /^[a-z0-9-]{2,64}$/;
 const CATEGORY_RE = /^[a-z][a-z0-9-]{1,63}$/;
 const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-const ATOMIC_AMOUNT_RE = /^\d{1,78}$/;
 
 /** The fixed icon set a toolset may pick from (design spec §7.2). */
 export const TOOLSET_ICONS = [
@@ -52,7 +53,7 @@ const MAX_ENTRIES_IN_BODY = 1_000;
 
 export class EntryMaxPriceDto {
   @ApiProperty({ description: 'Atomic units', example: '10000' })
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   amount: string;
 
   @ApiProperty({ description: 'CAIP-19 asset id; the decimals come from the asset registry' })
