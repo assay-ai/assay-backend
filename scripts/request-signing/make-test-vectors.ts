@@ -19,6 +19,8 @@ const params = (n: number) => ({
   expires: 1760700300,
   nonce: Buffer.alloc(16, n).toString('base64url'),
   keyId: KEY_ID,
+  // The provider organization the request is made for (`aud`).
+  audience: n % 2 === 0 ? '8f14e45f-ceea-467e-a2b0-6f2c3a1d9b7e' : 'prov-test-1',
 });
 const callId = { 'x-assay-call-id': 'c-1' };
 

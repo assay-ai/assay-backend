@@ -69,6 +69,8 @@ const UNSIGNED_SIGNER = new RequestSignerService([]);
 let server: http.Server;
 let port: number;
 let received: { url: string; headers: http.IncomingHttpHeaders; body: string } | null = null;
+/** Every request this run sent, in order: the main run first, then the auth probes. */
+let allReceived: Array<{ url: string; headers: http.IncomingHttpHeaders; body: string }> = [];
 const openSockets: Array<{ destroy: () => void }> = [];
 
 /** What the fixture endpoint answers next. Set per test. */
@@ -80,6 +82,7 @@ beforeAll(async () => {
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
       received = { url: req.url ?? '', headers: req.headers, body };
+      allReceived.push(received);
       respond(req, res);
     });
   });
@@ -95,6 +98,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   received = null;
+  allReceived = [];
 });
 
 function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
@@ -448,6 +452,25 @@ describe('BindingMappingTesterService — unauthenticated probes', () => {
     expect(report.warnings).toEqual([]);
   });
 
+  // The signature is checked but not who it is for: the 0.1 verifier shape,
+  // and exactly what a provider org pointing a binding at someone else's
+  // signature-only endpoint sees.
+  it('SIGNATURE: warns ACCEPTS_FOREIGN_PROVIDER when only the foreign-audience probe is answered', async () => {
+    const { invoker, invoke } = fake((omit) => ({
+      status: (omit as { signature?: boolean } | undefined)?.signature ? 401 : 200,
+    }));
+    const report = await run(BindingAuthMode.SIGNATURE, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    expect(report.warnings.map((w) => w.code)).toEqual([
+      BindingTestWarningCode.ACCEPTS_FOREIGN_PROVIDER,
+    ]);
+    expect(invoke.mock.calls.map((c) => c[0].omit)).toEqual([
+      undefined,
+      { signature: true },
+      { audience: true },
+    ]);
+  });
+
   it('BOTH: probes signature and credentials separately', async () => {
     const { invoker, invoke } = fake(() => ({ status: 200 }));
     const report = await run(BindingAuthMode.BOTH, invoker);
@@ -515,7 +538,7 @@ describe('BindingMappingTesterService — the signature headers in the request v
       res.end(JSON.stringify({ data: { answer: 'ok' } }));
     };
 
-    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.SIGNATURE }));
     const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
       query: 'x',
     });
@@ -524,12 +547,13 @@ describe('BindingMappingTesterService — the signature headers in the request v
     expect(names).toEqual(
       expect.arrayContaining(['x-assay-call-id', 'content-digest', 'signature-input', 'signature']),
     );
-    // The view says what went on the wire: every name it lists was received.
-    for (const name of names) expect(received?.headers[name]).toBeDefined();
+    // The view says what went on the wire: every name it lists was received
+    // by the main run (the first request; the auth probes follow it).
+    for (const name of names) expect(allReceived[0]?.headers[name]).toBeDefined();
     // Names only: no signature, digest or call id value is in the report.
     const view = JSON.stringify(report.request);
-    expect(view).not.toContain(String(received?.headers['signature']));
-    expect(view).not.toContain(String(received?.headers['x-assay-call-id']));
+    expect(view).not.toContain(String(allReceived[0]?.headers['signature']));
+    expect(view).not.toContain(String(allReceived[0]?.headers['x-assay-call-id']));
   });
 
   it('lists a signature name once, even when the mapping also sets it', async () => {
@@ -540,7 +564,7 @@ describe('BindingMappingTesterService — the signature headers in the request v
 
     const tester = signedTester(
       bindingRow({
-        authMode: BindingAuthMode.NONE,
+        authMode: BindingAuthMode.SIGNATURE,
         requestMapping: {
           method: 'POST',
           path: '/search',
@@ -582,7 +606,7 @@ describe('BindingMappingTesterService — the signature headers in the request v
       res.end(JSON.stringify({ data: { answer: 'ok' } }));
     };
 
-    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.SIGNATURE }));
     const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
       query: 'x',
     });

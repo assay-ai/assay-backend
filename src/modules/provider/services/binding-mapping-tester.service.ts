@@ -232,6 +232,16 @@ export class BindingMappingTesterService {
           code: BindingTestWarningCode.ACCEPTS_UNSIGNED,
           message: 'Your endpoint accepted a request without an Assay signature.',
         });
+      } else if (await this.probeAccepted(tool, binding, input, { audience: true })) {
+        // It checks the signature, but not who it is for. Asked only when the
+        // unsigned probe was refused: an endpoint that takes unsigned calls is
+        // not protected by the signature at all, and says so above.
+        warnings.push({
+          code: BindingTestWarningCode.ACCEPTS_FOREIGN_PROVIDER,
+          message:
+            'Your endpoint accepted a request Assay signed for another provider. Set your ' +
+            'provider id in the verifier (provider-verify 0.2 or later) so it refuses them.',
+        });
       }
     }
     if (authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH) {
@@ -249,7 +259,7 @@ export class BindingMappingTesterService {
     tool: Tool,
     binding: ToolBinding,
     input: JsonObject,
-    omit: { credentials?: boolean; signature?: boolean },
+    omit: { credentials?: boolean; signature?: boolean; audience?: boolean },
   ): Promise<boolean> {
     try {
       const response = await this.invoker.invoke({
@@ -311,7 +321,12 @@ export class BindingMappingTesterService {
       // stored. See `BindingTestRequestView`. The headers Assay adds (call id,
       // signature) are named too, so a provider sees what to verify; stored
       // credential headers are not.
-      headerNames: wireHeaderNames(upstreamRequest, this.signs()),
+      headerNames: wireHeaderNames(
+        upstreamRequest,
+        this.signs() &&
+          (binding.authMode === BindingAuthMode.SIGNATURE ||
+            binding.authMode === BindingAuthMode.BOTH),
+      ),
       body: upstreamRequest.body ?? null,
     };
 
