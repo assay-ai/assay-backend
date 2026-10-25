@@ -4,7 +4,13 @@ import { SOLANA_PAYMENT_SCHEME } from '@modules/chains/solana/solana.constants';
 import { TxRef } from '@modules/chains/ports/x402.types';
 import { X402_INVALID_REASON } from '@modules/chains/facilitator/facilitator.wire';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { AccountId, ChainId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
+import {
+  AccountId,
+  ChainId,
+  ChainNamespace,
+  CHAIN_IDS,
+  toAccountId,
+} from '@modules/chains/ports/caip.types';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainErrorCode, ChainErrors } from '@modules/chains/errors/chains.errors';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -975,6 +981,38 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
     const after = await harness.depositIntents.findById(ORGANIZATION_ID, second.id);
     expect(after.status).toBe(DepositIntentStatus.CREATED);
+  });
+
+  // An EVM hash is case-insensitive on the node but compared byte for byte by
+  // the claim lookup and both single-use indexes: each case variant of one real
+  // deposit used to be credited again.
+  it('refuses a case variant of a transaction already claimed, and stores the hash lowercase', async () => {
+    const adapter = selfBroadcastAdapter({ namespace: ChainNamespace.EIP155 });
+    const harness = buildHarness({ adapter });
+    const first = await createdIntent(harness);
+    const mixed = `0x${'aB'.repeat(32)}` as TxRef;
+
+    const settled = await harness.service.settleDepositByBroadcast(
+      ORGANIZATION_ID,
+      first.id,
+      mixed,
+    );
+    expect(settled.chainTxRef).toBe(mixed.toLowerCase());
+    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ chainTxRef: mixed.toLowerCase() }),
+    );
+
+    const second = await createdIntent(harness);
+    await expectErrorCodeAsync(
+      () =>
+        harness.service.settleDepositByBroadcast(
+          ORGANIZATION_ID,
+          second.id,
+          mixed.toUpperCase().replace('0X', '0x') as TxRef,
+        ),
+      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
+    );
+    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
   });
 
   // HIGH-1 regression: two concurrent broadcasts of one transaction both pass
