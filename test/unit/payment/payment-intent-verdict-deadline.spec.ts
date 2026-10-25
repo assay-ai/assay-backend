@@ -54,7 +54,7 @@ function build(candidates: DuePaymentIntent[]) {
   const repo = {
     findDueForExpiry: jest.fn().mockResolvedValue([]),
     findDueForHoldBackstop: jest.fn().mockResolvedValue([]),
-    findExpiredWithUnreleasedHold: jest.fn().mockResolvedValue([]),
+    findTerminalWithUnreleasedHold: jest.fn().mockResolvedValue([]),
     findDueForVerdictDeadline: jest.fn(async () =>
       candidates.filter((row) => status.get(row.id) === PaymentIntentStatus.VERIFYING),
     ),

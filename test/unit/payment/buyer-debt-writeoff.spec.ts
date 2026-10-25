@@ -53,7 +53,7 @@ function sweepBuild(
   const repo = {
     findDueForExpiry: jest.fn().mockResolvedValue([]),
     findDueForHoldBackstop: jest.fn().mockResolvedValue([]),
-    findExpiredWithUnreleasedHold: jest.fn().mockResolvedValue([]),
+    findTerminalWithUnreleasedHold: jest.fn().mockResolvedValue([]),
     findDueForVerdictDeadline: jest.fn().mockResolvedValue([]),
     findDueForWriteOff: jest.fn().mockResolvedValue(candidates),
     findClosedWithOpenHold: jest.fn().mockResolvedValue([]),

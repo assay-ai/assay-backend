@@ -192,6 +192,21 @@ export const PAYMENT_INTENT_TERMINAL_STATUSES: readonly PaymentIntentStatus[] = 
   PaymentIntentStatus,
 ).filter((status) => PAYMENT_INTENT_ALLOWED_TARGETS[status].length === 0);
 
+/**
+ * Terminal states every edge into releases the hold — `EXPIRED`, `VOIDED`,
+ * `REFUNDED` today. A row in one of these with `hold_released_at` still null
+ * lost its release to a crash between the status move and `releaseHold`, and
+ * the expiry sweep's repair pass returns it. Derived, so a new release edge is
+ * repaired without anyone remembering to add it here.
+ */
+export const PAYMENT_INTENT_RELEASED_TERMINAL_STATUSES: readonly PaymentIntentStatus[] =
+  PAYMENT_INTENT_TERMINAL_STATUSES.filter((status) => {
+    const incoming = PAYMENT_INTENT_TRANSITIONS.filter(
+      (rule) => rule.to === status && rule.holdEffect !== HoldEffect.NONE,
+    );
+    return incoming.length > 0 && incoming.every((rule) => rule.holdEffect === HoldEffect.RELEASE);
+  });
+
 /** The states with an `EXPIRED` edge `trigger` may take. */
 function statusesExpirableBy(trigger: PaymentIntentTrigger): readonly PaymentIntentStatus[] {
   return PAYMENT_INTENT_TRANSITIONS.filter(
