@@ -17,6 +17,8 @@ import { EvmDeployment } from './evm.constants';
 export const CHAIN_PARAMS_READ_TIMEOUT_MS = 2_000;
 /** How often every chain is read again in the background. */
 export const CHAIN_PARAMS_REFRESH_MS = 5 * 60 * 1000;
+/** While a chain has never been read (a failed boot read), it is retried this often. */
+export const CHAIN_PARAMS_RETRY_MS = 20_000;
 
 export const CHAIN_PARAMS_ALERTS = {
   /** A chain value differs from the env value kept as its fallback. */
@@ -63,6 +65,8 @@ export class EvmChainParamsCache implements ChainParamsPort, OnModuleInit, OnMod
   private readonly drift = new Map<ChainId, string>();
   private readonly listeners = new Set<(params: ChainParams) => void>();
   private timer: NodeJS.Timeout | null = null;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private readonly fieldFailures = new Map<ChainId, string>();
   private running: Promise<void> | null = null;
 
   constructor(
@@ -72,6 +76,7 @@ export class EvmChainParamsCache implements ChainParamsPort, OnModuleInit, OnMod
     private readonly alerts: AlertPort | null = null,
     private readonly options: {
       readonly refreshMs?: number;
+      readonly retryMs?: number;
       readonly timeoutMs?: number;
       readonly now?: () => number;
     } = {},
@@ -87,11 +92,34 @@ export class EvmChainParamsCache implements ChainParamsPort, OnModuleInit, OnMod
       this.options.refreshMs ?? CHAIN_PARAMS_REFRESH_MS,
     );
     this.timer.unref?.();
+    this.retryUnread();
   }
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.retryTimer) clearTimeout(this.retryTimer);
     this.timer = null;
+    this.retryTimer = null;
+  }
+
+  /**
+   * A chain that has never answered (a failed or slow boot read) serves the
+   * env fallback; it is read again every {@link CHAIN_PARAMS_RETRY_MS} until
+   * its first success, not only at the 5-minute refresh.
+   */
+  private retryUnread(): void {
+    if (this.retryTimer) return;
+    const unread = this.readable().filter((deployment) => !this.read.has(deployment.chainId));
+    if (unread.length === 0) return;
+    this.logger.warn(
+      `on-chain params never read on ${unread.map((d) => d.chainId).join(', ')}; serving the env ` +
+        `fallback and retrying every ${(this.options.retryMs ?? CHAIN_PARAMS_RETRY_MS) / 1000} s`,
+    );
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.refresh().then(() => this.retryUnread());
+    }, this.options.retryMs ?? CHAIN_PARAMS_RETRY_MS);
+    this.retryTimer.unref?.();
   }
 
   current(chainId: ChainId): ChainParams | null {
@@ -181,18 +209,65 @@ export class EvmChainParamsCache implements ChainParamsPort, OnModuleInit, OnMod
       functionName,
       args: [] as const,
     });
-    const [params, slashDelay, collectHold, paused, arbiter] = (await this.clients
-      .get(deployment.chainId)!
-      .multicall({
-        contracts: [
-          call(ASSAY_CONFIG_ABI, 'params'),
-          call(ASSAY_CONFIG_ABI, 'slashDelaySeconds'),
-          call(ASSAY_CONFIG_HOLD_ABI, 'collectHoldSeconds'),
-          call(ASSAY_CONFIG_ABI, 'paused'),
-          call(ASSAY_CONFIG_ABI, 'arbiter'),
-        ],
-        allowFailure: false,
-      })) as [ParamSetRead, bigint, bigint, boolean, `0x${string}`];
+    // One failed optional getter (a Config without `collectHoldSeconds()`, say)
+    // must not throw the whole chain back to env: each call answers on its
+    // own, `params()` is required, and a failed optional field keeps its last
+    // chain value, else the env fallback, and is logged.
+    const results = (await this.clients.get(deployment.chainId)!.multicall({
+      contracts: [
+        call(ASSAY_CONFIG_ABI, 'params'),
+        call(ASSAY_CONFIG_ABI, 'slashDelaySeconds'),
+        call(ASSAY_CONFIG_HOLD_ABI, 'collectHoldSeconds'),
+        call(ASSAY_CONFIG_ABI, 'paused'),
+        call(ASSAY_CONFIG_ABI, 'arbiter'),
+      ],
+      allowFailure: true,
+    })) as readonly { status: 'success' | 'failure'; result?: unknown; error?: unknown }[];
+    const [paramsRead, slashDelayRead, collectHoldRead, pausedRead, arbiterRead] = results;
+    if (paramsRead?.status !== 'success') {
+      throw paramsRead?.error instanceof Error ? paramsRead.error : new Error('params() failed');
+    }
+    const params = paramsRead.result as ParamSetRead;
+    const previous = this.read.get(deployment.chainId);
+    const failed: string[] = [];
+    const optional = <T>(
+      name: string,
+      read: { status: string; result?: unknown } | undefined,
+      parse: (value: unknown) => T,
+      otherwise: T,
+    ): T => {
+      if (read?.status === 'success') return parse(read.result);
+      failed.push(name);
+      return otherwise;
+    };
+    const slashDelay = optional(
+      'slashDelaySeconds',
+      slashDelayRead,
+      (value) => Number(value as bigint),
+      previous?.slashDelaySeconds ?? this.fallback.slashDelaySeconds,
+    );
+    const collectHold = optional(
+      'collectHoldSeconds',
+      collectHoldRead,
+      (value) => Number(value as bigint),
+      previous?.collectHoldSeconds ?? this.fallback.collectHoldSeconds,
+    );
+    const paused = optional(
+      'paused',
+      pausedRead,
+      (value) => Boolean(value),
+      previous?.paused ?? null,
+    );
+    const arbiter = optional(
+      'arbiter',
+      arbiterRead,
+      (value) => {
+        const address = value as `0x${string}` | undefined;
+        return !address || BigInt(address) === 0n ? null : getAddress(address);
+      },
+      previous?.arbiter ?? null,
+    );
+    this.reportFieldFailures(deployment.chainId, failed);
     const asset = this.assetOf(deployment);
     const money = (amount: bigint) =>
       MoneyUtil.of(BigInt(amount).toString(), asset, getAssetMetadata(asset).decimals);
@@ -209,12 +284,27 @@ export class EvmChainParamsCache implements ChainParamsPort, OnModuleInit, OnMod
       slashPlatformBps: Number(params.slashPlatformBps),
       slashCapBps: Number(params.slashCapBps),
       unbondingPeriodSeconds: Number(params.unbondingPeriodSeconds),
-      slashDelaySeconds: Number(slashDelay),
+      slashDelaySeconds: slashDelay,
       policySlashDelaySeconds: this.fallback.slashDelaySeconds,
-      collectHoldSeconds: Number(collectHold),
-      paused: Boolean(paused),
-      arbiter: !arbiter || BigInt(arbiter) === 0n ? null : getAddress(arbiter),
+      collectHoldSeconds: collectHold,
+      paused,
+      arbiter,
     };
+  }
+
+  /** A warning once per distinct set of failed optional getters per chain. */
+  private reportFieldFailures(chainId: ChainId, failed: readonly string[]): void {
+    const signature = failed.join(',');
+    if ((this.fieldFailures.get(chainId) ?? '') === signature) return;
+    this.fieldFailures.set(chainId, signature);
+    if (signature === '') {
+      this.logger.log(`every on-chain param getter on ${chainId} answers again`);
+      return;
+    }
+    this.logger.warn(
+      `on-chain params on ${chainId}: ${signature} could not be read; those fields keep their ` +
+        `last chain value, else the env fallback, and the rest follow the chain`,
+    );
   }
 
   private fromConfig(deployment: EvmDeployment): ChainParams {

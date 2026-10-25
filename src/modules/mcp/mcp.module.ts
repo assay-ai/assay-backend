@@ -7,7 +7,6 @@ import { NotificationModule } from '@modules/notification/notification.module';
 import { PaymentModule } from '@modules/payment/payment.module';
 import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
 import { ChainsModule } from '@modules/chains/chains.module';
-import { ChainId } from '@modules/chains/ports/caip.types';
 import { CHAIN_PARAMS, ChainParamsPort } from '@modules/chains/ports/chain-params.port';
 import { AuthModule } from '@modules/auth/auth.module';
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
@@ -32,11 +31,7 @@ import {
   loadMcpCredentials,
 } from './services/config-mcp-session.source';
 import { McpCatalogueService } from './services/mcp-catalogue.service';
-import {
-  DEFAULT_PLATFORM_FEE_BPS,
-  MCP_PRICING,
-  McpPricingConfig,
-} from './services/mcp-pricing.config';
+import { MCP_PRICING, mcpPricingFrom, McpPricingConfig } from './services/mcp-pricing.config';
 import {
   MCP_IDEMPOTENCY_CONFIG,
   McpIdempotencyStore,
@@ -170,15 +165,8 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
       // The contract's `takeRateBps` per chain once read (the chain is the
       // source of truth); `PLATFORM_FEE_BPS` only while it was not.
       provide: MCP_PRICING,
-      useFactory: (config: ConfigService, params: ChainParamsPort | null): McpPricingConfig => ({
-        platformFeeBps: Number(
-          config.get<string>('PLATFORM_FEE_BPS') ?? String(DEFAULT_PLATFORM_FEE_BPS),
-        ),
-        platformFeeBpsFor: (chainId) => {
-          const live = params?.current(chainId as ChainId);
-          return live?.source === 'chain' ? live.takeRateBps : null;
-        },
-      }),
+      useFactory: (config: ConfigService, params: ChainParamsPort | null): McpPricingConfig =>
+        mcpPricingFrom(config, params),
       inject: [ConfigService, { token: CHAIN_PARAMS, optional: true }],
     },
 

@@ -43,3 +43,25 @@ export function platformTakeRatePercent(config: {
 }): number {
   return Number(config.get<string>('PLATFORM_FEE_BPS') ?? String(DEFAULT_PLATFORM_FEE_BPS)) / 100;
 }
+
+/**
+ * {@link McpPricingConfig} from config and the on-chain params cache: the
+ * contract's `takeRateBps` for a chain it has read (`source: 'chain'`), and
+ * `PLATFORM_FEE_BPS` for any other chain (never read yet, or no contract).
+ */
+export function mcpPricingFrom(
+  config: { get<T = string>(key: string): T | undefined },
+  params: {
+    current(chainId: never): { source: 'chain' | 'config'; takeRateBps: number | null } | null;
+  } | null,
+): McpPricingConfig {
+  return {
+    platformFeeBps: Number(
+      config.get<string>('PLATFORM_FEE_BPS') ?? String(DEFAULT_PLATFORM_FEE_BPS),
+    ),
+    platformFeeBpsFor: (chainId) => {
+      const live = params?.current(chainId as never);
+      return live?.source === 'chain' ? live.takeRateBps : null;
+    },
+  };
+}

@@ -39,12 +39,14 @@ describe('EvmChainParamsCache', () => {
     slashCapBps: 1000,
     ...overrides,
   });
+  const ok = (result: unknown) => ({ status: 'success', result });
+  const fail = { status: 'failure', error: new Error('execution reverted') };
   const answers = (overrides: Record<string, unknown> = {}) => [
-    paramSet(overrides),
-    259_200n,
-    3_600n,
-    false,
-    ARBITER,
+    ok(paramSet(overrides)),
+    ok(259_200n),
+    ok(3_600n),
+    ok(false),
+    ok(ARBITER),
   ];
 
   function build(
@@ -57,7 +59,7 @@ describe('EvmChainParamsCache', () => {
       new Map(deployments.map((chainId) => [chainId, deploymentOf(chainId)])) as never,
       FALLBACK,
       alerts as never,
-      { timeoutMs: 2_000, now: () => Date.parse('2026-10-25T00:00:00Z') },
+      { timeoutMs: 2_000, retryMs: 20_000, now: () => Date.parse('2026-10-25T00:00:00Z') },
     );
     return { cache, alerts };
   }
@@ -224,6 +226,59 @@ describe('EvmChainParamsCache', () => {
     expect(alerts.emit).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'evm_asset_decimals_mismatch' }),
     );
+  });
+
+  it('M3: a failed optional getter falls back for that field only; params() is required', async () => {
+    const multicall = jest
+      .fn()
+      .mockResolvedValueOnce([
+        ok(paramSet({ minimumStake: 70_000_000n })),
+        ok(600n),
+        fail,
+        ok(true),
+        fail,
+      ])
+      .mockResolvedValueOnce([fail, ok(600n), ok(3_600n), ok(false), ok(ARBITER)]);
+    const { cache } = build(new Map([[CHAIN, { multicall }]]));
+
+    await cache.refresh();
+    const params = cache.current(CHAIN)!;
+    expect(params.source).toBe('chain');
+    expect(params.minimumStake?.amount).toBe('70000000');
+    expect(params.slashDelaySeconds).toBe(600);
+    expect(params.paused).toBe(true);
+    // Missing getters: the env fallback (never read before), not a guess.
+    expect(params.collectHoldSeconds).toBe(3_600);
+    expect(params.arbiter).toBeNull();
+
+    // params() itself failing keeps the last reading whole.
+    await cache.refresh();
+    expect(cache.current(CHAIN)!.minimumStake?.amount).toBe('70000000');
+  });
+
+  it('M1: a chain that never answered at boot is retried every 20 s until it does', async () => {
+    jest.useFakeTimers();
+    const multicall = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValue(answers());
+    const { cache } = build(
+      new Map([[CHAIN, { multicall, readContract: jest.fn(async () => 6) }]]),
+    );
+
+    await cache.onModuleInit();
+    expect(cache.current(CHAIN)!.source).toBe('config');
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(multicall).toHaveBeenCalledTimes(2);
+    expect(cache.current(CHAIN)!.source).toBe('config');
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(multicall).toHaveBeenCalledTimes(3);
+    expect(cache.current(CHAIN)!.source).toBe('chain');
+    // Once read, back to the normal 5-minute refresh: no more 20 s retries.
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(multicall).toHaveBeenCalledTimes(3);
+    cache.onModuleDestroy();
   });
 
   it('has no entry for a chain with no deployment', () => {
