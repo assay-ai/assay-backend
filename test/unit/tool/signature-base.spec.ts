@@ -13,8 +13,9 @@ const params = {
   expires: 1760700300,
   nonce: 'AAAAAAAAAAAAAAAAAAAAAA',
   keyId: 'test-2026-10',
+  audience: 'prov-test-1',
 };
-const TAIL = `;created=1760700000;expires=1760700300;nonce="AAAAAAAAAAAAAAAAAAAAAA";keyid="test-2026-10";alg="ed25519";tag="assay-request"`;
+const TAIL = `;created=1760700000;expires=1760700300;nonce="AAAAAAAAAAAAAAAAAAAAAA";keyid="test-2026-10";alg="ed25519";tag="assay-request";aud="prov-test-1"`;
 
 describe('signature base', () => {
   it('computes content-digest', () => {
@@ -70,5 +71,16 @@ describe('signature base', () => {
     expect(
       signatureBase({ method: 'GET', url: 'http://a.test:80/x', headers: h }, params),
     ).toContain('"@authority": a.test\n');
+  });
+
+  it('refuses an audience that would need escaping in the sf-string', () => {
+    for (const audience of ['', 'a"b', 'a\\b', 'a b', 'x'.repeat(129)]) {
+      expect(() =>
+        signatureBase(
+          { method: 'GET', url: 'https://api.example.test', headers: { 'x-assay-call-id': 'c-1' } },
+          { ...params, audience },
+        ),
+      ).toThrow('audience');
+    }
   });
 });

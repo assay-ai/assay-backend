@@ -20,7 +20,20 @@ export interface SignatureParams {
   expires: number;
   nonce: string;
   keyId: string;
+  /**
+   * The provider organization this request is made for — the `aud` parameter.
+   * Without it a signature proved only "Assay sent this", so any provider org
+   * could point a binding at another provider's origin and have Assay sign
+   * requests its verifier accepted. A verifier pins its own provider id and
+   * refuses every other audience. A signature parameter, not a covered header:
+   * 0.1 verifiers enforce an exact component list but sign the raw
+   * `@signature-params`, so they keep verifying (they simply do not check it).
+   */
+  audience: string;
 }
+
+/** What `aud` may contain: an sf-string with no quote or backslash to escape. */
+const AUDIENCE_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const CALL_ID_HEADER = 'x-assay-call-id';
 const DIGEST_HEADER = 'content-digest';
@@ -43,12 +56,15 @@ export function coveredComponents(hasBody: boolean): string[] {
   ];
 }
 
-/** `("@method" ...);created=...;expires=...;nonce="...";keyid="...";alg="ed25519";tag="assay-request"` */
+/** `("@method" ...);created=...;expires=...;nonce="...";keyid="...";alg="ed25519";tag="assay-request";aud="..."` */
 export function signatureParamsValue(components: string[], p: SignatureParams): string {
+  if (!AUDIENCE_RE.test(p.audience)) {
+    throw new Error('signature params: audience must match [A-Za-z0-9._:-]{1,128}');
+  }
   const list = `(${components.map((c) => `"${c}"`).join(' ')})`;
   return (
     `${list};created=${p.created};expires=${p.expires};nonce="${p.nonce}"` +
-    `;keyid="${p.keyId}";alg="ed25519";tag="${SIGNATURE_TAG}"`
+    `;keyid="${p.keyId}";alg="ed25519";tag="${SIGNATURE_TAG}";aud="${p.audience}"`
   );
 }
 

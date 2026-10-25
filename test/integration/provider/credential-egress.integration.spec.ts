@@ -13,7 +13,7 @@ import { ProviderResponse } from '@modules/tool/domain/classification';
 import { REDACTED } from '@modules/tool/domain/egress/credential-redaction';
 import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
 import { signatureBase } from '@modules/tool/request-auth/signature-base';
-import { PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, PricingMode } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
@@ -229,10 +229,16 @@ function runTester() {
 
 describe('credential egress', () => {
   it('sends the credential and the signature to the origin they were stored for', async () => {
+    // Only SIGNATURE and BOTH bindings are signed.
+    await context.editor.update(context.organizationId, SUBJECT, bindingId, {
+      authMode: BindingAuthMode.SIGNATURE,
+    });
     const report = await runTester();
 
     expect(report.outcome).toBe(BindingTestOutcome.PASSED);
-    expect(received.a).toHaveLength(1);
+    // The tested call, then the tester's unsigned probe.
+    expect(received.a).toHaveLength(2);
+    expect(received.a[1].signature).toBeUndefined();
     expect(received.a[0]['x-vendor-auth']).toBe(CANARY);
     expect(received.a[0].signature).toMatch(/^assay=:.+:$/);
     expect(received.a[0]['signature-input']).toMatch(/^assay=\(/);
@@ -241,9 +247,10 @@ describe('credential egress', () => {
     // The signature verifies over what A actually received: method, authority,
     // the path as sent, the digest of the body and the call id.
     const headers = received.a[0] as Record<string, string>;
-    const params = /created=(\d+);expires=(\d+);nonce="([^"]+)";keyid="([^"]+)"/.exec(
-      headers['signature-input'],
-    );
+    const params =
+      /created=(\d+);expires=(\d+);nonce="([^"]+)";keyid="([^"]+)";alg="ed25519";tag="[^"]+";aud="([^"]+)"/.exec(
+        headers['signature-input'],
+      );
     expect(params).not.toBeNull();
     const base = signatureBase(
       {
@@ -252,8 +259,16 @@ describe('credential egress', () => {
         headers,
         body: lastA!.body,
       },
-      { created: +params![1], expires: +params![2], nonce: params![3], keyId: params![4] },
+      {
+        created: +params![1],
+        expires: +params![2],
+        nonce: params![3],
+        keyId: params![4],
+        audience: params![5],
+      },
     );
+    // Signed for this provider, so no other provider's verifier accepts it.
+    expect(params![5]).toBe(context.organizationId);
     const signature = Buffer.from(/^assay=:(.+):$/.exec(headers.signature)![1], 'base64');
     expect(verify(null, Buffer.from(base, 'utf8'), publicKey, signature)).toBe(true);
   });
@@ -261,6 +276,7 @@ describe('credential egress', () => {
   it('sends no credential to a new origin after the endpoint is edited', async () => {
     await context.editor.update(context.organizationId, SUBJECT, bindingId, {
       endpoint: `${ORIGIN_B}/api`,
+      authMode: BindingAuthMode.SIGNATURE,
     });
 
     await runTester();
@@ -275,13 +291,16 @@ describe('credential egress', () => {
     await runTester();
 
     expect(received.a).toHaveLength(0);
-    expect(received.b).toHaveLength(2);
+    // Each run: the tested call, then the tester's unsigned probe.
+    expect(received.b).toHaveLength(4);
     for (const headers of received.b) {
       expect(headers['x-vendor-auth']).toBeUndefined();
       expect(JSON.stringify(headers)).not.toContain(CANARY);
-      // Still signed: the signature is Assay's, not the provider's secret.
-      expect(headers.signature).toMatch(/^assay=:.+:$/);
     }
+    // Still signed: the signature is Assay's, not the provider's secret.
+    expect(
+      received.b.filter((headers) => /^assay=:.+:$/.test(String(headers.signature ?? ''))),
+    ).toHaveLength(2);
   });
 
   it('strips the credential and the signature on a cross-origin redirect', async () => {

@@ -46,7 +46,15 @@ export interface BindingInvocation {
    * ONLY the binding tester sets this, for its unauthenticated probes; the
    * router never does. Honoured by `EgressBindingInvoker`.
    */
-  readonly omit?: { readonly credentials?: boolean; readonly signature?: boolean };
+  readonly omit?: {
+    readonly credentials?: boolean;
+    readonly signature?: boolean;
+    /**
+     * Sign for another provider than the binding's own (a random `aud`): the
+     * tester's probe that the endpoint's verifier checks its provider id.
+     */
+    readonly audience?: boolean;
+  };
 }
 
 export interface BindingInvokerPort {

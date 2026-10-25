@@ -3,7 +3,12 @@ import {
   evaluatePublishGate,
   unmetRequirements,
 } from '@modules/provider/domain/publish-gate';
-import { BindingTestLayer, BindingTestOutcome } from '@modules/provider/ports/binding-test.types';
+import {
+  BindingTestLayer,
+  BindingTestOutcome,
+  BindingTestWarningCode,
+} from '@modules/provider/ports/binding-test.types';
+import { BindingAuthMode } from '@modules/tool/ports/tool.types';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict } from '@modules/tool/domain/routing/payout-gate';
@@ -207,6 +212,67 @@ describe('evaluatePublishGate', () => {
         PublishRequirement.API_KEY_CREDENTIALS,
       );
     });
+  });
+
+  describe('SIGNATURE_PROVIDER_CHECKED', () => {
+    const base = {
+      mappingVersion: 4,
+      payoutByChain: on(PAYOUT_OK),
+      stakeByChain: on(STAKE_OK),
+    };
+
+    it('blocks a signature-only binding whose endpoint accepted a foreign-provider signature', () => {
+      const check = evaluatePublishGate({
+        ...base,
+        authMode: BindingAuthMode.SIGNATURE,
+        latestRun: {
+          ...GREEN_RUN,
+          authMode: BindingAuthMode.SIGNATURE,
+          warnings: [BindingTestWarningCode.ACCEPTS_FOREIGN_PROVIDER],
+        },
+      });
+      const row = requirement(check, PublishRequirement.SIGNATURE_PROVIDER_CHECKED);
+      expect(row.met).toBe(false);
+      expect(row.code).toBe('accepts_foreign_provider');
+      expect(check.publishable).toBe(false);
+    });
+
+    it('is met when the endpoint refused it', () => {
+      const check = evaluatePublishGate({
+        ...base,
+        authMode: BindingAuthMode.SIGNATURE,
+        latestRun: { ...GREEN_RUN, authMode: BindingAuthMode.SIGNATURE, warnings: [] },
+      });
+      expect(requirement(check, PublishRequirement.SIGNATURE_PROVIDER_CHECKED).met).toBe(true);
+      expect(check.publishable).toBe(true);
+    });
+
+    it('is unmet with no counted run', () => {
+      const check = evaluatePublishGate({
+        ...base,
+        authMode: BindingAuthMode.SIGNATURE,
+        latestRun: null,
+      });
+      expect(requirement(check, PublishRequirement.SIGNATURE_PROVIDER_CHECKED).met).toBe(false);
+    });
+
+    it.each([BindingAuthMode.BOTH, BindingAuthMode.API_KEY, BindingAuthMode.NONE])(
+      'is not asked for %s: the API key, or nothing, is the lock there',
+      (authMode) => {
+        const check = evaluatePublishGate({
+          ...base,
+          authMode,
+          latestRun: {
+            ...GREEN_RUN,
+            authMode,
+            warnings: [BindingTestWarningCode.ACCEPTS_FOREIGN_PROVIDER],
+          },
+        });
+        expect(check.requirements.map((r) => r.requirement)).not.toContain(
+          PublishRequirement.SIGNATURE_PROVIDER_CHECKED,
+        );
+      },
+    );
   });
 
   it('reports every requirement even when the first one fails', () => {

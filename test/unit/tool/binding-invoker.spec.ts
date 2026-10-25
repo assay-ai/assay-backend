@@ -446,7 +446,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
     reply?: { headers?: Record<string, string>; body?: string; contentType?: string };
     transportError?: unknown;
     authMode?: BindingAuthMode;
-    omit?: { credentials?: boolean; signature?: boolean };
+    omit?: { credentials?: boolean; signature?: boolean; audience?: boolean };
   }) {
     const sent: EgressRequest[] = [];
     const http = {
@@ -477,7 +477,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
 
     const signed: SignableRequest[] = [];
     const signer = {
-      sign: jest.fn(async (req: SignableRequest) => {
+      sign: jest.fn(async (req: SignableRequest, _audience: string) => {
         if (options.signerError) throw options.signerError;
         signed.push(req);
         return {
@@ -490,7 +490,9 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
 
     const binding = buildBinding('provider-p', {
       endpoint: ENDPOINT,
-      authMode: options.authMode,
+      // Signature mode unless a test says otherwise: most of these pin the
+      // signed request. `authMode: undefined` passed explicitly means unset.
+      authMode: 'authMode' in options ? options.authMode : BindingAuthMode.SIGNATURE,
       requestMapping:
         options.method === 'GET'
           ? {
@@ -690,6 +692,46 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
     expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
     expect(response.transportError?.detail).toBe('credential lookup failed');
     expect(response.transportError?.detail).not.toContain('10.0.0.5');
+  });
+
+  describe('the signature audience (aud)', () => {
+    it('signs for the binding’s own provider, never anyone else', async () => {
+      const { run, signer } = setup({});
+      await run();
+      expect(signer.sign).toHaveBeenCalledTimes(1);
+      expect(signer.sign.mock.calls[0][1]).toBe('provider-p');
+    });
+
+    it.each([BindingAuthMode.SIGNATURE, BindingAuthMode.BOTH])(
+      'signs a %s binding',
+      async (authMode) => {
+        const { run, signer } = setup({ authMode, credentials: [{ name: 'X-Key', value: 'k' }] });
+        await run();
+        expect(signer.sign).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([BindingAuthMode.API_KEY, BindingAuthMode.NONE, undefined])(
+      'does not sign a %s binding: the signature protects nothing there',
+      async (authMode) => {
+        const { run, signer, sent } = setup({
+          authMode,
+          credentials: [{ name: 'X-Key', value: 'k' }],
+        });
+        await run();
+        expect(signer.sign).not.toHaveBeenCalled();
+        expect(lower(sent[0])['signature']).toBeUndefined();
+        expect(lower(sent[0])['signature-input']).toBeUndefined();
+      },
+    );
+
+    it('signs the tester’s probe for a random foreign audience', async () => {
+      const { run, signer } = setup({ omit: { audience: true } });
+      await run();
+      const audience = signer.sign.mock.calls[0][1];
+      expect(audience).toMatch(/^probe-[0-9a-f-]{36}$/);
+      expect(audience).not.toBe('provider-p');
+    });
   });
 
   it('keeps raw error text out of the detail when the signer throws a non-AppError', async () => {

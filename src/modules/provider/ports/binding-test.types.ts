@@ -168,6 +168,13 @@ export interface BindingTestReport {
 /** A finding that never changes the outcome of a run (spec 7.3). */
 export enum BindingTestWarningCode {
   ACCEPTS_UNSIGNED = 'ACCEPTS_UNSIGNED',
+  /**
+   * The endpoint accepted a request signed for ANOTHER provider (a foreign
+   * `aud`): its verifier checks that Assay signed, not for whom, so any
+   * provider org could point a binding at it. Blocks publishing a
+   * signature-only binding (`SIGNATURE_PROVIDER_CHECKED`).
+   */
+  ACCEPTS_FOREIGN_PROVIDER = 'ACCEPTS_FOREIGN_PROVIDER',
   ACCEPTS_WITHOUT_CREDENTIALS = 'ACCEPTS_WITHOUT_CREDENTIALS',
   NO_AUTHENTICATION = 'NO_AUTHENTICATION',
 }

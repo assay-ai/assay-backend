@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Injectable } from '@nestjs/common';
 
 import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
@@ -139,8 +141,15 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       redactor = new CredentialRedactor(credentials.map(({ value }) => value));
       headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
       stage = 'request signing failed';
-      if (!omit?.signature) {
-        const signature = await this.signer.sign({ method, url, headers, body });
+      // Signed only where the endpoint is meant to check it: an API-key or
+      // open endpoint gains nothing from Assay's signature, and a third-party
+      // API behind a reseller's key would just receive our headers. The
+      // audience is always the binding's own provider — never caller-chosen —
+      // so a binding pointed at another provider's origin is signed for its
+      // own org, which that provider's verifier refuses.
+      if (needsSignature(binding.authMode) && !omit?.signature) {
+        const audience = omit?.audience ? `probe-${randomUUID()}` : binding.providerId;
+        const signature = await this.signer.sign({ method, url, headers, body }, audience);
         for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
       }
     } catch (error) {
@@ -200,6 +209,10 @@ export class EgressBindingInvoker implements BindingInvokerPort {
  * origin. Without this the provider would answer 401 and be blamed for it.
  */
 export const CREDENTIALS_MISSING = 'credentials missing for this address';
+
+function needsSignature(authMode: BindingAuthMode | undefined): boolean {
+  return authMode === BindingAuthMode.SIGNATURE || authMode === BindingAuthMode.BOTH;
+}
 
 function needsApiKey(authMode: BindingAuthMode | undefined): boolean {
   return authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH;

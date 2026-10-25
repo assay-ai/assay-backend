@@ -64,8 +64,16 @@ export class RequestSignerService {
     }));
   }
 
-  /** Returns the headers to add (`content-digest` only when `body !== undefined`). */
-  async sign(req: SignableRequest, now: Date = new Date()): Promise<Record<string, string>> {
+  /**
+   * Returns the headers to add (`content-digest` only when `body !== undefined`).
+   * `audience` is the provider organization the request is made for — always
+   * the calling binding's own provider, never a caller-chosen value.
+   */
+  async sign(
+    req: SignableRequest,
+    audience: string,
+    now: Date = new Date(),
+  ): Promise<Record<string, string>> {
     if (!this.active) return {};
     const created = Math.floor(now.getTime() / 1000);
     return this.signWith(req, {
@@ -73,6 +81,7 @@ export class RequestSignerService {
       expires: created + REQUEST_SIGNATURE_TTL_S,
       nonce: randomBytes(16).toString('base64url'),
       keyId: this.active.keyId,
+      audience,
     });
   }
 
