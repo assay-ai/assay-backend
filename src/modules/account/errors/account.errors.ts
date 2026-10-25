@@ -22,6 +22,7 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_BIND_CONFLICT = 'ACCOUNT_DELEGATE_BIND_CONFLICT',
   ACCOUNT_CREDENTIAL_SCOPES_INVALID = 'ACCOUNT_CREDENTIAL_SCOPES_INVALID',
   ACCOUNT_CREDENTIAL_EXPIRY_INVALID = 'ACCOUNT_CREDENTIAL_EXPIRY_INVALID',
+  ACCOUNT_CREDENTIAL_LIMIT_REACHED = 'ACCOUNT_CREDENTIAL_LIMIT_REACHED',
   // ── The account blocklist ──
   ACCOUNT_BLOCKED = 'ACCOUNT_BLOCKED',
 }
@@ -103,6 +104,14 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
     message: (context?: Record<string, any>) =>
       `expiresAt must be in the future and at most ${context?.maxDays ?? 365} days from now; ` +
       'nothing was created',
+  },
+  /** The agent already holds the maximum number of live (non-revoked, non-expired) API keys. */
+  credentialLimitReached: {
+    code: AccountErrorCode.ACCOUNT_CREDENTIAL_LIMIT_REACHED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This agent already has the maximum of ${context?.limit ?? 25} active API keys; ` +
+      'nothing was created. Revoke an unused key, or raise the limit',
   },
   /**
    * The key is already bound to ANOTHER live agent credential (in any

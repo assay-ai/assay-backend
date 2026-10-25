@@ -95,6 +95,7 @@ function buildHarness(
     findOneBy: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     clearPendingDelegate: jest.fn(async (): Promise<boolean> => false),
+    countLiveApiKeysForAgent: jest.fn().mockResolvedValue(0),
   };
 
   const agents = {
@@ -483,6 +484,26 @@ describe('AgentCredentialsService.create', () => {
       AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
     );
     expect(credentials.save).not.toHaveBeenCalled();
+  });
+
+  it('refuses a new key once the agent is at the live API-key cap, minting nothing', async () => {
+    const { service, credentials } = buildHarness();
+    credentials.countLiveApiKeysForAgent.mockResolvedValueOnce(25);
+
+    await expectErrorCodeAsync(
+      () => service.create(ORGANIZATION_ID, AGENT_ID, { name: 'one too many' }, ACTOR),
+      AccountErrorCode.ACCOUNT_CREDENTIAL_LIMIT_REACHED,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
+  });
+
+  it('allows a new key while below the cap', async () => {
+    const { service, credentials } = buildHarness();
+    credentials.countLiveApiKeysForAgent.mockResolvedValueOnce(24);
+
+    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'still ok' }, ACTOR);
+    expect(response.token).toMatch(/^assay_sk_live_/);
+    expect(credentials.save).toHaveBeenCalled();
   });
 
   it('returns the full token exactly once and stores only its hash', async () => {
