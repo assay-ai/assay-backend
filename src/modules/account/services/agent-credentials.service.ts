@@ -42,6 +42,7 @@ import {
 import {
   CREDENTIAL_DEFAULT_LIFETIME_DAYS,
   CREDENTIAL_MAX_LIFETIME_DAYS,
+  MAX_ACTIVE_API_KEYS_PER_AGENT,
   ONE_DAY_MS,
 } from '../constants/credential-expiry.constants';
 import { AccountErrors } from '../errors/account.errors';
@@ -249,6 +250,17 @@ export class AgentCredentialsService {
     });
 
     const saved = await this.dataSource.transaction(async (manager) => {
+      // Guardrail: bound live API keys per agent. Counted inside the
+      // transaction so concurrent creates see each other; a revoked or expired
+      // key (kept for audit) does not count. Mirrors the OAuth grant cap.
+      const live = await this.credentials.countLiveApiKeysForAgent(
+        organizationId,
+        agentId,
+        manager,
+      );
+      if (live >= MAX_ACTIVE_API_KEYS_PER_AGENT) {
+        throw AccountErrors.credentialLimitReached({ limit: MAX_ACTIVE_API_KEYS_PER_AGENT });
+      }
       const row = await manager.save(AgentCredentialEntity, entity);
       await this.audit.record(manager, {
         organizationId,

@@ -33,6 +33,17 @@ export interface CredentialExpirySweepConfig {
   readonly now: () => number;
 }
 
+/**
+ * The most live (not revoked, not expired) API-key credentials one agent may
+ * hold at once. A guardrail against a runaway or accidental key-creation loop
+ * and unbounded growth — not a product tier. Sized for generous legitimate use
+ * (rotation overlap + several environments + a per-host fleet, ~20) with
+ * headroom; raise it here if a fleet needs more. The OAuth sibling cap is 50
+ * (OAUTH_MAX_LIVE_GRANTS_PER_AGENT); API keys are tighter because they are
+ * created by hand rather than minted by an authorize flow.
+ */
+export const MAX_ACTIVE_API_KEYS_PER_AGENT = 25;
+
 /** A new API key's lifetime when `POST /agents/:agentId/credentials` names none. */
 export const CREDENTIAL_DEFAULT_LIFETIME_DAYS = 90;
 
