@@ -977,6 +977,37 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     expect(after.status).toBe(DepositIntentStatus.CREATED);
   });
 
+  // HIGH-1 regression: two concurrent broadcasts of one transaction both pass
+  // the read-then-write guard; `uq_ledger_entries_deposit_pending` refuses the
+  // loser's DEPOSIT_PENDING. The loser must end FAILED with the same 409, never
+  // stuck SETTLING and never SETTLED (which would put it in the finality queue).
+  it('fails the loser of a concurrent claim cleanly when the pending-credit index refuses it', async () => {
+    const adapter = selfBroadcastAdapter();
+    const uniqueViolation = Object.assign(new Error('duplicate key value'), { code: '23505' });
+    const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(uniqueViolation) });
+    const harness = buildHarness({ adapter, ledger });
+    const intent = await createdIntent(harness);
+
+    await expectErrorCodeAsync(
+      () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
+    );
+    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    expect(after.status).toBe(DepositIntentStatus.FAILED);
+    expect(after.chainTxRef).toBeNull();
+  });
+
+  it('re-raises a ledger failure that is not the pending-credit unique violation', async () => {
+    const adapter = selfBroadcastAdapter();
+    const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(new Error('db down')) });
+    const harness = buildHarness({ adapter, ledger });
+    const intent = await createdIntent(harness);
+
+    await expect(
+      harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+    ).rejects.toThrow('db down');
+  });
+
   it('never credits a transaction that credits nobody this intent names', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick'] });
     try {

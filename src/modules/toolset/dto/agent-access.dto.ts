@@ -17,12 +17,12 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+import { IsAtomicAmount } from '@shared/decorators/is-atomic-amount.decorator';
+
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 
 import { AccessMode, ToolAccessStanding } from '../domain/access';
-
-const ATOMIC_AMOUNT_RE = /^\d{1,78}$/;
 
 export class AllowedToolsetInputDto {
   @ApiProperty()
@@ -73,7 +73,7 @@ export class AgentRulesInputDto {
     example: '10000',
   })
   @IsOptional()
-  @Matches(ATOMIC_AMOUNT_RE)
+  @IsAtomicAmount()
   maxPrice?: string | null;
 
   @ApiPropertyOptional({
