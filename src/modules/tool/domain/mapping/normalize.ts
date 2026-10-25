@@ -96,7 +96,17 @@ export function isObjectNode(node: MappingNode): node is ObjectNode {
  * Recursive: an object's values are normalised too, so a spec is canonical all
  * the way down after a single call at the root.
  */
-export function normalizeMappingNode(raw: RawMappingNode, pointer = ''): MappingNode {
+/**
+ * Hard ceiling on mapping nesting. Without it a self-inflicted deeply-nested
+ * mapping recurses until the stack overflows — a 500 on the caller's own save
+ * (own-tenant only, but it should be a clean 4xx, not a crashed request).
+ */
+const MAX_MAPPING_DEPTH = 64;
+
+export function normalizeMappingNode(raw: RawMappingNode, pointer = '', depth = 0): MappingNode {
+  if (depth > MAX_MAPPING_DEPTH) {
+    throw new NormalizeError(`Mapping nested deeper than ${MAX_MAPPING_DEPTH} levels`, pointer);
+  }
   if (typeof raw === 'string') {
     return looksLikeSelector(raw) ? { $path: raw } : { $const: raw };
   }
@@ -128,11 +138,11 @@ export function normalizeMappingNode(raw: RawMappingNode, pointer = ''): Mapping
   }
 
   if (directives.length === 0) {
-    return normalizeObjectNode(source, pointer);
+    return normalizeObjectNode(source, pointer, depth);
   }
 
   if ('$from' in source) {
-    return normalizeFromNode(source, pointer);
+    return normalizeFromNode(source, pointer, depth);
   }
 
   if ('$const' in source) {
@@ -150,10 +160,18 @@ export function normalizeMappingNode(raw: RawMappingNode, pointer = ''): Mapping
   );
 }
 
-function normalizeObjectNode(source: Record<string, unknown>, pointer: string): ObjectNode {
+function normalizeObjectNode(
+  source: Record<string, unknown>,
+  pointer: string,
+  depth: number,
+): ObjectNode {
   const result: Record<string, MappingNode> = {};
   for (const [key, value] of Object.entries(source)) {
-    result[key] = normalizeMappingNode(value as RawMappingNode, joinPointer(pointer, key));
+    result[key] = normalizeMappingNode(
+      value as RawMappingNode,
+      joinPointer(pointer, key),
+      depth + 1,
+    );
   }
   return result;
 }
@@ -225,7 +243,11 @@ function normalizePathNode(source: Record<string, unknown>, pointer: string): Pa
  * console rendering the node has to know which keys are structural. The sugar
  * is accepted and immediately rewritten to the explicit `$item` form.
  */
-function normalizeFromNode(source: Record<string, unknown>, pointer: string): FromNode {
+function normalizeFromNode(
+  source: Record<string, unknown>,
+  pointer: string,
+  depth: number,
+): FromNode {
   if (typeof source.$from !== 'string') {
     throw new NormalizeError('$from must be a string selector', joinPointer(pointer, '$from'));
   }
@@ -252,7 +274,11 @@ function normalizeFromNode(source: Record<string, unknown>, pointer: string): Fr
 
   const node: { $from: string; $item: MappingNode; $onEmpty?: EmptyPolicy } = {
     $from: source.$from,
-    $item: normalizeMappingNode(rawItem as RawMappingNode, joinPointer(pointer, '$item')),
+    $item: normalizeMappingNode(
+      rawItem as RawMappingNode,
+      joinPointer(pointer, '$item'),
+      depth + 1,
+    ),
   };
 
   if ('$onEmpty' in source) {

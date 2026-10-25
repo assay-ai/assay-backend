@@ -10,7 +10,12 @@ import {
 } from 'class-validator';
 
 /** Atomic units as a non-negative decimal integer string — same grammar as `MoneyDto.amount`. */
-const ATOMIC_AMOUNT_RE = /^\d+$/;
+// Bounded to 78 digits like the sibling money DTOs (toolset, agent-access): an
+// unbounded `\d+` let a PATCH store a cap too large for the u64 the read and
+// enforcement paths assume, which then threw on every read — the user corrupting
+// their own policy. The exact u64 ceiling is still enforced by `MoneyUtil` where
+// the cap is used, as it is for those siblings.
+const ATOMIC_AMOUNT_RE = /^\d{1,78}$/;
 
 /**
  * `PATCH /spend-policy` — writes a new version at the calling agent's scope
