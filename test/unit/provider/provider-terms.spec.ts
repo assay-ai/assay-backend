@@ -82,3 +82,43 @@ describe('loadProviderTerms', () => {
     ]);
   });
 });
+
+describe('loadProviderTerms — from the chain', () => {
+  const ASSET = 'eip155:46630/erc20:0xDbbC0000000000000000000000000000000000aA' as never;
+  const live = {
+    minimumStake: { amount: '100000000', asset: ASSET, decimals: 6 },
+    params: {
+      takeRateBps: 800,
+      slashAgentBps: 5000,
+      slashPlatformBps: 4000,
+      collectHoldSeconds: 7200,
+      unbondingPeriodSeconds: 14 * 86_400,
+    } as never,
+  };
+  const row = (key: string) =>
+    loadProviderTerms(configWith({ PLATFORM_FEE_BPS: '1000' }), live).commercialTerms.find(
+      (term) => term.key === key,
+    );
+
+  it('prints the chain values over the env fallbacks, in both directions', () => {
+    expect(row('stakeRequired')?.value).toBe('$100.00 minimum');
+    expect(row('takeRate')?.value).toBe('8%');
+    expect(row('penaltySplit')).toMatchObject({
+      value: '50 / 40 / 10',
+      caption: '50% to the agent served the bad result, 40% platform, 10% stays yours',
+    });
+  });
+
+  it('words the hold captions and the unbonding row from the chain', () => {
+    expect(row('payouts')?.caption).toBe('on chain; final 2 hours after each call');
+    expect(row('reserveHeld')?.caption).toBe(
+      'no standing reserve; each paid call is held 2 hours for buyer reports',
+    );
+    expect(row('unbondingPeriod')?.value).toBe('14 days');
+  });
+
+  it('has no unbonding row while the chain was not read', () => {
+    const terms = loadProviderTerms(configWith({}));
+    expect(terms.commercialTerms.some((term) => term.key === 'unbondingPeriod')).toBe(false);
+  });
+});

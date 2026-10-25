@@ -62,8 +62,9 @@ import { LastSeenModule } from '@shared/last-seen';
   // uses, and the alternative here would be re-exporting a stake port from the
   // slash domain, which has no business owning one.
   //
-  // `ChainsModule` also supplies `MINIMUM_STAKE_READER`, so the economics
-  // panel's minimum stake is the contract's own, as on the Contracts page.
+  // `ChainsModule` also supplies `CHAIN_PARAMS`, so the economics panel's
+  // minimum stake, take rate, split and penalty ceiling are the contract's
+  // own, as on the Contracts page.
   //
   // `ChainsModule` supplies `VERIFIER_REGISTRY` for the read-only verifier
   // panel — the on-chain allowlist is the only authority on which keys the

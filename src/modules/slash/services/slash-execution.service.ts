@@ -3002,6 +3002,8 @@ export class SlashExecutionService {
       readonly signature: string | null;
       readonly appliedMinor: string;
       readonly platformAmountMinor: string;
+      /** The agents' share the chain recorded (`SlashExecuted.agentAmount`), when known. */
+      readonly agentAmountMinor?: string;
       readonly executedAt: Date;
     },
     expectedFrom: readonly string[],
@@ -3084,6 +3086,12 @@ export class SlashExecutionService {
         payload: {
           proposalId: proposal.id,
           applied: result.appliedMinor,
+          // The split the chain recorded, so the inbox shows it instead of
+          // recomputing it from today's terms.
+          platformAmount: result.platformAmountMinor,
+          ...(result.agentAmountMinor !== undefined
+            ? { agentAmount: result.agentAmountMinor }
+            : {}),
           requested: proposal.penaltyAmount,
           decimals: proposal.decimals,
           toolName,

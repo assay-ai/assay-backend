@@ -5,6 +5,7 @@ import { IsNull } from 'typeorm';
 import { ProviderStakeGraceEntity } from '@database/postgres/entities/provider-stake-grace.entity';
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { chainMetadata } from '@modules/chains/chain-metadata';
+import { DEFAULT_MINIMUM_STAKE_FLOOR } from '@modules/chains/evm/chain-params-fallback';
 import { ENABLED_CHAINS_ENV } from '@modules/chains/enabled-chains';
 import { platformAssetFrom } from '@modules/chains/platform-asset';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
@@ -85,13 +86,14 @@ export function loadMinimumStakeParameters(config: ConfigService): MinimumStakeP
 }
 
 /**
- * {@link loadMinimumStakeParameters}' floor, raised to the effective routing
- * floor of the same chain (`ContractMinimumStakeFloors.byChain`: the contract
- * minimum when stricter), read at every use so a refresh shows at once.
+ * {@link loadMinimumStakeParameters}' floor, replaced by the effective routing
+ * floor of the same chain (`ContractMinimumStakeFloors.byChain`: the
+ * contract's own minimum once it was read, higher or lower), read at every use
+ * so a refresh shows at once.
  *
  * For the provider Capital screen and the stake monitor (review M-8), so they
- * name the number routing gates on. Never below the configured floor, and the
- * configured floor whenever the live entry is missing or in another asset.
+ * name the number routing gates on. The configured floor whenever the live
+ * entry is missing or in another asset.
  */
 export function liveMinimumStakeParameters(
   configured: MinimumStakeParameters,
@@ -103,8 +105,7 @@ export function liveMinimumStakeParameters(
       const live = byChain.get(chainId)?.floor;
       return live &&
         live.asset === configured.floor.asset &&
-        live.decimals === configured.floor.decimals &&
-        MoneyUtil.greaterThan(live, configured.floor)
+        live.decimals === configured.floor.decimals
         ? live
         : configured.floor;
     },
@@ -112,8 +113,6 @@ export function liveMinimumStakeParameters(
   };
 }
 
-/** `$50`, the default minimum-stake floor. */
-const DEFAULT_MINIMUM_STAKE_FLOOR = '50000000';
 /** `1000×` the binding's price. */
 const DEFAULT_MINIMUM_STAKE_MULTIPLE = '1000';
 

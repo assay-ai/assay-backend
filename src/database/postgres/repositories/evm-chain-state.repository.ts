@@ -27,6 +27,10 @@ export interface IndexedRange {
   readonly paused?: boolean;
   /** The last `ArbiterSet` in the range, lower-case, `null` for none. */
   readonly arbiter?: string | null;
+  /** The last `SlashDelaySet` in the range. */
+  readonly slashDelaySeconds?: number;
+  /** The range holds a config-change event: stamps `params_changed_at`. */
+  readonly paramsChanged?: boolean;
   readonly blocked: readonly BlockedSetRow[];
 }
 
@@ -96,6 +100,10 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
           ...(range.caughtUp ? { caughtUpAt: range.now } : {}),
           ...(range.paused !== undefined ? { paused: range.paused } : {}),
           ...(range.arbiter !== undefined ? { arbiter: range.arbiter } : {}),
+          ...(range.slashDelaySeconds !== undefined
+            ? { slashDelaySeconds: range.slashDelaySeconds }
+            : {}),
+          ...(range.paramsChanged ? { paramsChangedAt: range.now } : {}),
           lastError: null,
         },
       );

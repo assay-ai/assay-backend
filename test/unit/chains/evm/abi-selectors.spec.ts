@@ -325,6 +325,8 @@ describe('the vendored ABI matches the compiled contracts', () => {
       BlockedSet: '0xe542f9e64ac19b6755a8df86c41b0b8e0fd7a37565a0b79291c2b5383e6a4a15',
       ArbiterSet: '0xa99fc739cab6b19d8ee27aaf57eabd8d86b73474801240c86a747a5f5ee88841',
       SlashDelaySet: '0xe92892ac23b44eec891739e9373975ea3d0390fff6945b656d711465fa06a44a',
+      // From the compiled AssayConfig artifact (`CollectHoldSet(uint64,uint64)`).
+      CollectHoldSet: '0xc7b8f47fc57c4b839b62f59f1088987f65c73b2bd7096ecf80d061a08947d90d',
       VerifierRegistered: '0xf548a4789950d0f1776ed9cb2587f9c617dd22bcaf73b7e11671ea12a11788a9',
       // Audit E-6, from the compiled AssayConfig artifact.
       AdminSet: '0xbf265e8326285a2747e33e54d5945f7111f2b5edb826eb8c08d4677779b3ff97',

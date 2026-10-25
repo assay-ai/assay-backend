@@ -36,7 +36,7 @@ import {
 } from '../ports/provider-registration.types';
 import { ChainEnrolmentStatus } from '../ports/chain-enrolment.port';
 import { ProviderStatus, ProviderTier } from '../ports/provider.types';
-import { PROVIDER_TERMS, ProviderTerms } from './provider-terms';
+import { PROVIDER_TERMS, ProviderTermsSource } from './provider-terms';
 
 /**
  * Open registration and the console's onboarding screen.
@@ -76,7 +76,7 @@ export class ProviderRegistrationService {
     private readonly payoutChallenges: ProviderPayoutChallengeRepository,
     private readonly chainEnrolments: ProviderChainEnrolmentRepository,
     private readonly connectivityChecks: ProviderConnectivityCheckRepository,
-    @Inject(PROVIDER_TERMS) private readonly terms: ProviderTerms,
+    @Inject(PROVIDER_TERMS) private readonly termsSource: ProviderTermsSource,
   ) {}
 
   async register(
@@ -347,7 +347,8 @@ export class ProviderRegistrationService {
    * `ports/provider-registration.types.ts`).
    */
   private buildAcceptedTerms(input: AcceptedTermsInputDto, acceptedBy: string): AcceptedTerms {
-    const { providerAgreementVersion, payoutTermsVersion, slashPolicyVersion } = this.terms;
+    const { providerAgreementVersion, payoutTermsVersion, slashPolicyVersion } =
+      this.termsSource.current();
     const matches =
       input.providerAgreementVersion === providerAgreementVersion &&
       input.payoutTermsVersion === payoutTermsVersion &&
@@ -396,12 +397,14 @@ export class ProviderRegistrationService {
   }
 
   private toTermsSummaryDto(): ProviderTermsSummaryDto {
+    // Built per request: the stake floor, fee, split and hold follow the chain.
+    const terms = this.termsSource.current();
     return {
-      providerAgreementVersion: this.terms.providerAgreementVersion,
-      payoutTermsVersion: this.terms.payoutTermsVersion,
-      slashPolicyVersion: this.terms.slashPolicyVersion,
-      acceptanceLine: this.terms.acceptanceLine,
-      commercialTerms: this.terms.commercialTerms.map((term) => ({ ...term })),
+      providerAgreementVersion: terms.providerAgreementVersion,
+      payoutTermsVersion: terms.payoutTermsVersion,
+      slashPolicyVersion: terms.slashPolicyVersion,
+      acceptanceLine: terms.acceptanceLine,
+      commercialTerms: terms.commercialTerms.map((term) => ({ ...term })),
     };
   }
 }

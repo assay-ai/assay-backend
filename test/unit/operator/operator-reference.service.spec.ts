@@ -1,7 +1,4 @@
-import {
-  MINIMUM_STAKE_READ_TIMEOUT_MS,
-  OperatorReferenceService,
-} from '@modules/operator/services/operator-reference.service';
+import { OperatorReferenceService } from '@modules/operator/services/operator-reference.service';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { OVERRIDE_CODES } from '@modules/operator/domain/override-register';
@@ -27,19 +24,29 @@ function build(
     providerIds?: readonly string[];
     providerRegistry?: ReturnType<typeof fakeProviderRegistry>;
     config?: Readonly<Record<string, string>>;
-    readings?: readonly { chainId: ChainId; minimumStake: bigint | null; failure?: string }[];
+    /** A chain read (`minimumStake` set) or never read (`null`). */
+    readings?: readonly {
+      chainId: ChainId;
+      minimumStake: bigint | null;
+      takeRateBps?: number;
+      slashAgentBps?: number;
+      slashPlatformBps?: number;
+    }[];
   } = {},
 ): OperatorReferenceService {
-  const minimumStakes = options.readings
+  const chainParams = options.readings
     ? {
-        readMinimumStakes: jest.fn(async () =>
+        all: jest.fn(() =>
           options.readings!.map((reading) => ({
             chainId: reading.chainId,
-            minimumStake:
-              reading.minimumStake === null
-                ? null
-                : MoneyUtil.of(reading.minimumStake, EVM_ASSET, 6),
-            failure: reading.minimumStake === null ? (reading.failure ?? 'TIMEOUT') : null,
+            source: reading.minimumStake === null ? 'config' : 'chain',
+            minimumStake: MoneyUtil.of(reading.minimumStake ?? 50_000_000n, EVM_ASSET, 6),
+            penaltyAmount:
+              reading.minimumStake === null ? null : MoneyUtil.of(1_000_000n, EVM_ASSET, 6),
+            takeRateBps: reading.takeRateBps ?? 1000,
+            slashAgentBps: reading.slashAgentBps ?? 6000,
+            slashPlatformBps: reading.slashPlatformBps ?? 3000,
+            slashCapBps: 1000,
           })),
         ),
       }
@@ -51,7 +58,7 @@ function build(
     fakeProviderRepositoryFor(options.providerIds ?? []),
     options.providerRegistry ?? fakeProviderRegistry(),
     fakeConfigService(options.config ?? {}),
-    minimumStakes as never,
+    chainParams as never,
   );
 }
 
@@ -237,14 +244,25 @@ describe('OperatorReferenceService — economic parameters', () => {
     expect(byKey.get('splitProvider')?.value).toBe('10%');
   });
 
-  it('reports penaltySize as unsourced rather than fabricating a value', async () => {
+  it('reports penaltySize as not known yet, rather than fabricating a value, before a chain read', async () => {
     const service = build();
 
     const rows = await service.listEconomicParameters();
     const penaltySize = rows.find((row) => row.key === 'penaltySize');
 
     expect(penaltySize?.value).toBeNull();
-    expect(penaltySize?.note).toContain('No fixed penalty-size parameter');
+    expect(penaltySize?.note).toContain('params().penaltyAmount');
+  });
+
+  it('reports the per-record penalty ceiling and the slash cap from the chain (M6)', async () => {
+    const service = build({ readings: [{ chainId: EVM_CHAIN, minimumStake: 50_000_000n }] });
+
+    const row = (await service.listEconomicParameters()).find((r) => r.key === 'penaltySize');
+
+    expect(row?.value).toBe('$1.00 per record');
+    expect(row?.source).toBe('chain');
+    expect(row?.note).toContain('10% of the provider');
+    expect(row?.note).not.toContain('no per-call or per-strike ceiling');
   });
 
   it('counts providers with a negotiated minimum-stake override', async () => {
@@ -285,48 +303,51 @@ describe('OperatorReferenceService — economic parameters', () => {
     expect(row?.note).toBeNull();
   });
 
-  it('shows the configured floor with a short code, never the error text, when no chain answers', async () => {
-    const service = build({
-      readings: [{ chainId: EVM_CHAIN, minimumStake: null, failure: 'UNREADABLE' }],
-    });
+  it('shows the configured floor while no chain was read', async () => {
+    const service = build({ readings: [{ chainId: EVM_CHAIN, minimumStake: null }] });
 
     const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
 
     expect(row?.value).toBe('$50.00');
     expect(row?.source).toBe('config');
-    expect(row?.note).toBe(
-      'No answer from the settlement contract on eip155:46630 (UNREADABLE); the configured floor is shown for it.',
-    );
   });
 
-  it('keeps the chains that answered and shows the configured floor for one that timed out', async () => {
+  it('lists one value per chain when the chains disagree, skipping a chain never read', async () => {
     const other = 'eip155:1' as ChainId;
     const service = build({
       readings: [
         { chainId: EVM_CHAIN, minimumStake: 100_000_000n },
-        { chainId: other, minimumStake: null, failure: 'TIMEOUT' },
+        { chainId: other, minimumStake: 20_000_000n },
+        { chainId: 'eip155:2' as ChainId, minimumStake: null },
       ],
     });
 
     const row = (await service.listEconomicParameters()).find((r) => r.key === 'minimumStake');
 
     expect(row?.source).toBe('chain');
-    expect(row?.value).toBe('eip155:46630 $100.00 · eip155:1 $50.00');
-    expect(row?.note).toContain('eip155:1 (TIMEOUT)');
+    expect(row?.value).toBe('eip155:46630 $100.00 · eip155:1 $20.00');
   });
 
-  it('asks the reader for a bounded read', async () => {
-    const readings = [{ chainId: EVM_CHAIN, minimumStake: 100_000_000n }];
-    const service = build({ readings });
-    const reader = (service as unknown as { minimumStakes: { readMinimumStakes: jest.Mock } })
-      .minimumStakes;
-
-    await service.listEconomicParameters();
-
-    expect(reader.readMinimumStakes).toHaveBeenCalledWith({
-      timeoutMs: MINIMUM_STAKE_READ_TIMEOUT_MS,
+  it('reads the take rate and the split from the chain over config', async () => {
+    const service = build({
+      config: { PLATFORM_FEE_BPS: '1200', PROVIDER_TERMS_PENALTY_SPLIT: '50 / 40 / 10' },
+      readings: [
+        {
+          chainId: EVM_CHAIN,
+          minimumStake: 50_000_000n,
+          takeRateBps: 800,
+          slashAgentBps: 7000,
+          slashPlatformBps: 2500,
+        },
+      ],
     });
-    expect(MINIMUM_STAKE_READ_TIMEOUT_MS).toBe(2_000);
+
+    const byKey = new Map((await service.listEconomicParameters()).map((row) => [row.key, row]));
+
+    expect(byKey.get('takeRate')).toMatchObject({ value: '8%', source: 'chain' });
+    expect(byKey.get('splitAgent')).toMatchObject({ value: '70%', source: 'chain' });
+    expect(byKey.get('splitPlatform')).toMatchObject({ value: '25%', source: 'chain' });
+    expect(byKey.get('splitProvider')).toMatchObject({ value: '5%', source: 'chain' });
   });
 
   it('respects a custom take rate and penalty split from config', async () => {

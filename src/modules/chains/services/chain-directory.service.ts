@@ -1,8 +1,13 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+
+import { HELD_TIMEOUT_SECONDS } from '@modules/payment/ports/held-payments.port';
+import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 
 import { ChainAdapterRegistry } from '../chain-adapter.registry';
 import { chainMetadata } from '../chain-metadata';
-import { ChainDto, GetChainsResponseDto } from '../dto/get-chains.dto';
+import { ChainDto, ChainParamsDto, GetChainsResponseDto } from '../dto/get-chains.dto';
+import { EVM_CONSTANTS } from '../evm/evm.constants';
+import { CHAIN_PARAMS, ChainParams, ChainParamsPort } from '../ports/chain-params.port';
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { getAssetMetadata } from '../ports/asset-registry';
 import { ChainId, parseChainId } from '../ports/caip.types';
@@ -42,6 +47,10 @@ export class ChainDirectoryService {
      * the field, and the browser refuses that chain by name.
      */
     @Inject(PUBLIC_RPC_URLS) private readonly publicRpcUrls: ReadonlyMap<string, string>,
+    /** The on-chain params cache: in memory, so this route still does no I/O. */
+    @Optional()
+    @Inject(CHAIN_PARAMS)
+    private readonly chainParams: ChainParamsPort | null = null,
   ) {}
 
   listChains(): GetChainsResponseDto {
@@ -78,6 +87,42 @@ export class ChainDirectoryService {
       // for the chain: the browser's refusal reads "this build has no network
       // endpoint for this chain", which is true, instead of dialling "".
       ...(this.publicRpcUrls.get(chainId) ? { publicRpcUrl: this.publicRpcUrls.get(chainId) } : {}),
+      ...this.onChain(chainId),
     };
   }
+
+  private onChain(chainId: ChainId): Pick<ChainDto, 'contracts' | 'params'> {
+    const params = this.chainParams?.current(chainId);
+    if (!params) return {};
+    return { contracts: { ...params.contracts }, params: toParamsDto(params) };
+  }
+}
+
+function toParamsDto(params: ChainParams): ChainParamsDto {
+  return {
+    source: params.source,
+    readAt: params.readAt?.toISOString() ?? null,
+    minimumStake: params.minimumStake?.amount ?? null,
+    penaltyAmount: params.penaltyAmount?.amount ?? null,
+    takeRateBps: params.takeRateBps,
+    slashAgentBps: params.slashAgentBps,
+    slashPlatformBps: params.slashPlatformBps,
+    slashCapBps: params.slashCapBps,
+    unbondingPeriodSeconds: params.unbondingPeriodSeconds,
+    slashDelaySeconds: params.slashDelaySeconds,
+    effectiveSlashDelaySeconds: Math.max(
+      params.slashDelaySeconds ?? 0,
+      params.policySlashDelaySeconds,
+    ),
+    collectHoldSeconds: params.collectHoldSeconds,
+    // Compile-time contract constants (`assay-evm/src/Constants.sol`, pinned
+    // by `constants-pin.spec.ts`): served so no client keeps its own copy.
+    withdrawDelaySeconds: EVM_CONSTANTS.WITHDRAW_DELAY_SECONDS,
+    tightenDelaySeconds: EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS,
+    redeemGraceSeconds: EVM_CONSTANTS.REDEEM_GRACE_SECONDS,
+    heldTimeoutSeconds: HELD_TIMEOUT_SECONDS,
+    disputeTimeoutSeconds: DISPUTE_TIMEOUT_MS / 1000,
+    paused: params.paused,
+    arbiter: params.arbiter,
+  };
 }

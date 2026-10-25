@@ -496,6 +496,17 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(intent.rail).toBe(PaymentRail.RAIL_A_PER_CALL);
   });
 
+  it("splits the fee at the contract's own take rate once read, over PLATFORM_FEE_BPS", async () => {
+    const { calls, intents } = harness(
+      { 'binding-provider-a': () => Promise.resolve(ok()) },
+      { platformFeeBps: 1000, platformFeeBpsFor: () => 2000 },
+    );
+
+    await calls.call(SESSION, 'Search the web', ARGS);
+
+    expect(intents.only.platformFee.amount).toBe(usdc('0.01').amount);
+  });
+
   it('keeps 10% by default, the take rate the provider terms state', async () => {
     const { calls, intents } = harness({ 'binding-provider-a': () => Promise.resolve(ok()) });
 

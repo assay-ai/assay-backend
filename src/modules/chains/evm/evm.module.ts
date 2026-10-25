@@ -48,7 +48,8 @@ import {
 } from './evm-escrow-deposit-logs.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
-import { EvmMinimumStakeReader } from './evm-minimum-stake-reader.service';
+import { loadChainParamsFallback } from './chain-params-fallback';
+import { EvmChainParamsCache } from './evm-chain-params.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
 import { ModuleRef } from '@nestjs/core';
@@ -336,11 +337,14 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       useClass: EvmRelayedEscrowIntentSubmitter,
     },
     {
-      // `params().minimumStake` per chain, for the operator economics panel.
-      provide: EvmMinimumStakeReader,
-      useFactory: (clients: never, deployments: never) =>
-        new EvmMinimumStakeReader(clients, deployments),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+      // The on-chain parameters of every deployment (`params()`, slash delay,
+      // collect hold, pause, arbiter), cached per process: the one source for
+      // the routing floor, the fee, the terms tables and `GET /chains`. The env
+      // values are only its fallback while a chain was never read.
+      provide: EvmChainParamsCache,
+      useFactory: (clients: never, deployments: never, config: ConfigService, alerts: AlertPort) =>
+        new EvmChainParamsCache(clients, deployments, loadChainParamsFallback(config), alerts),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ConfigService, ALERT_PORT],
     },
     {
       // Whether each chain's escrow has the tighten delay (D-21), by asking it.
@@ -512,6 +516,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         deployments: ReadonlyMap<ChainId, EvmDeployment>,
         config: ConfigService,
         alerts: AlertPort,
+        params: EvmChainParamsCache,
       ) =>
         new EvmChainStateService(
           repository,
@@ -525,6 +530,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
             ),
           },
           alerts,
+          params,
         ),
       inject: [
         EvmChainStateRepository,
@@ -532,6 +538,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         EVM_DEPLOYMENTS,
         ConfigService,
         ALERT_PORT,
+        EvmChainParamsCache,
       ],
     },
     {
@@ -556,7 +563,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmHeldPayments,
     EvmEscrowDepositLogs,
     EvmTightenDelayProbe,
-    EvmMinimumStakeReader,
+    EvmChainParamsCache,
     EvmSlashExecutor,
     EvmVerifierRegistryService,
     EvmVaultService,
