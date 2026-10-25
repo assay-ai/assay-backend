@@ -14,6 +14,7 @@ import {
   isAccountId,
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
+import { LedgerErrors } from '@modules/ledger/errors/ledger.errors';
 import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
 import {
   VoucherAuthorityKind,
@@ -1006,6 +1007,20 @@ export class VoucherService {
               ? PaymentErrors.voucherSeqAlreadyUsed
               : PaymentErrors.voucherSeqStale;
           throw refusal({ account: input.agentAccount, actual: voucher.seq });
+        }
+        // Affordability, under the payer's lock (the gate in `secureFunds` reads
+        // outside it, before any concurrent call's hold exists). Against the
+        // same chain reading the window check uses; the gate still runs after.
+        if (escrow !== null && open.reserved !== undefined) {
+          const balance = BigInt(escrow.balance.amount);
+          const spendable = balance > open.reserved ? balance - open.reserved : 0n;
+          if (spendable < amount) {
+            throw LedgerErrors.insufficientAvailableBalance({
+              accountId: input.agentAccount,
+              required: amount.toString(),
+              available: spendable.toString(),
+            });
+          }
         }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;
