@@ -12,6 +12,7 @@ import {
   OrgHandleHistoryRepository,
 } from '@database/postgres/repositories/toolset-sharing.repository';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { DEPOSIT_MINIMUM_USD } from '@modules/payment/constants/deposit-intent.constants';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import {
@@ -97,9 +98,9 @@ export class HandlesService {
       throw ToolsetErrors.handleLocked();
     }
 
-    if (!(await this.isVerified(organizationId))) {
-      throw ToolsetErrors.handleClaimRefused({ reason: 'NOT_VERIFIED' });
-    }
+    // Funded once, or the one free name of a set-up provider (below).
+    const funded = await this.isVerified(organizationId);
+    if (!funded) await this.assertFreeProviderName(this.dataSource.manager, organizationId);
     const user = await this.claimantOf(session);
     const since = new Date(this.now().getTime() - HANDLE_CLAIM_WINDOW_MS);
     if (!claimGateAllows(await this.claims.recentOrgIds(user, since), organizationId)) {
@@ -138,6 +139,10 @@ export class HandlesService {
         if (!claimGateAllows(recent, organizationId)) {
           throw ToolsetErrors.handleClaimRefused({ reason: 'CLAIM_LIMIT' });
         }
+        // The free name again, under the organization's lock: two claims of
+        // one organization serialise here, so the second sees the first's
+        // claim row and its handle, and is refused.
+        if (!funded) await this.assertFreeProviderName(manager, organizationId);
         if (!(await this.isAvailable(manager, handle, organizationId))) {
           throw ToolsetErrors.handleTaken({ suggestions: await this.freeSuggestions(handle) });
         }
@@ -162,7 +167,7 @@ export class HandlesService {
           resourceType: 'organization',
           resourceId: organizationId,
           before: { handle: previous },
-          after: { handle },
+          after: funded ? { handle } : { handle, freeProviderName: true },
         });
       });
     } catch (error) {
@@ -279,6 +284,43 @@ export class HandlesService {
       [organizationId],
     )) as { verified: boolean }[];
     return row?.verified === true;
+  }
+
+  /**
+   * The one exception to "fund once first": an organization whose provider
+   * setup is complete — an ACTIVE provider with a proved payout address (an
+   * ACTIVE enrolment exists only after the payout signature) — may claim its
+   * FIRST public name unfunded, so a provider can publish a free tool without
+   * a deposit. Proving a payout address is per-wallet work a bulk grabber has
+   * to repeat, and the person-wide 3-in-30-days gate still applies.
+   *
+   * "First" means the organization holds no handle and never claimed one:
+   * `org_handle_claims` rows are never deleted, so a takedown that clears the
+   * handle, or a change before the lock, cannot replay it. Throws the
+   * `NOT_VERIFIED` refusal, with what the console needs to offer "Add funds".
+   */
+  private async assertFreeProviderName(
+    manager: EntityManager,
+    organizationId: string,
+  ): Promise<void> {
+    const [row] = (await manager.query(
+      `SELECT
+         (EXISTS (SELECT 1 FROM providers
+                   WHERE organization_id = $1 AND status = 'ACTIVE')
+          AND EXISTS (SELECT 1 FROM provider_chain_enrolments
+                       WHERE organization_id = $1 AND status = 'ACTIVE')) AS "providerSetUp",
+         (EXISTS (SELECT 1 FROM organizations WHERE id = $1 AND handle IS NOT NULL)
+          OR EXISTS (SELECT 1 FROM org_handle_claims WHERE org_id = $1)) AS "claimedBefore"`,
+      [organizationId],
+    )) as { providerSetUp: boolean; claimedBefore: boolean }[];
+    const providerSetUp = row?.providerSetUp === true;
+    if (providerSetUp && row?.claimedBefore === false) return;
+    throw ToolsetErrors.handleClaimRefused({
+      reason: 'NOT_VERIFIED',
+      fundingRequired: true,
+      minimumDepositUsd: DEPOSIT_MINIMUM_USD,
+      providerSetUp,
+    });
   }
 
   /** Free of every current handle and every held old one (`manager` holds the lock). */

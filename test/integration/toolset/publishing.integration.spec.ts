@@ -301,6 +301,69 @@ describe('toolset publishing, against a real database and Redis', () => {
         context: { reason: 'CLAIM_LIMIT' },
       });
     });
+
+    /** A registered provider; `payout` also proves a payout address (setup complete). */
+    async function provider(organizationId: string, payout: boolean): Promise<void> {
+      const contact = JSON.stringify({ name: 'Ops', email: 'ops@example.com' });
+      await dataSource.query(
+        `INSERT INTO providers (organization_id, legal_name, technical_contact, timezone,
+                                accepted_terms)
+         VALUES ($1, 'Example Labs', $2::jsonb, 'UTC', '{}'::jsonb)`,
+        [organizationId, contact],
+      );
+      if (!payout) return;
+      await dataSource.query(
+        `INSERT INTO provider_chain_enrolments
+           (organization_id, chain_id, payout_account_id, payout_proof, payout_proved_at, status)
+         VALUES ($1, $2, $3, '{}'::jsonb, now(), 'ACTIVE')`,
+        [organizationId, CHAIN, `${CHAIN}:Payout${organizationId.slice(0, 8)}`],
+      );
+    }
+
+    it('lets a set-up provider claim one name unfunded, once, even when two claims race', async () => {
+      const s = services();
+      const half = await org('Half provider');
+      await provider(half, false);
+      expect(
+        await errorOf(s.handles.claim(session(half, await agent(half)), 'half-co', ACTOR)),
+      ).toMatchObject({
+        code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED,
+        context: { reason: 'NOT_VERIFIED', fundingRequired: true, providerSetUp: false },
+      });
+
+      const ready = await org('Ready provider');
+      await provider(ready, true);
+      const results = await Promise.all(
+        ['ready-one', 'ready-two'].map(async (name) =>
+          errorOf(s.handles.claim(session(ready, await agent(ready)), name, ACTOR)),
+        ),
+      );
+      expect(results.filter((result) => result === null)).toHaveLength(1);
+      expect(results.find((result) => result !== null)).toMatchObject({
+        code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED,
+        context: { reason: 'NOT_VERIFIED', providerSetUp: true },
+      });
+      const held = (await s.handles.get(ready)).handle;
+      expect(['ready-one', 'ready-two']).toContain(held);
+
+      // A change before the lock is a second name: refused until funded.
+      expect(
+        await errorOf(s.handles.claim(session(ready, await agent(ready)), 'ready-three', ACTOR)),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED });
+      // A cleared handle does not give the free name back.
+      await dataSource.query(
+        `UPDATE organizations SET handle = NULL, handle_skeleton = NULL, handle_status = NULL
+          WHERE id = $1`,
+        [ready],
+      );
+      expect(
+        await errorOf(s.handles.claim(session(ready, await agent(ready)), 'ready-four', ACTOR)),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED });
+      await verify(ready);
+      await expect(
+        s.handles.claim(session(ready, await agent(ready)), 'ready-four', ACTOR),
+      ).resolves.toMatchObject({ handle: 'ready-four' });
+    });
   });
 
   describe('publishing and the shared URLs', () => {

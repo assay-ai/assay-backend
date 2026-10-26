@@ -30,7 +30,8 @@ export class HandlesController {
   @ApiOperation({
     summary: 'Claim or change the public name (before the first shared tool set locks it)',
     description:
-      'Needs a verified organization (funded once, or a verified provider) and at most 3 ' +
+      'Needs a verified organization (funded once, or a verified provider); a provider whose ' +
+      'setup is complete (payout address proved) may claim its first name unfunded. At most 3 ' +
       'organizations per person in 30 days. Unique ignoring case; reserved words and category ' +
       'names are refused.',
   })
@@ -38,7 +39,9 @@ export class HandlesController {
   @ApiResponse({ status: 400, description: 'TOOLSET_HANDLE_INVALID (`reason`: FORMAT | RESERVED)' })
   @ApiResponse({
     status: 403,
-    description: 'TOOLSET_HANDLE_CLAIM_REFUSED (NOT_VERIFIED | CLAIM_LIMIT)',
+    description:
+      'TOOLSET_HANDLE_CLAIM_REFUSED (`reason`: NOT_VERIFIED | CLAIM_LIMIT); NOT_VERIFIED adds ' +
+      '`fundingRequired`, `minimumDepositUsd` and `providerSetUp`',
   })
   @ApiResponse({
     status: 409,
