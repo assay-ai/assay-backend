@@ -25,7 +25,8 @@ export type FacilitatorErrorCodesArePrefixed = AssertDomainErrorCodes<
 export const FacilitatorErrors = createDomainErrorFactory('FACILITATOR', {
   signerUnavailable: {
     code: FacilitatorErrorCode.FACILITATOR_SIGNER_UNAVAILABLE,
-    statusCode: 502,
+    // `503`, never `502`: see `edgeSafeStatus`.
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Fee-payer signer "${context?.signer ?? 'unknown'}" is unavailable` +
       `${context?.reason ? `: ${context.reason}` : ''}`,

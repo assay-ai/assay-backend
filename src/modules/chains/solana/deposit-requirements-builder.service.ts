@@ -27,7 +27,7 @@ import { BLOCKHASH_READER, BlockhashReaderPort } from './blockhash.port';
  *
  * `PaymentRequirements.extra` is `Record<string, unknown>` because it is
  * chain-specific by design, and `feePayer`/`memo` therefore arrive untyped.
- * `readRequiredExtra` refuses a non-string with `502
+ * `readRequiredExtra` refuses a non-string with `503
  * PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE` — the facilitator failed to hold up
  * its end, and nothing the caller sent could have caused it or can fix it. Cast
  * instead of checked, a missing `feePayer` becomes the string `"undefined"` in
@@ -48,7 +48,7 @@ export class SolanaDepositRequirementsBuilder implements DepositRequirementsBuil
     requirements,
     decimals,
   }: DepositRequirementsInput): Promise<DepositRequirements> {
-    // Read before the blockhash, deliberately: a missing `feePayer` is a 502
+    // Read before the blockhash, deliberately: a missing `feePayer` is a 503
     // that does not need an RPC round trip to discover.
     const feePayer = readRequiredExtra(requirements, 'feePayer');
     const memo = readRequiredExtra(requirements, 'memo');

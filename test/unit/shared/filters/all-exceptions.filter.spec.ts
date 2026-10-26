@@ -1,13 +1,19 @@
 import {
   ArgumentsHost,
+  BadGatewayException,
   BadRequestException,
+  GatewayTimeoutException,
   HttpException,
   NotFoundException,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
-import { ErrorResponse } from '@shared/errors/error-response';
+import { edgeSafeStatus, ErrorResponse } from '@shared/errors/error-response';
+import { EgressError, EgressFailureKind } from '@shared/network/egress/egress.errors';
+import { ChainErrors } from '@modules/chains/errors/chains.errors';
+import { FacilitatorErrors } from '@modules/chains/facilitator/errors/facilitator.errors';
+import { ToolErrors } from '@modules/tool/errors/tool.errors';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { AccountErrors } from '@modules/account/errors/account.errors';
 import { SlashErrors } from '@modules/slash/errors/slash.errors';
@@ -152,6 +158,58 @@ describe('AllExceptionsFilter', () => {
 
     expect(new Set(shapes).size).toBe(1);
     bodies.forEach(expectTheOneShape);
+  });
+
+  /*
+    Cloudflare replaces an origin 502/504 with its own page, which has no CORS
+    headers, so a browser sees "Failed to fetch" and never this body. Nothing
+    this filter writes may be a 502 or a 504; the code is kept.
+  */
+  describe('never answers 502 or 504 (the edge would replace the body)', () => {
+    it.each([
+      ['BadGatewayException', new BadGatewayException('upstream broke'), 'BAD_GATEWAY'],
+      ['GatewayTimeoutException', new GatewayTimeoutException('upstream slow'), 'GATEWAY_TIMEOUT'],
+      ['a raw HttpException 502', new HttpException('raw', 502), 'BAD_GATEWAY'],
+    ])('answers %s as 503, keeping its code', (_label, exception, code) => {
+      const { host, status, json } = buildHost();
+      new AllExceptionsFilter().catch(exception, host);
+
+      expect(status).toHaveBeenCalledWith(503);
+      const body = json.mock.calls[0][0] as ErrorResponse;
+      expect(body.error.statusCode).toBe(503);
+      expect(body.error.code).toBe(code);
+    });
+
+    it.each([
+      ['CHAIN_FACILITATOR_UNAVAILABLE', ChainErrors.facilitatorUnavailable({ chainId: 'x' })],
+      ['CHAIN_RPC_REPLY_MALFORMED', ChainErrors.rpcReplyMalformed({})],
+      ['CHAIN_TRANSACTION_FAILED', ChainErrors.transactionFailed({})],
+      ['FACILITATOR_SIGNER_UNAVAILABLE', FacilitatorErrors.signerUnavailable({ signer: 'kora' })],
+      ['PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE', PaymentErrors.depositRequirementsIncomplete({})],
+      ['PAYMENT_SETTLEMENT_FAILED', PaymentErrors.settlementFailed({})],
+      ['TOOL_ALL_BINDINGS_FAILED', ToolErrors.allBindingsFailed({ attempts: 2 })],
+    ])('declares %s as 503 itself', (code, error) => {
+      expect(error.statusCode).toBe(503);
+      const { host, status, json } = buildHost();
+      new AllExceptionsFilter().catch(error, host);
+
+      expect(status).toHaveBeenCalledWith(503);
+      expect((json.mock.calls[0][0] as ErrorResponse).error.code).toBe(code);
+    });
+
+    it.each(Object.values(EgressFailureKind))(
+      'gives egress %s a status that is not 502/504',
+      (kind) => {
+        const status = new EgressError(kind, 'x').statusCode;
+        expect([502, 504]).not.toContain(status);
+      },
+    );
+
+    it('leaves every other status as it is', () => {
+      for (const status of [400, 404, 409, 422, 429, 500, 501, 503]) {
+        expect(edgeSafeStatus(status)).toBe(status);
+      }
+    });
   });
 
   it('does not write a second time when headers are already sent', () => {

@@ -10,6 +10,7 @@ import { Request, Response } from 'express';
 import { AppError } from '@shared/errors/app-errors';
 import { redactOAuthText, redactOAuthUrl } from '@shared/observability';
 import {
+  edgeSafeStatus,
   ErrorResponse,
   HttpErrorCode,
   httpErrorCodeForStatus,
@@ -55,7 +56,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
 
     const described = this.describe(exception);
-    const { code, statusCode, context } = described;
+    const { code, context } = described;
+    // Never a `502`/`504`: the edge would replace the body (`edgeSafeStatus`).
+    const statusCode = edgeSafeStatus(described.statusCode);
     // The path is logged and echoed with any consent request id and OAuth
     // secret replaced (R-OA-27). The request body is never read here.
     const path = redactOAuthUrl(request.originalUrl ?? request.url);

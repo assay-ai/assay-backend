@@ -89,3 +89,22 @@ export function httpErrorCodeForStatus(statusCode: number): HttpErrorCode {
     (statusCode >= 500 ? HttpErrorCode.INTERNAL_SERVER_ERROR : HttpErrorCode.BAD_REQUEST)
   );
 }
+
+/**
+ * The status this process may answer with: `502` and `504` become `503`; every
+ * other status is unchanged.
+ *
+ * Cloudflare, in front of every public host, replaces an origin `502` or `504`
+ * with its own branded page. That page carries no CORS headers, so a browser on
+ * the web app sees "Failed to fetch" and never the `ErrorResponse` body
+ * (verified on production: a `502` thrown by `POST /deposits/:id/broadcast`).
+ * The setting that passes them through is Enterprise-only. So no error this
+ * process wants a client to read may leave as a `502`/`504`: the domain
+ * errors declare `503` themselves, and this is the backstop for anything that
+ * still carries one — a Nest `BadGatewayException`, a library's
+ * `HttpException`. The error `code` is kept, so a client still knows which
+ * failure it was.
+ */
+export function edgeSafeStatus(statusCode: number): number {
+  return statusCode === 502 || statusCode === 504 ? 503 : statusCode;
+}

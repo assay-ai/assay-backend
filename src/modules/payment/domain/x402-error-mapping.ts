@@ -50,7 +50,7 @@ export function throwForX402InvalidReason(reason: string | undefined): never {
 
     // The EVM simulation reason belongs here too: a revert there is almost
     // always a missing `approve` or a short USDG balance — the caller's to fix,
-    // so 4xx, not the 502 of `default`.
+    // so 4xx, not the 503 of `default`.
     case X402_INVALID_REASON.INVALID_EXACT_SVM_PAYLOAD_TRANSACTION:
     case X402_INVALID_REASON.INVALID_EXACT_SVM_PAYLOAD_INSTRUCTIONS:
     case X402_INVALID_REASON.INVALID_EXACT_SVM_PAYLOAD_FEE_PAYER:
@@ -69,7 +69,7 @@ export function throwForX402InvalidReason(reason: string | undefined): never {
     case X402_INVALID_REASON.UNEXPECTED_SETTLE_ERROR:
     default:
       // Includes `undefined` — a facilitator we could not even get a reason
-      // from is exactly the "unexpected" case, and `502` says the fault is
+      // from is exactly the "unexpected" case, and `503` says the fault is
       // ours-to-retry, not the caller's to fix.
       throw PaymentErrors.settlementFailed({ reason });
   }

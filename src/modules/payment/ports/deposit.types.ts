@@ -46,7 +46,11 @@ export interface DepositIntent {
   /** The settlement transaction signature, once known. */
   readonly chainTxRef: string | null;
 
-  /** Short-lived — bounded by the SVM blockhash the client's transaction is signed over. */
+  /**
+   * Short-lived, and chain-dependent (`DEPOSIT_INTENT_TTL_MS`): 90 s on Solana,
+   * bounded by the blockhash the client's transaction is signed over; 10 min on
+   * eip155, where the buyer signs two wallet prompts and nothing on chain expires.
+   */
   readonly expiresAt: Date;
 
   readonly createdAt: Date;
@@ -60,7 +64,7 @@ export interface CreateDepositIntentInput {
   /** Asset must be the chain's registered USDC — refused before anything else, see `assertUsdc`. */
   readonly requestedAmount: Money;
   readonly chainId: ChainId;
-  /** Defaults to `DEPOSIT_INTENT_TTL_MS` from now. */
+  /** Defaults to `depositIntentTtlMs(chainId)` from now. */
   readonly expiresAt?: Date;
 }
 

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
@@ -122,7 +122,7 @@ export class DepositService {
    * pendingDepositsByAsset` sums `requestedAmount` over exactly this status,
    * so the row *is* the `pendingDeposits` figure the funding screen renders,
    * and it stays that until the expiry sweep moves it. Writing it first and
-   * then failing on `ensureEscrow` or `getFeePayer` answers the caller `502`
+   * then failing on `ensureEscrow` or `getFeePayer` answers the caller `503`
    * (or `409`) while leaving money the buyer never sent counted as in flight —
    * the request errors and the balance changes anyway.
    *
@@ -325,6 +325,10 @@ export class DepositService {
     // credited again. Canonicalize before anything reads or writes the hash.
     // Only EVM: a Solana signature is base58, where case is significant.
     transaction = canonicalTxRef(adapter, transaction);
+    // A hash that cannot exist is the caller's mistake, refused before the
+    // intent moves: read on chain, `0xdeadbeef` was polled for the whole
+    // observation window and then failed the intent (BUG-PROD-BUY-MONEY-02).
+    assertWellFormedTxRef(adapter, transaction);
 
     const claimed = await this.deposits.findByChainTxRef(organizationId, transaction);
     if (claimed && claimed.id !== intent.id) {
@@ -398,9 +402,7 @@ export class DepositService {
           reason: `settlement reported success but no transfer was observed on ${transaction}`,
         },
       );
-      throw PaymentErrors.settlementFailed({
-        reason: `no observable transfer for transaction ${transaction}`,
-      });
+      throw PaymentErrors.depositTransferNotObserved({ transaction });
     }
 
     let settledMoney: Money;
@@ -512,9 +514,12 @@ export class DepositService {
     let attempt = 0;
 
     for (;;) {
-      const observed = await adapter.observeTransfer(intent, transaction, {
-        commitment: 'confirmed',
-      });
+      // Each read is bounded by what is left of the window: one RPC call may
+      // otherwise take the egress client's whole budget past the deadline.
+      const observed = await withinDeadline(
+        adapter.observeTransfer(intent, transaction, { commitment: 'confirmed' }),
+        deadline,
+      );
       if (observed) {
         return observed;
       }
@@ -526,7 +531,8 @@ export class DepositService {
         return null;
       }
       attempt += 1;
-      await sleep(DEPOSIT_OBSERVE_POLL_MS);
+      // Never pause past the deadline: the window is the request's whole wait.
+      await sleep(Math.min(DEPOSIT_OBSERVE_POLL_MS, deadline - Date.now()));
     }
   }
 
@@ -570,7 +576,7 @@ export class DepositService {
     // point of `ChainAdapter` is that this service does not know what a chain
     // is. On a chain with no fee-payer separation the read is SKIPPED rather
     // than attempted-and-tolerated: an unreachable facilitator must still be a
-    // 502 on Solana, and a `try/catch` here would have swallowed that.
+    // 503 on Solana, and a `try/catch` here would have swallowed that.
     const feePayer = adapter.requiresFeePayer ? await this.facilitator.getFeePayer(chainId) : null;
     return { escrowTokenAccount: escrow.escrowTokenAccount, feePayer };
   }
@@ -689,6 +695,36 @@ function describe(error: unknown): string {
 }
 
 /** Bounded wait between chain reads. Local so this file adds no dependency. */
+const EVM_TX_HASH = /^0x[0-9a-f]{64}$/;
+
+/** Runs after `canonicalTxRef`, so an EVM hash is already lowercase here. */
+function assertWellFormedTxRef(adapter: ChainAdapter, transaction: TxRef): void {
+  if (adapter.namespace === ChainNamespace.EIP155 && !EVM_TX_HASH.test(transaction)) {
+    // The `message` array is what `AllExceptionsFilter` answers as
+    // `400 VALIDATION_FAILED`, the same as a DTO refusal.
+    throw new BadRequestException([
+      'transactionHash must be a 0x-prefixed 32-byte hex transaction hash',
+    ]);
+  }
+}
+
+/**
+ * `work`, or `null` once `deadline` passes. The read left behind is not
+ * cancelled, only no longer awaited; its late rejection is swallowed.
+ */
+async function withinDeadline<T>(work: Promise<T | null>, deadline: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+  });
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

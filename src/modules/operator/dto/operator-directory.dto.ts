@@ -102,9 +102,15 @@ export class AddOperatorBodyDto {
  * once; adding a role or raising the limit is answered 202 `{approvalId}`.
  */
 export class ChangeOperatorBodyDto {
-  @ApiPropertyOptional({ enum: OperatorRole, isArray: true, description: 'The full new set' })
+  @ApiPropertyOptional({
+    enum: OperatorRole,
+    isArray: true,
+    minItems: 1,
+    description: 'The full new set. To take every role away, remove the operator instead.',
+  })
   @IsOptional()
   @IsArray()
+  @ArrayMinSize(1, { message: 'Choose at least one role' })
   @ArrayUnique()
   @ArrayMaxSize(16)
   @IsEnum(OperatorRole, { each: true })

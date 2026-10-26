@@ -47,18 +47,19 @@ export type EgressErrorCodesArePrefixed = AssertDomainErrorCodes<'EGRESS', Egres
 /**
  * `4xx` for "this URL is not acceptable, and re-sending it will not help" —
  * these are the ones a registration endpoint (connectivity check) returns to the provider
- * who typed the URL. `502` for "we tried and the far end misbehaved".
+ * who typed the URL. `503` for "we tried and the far end misbehaved" — never
+ * `502`/`504`, which the edge replaces with its own page (`edgeSafeStatus`).
  */
 const STATUS_BY_KIND: Readonly<Record<EgressFailureKind, number>> = Object.freeze({
   [EgressFailureKind.URL_INVALID]: 400,
   [EgressFailureKind.SCHEME_NOT_ALLOWED]: 400,
   [EgressFailureKind.BLOCKED_ADDRESS]: 403,
-  [EgressFailureKind.DNS_FAILED]: 502,
-  [EgressFailureKind.REDIRECT_INVALID]: 502,
-  [EgressFailureKind.TOO_MANY_REDIRECTS]: 502,
-  [EgressFailureKind.RESPONSE_TOO_LARGE]: 502,
-  [EgressFailureKind.TIMEOUT]: 504,
-  [EgressFailureKind.CONNECTION_FAILED]: 502,
+  [EgressFailureKind.DNS_FAILED]: 503,
+  [EgressFailureKind.REDIRECT_INVALID]: 503,
+  [EgressFailureKind.TOO_MANY_REDIRECTS]: 503,
+  [EgressFailureKind.RESPONSE_TOO_LARGE]: 503,
+  [EgressFailureKind.TIMEOUT]: 503,
+  [EgressFailureKind.CONNECTION_FAILED]: 503,
   [EgressFailureKind.RELAY_UNAVAILABLE]: 503,
 });
 
