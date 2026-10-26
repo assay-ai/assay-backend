@@ -1,6 +1,6 @@
 /**
  * Enough of ioredis for the rate limiters: `MULTI` of `INCR` / `DECR` /
- * `PEXPIRE` and of the sorted-set commands a concurrency slot uses
+ * `PEXPIRE` / `GET` and of the sorted-set commands a concurrency slot uses
  * (`ZREMRANGEBYSCORE` / `ZADD` / `ZCARD`), plus a bare `DECR` and `ZREM`,
  * over maps that several limiter instances can share (as replicas share one
  * Redis). `fail` makes every call reject.
@@ -29,6 +29,10 @@ export function fakeRateRedis(
         incr: (key: string) => (ops.push(() => [null, step(key, 1)]), chain),
         decr: (key: string) => (ops.push(() => [null, step(key, -1)]), chain),
         pexpire: () => (ops.push(() => [null, 1]), chain),
+        get: (key: string) => (
+          ops.push(() => [null, store.has(key) ? String(store.get(key)) : null]),
+          chain
+        ),
         zremrangebyscore: (key: string, _min: string | number, max: string | number) => (
           ops.push(() => {
             let removed = 0;

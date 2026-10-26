@@ -243,7 +243,7 @@ describe('UserRateLimitInterceptor: which window a request counts against', () =
 });
 
 describe('UserRateLimitInterceptor: windows', () => {
-  it('allows the read limit, then answers 429 with the seconds left as Retry-After', async () => {
+  it('allows the read limit, then answers 429 with the wait until a request would pass', async () => {
     const { interceptor, advance } = limiter();
 
     const statuses = await sendMany(interceptor, READ_RULE.limit, () =>
@@ -252,9 +252,10 @@ describe('UserRateLimitInterceptor: windows', () => {
     expect(statuses.every((status) => status === 200)).toBe(true);
 
     advance(15_000);
+    // 45 s left in the window, and under a second into the next for the burst's weight to fall under the limit.
     expect(await send(interceptor, request('GET', '/tool-calls'))).toEqual({
       status: 429,
-      retryAfter: '45',
+      retryAfter: '46',
     });
   });
 
@@ -346,10 +347,12 @@ describe('UserRateLimitInterceptor: windows', () => {
     expect((await send(interceptor, mint(person('agent-dan', 'org-2')))).status).toBe(200);
   });
 
-  it('opens a fresh window once the old one has passed', async () => {
+  it('allows again once the burst has slid out of the window', async () => {
     const { interceptor, advance } = limiter();
     await sendMany(interceptor, WRITE_RULE.limit + 1, () => request('POST', '/toolsets'));
 
+    advance(WRITE_RULE.windowMs);
+    expect((await send(interceptor, request('POST', '/toolsets'))).status).toBe(429);
     advance(WRITE_RULE.windowMs);
     expect((await send(interceptor, request('POST', '/toolsets'))).status).toBe(200);
   });
@@ -434,6 +437,53 @@ describe('UserRateLimitInterceptor: the export runs one at a time', () => {
       request('GET', '/providers/me/calls/export'),
     );
     expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+  });
+});
+
+describe('UserRateLimitInterceptor: a burst across a window boundary', () => {
+  const health = () => request('GET', '/operator/health', operator());
+
+  /** `HEAVY_READ_LIMIT` requests just before a minute boundary, then as many just after. */
+  async function straddle(redis?: unknown): Promise<number[]> {
+    const boundary = 7_020_000; // a whole minute
+    const { interceptor, advance } = limiter(redis, boundary - 1_000);
+    const before = await sendMany(interceptor, HEAVY_READ_LIMIT, health);
+    advance(2_000);
+    return [...before, ...(await sendMany(interceptor, HEAVY_READ_LIMIT, health))];
+  }
+
+  it('allows the heavy-read limit once per rolling minute, not once per window', async () => {
+    const statuses = await straddle();
+    expect(statuses.filter((status) => status === 200)).toHaveLength(HEAVY_READ_LIMIT);
+  });
+
+  it('does the same in the shared window', async () => {
+    const { redis } = fakeRateRedis();
+    const statuses = await straddle(redis);
+    expect(statuses.filter((status) => status === 200)).toHaveLength(HEAVY_READ_LIMIT);
+  });
+
+  it('lets a steady rate within the limit through, across boundaries', async () => {
+    const { redis } = fakeRateRedis();
+    const { interceptor, advance } = limiter(redis);
+    const statuses: number[] = [];
+    for (let i = 0; i < HEAVY_READ_LIMIT * 4; i += 1) {
+      statuses.push((await send(interceptor, health())).status);
+      advance(60_000 / HEAVY_READ_LIMIT + 100);
+    }
+    expect(statuses.every((status) => status === 200)).toBe(true);
+  });
+
+  it('answers Retry-After with the wait until a request would pass', async () => {
+    const { redis } = fakeRateRedis();
+    const { interceptor, advance } = limiter(redis, 7_020_000 - 1_000);
+    await sendMany(interceptor, HEAVY_READ_LIMIT, health);
+    advance(2_000);
+    const refused = await send(interceptor, health());
+    expect(refused.status).toBe(429);
+
+    advance(Number(refused.retryAfter) * 1_000);
+    expect((await send(interceptor, health())).status).toBe(200);
   });
 });
 

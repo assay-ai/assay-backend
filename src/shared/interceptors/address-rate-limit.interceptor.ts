@@ -30,7 +30,8 @@ export { SHARED_WINDOW_RETRY_MS };
 export type { RateOutcome };
 
 /**
- * A per-address fixed window, counted in Redis so every instance shares it.
+ * A per-address sliding window (see {@link SharedRateWindows}), counted in
+ * Redis so every instance shares it.
  *
  * ## Why Redis, and why a fallback
  *
@@ -112,7 +113,7 @@ export abstract class AddressRateLimitInterceptor implements NestInterceptor {
     return this.counter.take(client, this.rate);
   }
 
-  /** Count one request from `client` in process; refused with the seconds until its window resets. */
+  /** Count one request from `client` in process; refused with the seconds until it would be allowed. */
   take(client: string): RateOutcome {
     return this.counter.takeLocal(client, this.rate);
   }
