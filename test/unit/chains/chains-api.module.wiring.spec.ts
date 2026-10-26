@@ -134,7 +134,7 @@ describe('ChainsApiModule refuses to boot on a chain it cannot describe', () => 
 
   it('fails compile() rather than serving a 400 on the first request', async () => {
     await expect(
-      compileWith(toChainId('eip155', '4663'), (m) => m.get(ChainsController).list()),
+      compileWith(toChainId('eip155', '8453'), (m) => m.get(ChainsController).list()),
     ).rejects.toThrow(/chain-metadata\.ts/);
   });
 });

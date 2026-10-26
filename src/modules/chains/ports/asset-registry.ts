@@ -57,11 +57,6 @@ const USDC_SOLANA_DEVNET = `${CHAIN_IDS.SOLANA_DEVNET}/token:${resolveDevnetUsdc
  * `assertChainMetadata` refuses to boot a process that enables `eip155:46630`
  * and names this variable. Read **once**, at module load, for the same reason
  * as `SOLANA_DEVNET_USDC_MINT` above.
- *
- * **There is deliberately no mainnet row.** The mainnet USDG address is
- * unresolved and must come from `docs.robinhood.com` or the operator, and
- * `assertChainMetadata` refusing `eip155:4663` at boot is the correct
- * behaviour until it is filled in.
  */
 export const ROBINHOOD_TESTNET_USDG_ENV = 'ROBINHOOD_TESTNET_USDG_ADDRESS';
 
@@ -81,10 +76,19 @@ function resolveRobinhoodTestnetUsdg(): AssetId | null {
 
 const USDG_ROBINHOOD_TESTNET = resolveRobinhoodTestnetUsdg();
 
+/**
+ * USDG on Robinhood Chain mainnet. A constant, never env-driven: mainnet must
+ * not be overridable. Keep the EIP-55 spelling exactly — asset ids are compared
+ * as strings.
+ */
+const USDG_ROBINHOOD_MAINNET =
+  `${CHAIN_IDS.ROBINHOOD_MAINNET}/erc20:0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` as AssetId;
+
 export const ASSET_IDS = {
   USDC_SOLANA_MAINNET,
   USDC_SOLANA_DEVNET,
   USDG_ROBINHOOD_TESTNET,
+  USDG_ROBINHOOD_MAINNET,
 } as const;
 
 const REGISTRY: Readonly<Record<string, AssetMetadata>> = {
@@ -100,6 +104,13 @@ const REGISTRY: Readonly<Record<string, AssetMetadata>> = {
     symbol: 'USDC',
     decimals: 6,
     chainId: CHAIN_IDS.SOLANA_DEVNET,
+    peg: 'USD-1:1',
+  },
+  [USDG_ROBINHOOD_MAINNET]: {
+    assetId: USDG_ROBINHOOD_MAINNET,
+    symbol: 'USDG',
+    decimals: 6,
+    chainId: CHAIN_IDS.ROBINHOOD_MAINNET,
     peg: 'USD-1:1',
   },
   ...(USDG_ROBINHOOD_TESTNET && {

@@ -84,11 +84,18 @@ describe('the minimum stake floor, per chain', () => {
     }
   });
 
-  it('refuses a chain with no metadata row — eip155:4663 in particular', () => {
-    // Robinhood MAINNET has no row on purpose: the mainnet USDG address is
-    // unmeasured. A floor derived for it would be a number about a token nobody
-    // has looked at.
-    expect(() => loadMinimumStakeByChain(config(), [CHAIN_IDS.ROBINHOOD_MAINNET])).toThrow();
+  it('refuses a chain with no metadata row', () => {
+    // A floor derived for an undescribed chain would be a number about a token
+    // nobody has registered.
+    expect(() => loadMinimumStakeByChain(config(), [CHAIN_IDS.BASE_MAINNET])).toThrow();
+  });
+
+  it('derives a floor on Robinhood Chain mainnet, in mainnet USDG', () => {
+    const byChain = loadMinimumStakeByChain(config(), [CHAIN_IDS.ROBINHOOD_MAINNET]);
+
+    expect(byChain.get(CHAIN_IDS.ROBINHOOD_MAINNET)!.floor.asset).toBe(
+      ASSET_IDS.USDG_ROBINHOOD_MAINNET,
+    );
   });
 
   it('refuses when PLATFORM_STAKE_ASSET_ID names no enabled chain', () => {

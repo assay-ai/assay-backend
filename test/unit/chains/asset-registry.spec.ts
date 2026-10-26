@@ -142,8 +142,8 @@ describe('asset-registry — ROBINHOOD_TESTNET_USDG_ADDRESS', () => {
 });
 
 /**
- * USDG on Robinhood Chain, and the mainnet row that deliberately does not
- * exist. The testnet address is the fixture `test/setup-env.ts` pins.
+ * USDG on Robinhood Chain. The testnet address is the fixture
+ * `test/setup-env.ts` pins; the mainnet address is a constant.
  */
 describe('asset-registry — USDG on Robinhood Chain', () => {
   const TESTNET_USDG = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
@@ -160,21 +160,43 @@ describe('asset-registry — USDG on Robinhood Chain', () => {
     });
   });
 
-  it('registers NOTHING on eip155:4663, at that address or any other', () => {
-    // `cast code` at TESTNET_USDG on 4663 returned `0x` — the empty-code answer
-    // — with an 11,306-byte reply from testnet as the control. The mainnet USDG
-    // address is therefore unknown, and a registry entry for a token nobody has
-    // read would be a guess a later reader mistakes for a measurement.
-    //
-    // The first assertion is the one that matters: it fails however the address
-    // was chosen, so "copy the testnet address across" and "pick a plausible
-    // one" are both caught.
-    expect(registeredAssets().map((asset) => asset.chainId)).not.toContain(
-      CHAIN_IDS.ROBINHOOD_MAINNET,
-    );
+  it('registers mainnet USDG as a constant, 6 dp and pegged', () => {
+    const MAINNET_USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+
+    expect(getAssetMetadata(ASSET_IDS.USDG_ROBINHOOD_MAINNET)).toEqual({
+      assetId: `${CHAIN_IDS.ROBINHOOD_MAINNET}/erc20:${MAINNET_USDG}`,
+      symbol: 'USDG',
+      decimals: 6,
+      chainId: CHAIN_IDS.ROBINHOOD_MAINNET,
+      peg: 'USD-1:1',
+    });
+    expect(
+      registeredAssets().filter((asset) => asset.chainId === CHAIN_IDS.ROBINHOOD_MAINNET),
+    ).toHaveLength(1);
+    // Asset ids are exact strings: another spelling of the address is not it,
+    // and the testnet address on 4663 is not it either.
+    expect(
+      isRegisteredAsset(
+        `${CHAIN_IDS.ROBINHOOD_MAINNET}/erc20:${MAINNET_USDG.toLowerCase()}` as AssetId,
+      ),
+    ).toBe(false);
     expect(
       isRegisteredAsset(`${CHAIN_IDS.ROBINHOOD_MAINNET}/erc20:${TESTNET_USDG}` as AssetId),
     ).toBe(false);
+  });
+
+  it('keeps mainnet USDG registered when the testnet variable is unset', async () => {
+    const original = { ...process.env };
+    delete process.env.ROBINHOOD_TESTNET_USDG_ADDRESS;
+    try {
+      jest.resetModules();
+      const registry = await import('@modules/chains/ports/asset-registry');
+      const metadata = await import('@modules/chains/chain-metadata');
+      expect(registry.isRegisteredAsset(registry.ASSET_IDS.USDG_ROBINHOOD_MAINNET)).toBe(true);
+      expect(() => metadata.assertChainMetadata([CHAIN_IDS.ROBINHOOD_MAINNET])).not.toThrow();
+    } finally {
+      process.env = original;
+    }
   });
 
   it('every registered asset answers the peg question, and every one is 6 dp today', () => {

@@ -32,11 +32,12 @@ import { expectErrorCode } from '../helpers/expect-error-code';
  * {@link PER_CHAIN}.
  */
 
-/** The chain ↔ its declared settlement asset. Three chains, three distinct assets. */
+/** The chain ↔ its declared settlement asset. Four chains, four distinct assets. */
 const PER_CHAIN: readonly { chainId: ChainId; asset: AssetId; symbol: string }[] = [
   { chainId: CHAIN_IDS.SOLANA_MAINNET, asset: ASSET_IDS.USDC_SOLANA_MAINNET, symbol: 'USDC' },
   { chainId: CHAIN_IDS.SOLANA_DEVNET, asset: ASSET_IDS.USDC_SOLANA_DEVNET, symbol: 'USDC' },
   { chainId: CHAIN_IDS.ROBINHOOD_TESTNET, asset: ASSET_IDS.USDG_ROBINHOOD_TESTNET, symbol: 'USDG' },
+  { chainId: CHAIN_IDS.ROBINHOOD_MAINNET, asset: ASSET_IDS.USDG_ROBINHOOD_MAINNET, symbol: 'USDG' },
 ];
 
 /**
@@ -50,14 +51,13 @@ const CROSS_CHAIN: readonly { chainId: ChainId; wrong: AssetId }[] = [
   { chainId: CHAIN_IDS.SOLANA_DEVNET, wrong: ASSET_IDS.USDC_SOLANA_MAINNET },
   { chainId: CHAIN_IDS.ROBINHOOD_TESTNET, wrong: ASSET_IDS.USDC_SOLANA_DEVNET },
   { chainId: CHAIN_IDS.ROBINHOOD_TESTNET, wrong: ASSET_IDS.USDC_SOLANA_MAINNET },
+  // Same symbol, same scale, different chain: testnet USDG is not mainnet USDG.
+  { chainId: CHAIN_IDS.ROBINHOOD_MAINNET, wrong: ASSET_IDS.USDG_ROBINHOOD_TESTNET },
+  { chainId: CHAIN_IDS.ROBINHOOD_TESTNET, wrong: ASSET_IDS.USDG_ROBINHOOD_MAINNET },
 ];
 
 /** Chains this deployment names but cannot describe — there is no row to read. */
-const UNDESCRIBED: readonly ChainId[] = [
-  CHAIN_IDS.ROBINHOOD_MAINNET,
-  CHAIN_IDS.BASE_MAINNET,
-  CHAIN_IDS.BASE_SEPOLIA,
-];
+const UNDESCRIBED: readonly ChainId[] = [CHAIN_IDS.BASE_MAINNET, CHAIN_IDS.BASE_SEPOLIA];
 
 describe('depositAssetFor', () => {
   it.each(PER_CHAIN)('answers $asset on $chainId', ({ chainId, asset }) => {
@@ -78,6 +78,7 @@ describe('depositAssetFor', () => {
       'USDC',
       'USDC',
       'USDG',
+      'USDG',
     ]);
   });
 
@@ -97,8 +98,7 @@ describe('depositAssetFor', () => {
   it.each(UNDESCRIBED)('refuses %s, which this deployment cannot describe', (chainId) => {
     // Not "the first registered asset", not a default: no answer at all. The
     // honest error is the chain one — the caller supplied no asset to be wrong
-    // about, and `eip155:4663`'s absence is deliberate and load-bearing
-    // (`chain-metadata.ts`: its mainnet USDG address is unmeasured).
+    // about.
     expectErrorCode(() => depositAssetFor(chainId), ChainErrorCode.CHAIN_UNSUPPORTED);
   });
 });

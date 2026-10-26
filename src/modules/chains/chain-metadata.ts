@@ -91,11 +91,12 @@ const CHAIN_METADATA: Readonly<Record<string, ChainMetadata>> = {
     // No paid rail: see `ChainMetadata.rails`. Free calls still work.
     rails: [],
   },
-  // `eip155:4663` — Robinhood Chain MAINNET — is absent on purpose, and the
-  // absence is load-bearing: the mainnet token address is unknown, so no
-  // settlement asset can honestly be named for it and `assertChainMetadata`
-  // refuses the chain at boot.
-  //
+  [CHAIN_IDS.ROBINHOOD_MAINNET]: {
+    displayName: 'Robinhood Chain',
+    explorerBaseUrl: 'https://robinhoodchain.blockscout.com',
+    settlementAsset: ASSET_IDS.USDG_ROBINHOOD_MAINNET,
+    rails: ['B'],
+  },
   // The testnet row exists only once `ROBINHOOD_TESTNET_USDG_ADDRESS` names its
   // settlement token (asset-registry.ts); `assertChainMetadata` names that
   // variable when the chain is enabled without it.
@@ -145,13 +146,9 @@ export function chainMetadata(chainId: ChainId): ChainMetadata {
  *
  * Observed before this assertion existed:
  *
- * - **Today**, `ENABLED_CHAINS=eip155:4663` fails at boot — but from the
- *   *registry*, because no adapter serves it (`CHAIN_ENABLED_CHAINS_INVALID`,
- *   500). The metadata gap is masked by the adapter gap and is not reachable.
- * - **Once an EVM adapter exists** the mask is gone. The registry accepts the
- *   chain (`enabledChains() === ['eip155:4663']`) and the first `GET /chains`
- *   throws `CHAIN_UNSUPPORTED` — **HTTP 400**, reading *"No chain adapter is
- *   enabled for eip155:4663"*. Three things wrong in one response: an adapter
+ * - A chain an EVM adapter serves but this table does not describe passes the
+ *   registry, and the first `GET /chains` throws `CHAIN_UNSUPPORTED` —
+ *   **HTTP 400**, reading *"No chain adapter is enabled for <chain>"*. Three things wrong in one response: an adapter
  *   *is* enabled, so the message sends the operator to the wrong file; 4xx
  *   blames a caller who sent no input for a server misconfiguration; and 4xx is
  *   the class 5xx alerting does not watch, so a deployment can be broken with
@@ -243,8 +240,7 @@ export function assertChainMetadata(enabled: readonly ChainId[]): void {
  * is the translation, and it is an exhaustive switch for the same reason.
  *
  * Throws `CHAIN_UNSUPPORTED` for a chain with no row at all, by way of
- * {@link chainMetadata} — which is the honest answer for `eip155:4663`, whose
- * absence from the table is deliberate and load-bearing. A rail check that
+ * {@link chainMetadata}. A rail check that
  * answered "yes" for an undescribed chain would make that refusal reachable
  * only at boot.
  */
