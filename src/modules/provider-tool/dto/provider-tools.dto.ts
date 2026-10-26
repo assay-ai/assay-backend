@@ -134,7 +134,10 @@ export class CreateProviderToolBodyDto extends ProviderToolContractBodyDto {
   @MaxLength(40)
   name: string;
 
-  @ApiProperty({ example: 'social' })
+  @ApiProperty({
+    example: 'social',
+    description: 'A topic from `GET /provider/tools/topics`',
+  })
   @Matches(CATEGORY_RE)
   category: string;
 
@@ -144,6 +147,21 @@ export class CreateProviderToolBodyDto extends ProviderToolContractBodyDto {
   @ArrayMaxSize(10)
   @Matches(TAG_RE, { each: true })
   tags?: string[];
+}
+
+/** `GET /provider/tools/topics`: the topics a provider tool may take. */
+export class ProviderToolTopicsDto {
+  @ApiProperty({
+    type: [String],
+    example: ['weather', 'finance', 'search', 'data', 'ai', 'other'],
+    description:
+      'Every accepted category: the fixed topic list in its order, then any other category ' +
+      'a standard tool already uses',
+  })
+  topics: string[];
+
+  @ApiProperty({ example: 'other', description: 'The topic for an API that fits no other' })
+  neutral: string;
 }
 
 export class UpdateProviderToolBodyDto {

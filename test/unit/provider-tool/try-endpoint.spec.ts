@@ -36,6 +36,18 @@ describe('Try your endpoint: parsing (design spec §7.10)', () => {
     expect(problemsOf(() => shellWords(`curl 'unclosed`))).toHaveLength(1);
   });
 
+  it('keeps the path of a pasted curl in the endpoint (onboarding run 3: /latest)', () => {
+    const plan = planFromCurl(`curl 'https://api.frankfurter.app/latest?from=GBP&to=JPY'`);
+    expect(plan).toMatchObject({
+      method: 'GET',
+      url: 'https://api.frankfurter.app/latest?from=GBP&to=JPY',
+      endpoint: 'https://api.frankfurter.app/latest',
+      arguments: { from: 'GBP', to: 'JPY' },
+      requestMapping: { method: 'GET', query: { from: '$.from', to: '$.to' } },
+    });
+    expect(plan.requestMapping).not.toHaveProperty('path');
+  });
+
   it('reads a GET with a query: inputs from the query, a credential header kept out', () => {
     const plan = planFromCurl(
       `curl -sS -H 'Authorization: Bearer sk_live_abcdef123456' -H 'X-Version: 2' ` +
