@@ -48,14 +48,23 @@ export function depositResource(intentId: string): string {
  * `getTransaction` at `confirmed` still answered "not found", which marked the
  * deposit FAILED with the money already gone.
  *
- * 15s is comfortably longer than devnet's observed ~211 ms block time takes to
+ * 20s is comfortably longer than devnet's observed ~211 ms block time takes to
  * confirm, and short enough that a genuinely dead transaction still fails a
  * request rather than hanging it. It is a hard bound — a read still in flight
- * at the deadline is abandoned — and sits well under the web app's 30s request
- * timeout, leaving room for the settle path's own broadcast before it
+ * at the deadline is abandoned, and the pause between reads never runs past
+ * it — so the window ends at 20s, not at 20s plus one slow read
  * (BUG-PROD-BUY-MONEY-02: 20s checked only between reads answered after 21.5s).
+ *
+ * Worst case against the web app's 30s request timeout: on
+ * `/deposits/:id/broadcast` the window is the only wait — before it, two
+ * intent reads and one CAS write; after it, one CAS write — so the request
+ * answers in about 20s plus a few database round trips. On `/settle` the
+ * facilitator's `verify` and `settle` run first; at their measured ~1.5s the
+ * request stays near 22s, which leaves them about 10s before the client gives
+ * up. A facilitator call is bounded by its own `FACILITATOR_TIMEOUT_MS`, not
+ * by this window.
  */
-export const DEPOSIT_OBSERVE_TIMEOUT_MS = 15 * 1000;
+export const DEPOSIT_OBSERVE_TIMEOUT_MS = 20 * 1000;
 
 /** Gap between those reads. Short — the whole point is to catch confirmation. */
 export const DEPOSIT_OBSERVE_POLL_MS = 750;

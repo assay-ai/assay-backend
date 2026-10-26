@@ -1123,8 +1123,35 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     }
   });
 
-  it('keeps the observation window well under the 30 s client timeout', () => {
-    expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBeLessThanOrEqual(15_000);
+  // The pause between reads is clamped to the deadline too: a 750 ms sleep
+  // begun just before it would otherwise end the window up to 750 ms late.
+  it('answers at the observation deadline, not one poll interval after it', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    try {
+      const adapter = selfBroadcastAdapter({
+        observeTransfer: jest.fn().mockResolvedValue(null),
+      });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      let settled = false;
+      const settling = expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+      ).finally(() => {
+        settled = true;
+      });
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + 1);
+      expect(settled).toBe(true);
+      await settling;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the observation window at 20 s, under the 30 s client timeout', () => {
+    expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBe(20_000);
+    expect(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS).toBeLessThan(30_000);
   });
 
   // BUG-PROD-BUY-MONEY-02: `0xdeadbeef` was polled for the whole observation

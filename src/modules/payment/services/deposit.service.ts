@@ -531,7 +531,8 @@ export class DepositService {
         return null;
       }
       attempt += 1;
-      await sleep(DEPOSIT_OBSERVE_POLL_MS);
+      // Never pause past the deadline: the window is the request's whole wait.
+      await sleep(Math.min(DEPOSIT_OBSERVE_POLL_MS, deadline - Date.now()));
     }
   }
 
