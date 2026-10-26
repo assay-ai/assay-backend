@@ -885,8 +885,8 @@ describe('toolset publishing, against a real database and Redis', () => {
          VALUES ($1, 'extract_page_text', 'STANDARD', 'web', 'LISTED', 'ACTIVE')`,
         [randomUUID()],
       );
-      expect(await seedOfficialToolsets(dataSource)).toBe(3);
-      expect(await seedOfficialToolsets(dataSource)).toBe(0);
+      expect(await seedOfficialToolsets(dataSource, s.official)).toBe(3);
+      expect(await seedOfficialToolsets(dataSource, s.official)).toBe(0);
       // A Draft rename is not published.
       await s.toolsets.update(
         (await dataSource.query(`SELECT owner_org_id FROM toolsets WHERE id = $1`, [popular]))[0]

@@ -15,6 +15,7 @@ import { OperatorArbiterController } from './controllers/operator-arbiter.contro
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorModerationController } from './controllers/operator-moderation.controller';
 import { OperatorContractsController } from './controllers/operator-contracts.controller';
+import { OperatorOfficialToolsetsController } from './controllers/operator-official-toolsets.controller';
 import { OperatorCallDisputesController } from './controllers/operator-call-disputes.controller';
 import { OperatorProviderToolsController } from './controllers/operator-provider-tools.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
@@ -35,6 +36,7 @@ import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorModerationService } from './services/operator-moderation.service';
 import { OperatorContractsService } from './services/operator-contracts.service';
+import { OperatorOfficialToolsetsService } from './services/operator-official-toolsets.service';
 import { OperatorProviderToolsService } from './services/operator-provider-tools.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
@@ -101,6 +103,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorBlocksController,
     OperatorModerationController,
     OperatorContractsController,
+    OperatorOfficialToolsetsController,
     OperatorProviderToolsController,
     OperatorCasesController,
     OperatorCallDisputesController,
@@ -122,6 +125,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorDirectoryService,
     OperatorModerationService,
     OperatorContractsService,
+    OperatorOfficialToolsetsService,
     OperatorProviderToolsService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with

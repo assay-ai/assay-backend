@@ -31,6 +31,7 @@ import { AgentAccessService } from '@modules/toolset/services/agent-access.servi
 import { ConnectUrlsService } from '@modules/toolset/services/connect-urls.service';
 import { HandlesService } from '@modules/toolset/services/handles.service';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
+import { OfficialToolsetsService } from '@modules/toolset/services/official-toolsets.service';
 import { PublicToolsetsService } from '@modules/toolset/services/public-toolsets.service';
 import { ToolsetClock } from '@modules/toolset/services/toolset-clock';
 import { ToolsetModerationService } from '@modules/toolset/services/toolset-moderation.service';
@@ -134,6 +135,7 @@ export function toolsetTestContext(options: ToolsetTestContextOptions) {
   return {
     epochs,
     handles,
+    official: new OfficialToolsetsService(toolsets, epochs, dataSource, host, notices, clock),
     resolver,
     connectUrls,
     toolsets: owned,

@@ -452,6 +452,23 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
+  /**
+   * Official tool sets (`/@assay/{slug}`, design spec §7.10). A Draft serves
+   * nothing and is not an override; publishing puts a version in front of
+   * every buyer, so it is two-person, for the hash of the Draft that was
+   * requested. Undone by a delist (`A-15`), not by unpublishing.
+   */
+  'P-13': define({
+    code: 'P-13',
+    family: OverrideFamily.POLICY,
+    action: 'toolset.official_published',
+    label: 'Publish a version of an official tool set',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: true,
+    implemented: true,
+  }),
 
   // ── A · Access and routing ───────────────────────────────────────────────
   'A-2': define({
@@ -599,7 +616,14 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     family: OverrideFamily.ACCESS,
     action: 'toolset.delisted',
     label: 'Delist a public tool set (confirmed by a second operator within 72 h)',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    // POL/POLA curate the official sets (P-13) and may delist them too.
+    roles: [
+      OperatorRole.ADJ,
+      OperatorRole.ADJL,
+      OperatorRole.SRE,
+      OperatorRole.POL,
+      OperatorRole.POLA,
+    ],
     approval: ApprovalMode.SINGLE,
     reversible: true,
     implemented: true,
@@ -653,7 +677,7 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     family: OverrideFamily.ACCESS,
     action: 'toolset.relisted',
     label: 'Relist a delisted tool set the owner fixed',
-    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.POL, OperatorRole.POLA],
     approval: ApprovalMode.SINGLE,
     reversible: true,
     implemented: true,

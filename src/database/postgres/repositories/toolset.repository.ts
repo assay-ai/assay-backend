@@ -65,10 +65,12 @@ export class ToolsetRepository extends AbstractRepository<ToolsetEntity> {
   }
 
   /** Held slugs (live, or ever shared) that start with `prefix`, for generating a free one. */
-  async slugsLike(ownerOrgId: string, prefix: string): Promise<string[]> {
-    const rows = await this.createQueryBuilder('toolset')
-      .select('toolset.slug', 'slug')
-      .where('toolset.owner_org_id = :ownerOrgId', { ownerOrgId })
+  async slugsLike(ownerOrgId: string | null, prefix: string): Promise<string[]> {
+    const qb = this.createQueryBuilder('toolset').select('toolset.slug', 'slug');
+    // `null` owner: the platform's official sets.
+    if (ownerOrgId === null) qb.where('toolset.owner_org_id IS NULL');
+    else qb.where('toolset.owner_org_id = :ownerOrgId', { ownerOrgId });
+    const rows = await qb
       .andWhere('(toolset.deleted_at IS NULL OR toolset.first_shared_at IS NOT NULL)')
       .andWhere('toolset.slug LIKE :prefix', { prefix: `${prefix}%` })
       .getRawMany<{ slug: string }>();

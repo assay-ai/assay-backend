@@ -432,6 +432,8 @@ describe('REST surface consistency', () => {
       // `P-10`–`P-12`, the standard contract editor. A STANDARD tool is the
       // platform's: nobody's tenant.
       'modules/operator/controllers/operator-contracts.controller.ts',
+      // `P-13`, official tool sets (`/@assay/{slug}`): the platform's own, nobody's tenant.
+      'modules/operator/controllers/operator-official-toolsets.controller.ts',
       // `A-24`, the provider tool review queue, and promotion. The subject is a
       // provider who is never the caller.
       'modules/operator/controllers/operator-provider-tools.controller.ts',
