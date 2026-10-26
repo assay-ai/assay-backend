@@ -19,6 +19,7 @@ import {
   ASSAY_ESCROW_HOLD_ABI,
 } from './abi/assay-hold.abi';
 import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
+import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import { isRevert } from './evm-voucher-authority';
@@ -355,10 +356,16 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       } as Parameters<EvmReaderClient['readContract']>[0]);
     } catch (error) {
       if (isRevert(error)) {
+        // The `Errors.sol` name first when the node returned the selector: the
+        // message alone may carry only the selector, or lose it to the cut.
+        const data = revertDataOf(error);
+        const message = (error as Error).message.slice(0, 200);
         throw new HeldSendRefusedError(
-          hasRevertData(error)
-            ? (error as Error).message.slice(0, 200)
-            : `out of gas at limit ${gasLimit} (estimate ${estimate ?? 'failed'})`,
+          data
+            ? `${evmErrorName(data)}: ${message}`
+            : hasRevertData(error)
+              ? message
+              : `out of gas at limit ${gasLimit} (estimate ${estimate ?? 'failed'})`,
         );
       }
       throw error;

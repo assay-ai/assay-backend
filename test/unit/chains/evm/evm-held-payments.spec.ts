@@ -256,6 +256,21 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
         message: 'held send refused: HeldNotYetCollectable',
       });
     });
+    it('names the Errors.sol error when the node returned its selector', async () => {
+      const rpc = Object.assign(new Error('EVM RPC eth_call failed: code 3'), {
+        data: '0x3e5b55ad',
+      });
+      const wrapped = Object.assign(
+        new Error('The contract function "collectHeld" reverted with the following signature'),
+        { name: 'ContractFunctionRevertedError', cause: rpc },
+      );
+      const { service, sent } = build(null, { simulateError: wrapped });
+      await expect(service.collect(ASSET, one)).rejects.toMatchObject({
+        name: 'HeldSendRefusedError',
+        message: expect.stringMatching(/^held send refused: HeldNotYetCollectable: The contract/),
+      });
+      expect(sent).toEqual([]);
+    });
   });
 
   describe('classifyRedemption — from the receipt (review P0-1)', () => {
