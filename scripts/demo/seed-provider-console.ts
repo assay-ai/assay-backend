@@ -97,6 +97,7 @@ import {
   type RequestMappingSpec,
   type ResponseMappingSpec,
 } from '@modules/tool/domain/mapping';
+import { OfficialToolsetsService } from '@modules/toolset/services/official-toolsets.service';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -343,7 +344,7 @@ async function main(): Promise<void> {
   log(`calls     ${written} written, ${plans.length - written} already present`);
 
   // 6. Official tool sets, so the catalogue's "Tool sets" tab is not empty.
-  const officialSets = await seedOfficialToolsets(dataSource);
+  const officialSets = await seedOfficialToolsets(dataSource, app.get(OfficialToolsetsService));
   log(`toolsets  ${officialSets} official tool sets created`);
 
   await report(dataSource);
