@@ -122,7 +122,7 @@ export class DepositService {
    * pendingDepositsByAsset` sums `requestedAmount` over exactly this status,
    * so the row *is* the `pendingDeposits` figure the funding screen renders,
    * and it stays that until the expiry sweep moves it. Writing it first and
-   * then failing on `ensureEscrow` or `getFeePayer` answers the caller `502`
+   * then failing on `ensureEscrow` or `getFeePayer` answers the caller `503`
    * (or `409`) while leaving money the buyer never sent counted as in flight —
    * the request errors and the balance changes anyway.
    *
@@ -576,7 +576,7 @@ export class DepositService {
     // point of `ChainAdapter` is that this service does not know what a chain
     // is. On a chain with no fee-payer separation the read is SKIPPED rather
     // than attempted-and-tolerated: an unreachable facilitator must still be a
-    // 502 on Solana, and a `try/catch` here would have swallowed that.
+    // 503 on Solana, and a `try/catch` here would have swallowed that.
     const feePayer = adapter.requiresFeePayer ? await this.facilitator.getFeePayer(chainId) : null;
     return { escrowTokenAccount: escrow.escrowTokenAccount, feePayer };
   }

@@ -442,16 +442,17 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * The facilitator did not advertise everything the browser needs to build
    * the transfer.
    *
-   * `502`, not `400`: `PaymentRequirements.extra` is typed `unknown` and is
+   * `503`, not `400`: `PaymentRequirements.extra` is typed `unknown` and is
    * filled in from what the facilitator told us, so a missing `feePayer` or
    * `memo` is the upstream failing to hold up its end — nothing the caller
    * sent could have caused it or can fix it. Raised rather than cast, because
    * casting produces a `402` whose fee-payer slot names `undefined` and whose
-   * only symptom is a wallet signature the facilitator later rejects.
+   * only symptom is a wallet signature the facilitator later rejects. `503`,
+   * not `502`, because the edge replaces an origin `502` (`edgeSafeStatus`).
    */
   depositRequirementsIncomplete: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE,
-    statusCode: 502,
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `The payment requirements are missing a field the client needs` +
       `${context?.field ? `: ${context.field}` : ''}`,
@@ -579,7 +580,8 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
   },
   settlementFailed: {
     code: PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,
-    statusCode: 502,
+    // `503`, never `502`: see `edgeSafeStatus`.
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Facilitator settlement failed${context?.reason ? `: ${context.reason}` : ''}`,
   },

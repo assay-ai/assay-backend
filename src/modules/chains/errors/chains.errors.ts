@@ -156,7 +156,8 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
   },
   facilitatorUnavailable: {
     code: ChainErrorCode.CHAIN_FACILITATOR_UNAVAILABLE,
-    statusCode: 502,
+    // `503`, never `502`: see `edgeSafeStatus`.
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Facilitator could not be reached for ${context?.chainId}` +
       `${context?.reason ? `: ${context.reason}` : ''}`,
@@ -267,12 +268,13 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * gate exists to refuse. Unreadable must never be able to substitute for
    * empty, so a reply that does not answer for what was asked is an error.
    *
-   * `502` rather than `500`: the upstream node gave us a bad answer, and the
-   * remedy is another node or another attempt, not a code change.
+   * `503` rather than `500`: the upstream node gave us a bad answer, and the
+   * remedy is another node or another attempt, not a code change. `503`, not
+   * `502`, because the edge replaces an origin `502` (`edgeSafeStatus`).
    */
   rpcReplyMalformed: {
     code: ChainErrorCode.CHAIN_RPC_REPLY_MALFORMED,
-    statusCode: 502,
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Chain RPC returned a malformed reply` +
       `${context?.method ? ` from ${context.method}` : ''}` +
@@ -296,13 +298,13 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * expired blockhash, a confirmation timeout. That is a genuinely different
    * class of event and is why the field is nullable rather than absent.
    *
-   * `502` for the same reason `rpcReplyMalformed` is: the remedy is another
+   * `503` for the same reason `rpcReplyMalformed` is: the remedy is another
    * attempt or another node, not a code change — and it is never on the wire
    * anyway, since every caller is a background job.
    */
   transactionFailed: {
     code: ChainErrorCode.CHAIN_TRANSACTION_FAILED,
-    statusCode: 502,
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Chain refused the transaction` +
       `${context?.instruction ? ` (${context.instruction})` : ''}` +
