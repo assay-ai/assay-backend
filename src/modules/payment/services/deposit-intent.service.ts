@@ -6,7 +6,7 @@ import { DepositIntentRepository } from '@database/postgres/repositories/deposit
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { DEPOSIT_INTENT_TTL_MS } from '../constants/deposit-intent.constants';
+import { depositIntentTtlMs } from '../constants/deposit-intent.constants';
 import { requireDepositIntentTransition } from '../domain/deposit-intent-transitions';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
@@ -44,7 +44,7 @@ export class DepositIntentService {
       settledAmount: null,
       chainId: input.chainId,
       chainTxRef: null,
-      expiresAt: input.expiresAt ?? new Date(Date.now() + DEPOSIT_INTENT_TTL_MS),
+      expiresAt: input.expiresAt ?? new Date(Date.now() + depositIntentTtlMs(input.chainId)),
     };
 
     await this.deposits.insert(row);

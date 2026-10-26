@@ -1123,6 +1123,59 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     }
   });
 
+  /*
+    BUG-PROD-DEPOSIT-01: an EVM deposit is two wallet prompts (approve, wait
+    for it to be mined, depositFor) after a slow wallet-session refresh, and
+    the 90 s Solana lifetime expired real ones mid-flow. On eip155 the intent
+    lives 10 minutes; the expiry check itself is unchanged.
+  */
+  describe('on eip155, where the intent lives 10 minutes', () => {
+    async function createdEvmIntent(harness: ReturnType<typeof buildHarness>) {
+      const { intent } = await harness.service.createDeposit({
+        ...input(),
+        agentAccount: EVM_AGENT_ACCOUNT,
+        chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
+        amount: MoneyUtil.of(5_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+      });
+      return intent;
+    }
+
+    afterEach(() => jest.useRealTimers());
+
+    it('still settles a broadcast that arrives after the old 90 s bound', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const intent = await createdEvmIntent(harness);
+      expect(intent.expiresAt.getTime() - Date.now()).toBe(10 * 60 * 1000);
+
+      jest.setSystemTime(Date.now() + 2 * 60 * 1000);
+      const settled = await harness.service.settleDepositByBroadcast(
+        ORGANIZATION_ID,
+        intent.id,
+        TX_HASH,
+      );
+
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    it('refuses a broadcast after the 10 minutes, before reading the chain', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const adapter = selfBroadcastAdapter();
+      const harness = buildHarness({ adapter });
+      const intent = await createdEvmIntent(harness);
+
+      jest.setSystemTime(Date.now() + 10 * 60 * 1000 + 1);
+      await expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,
+      );
+
+      expect(adapter.observeTransfer).not.toHaveBeenCalled();
+      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+    });
+  });
+
   // The pause between reads is clamped to the deadline too: a 750 ms sleep
   // begun just before it would otherwise end the window up to 750 ms late.
   it('answers at the observation deadline, not one poll interval after it', async () => {

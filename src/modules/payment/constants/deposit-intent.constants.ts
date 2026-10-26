@@ -1,16 +1,50 @@
 import { CronExpression } from '@nestjs/schedule';
 
+import { ChainId, ChainNamespace, parseChainId } from '@modules/chains/ports/caip.types';
+
 /**
- * How long a deposit intent may sit unfunded before the sweep expires it.
+ * How long a deposit intent may sit unfunded before the sweep expires it —
+ * per chain namespace, because what bounds it is the chain's, not a business
+ * rule.
  *
- * On Solana a payment authorization
- * cannot outlive the ~60 second blockhash the client's transaction is signed
- * over (`SOLANA_MAX_TIMEOUT_SECONDS`). 90 seconds is that bound plus a margin
- * for request latency and clock skew between this process and the chain —
- * not a second, independent deadline. The bound is chain-dependent, so once
- * another chain's deposits use it this stops being a single constant.
+ * - **solana — 90 seconds.** A payment authorization cannot outlive the ~60
+ *   second blockhash the client's transaction is signed over
+ *   (`SOLANA_MAX_TIMEOUT_SECONDS`). 90 seconds is that bound plus a margin for
+ *   request latency and clock skew between this process and the chain — not a
+ *   second, independent deadline.
+ * - **eip155 — 10 minutes.** An EVM transaction has no blockhash lifetime (its
+ *   lifetime is the wallet's nonce and gas price), so nothing on chain expires
+ *   and the intent's own `expiresAt` is the only clock. What it must cover is
+ *   the buyer: two wallet prompts (`approve`, wait for it to be mined, then
+ *   `depositFor`) plus the embedded wallet's session refresh before the first
+ *   prompt, which is slow on a cold tab. 90 seconds expired real deposits
+ *   mid-flow (BUG-PROD-DEPOSIT-01: a successful retry already used 66 of
+ *   them). Ten minutes covers a slow signer without leaving a `CREATED` row —
+ *   counted in `pendingDeposits` — around for long.
+ *
+ * A longer window weakens nothing else: the intent is still single use (the
+ * `CREATED -> SETTLING` CAS and the per-transaction claim), still bound to its
+ * organization, buyer and amount, and only an observed on-chain transfer
+ * credits it.
  */
-export const DEPOSIT_INTENT_TTL_MS = 90 * 1000;
+export const DEPOSIT_INTENT_TTL_MS: Readonly<Record<ChainNamespace, number>> = {
+  [ChainNamespace.SOLANA]: 90 * 1000,
+  [ChainNamespace.EIP155]: 10 * 60 * 1000,
+};
+
+/**
+ * `DEPOSIT_INTENT_TTL_MS` for the chain an intent is on. A namespace with no
+ * entry is refused rather than given a guessed lifetime: the bound has to be
+ * reasoned about per chain.
+ */
+export function depositIntentTtlMs(chainId: ChainId): number {
+  const namespace = parseChainId(chainId).namespace;
+  const ttl = (DEPOSIT_INTENT_TTL_MS as Readonly<Record<string, number>>)[namespace];
+  if (ttl === undefined) {
+    throw new Error(`No deposit intent lifetime is defined for chain namespace "${namespace}"`);
+  }
+  return ttl;
+}
 
 /** The sweep runs on the scheduler, which is a single instance by design. */
 export const DEPOSIT_INTENT_EXPIRY_SWEEP_CRON = CronExpression.EVERY_MINUTE;

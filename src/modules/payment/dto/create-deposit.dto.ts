@@ -322,8 +322,10 @@ export class CreateDepositResponseDto {
 
   @ApiProperty({
     description:
-      'ISO-8601. Short — bounded by the blockhash above, not by a business rule. After this, ' +
-      '`/settle` refuses with `PAYMENT_DEPOSIT_EXPIRED` and the fix is a fresh `POST /deposits`, ' +
+      'ISO-8601. Chain-dependent, not a business rule: 90 seconds on Solana, bounded by the ' +
+      '`blockhash` above; 10 minutes on eip155, which has no blockhash and where the buyer ' +
+      'signs two wallet prompts (`approve`, then `depositFor`). After this, `/settle` and ' +
+      '`/broadcast` refuse with `PAYMENT_DEPOSIT_EXPIRED` and the fix is a fresh `POST /deposits`, ' +
       'never a resubmission of the same payload.',
   })
   readonly expiresAt!: string;
