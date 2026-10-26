@@ -7,7 +7,11 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
-import { ProviderResponse, ResponseBodyKind } from '@modules/tool/domain/classification';
+import {
+  ProviderResponse,
+  ResponseBodyKind,
+  TransportErrorKind,
+} from '@modules/tool/domain/classification';
 import { CredentialRedactor } from '@modules/tool/domain/egress/credential-redaction';
 import { JsonValue } from '@modules/tool/domain/mapping/mapping.types';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
@@ -122,6 +126,9 @@ export class ProviderToolTryService {
         omit: { credentials: true, signature: !signed },
       });
       const redacted = new CredentialRedactor(plan.secrets).response(response);
+      if (isNonPublicTargetRefusal(redacted)) {
+        return resultOf(plan, NON_PUBLIC_TARGET_ANSWER, 0, warnings);
+      }
       return resultOf(plan, redacted, Date.now() - started, warnings);
     });
   }
@@ -202,6 +209,39 @@ function assertDialable(url: string): void {
       problems: ["the endpoint points at one of Assay's own hosts; it cannot be tried"],
     });
   }
+}
+
+/**
+ * The egress refusals that depend on what a host name resolves to: it did
+ * not resolve, or it resolved to an address the guard refuses (on any hop).
+ */
+const TARGET_REFUSAL_DETAIL_RE = /(^|← )EGRESS_(DNS_FAILED|BLOCKED_ADDRESS):/;
+
+/**
+ * The one answer for all of them. Telling "does not resolve" from "resolves
+ * to a private address" apart would let a provider enumerate the host names
+ * inside our network (SEC-PROD-SEC-02), so neither the kind, the detail nor
+ * the latency says which it was. Nothing was dialled in either case.
+ */
+const NON_PUBLIC_TARGET_ANSWER: ProviderResponse = {
+  status: 0,
+  body: { kind: ResponseBodyKind.EMPTY },
+  transportError: {
+    kind: TransportErrorKind.DNS_FAILURE,
+    partialBody: null,
+    detail:
+      'the host does not resolve to a public address; check the host name (only public ' +
+      'endpoints can be tried)',
+  },
+};
+
+function isNonPublicTargetRefusal(response: ProviderResponse): boolean {
+  const error = response.transportError;
+  if (!error) return false;
+  return (
+    error.kind === TransportErrorKind.DNS_FAILURE ||
+    TARGET_REFUSAL_DETAIL_RE.test(error.detail ?? '')
+  );
 }
 
 /** A permissive contract: the throwaway mapping has constants only, so no input reaches it. */

@@ -29,6 +29,7 @@ export enum ToolsetErrorCode {
   TOOLSET_HANDLE_NOT_FOUND = 'TOOLSET_HANDLE_NOT_FOUND',
   TOOLSET_HANDLE_REASSIGN_REFUSED = 'TOOLSET_HANDLE_REASSIGN_REFUSED',
   TOOLSET_ORGANIZATION_NOT_FOUND = 'TOOLSET_ORGANIZATION_NOT_FOUND',
+  TOOLSET_STATE = 'TOOLSET_STATE',
 }
 
 export type ToolsetErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOLSET', `${ToolsetErrorCode}`>;
@@ -189,5 +190,13 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     code: ToolsetErrorCode.TOOLSET_REFUSED_CALL_NOT_FOUND,
     statusCode: 404,
     message: () => 'Refused call not found',
+  },
+  /** The tool set is not in the state the action needs (`reason` says which). */
+  state: {
+    code: ToolsetErrorCode.TOOLSET_STATE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This tool set cannot be changed now${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason'],
   },
 });

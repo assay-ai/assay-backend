@@ -140,6 +140,8 @@ describe('override register coverage', () => {
         'OperatorReferenceController',
         'OperatorApprovalsController',
         'OperatorOperatorsController',
+        'OperatorToolVerificationController',
+        'OperatorOfficialToolsetsController',
       ]),
     );
   });

@@ -4,7 +4,6 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { ToolsetEntryEntity } from '@database/postgres/entities/toolset-entry.entity';
-import { ToolsetVersionEntity } from '@database/postgres/entities/toolset-version.entity';
 import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import {
@@ -29,7 +28,7 @@ import {
   sharedPathFor,
   versionServes,
 } from '../domain/sharing';
-import { SnapshotEntry, ToolsetSnapshot, changelogOf, diffSnapshots } from '../domain/snapshot';
+import { SnapshotEntry, ToolsetSnapshot } from '../domain/snapshot';
 import {
   CopyExcludedToolDto,
   CopyResultDto,
@@ -48,12 +47,15 @@ import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
 import { snapshotOfVersion, versionDtoOf, versionSummaryOf } from './version-mapping';
 import { ToolsetNoticesService } from './toolset-notices.service';
 import { TOOLSET_LIMITS, ToolsetsService, slugify } from './toolsets.service';
+import {
+  PUBLISHING_LIMITS,
+  assertVersionBudget,
+  snapshotOfDraft,
+  startOfUtcDay,
+  writeNextVersion,
+} from './version-writer';
 
-/** Limits of design spec §7.13 for publishing and copies. */
-export const PUBLISHING_LIMITS = Object.freeze({
-  versionsPerToolsetPerDay: 10,
-  copiesPerOrgPerDay: 50,
-});
+export { PUBLISHING_LIMITS, startOfUtcDay };
 
 /**
  * Publishing a toolset: the Share dialog, versions, the unlisted link, Make
@@ -99,62 +101,22 @@ export class ToolsetPublishingService {
     const now = this.now();
     const result = await this.dataSource.transaction(async (manager) => {
       const toolset = await this.lockOwned(manager, organizationId, id);
-      const since = startOfUtcDay(now);
-      const today = await manager
-        .createQueryBuilder(ToolsetVersionEntity, 'v')
-        .where('v.toolset_id = :id', { id: toolset.id })
-        .andWhere('v.published_at >= :since', { since })
-        .getCount();
-      if (today >= PUBLISHING_LIMITS.versionsPerToolsetPerDay) {
-        throw ToolsetErrors.limitExceeded({
-          limit: 'versionsPerToolsetPerDay',
-          max: PUBLISHING_LIMITS.versionsPerToolsetPerDay,
-        });
-      }
+      await assertVersionBudget(manager, toolset.id, now);
 
-      const snapshot = await this.snapshotOfDraft(manager, toolset);
+      const snapshot = await snapshotOfDraft(manager, toolset);
       await this.assertPublishable(organizationId, snapshot, body.visibility);
 
       const before = sharingStateOf(toolset);
       const next = this.transition(before, { kind: 'SHARE', visibility: body.visibility }, now);
       if (isShared(next)) await this.handles.lockForSharing(manager, organizationId);
 
-      const previous = toolset.latestVersion
-        ? await manager.findOne(ToolsetVersionEntity, {
-            where: { toolsetId: toolset.id, version: toolset.latestVersion },
-          })
-        : null;
-      const diff = diffSnapshots(previous ? snapshotOfVersion(previous) : null, snapshot);
-      const version = (toolset.latestVersion ?? 0) + 1;
-      const changelog = body.changelog?.trim() || changelogOf(diff, previous === null);
-
-      await manager.insert(ToolsetVersionEntity, {
-        toolsetId: toolset.id,
-        version,
-        entries: snapshot.entries as unknown as object,
-        toolIds: snapshot.entries.map((entry) => entry.toolId),
-        discovery: snapshot.discovery,
-        searchThreshold: snapshot.searchThreshold,
-        pinnedTools: [...snapshot.pinnedTools],
-        name: snapshot.name,
-        description: snapshot.description,
-        icon: snapshot.icon,
-        changelog,
-        sharedAs: next.visibility,
-        publishedAt: now,
+      const { version, changelog, diff } = await writeNextVersion(manager, {
+        toolset,
+        snapshot,
+        next,
+        changelog: body.changelog,
+        now,
       });
-      await manager.update(
-        ToolsetEntity,
-        { id: toolset.id },
-        {
-          ...sharingPatchOf(next),
-          latestVersion: version,
-          lastSharedVersion: isShared(next) ? version : toolset.lastSharedVersion,
-          lastPublicVersion:
-            next.visibility === ToolsetVisibility.PUBLIC ? version : toolset.lastPublicVersion,
-          updatedAt: now,
-        },
-      );
       await this.audit.record(manager, {
         organizationId,
         actor,
@@ -284,7 +246,7 @@ export class ToolsetPublishingService {
     if (source.removedAt) throw ToolsetErrors.notFound();
     if (own && source.deletedAt) throw ToolsetErrors.notFound();
     if (own && body.version === undefined) {
-      snapshot = await this.snapshotOfDraft(this.dataSource.manager, source);
+      snapshot = await snapshotOfDraft(this.dataSource.manager, source);
       version = null;
     } else {
       // Another organization sees only versions shared the way it reaches the
@@ -467,49 +429,6 @@ export class ToolsetPublishingService {
     }
   }
 
-  private async snapshotOfDraft(
-    manager: EntityManager,
-    toolset: ToolsetEntity,
-  ): Promise<ToolsetSnapshot> {
-    const rows = await manager.find(ToolsetEntryEntity, {
-      where: { toolsetId: toolset.id },
-      order: { position: 'ASC' },
-    });
-    const names = new Map(
-      (await this.tools.findByIds(rows.map((row) => row.toolId))).map((tool) => [
-        tool.id,
-        tool.name,
-      ]),
-    );
-    return {
-      entries: rows.map((row) => ({
-        toolId: row.toolId,
-        toolName: names.get(row.toolId) ?? '',
-        providerMode: row.providerMode,
-        providerIds: [...row.providerIds],
-        minTier: row.minTier,
-        maxPrice:
-          row.maxPriceAmount !== null && row.maxPriceAssetId && row.maxPriceDecimals !== null
-            ? {
-                amount: row.maxPriceAmount,
-                asset: row.maxPriceAssetId,
-                decimals: row.maxPriceDecimals,
-              }
-            : null,
-        minQuality: row.minQuality === null ? null : Number(row.minQuality),
-        toolVersionRange: row.toolVersionRange ?? null,
-        requireOutputFields: [...row.requireOutputFields],
-        onEmpty: row.onEmpty,
-      })),
-      discovery: toolset.discovery,
-      searchThreshold: toolset.searchThreshold,
-      pinnedTools: [...toolset.pinnedTools],
-      name: toolset.name,
-      description: toolset.description,
-      icon: toolset.icon,
-    };
-  }
-
   /** The owned, live row, locked for this transaction: publishes of one toolset serialise. */
   private async lockOwned(
     manager: EntityManager,
@@ -602,8 +521,4 @@ function entryRowOf(
     requireOutputFields: [...entry.requireOutputFields],
     onEmpty: entry.onEmpty,
   };
-}
-
-export function startOfUtcDay(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }

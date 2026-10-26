@@ -71,13 +71,9 @@ export class PolicyLifecycleRowDto {
     nullable: true,
     description:
       'The action word the policy-versions panel renders. `ACTIVE` → `kill` (`P-3`, ' +
-      '`policy.killed` — listed in the override register as `implemented: false`; this panel names the action regardless, since it ' +
-      'is a read-only description of what the register says an operator may do, not a claim that ' +
-      'the route exists). `SHADOW` → `promote`. Every other lifecycle → `null`. A third word, ' +
-      '`hold`, is never emitted: distinguishing "ready to promote" from "not enough ' +
-      'evidence yet" would need a labelled-sample count, and nothing in this schema tracks human ' +
-      'labelling per policy version. Every `SHADOW` row is offered `promote` rather than a guessed ' +
-      '`hold`; the promote endpoint itself is what actually evaluates readiness.',
+      '`policy.killed`, `POST /operator/tools/:id/verification/versions/:v/withdraw`). ' +
+      '`SHADOW` → `promote` (`P-1`). Every other lifecycle → `null`. Readiness against the ' +
+      'gate is on `GET /operator/tools/:id/verification`, computed from labelled trial calls.',
   })
   actionWord: 'kill' | 'promote' | null;
 }

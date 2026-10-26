@@ -13,6 +13,12 @@
 export const ASSAY_PRICE = 'assay/price';
 /** `unverified` | `verified` | `guaranteed` — the tool's verification tier. */
 export const ASSAY_TIER = 'assay/tier';
+/**
+ * `active` | `trial` | `none` — whether quality checks decide the charge
+ * (`active`), run without affecting it (`trial`), or are not switched on. The
+ * response shape is checked on every paid call whatever this says.
+ */
+export const ASSAY_CHECKS = 'assay/checks';
 /** Whether a failed call costs the agent anything. Always `true` today. */
 export const ASSAY_REFUND_ON_FAILURE = 'assay/refundOnFailure';
 export const ASSAY_P95_LATENCY_MS = 'assay/p95LatencyMs';
@@ -197,6 +203,7 @@ export const ASSAY_REPLAYED = 'assay/replayed';
 export const DUPLICATED_INTO_META = [
   ASSAY_PRICE,
   ASSAY_TIER,
+  ASSAY_CHECKS,
   ASSAY_TOOL_ID,
   ASSAY_SETTLEMENT_CHAINS,
   ASSAY_PRICING_MODE,

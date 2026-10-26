@@ -2,6 +2,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 
+import { ToolChecks } from '@modules/tool/ports/tool.types';
+
 import { UNLISTED_TOKEN_RE } from './toolset-publishing.dto';
 
 /**
@@ -419,6 +421,14 @@ export class PublicHandleToolDto {
 
   @ApiProperty({ enum: ['UNVERIFIED', 'VERIFIED'], description: 'Never GUARANTEED (§7.6)' })
   tier: string;
+
+  @ApiProperty({
+    enum: ['ACTIVE', 'SHADOW', 'NONE'],
+    description:
+      'Quality checks on this tool: ACTIVE decides the charge, SHADOW is in trial and does ' +
+      'not affect it, NONE is not switched on. The response shape is checked on every paid call.',
+  })
+  checks: ToolChecks;
 
   @ApiProperty({ example: '1.2.0', nullable: true })
   version: string | null;

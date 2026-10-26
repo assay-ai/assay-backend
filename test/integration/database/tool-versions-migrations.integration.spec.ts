@@ -76,6 +76,8 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'VerificationRecordLabels1762400000130',
+    'EvmChainStateParamsChanged1762400000120',
     'DepositPendingUniqueness1762400000110',
     'EvmSlashRecordsBackfill1762400000100',
     'EvmSlashRecords1762400000090',

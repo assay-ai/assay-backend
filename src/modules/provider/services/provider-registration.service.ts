@@ -241,7 +241,7 @@ export class ProviderRegistrationService {
       {
         key: ProviderOnboardingStepKey.ENDPOINT,
         title: 'Endpoint',
-        caption: 'where we send calls, and what to allowlist',
+        caption: 'where we send calls, checked before you go live',
         status: endpointStatus,
       },
       {

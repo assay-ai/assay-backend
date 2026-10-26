@@ -128,6 +128,7 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     replacementMajor: tool.replacementMajor,
     replacementVersion: tool.replacementVersion,
     tier: tool.tier,
+    checks: tool.checks,
     kind: tool.kind,
     handle: tool.handle,
     notReviewed: tool.notReviewed,

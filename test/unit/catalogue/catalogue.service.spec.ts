@@ -1382,6 +1382,7 @@ describe('PublicCatalogueService', () => {
     for (const tool of tools) {
       expect(Object.keys(tool).sort()).toEqual([
         'category',
+        'checks',
         'deprecatedMajors',
         'description',
         'freeCallsPerDay',

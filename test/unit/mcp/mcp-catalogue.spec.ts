@@ -8,6 +8,7 @@ import {
   ASSAY_PRICING_MODE,
   ASSAY_QUALITY_RATE,
   ASSAY_SETTLEMENT_CHAINS,
+  ASSAY_CHECKS,
   ASSAY_TIER,
   ASSAY_TOOL_ID,
 } from '@modules/mcp/constants/mcp.constants';
@@ -705,5 +706,35 @@ describe('McpCatalogueService — a viewer whose chain offers no paid rail (revi
       agentId: 'agent-viewer',
     });
     expect(descriptor.annotations).not.toHaveProperty(ASSAY_PAID_ON_THIS_CHAIN);
+  });
+});
+
+/**
+ * `assay/checks` and the description's last words say whether quality checks
+ * decide the charge, so a model knows before it pays. Missing reads as none.
+ */
+describe('McpCatalogueService — tools/list says whether quality checks are on', () => {
+  const invoker = new ScriptedInvoker({});
+  const listed = async (checks?: 'ACTIVE' | 'SHADOW' | 'NONE') => {
+    const { catalogue } = buildMcpHarness({
+      tool: { ...buildTool(), ...(checks ? { checks } : {}) },
+      bindings: [buildBinding('provider-a')],
+      providers: [buildProvider('provider-a')],
+      invoker,
+    });
+    const [descriptor] = await catalogue.listTools();
+    return descriptor;
+  };
+
+  it.each([
+    ['ACTIVE', 'active', /per call$/],
+    ['SHADOW', 'trial', / · Quality checks in trial$/],
+    ['NONE', 'none', / · Quality checks not switched on yet$/],
+    [undefined, 'none', / · Quality checks not switched on yet$/],
+  ] as const)('checks %s → %s', async (checks, label, description) => {
+    const descriptor = await listed(checks);
+    expect(descriptor.annotations[ASSAY_CHECKS]).toBe(label);
+    expect(descriptor._meta[ASSAY_CHECKS]).toBe(label);
+    expect(descriptor.description).toMatch(description);
   });
 });

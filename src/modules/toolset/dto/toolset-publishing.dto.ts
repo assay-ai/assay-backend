@@ -21,7 +21,7 @@ export const UNLISTED_TOKEN_RE = /^[a-z0-9_-]{22,32}$/;
 
 /** No control characters in text shown on public pages. */
 // eslint-disable-next-line no-control-regex -- matching control characters is the point
-const PLAIN_TEXT_RE = /^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]*$/;
+export const PLAIN_TEXT_RE = /^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]*$/;
 
 /** `POST /toolsets/:id/publish` — the Share dialog, in one step. */
 export class PublishToolsetBodyDto {

@@ -218,7 +218,7 @@ describe('approvals routes admit every role a register row names as its approver
     );
   });
 
-  it.each(['P-10', 'P-11'])('%s: every approver role passes both route guards', (code) => {
+  it.each(['P-10', 'P-11', 'P-13'])('%s: every approver role passes both route guards', (code) => {
     for (const role of OVERRIDE_REGISTER[code].approverRoles ?? []) {
       expect(rolesOf('approve')).toContain(role);
       expect(rolesOf('reject')).toContain(role);

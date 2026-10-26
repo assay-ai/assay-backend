@@ -531,6 +531,8 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'VerificationRecordLabels1762400000130',
+      'EvmChainStateParamsChanged1762400000120',
       'DepositPendingUniqueness1762400000110',
       'EvmSlashRecordsBackfill1762400000100',
       'EvmSlashRecords1762400000090',

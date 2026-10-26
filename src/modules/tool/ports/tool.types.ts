@@ -136,7 +136,17 @@ export interface Tool {
    * STANDARD tool, which needs no review.
    */
   readonly reviewed?: boolean;
+  /**
+   * Whether quality checks run on this tool's calls: `ACTIVE` (a promoted
+   * policy decides the charge), `SHADOW` (a policy is in trial and does not
+   * affect the charge) or `NONE`. The response shape is checked either way.
+   * Absent reads as `NONE`.
+   */
+  readonly checks?: ToolChecks;
 }
+
+/** See {@link Tool.checks}. */
+export type ToolChecks = 'ACTIVE' | 'SHADOW' | 'NONE';
 
 /** `tool_versions.status`. */
 export enum ToolVersionStatus {

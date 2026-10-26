@@ -13,6 +13,7 @@ import { ProviderToolTryService } from '@modules/provider-tool/services/provider
 import { ResponseBodyKind } from '@modules/tool/domain/classification';
 import { BindingInvocation } from '@modules/tool/ports/binding-invoker.port';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import { EgressError, EgressFailureKind } from '@shared/network/egress';
 
 const problemsOf = (work: () => unknown): readonly string[] => {
   try {
@@ -484,6 +485,47 @@ describe('ProviderToolTryService', () => {
     });
     expect(request.headers['x-assay-call-id']).toMatch(/^[0-9a-f-]{36}$/);
     expect(request.policy.relay).toBe(true);
+  });
+
+  it('answers a name that does not resolve exactly as one that resolves to a private address', async () => {
+    const refusals = [
+      new EgressError(
+        EgressFailureKind.DNS_FAILED,
+        'no-such-host.internal did not resolve: getaddrinfo ENOTFOUND no-such-host.internal',
+        {
+          url: 'https://no-such-host.internal/',
+          cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }),
+        },
+      ),
+      new EgressError(
+        EgressFailureKind.BLOCKED_ADDRESS,
+        'the host resolves to a non-public address',
+        {
+          url: 'https://redis-e2e/',
+          address: '172.18.0.4',
+        },
+      ),
+    ];
+    const answers: unknown[] = [];
+    for (const refusal of refusals) {
+      const http = {
+        request: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw refusal;
+        },
+      };
+      const invoker = new EgressBindingInvoker(http as never, {} as never, {} as never);
+      const service = new ProviderToolTryService(active, bindings, limiter, audit, invoker);
+      const result = await service.try(SESSION, { curl: 'curl https://some-host.example/' });
+      answers.push({ ...result, ranAt: null });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+    expect(answers[0]).toMatchObject({
+      ran: true,
+      passed: false,
+      upstream: { status: 0, latencyMs: 0, transportError: { kind: 'DNS_FAILURE' } },
+    });
+    expect(JSON.stringify(answers)).not.toMatch(/ENOTFOUND|non-public address|172\.18|redis-e2e/);
   });
 
   it('sends unsigned, and says so, to an origin that is none of the org’s bindings', async () => {

@@ -11,10 +11,15 @@ export interface RateWindowSpec {
   readonly windowMs: number;
 }
 
-/** One in-process window; its length travels with it, since one map holds windows of every length. */
+/**
+ * One in-process window; its length travels with it, since one map holds
+ * windows of every length. `previous` is the count of the window before, for
+ * the weighted estimate ({@link slidingOutcome}).
+ */
 export interface LocalWindow {
   startedAt: number;
   count: number;
+  previous: number;
   windowMs: number;
 }
 
@@ -44,15 +49,23 @@ export interface SharedRateWindowsOptions {
 }
 
 /**
- * Fixed windows counted in Redis, so every instance shares one count, with a
+ * Sliding windows counted in Redis, so every instance shares one count, with a
  * bounded in-process window behind them for when Redis does not answer.
+ *
+ * A window is the two-window weighted estimate: the count of the current
+ * fixed window plus the previous window's count scaled by how much of it still
+ * lies within the last `windowMs`. A plain fixed window let a burst that
+ * straddles a boundary through twice (`limit` at the end of one window and
+ * `limit` at the start of the next); the estimate never counts fewer than the
+ * fixed window would, and a steady rate within the limit is never refused.
  *
  * The mechanics `AddressRateLimitInterceptor` documents, for any key and any
  * {@link RateWindowSpec}:
  *
- * - `INCR` and `PEXPIRE` go in one `MULTI`, and the window index is part of
- *   the key, so a lost expiry can leave a dead key behind but never lock a key
- *   out past its window.
+ * - `INCR`, `PEXPIRE` and the `GET` of the previous window go in one `MULTI`,
+ *   and the window index is part of the key, so a lost expiry can leave a dead
+ *   key behind but never lock a key out past the next window. A key lives two
+ *   windows, so the next one can still read it.
  * - A Redis call that does not answer within `withRedisTimeout`'s deadline is
  *   counted in process instead, and for {@link SHARED_WINDOW_RETRY_MS} after a
  *   failure Redis is not asked at all, so an outage does not add the deadline
@@ -84,43 +97,52 @@ export class SharedRateWindows {
 
     const index = Math.floor(now / spec.windowMs);
     const sharedKey = `${this.options.keyPrefix}${key}:${index}`;
+    const previousKey = `${this.options.keyPrefix}${key}:${index - 1}`;
     try {
       const results = await withRedisTimeout(() =>
-        redis.multi().incr(sharedKey).pexpire(sharedKey, spec.windowMs).exec(),
+        redis
+          .multi()
+          .incr(sharedKey)
+          .pexpire(sharedKey, 2 * spec.windowMs)
+          .get(previousKey)
+          .exec(),
       );
-      const [error, count] = results?.[0] ?? [new Error('transaction discarded'), null];
+      if (!results) throw new Error('transaction discarded');
+      const [error, count] = results[0];
       if (error) throw error;
+      const [previousError, previous] = results[2];
+      if (previousError) throw previousError;
 
-      const windowEndsAt = (index + 1) * spec.windowMs;
-      return {
-        allowed: Number(count) <= spec.limit,
-        retryAfterSeconds: Math.max(1, Math.ceil((windowEndsAt - now) / 1000)),
-      };
+      return slidingOutcome(
+        Number(previous ?? 0),
+        Number(count),
+        now - index * spec.windowMs,
+        spec,
+      );
     } catch (error) {
       this.sharedFailed(now, spec.windowMs, error);
       return this.takeLocal(key, spec);
     }
   }
 
-  /** Count one request against `key` in process; refused with the seconds until its window resets. */
+  /** Count one request against `key` in process; refused with the seconds until it would be allowed. */
   takeLocal(key: string, spec: RateWindowSpec): RateOutcome {
     const now = this.options.now();
     let window = this.windows.get(key);
 
     if (!window || now - window.startedAt >= spec.windowMs) {
+      // The window just ended is the previous one; one older than that counts nothing.
+      const previous = window && now - window.startedAt < 2 * spec.windowMs ? window.count : 0;
+      const startedAt = window && previous > 0 ? window.startedAt + spec.windowMs : now;
       // Re-inserted, so the map's insertion order stays oldest-window-first.
       this.windows.delete(key);
       if (this.windows.size >= this.options.maxKeys) this.evict(now);
-      window = { startedAt: now, count: 0, windowMs: spec.windowMs };
+      window = { startedAt, count: 0, previous, windowMs: spec.windowMs };
       this.windows.set(key, window);
     }
 
     window.count += 1;
-    const retryAfterSeconds = Math.max(
-      1,
-      Math.ceil((window.startedAt + spec.windowMs - now) / 1000),
-    );
-    return { allowed: window.count <= spec.limit, retryAfterSeconds };
+    return slidingOutcome(window.previous, window.count, now - window.startedAt, spec);
   }
 
   /**
@@ -179,16 +201,52 @@ export class SharedRateWindows {
     }
   }
 
-  /** Drop expired windows; if still full, drop the oldest until there is room. */
+  /** Drop windows that no longer count; if still full, drop the oldest until there is room. */
   private evict(now: number): void {
     for (const [key, window] of this.windows) {
-      if (now - window.startedAt >= window.windowMs) this.windows.delete(key);
+      if (now - window.startedAt >= 2 * window.windowMs) this.windows.delete(key);
     }
     for (const key of this.windows.keys()) {
       if (this.windows.size < this.options.maxKeys) break;
       this.windows.delete(key);
     }
   }
+}
+
+/**
+ * The two-window weighted decision for a request just counted: `current` is
+ * the count of the window it fell in (this request included), `previous` the
+ * count of the window before, and `elapsedMs` how far into the current window
+ * it arrived. The estimate is `previous × (1 − elapsed / window) + current`.
+ *
+ * `retryAfterSeconds` is the wait until one more request would be allowed if
+ * none arrives meanwhile: later in this window, as the previous one's share
+ * fades, or else once the next window has taken enough of this one's weight
+ * off.
+ */
+export function slidingOutcome(
+  previous: number,
+  current: number,
+  elapsedMs: number,
+  spec: RateWindowSpec,
+): RateOutcome {
+  const { limit, windowMs } = spec;
+  const estimate = (previous * (windowMs - elapsedMs)) / windowMs + current;
+  if (estimate <= limit) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  // Inside this window: previous × (1 − e / W) + current + 1 ≤ limit.
+  const roomNow = limit - current - 1;
+  let waitMs: number;
+  if (roomNow >= 0 && previous > 0) {
+    waitMs = windowMs * (1 - roomNow / previous) - elapsedMs;
+  } else {
+    // In the next window: current × (1 − e / W) + 1 ≤ limit.
+    const intoNext = Math.max(0, windowMs * (1 - (limit - 1) / current));
+    waitMs = windowMs - elapsedMs + intoNext;
+  }
+  return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(waitMs / 1000)) };
 }
 
 /**

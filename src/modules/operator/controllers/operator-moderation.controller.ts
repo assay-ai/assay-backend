@@ -53,7 +53,13 @@ export class OperatorModerationController {
   @Post('toolsets/:id/delist')
   @HttpCode(200)
   @Override('A-15')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE)
+  @RequireRoles(
+    OperatorRole.ADJ,
+    OperatorRole.ADJL,
+    OperatorRole.SRE,
+    OperatorRole.POL,
+    OperatorRole.POLA,
+  )
   @ApiOperation({
     summary: 'Delist a public tool set at once; a second operator confirms within 72 h',
   })
@@ -103,7 +109,7 @@ export class OperatorModerationController {
   @Post('toolsets/:id/relist')
   @HttpCode(204)
   @Override('A-20')
-  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL)
+  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.POL, OperatorRole.POLA)
   @ApiOperation({ summary: 'Relist a delisted tool set its owner fixed' })
   async relist(
     @CurrentOperator() operator: OperatorSession,

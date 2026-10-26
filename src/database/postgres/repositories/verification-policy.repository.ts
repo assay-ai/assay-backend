@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { VerificationPolicyEntity } from '../entities/verification-policy.entity';
 import { AbstractRepository } from './abstract.repository';
 
@@ -23,8 +23,20 @@ export class VerificationPolicyRepository extends AbstractRepository<Verificatio
     super(VerificationPolicyEntity, dataSource);
   }
 
-  findVersion(policyId: string, policyVersion: number): Promise<VerificationPolicyEntity | null> {
-    return this.findOne({ where: { policyId, policyVersion } });
+  /**
+   * This repository, or the same table through a transaction's manager — so a
+   * lifecycle write can share the override log's transaction.
+   */
+  on(manager?: EntityManager): Repository<VerificationPolicyEntity> {
+    return manager ? manager.getRepository(VerificationPolicyEntity) : this;
+  }
+
+  findVersion(
+    policyId: string,
+    policyVersion: number,
+    manager?: EntityManager,
+  ): Promise<VerificationPolicyEntity | null> {
+    return this.on(manager).findOne({ where: { policyId, policyVersion } });
   }
 
   /**
@@ -58,8 +70,8 @@ export class VerificationPolicyRepository extends AbstractRepository<Verificatio
   }
 
   /** The highest version number registered under this id, or `0` if none. */
-  async latestVersion(policyId: string): Promise<number> {
-    const latest = await this.findOne({
+  async latestVersion(policyId: string, manager?: EntityManager): Promise<number> {
+    const latest = await this.on(manager).findOne({
       where: { policyId },
       order: { policyVersion: 'DESC' },
     });
@@ -80,8 +92,9 @@ export class VerificationPolicyRepository extends AbstractRepository<Verificatio
     from: string,
     to: string,
     patch: Partial<VerificationPolicyEntity> = {},
+    manager?: EntityManager,
   ): Promise<number> {
-    const result = await this.update(
+    const result = await this.on(manager).update(
       { policyId, policyVersion, lifecycle: from },
       { ...patch, lifecycle: to },
     );
