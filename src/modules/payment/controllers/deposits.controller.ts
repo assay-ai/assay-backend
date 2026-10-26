@@ -179,6 +179,12 @@ export class DepositsController {
   @ApiResponse({ status: 402, description: 'The intent expired; request a fresh one' })
   @ApiResponse({ status: 404, description: 'No such deposit intent in this organization' })
   @ApiResponse({ status: 409, description: 'A settlement for this intent is already in flight' })
+  @ApiResponse({
+    status: 422,
+    description:
+      'The transfer was not observed on chain in time; the intent is FAILED ' +
+      '(`PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED`)',
+  })
   async settle(
     @CurrentSession() session: McpSession,
     @Param('depositId', ParseUUIDPipe) depositId: string,
@@ -217,13 +223,17 @@ export class DepositsController {
   @ApiResponse({ status: 201, type: SettledDepositDto })
   @ApiResponse({
     status: 400,
-    description: 'This chain settles deposits through the facilitator only',
+    description:
+      'This chain settles deposits through the facilitator only, or the hash is not a ' +
+      'well-formed transaction hash for the chain (`VALIDATION_FAILED`)',
   })
   @ApiResponse({ status: 402, description: 'The intent expired; request a fresh one' })
   @ApiResponse({ status: 409, description: 'The transaction already settled another deposit' })
   @ApiResponse({
-    status: 502,
-    description: 'No transfer crediting this buyer was found in that transaction',
+    status: 422,
+    description:
+      'No transfer crediting this buyer was found in that transaction; the intent is FAILED ' +
+      '(`PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED`)',
   })
   async broadcast(
     @CurrentSession() session: McpSession,

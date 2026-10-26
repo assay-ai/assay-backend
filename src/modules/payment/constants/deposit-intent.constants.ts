@@ -48,11 +48,14 @@ export function depositResource(intentId: string): string {
  * `getTransaction` at `confirmed` still answered "not found", which marked the
  * deposit FAILED with the money already gone.
  *
- * 20s is comfortably longer than devnet's observed ~211 ms block time takes to
+ * 15s is comfortably longer than devnet's observed ~211 ms block time takes to
  * confirm, and short enough that a genuinely dead transaction still fails a
- * request rather than hanging it.
+ * request rather than hanging it. It is a hard bound — a read still in flight
+ * at the deadline is abandoned — and sits well under the web app's 30s request
+ * timeout, leaving room for the settle path's own broadcast before it
+ * (BUG-PROD-BUY-MONEY-02: 20s checked only between reads answered after 21.5s).
  */
-export const DEPOSIT_OBSERVE_TIMEOUT_MS = 20 * 1000;
+export const DEPOSIT_OBSERVE_TIMEOUT_MS = 15 * 1000;
 
 /** Gap between those reads. Short — the whole point is to catch confirmation. */
 export const DEPOSIT_OBSERVE_POLL_MS = 750;

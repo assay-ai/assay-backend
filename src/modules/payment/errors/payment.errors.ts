@@ -21,6 +21,7 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_EXPIRED = 'PAYMENT_DEPOSIT_EXPIRED',
   PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED = 'PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED',
   PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED = 'PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED',
+  PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED = 'PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED',
   PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET = 'PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET',
   PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE = 'PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE',
   PAYMENT_DEPOSIT_CHAIN_REQUIRED = 'PAYMENT_DEPOSIT_CHAIN_REQUIRED',
@@ -559,6 +560,22 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Transaction ${context?.transaction ?? ''} already settled deposit ` +
       `${context?.claimedBy ?? 'another deposit'}`,
+  },
+  /**
+   * No escrow transfer crediting this intent's buyer was observed in the
+   * transaction within the observation window; the intent is now `FAILED`.
+   *
+   * `422`, not `502` (BUG-PROD-BUY-MONEY-02): the edge in front of the API
+   * replaces an origin `502`/`504` with its own page, which carries no CORS
+   * headers, so a browser on the web app saw "Failed to fetch" and never this
+   * body. The transaction is readable; it just does not credit this buyer.
+   */
+  depositTransferNotObserved: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `No transfer crediting this buyer was observed in transaction ` +
+      `${context?.transaction ?? ''}; the deposit is marked failed`,
   },
   settlementFailed: {
     code: PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,
