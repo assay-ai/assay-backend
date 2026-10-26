@@ -12,14 +12,12 @@ import { CHAIN_IDS, ChainId, toChainId } from '@modules/chains/ports/caip.types'
 
 const DEVNET = CHAIN_IDS.SOLANA_DEVNET;
 const MAINNET = CHAIN_IDS.SOLANA_MAINNET;
-/**
- * Robinhood Chain **mainnet** — the chain this table deliberately cannot
- * describe. See `refuses eip155:4663 at boot` below for why that is the
- * deliverable rather than a gap.
- */
+/** Robinhood Chain **mainnet**. */
 const RHC = CHAIN_IDS.ROBINHOOD_MAINNET;
-/** Robinhood Chain **testnet** — the one EVM chain enabled today. */
+/** Robinhood Chain **testnet**. */
 const RHC_TESTNET = CHAIN_IDS.ROBINHOOD_TESTNET;
+/** A chain this table does not describe. */
+const UNDESCRIBED = toChainId('eip155', '8453');
 
 /**
  * The boot gate on the two tables `ChainAdapterRegistry` does not cover.
@@ -30,12 +28,11 @@ const RHC_TESTNET = CHAIN_IDS.ROBINHOOD_TESTNET;
  * differently depending on whether an adapter served it, and neither behaviour
  * was acceptable:
  *
- * - `ENABLED_CHAINS=eip155:4663` on this tree fails at boot — from the
- *   REGISTRY, because no adapter serves it. The metadata gap is masked, so it
- *   looks handled and is not.
+ * - A chain no adapter serves fails at boot from the REGISTRY. The metadata
+ *   gap is masked, so it looks handled and is not.
  * - With an `eip155` adapter registered, the mask is gone. The registry
  *   accepts the chain and the first `GET /chains` throws `CHAIN_UNSUPPORTED`:
- *   **HTTP 400**, "No chain adapter is enabled for eip155:4663". An adapter IS
+ *   **HTTP 400**, "No chain adapter is enabled for <chain>". An adapter IS
  *   enabled, so the message points at the wrong file; 400 blames a caller who
  *   sent no input; and 400 is invisible to 5xx alerting, so a broken deploy
  *   pages nobody.
@@ -50,19 +47,19 @@ describe('assertChainMetadata — the boot gate', () => {
   });
 
   it('refuses an enabled chain with no metadata row', () => {
-    expect(() => assertChainMetadata([DEVNET, RHC])).toThrow(/eip155:4663/);
+    expect(() => assertChainMetadata([DEVNET, UNDESCRIBED])).toThrow(/eip155:8453/);
   });
 
   it('names EVERY missing chain, not just the first — an operator edits one deployment config', () => {
-    const other = toChainId('eip155', '8453');
+    const other = toChainId('eip155', '10');
 
     try {
-      assertChainMetadata([RHC, DEVNET, other]);
+      assertChainMetadata([UNDESCRIBED, DEVNET, other]);
       throw new Error('expected assertChainMetadata to throw');
     } catch (error) {
       const message = (error as { message: string }).message;
-      expect(message).toContain('eip155:4663');
       expect(message).toContain('eip155:8453');
+      expect(message).toContain('eip155:10');
       // and says what IS available, so the fix does not need a second round trip
       expect(message).toContain(DEVNET);
     }
@@ -74,7 +71,7 @@ describe('assertChainMetadata — the boot gate', () => {
     // alerting that watches 5xx. If this ever reads 400 again, the request-time
     // fallback is back.
     try {
-      assertChainMetadata([RHC]);
+      assertChainMetadata([UNDESCRIBED]);
       throw new Error('expected assertChainMetadata to throw');
     } catch (error) {
       expect((error as { statusCode: number }).statusCode).toBe(500);
@@ -107,6 +104,7 @@ describe('assertChainMetadata — the boot gate', () => {
     it('is the asset the registry knows, so decimals never come from this table', () => {
       expect(chainMetadata(DEVNET).settlementAsset).toBe(ASSET_IDS.USDC_SOLANA_DEVNET);
       expect(chainMetadata(MAINNET).settlementAsset).toBe(ASSET_IDS.USDC_SOLANA_MAINNET);
+      expect(chainMetadata(RHC).settlementAsset).toBe(ASSET_IDS.USDG_ROBINHOOD_MAINNET);
     });
   });
 
@@ -115,54 +113,46 @@ describe('assertChainMetadata — the boot gate', () => {
     // chains were live would be a second answer to the question ENABLED_CHAINS
     // exists to answer alone.
     expect([...describedChains()].sort()).toEqual(
-      [MAINNET, DEVNET, RHC_TESTNET].sort() as ChainId[],
+      [MAINNET, DEVNET, RHC, RHC_TESTNET].sort() as ChainId[],
     );
   });
 
-  /**
-   * `eip155:4663` is refused at boot, and that refusal is deliberate.
-   *
-   * `docs/chain-facts.md` in assay-evm records `cast code` at the testnet USDG
-   * address on 4663 and got `0x` — the empty-code answer — with an 11,306-byte
-   * control against testnet proving the probe works. So the mainnet USDG
-   * address is unmeasured. A settlement asset cannot honestly be registered for
-   * a token nobody has read, and `chain-metadata.ts` therefore has no 4663 row
-   * at all.
-   *
-   * The tests below say **which** guard refuses it, not merely that something
-   * did. Naming the wrong guard is how a suite goes green while the thing it
-   * claims to cover has moved: "its settlement asset is not registered" would
-   * be a plausible name and a false one, because the row is missing before the
-   * asset is ever consulted.
-   */
-  describe('eip155:4663 — described nowhere, refused at boot', () => {
-    it('is not a chain this table describes', () => {
-      expect(describedChains()).not.toContain(RHC);
-      expect(() => chainMetadata(RHC)).toThrow();
+  describe('eip155:4663 — Robinhood Chain mainnet', () => {
+    it('is described, with a display name that does not say testnet', () => {
+      expect(describedChains()).toContain(RHC);
+      const row = chainMetadata(RHC);
+      expect(row.displayName).toBe('Robinhood Chain');
+      expect(row.displayName.toLowerCase()).not.toContain('testnet');
+      expect(row.explorerBaseUrl).toBe('https://robinhoodchain.blockscout.com');
     });
 
-    it('is refused by the missing-row guard, which names chain-metadata.ts', () => {
-      try {
-        assertChainMetadata([RHC]);
-        throw new Error('expected assertChainMetadata to throw');
-      } catch (error) {
-        const message = (error as { message: string }).message;
-        expect(message).toContain('eip155:4663');
-        expect(message).toContain('src/modules/chains/chain-metadata.ts');
-        // and NOT the asset table's message — the row is missing before the
-        // settlement asset is ever looked at.
-        expect(message).not.toContain('asset-registry.ts');
-      }
+    it('settles in mainnet USDG, a constant with its exact EIP-55 spelling', () => {
+      expect(ASSET_IDS.USDG_ROBINHOOD_MAINNET).toBe(
+        'eip155:4663/erc20:0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+      );
+      expect(getAssetMetadata(ASSET_IDS.USDG_ROBINHOOD_MAINNET)).toEqual({
+        assetId: ASSET_IDS.USDG_ROBINHOOD_MAINNET,
+        symbol: 'USDG',
+        decimals: 6,
+        chainId: RHC,
+        peg: 'USD-1:1',
+      });
+      expect(registeredAssets().map((asset) => asset.chainId)).toContain(RHC);
     });
 
-    it('has no registered asset either, so copying the testnet row across is not a fix', () => {
-      // The other half. Somebody "fixing" the boot failure would reach for the
-      // testnet USDG address; there is deliberately no mainnet entry to find.
-      expect(registeredAssets().map((asset) => asset.chainId)).not.toContain(RHC);
+    it('passes the boot assertions alone (ENABLED_CHAINS=eip155:4663)', () => {
+      expect(() => assertChainMetadata([RHC])).not.toThrow();
     });
 
-    it('accepts eip155:46630 — the positive control for every refusal above', () => {
-      expect(() => assertChainMetadata([RHC_TESTNET])).not.toThrow();
+    it('can be enabled beside the testnet and Solana', () => {
+      expect(() => assertChainMetadata([RHC, RHC_TESTNET])).not.toThrow();
+      expect(() => assertChainMetadata([DEVNET, RHC, RHC_TESTNET])).not.toThrow();
+    });
+
+    it('does not share an asset with the testnet', () => {
+      expect(chainMetadata(RHC).settlementAsset).not.toBe(
+        chainMetadata(RHC_TESTNET).settlementAsset,
+      );
     });
   });
 
@@ -203,6 +193,7 @@ describe('assertChainMetadata — the boot gate', () => {
   describe('rails', () => {
     it('is B only on Robinhood Chain, and empty on Solana', () => {
       expect(chainMetadata(RHC_TESTNET).rails).toEqual(['B']);
+      expect(chainMetadata(RHC).rails).toEqual(['B']);
       // Rail B is off on Solana until the Anchor program binds a buyer's
       // tightening to already-signed vouchers only after a delay, as the EVM
       // contract will (no-platform-debt design §3, step 5). Rail A spends a

@@ -177,15 +177,13 @@ describe('two chains, enabled together', () => {
     );
   });
 
-  it('refuses eip155:4663 — the mainnet USDG address is unmeasured', async () => {
-    // The deliverable, not the obstacle. `assertChainMetadata` refuses it
-    // unconditionally, and adding an `EVM_DEPLOYMENTS` entry does not help:
-    // there is no asset registry row and no chain-metadata row for 4663.
+  it('refuses an eip155 chain with no metadata row, even with a deployment record', async () => {
+    // `assertChainMetadata` refuses it; an `EVM_DEPLOYMENTS` entry does not help.
     await expect(
       bootWith({
-        ENABLED_CHAINS: `${SOLANA},${CHAIN_IDS.ROBINHOOD_MAINNET}`,
+        ENABLED_CHAINS: `${SOLANA},${CHAIN_IDS.BASE_MAINNET}`,
         EVM_DEPLOYMENTS: JSON.stringify({
-          [CHAIN_IDS.ROBINHOOD_MAINNET]: {
+          [CHAIN_IDS.BASE_MAINNET]: {
             config: '0x1111111111111111111111111111111111111111',
             stake: '0x2222222222222222222222222222222222222222',
             escrow: '0x3333333333333333333333333333333333333333',
@@ -193,7 +191,7 @@ describe('two chains, enabled together', () => {
           },
         }),
         EVM_RPC_URLS: JSON.stringify({
-          [CHAIN_IDS.ROBINHOOD_MAINNET]: 'https://rpc.chain.robinhood.example',
+          [CHAIN_IDS.BASE_MAINNET]: 'https://rpc.chain.robinhood.example',
         }),
       }),
     ).rejects.toMatchObject({ errorCode: 'CHAIN_ENABLED_CHAINS_INVALID' });

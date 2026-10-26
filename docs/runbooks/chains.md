@@ -24,10 +24,9 @@ network is live is the mainnet/devnet mislabel the variable exists to prevent.
 ENABLED_CHAINS=solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1,eip155:46630
 ```
 
-**`eip155:4663` cannot be enabled today, and the refusal is deliberate.** The mainnet USDG address is
-unmeasured — `cast code` at the testnet address on 4663 returns `0x` — so the asset registry has no
-mainnet row and `assertChainMetadata` refuses the chain at boot. Do not invent an address to get
-past it; the measurement is recorded in `docs/chain-facts.md` in the assay-evm repository.
+**`eip155:4663` (Robinhood Chain mainnet)** settles in mainnet USDG, registered as a constant in
+`asset-registry.ts` (no env variable). Enabling it needs its own `EVM_RPC_URLS` and `EVM_DEPLOYMENTS`
+entries, whose `asset` must be that USDG address.
 
 ## Unset is a boot failure. There is no default
 

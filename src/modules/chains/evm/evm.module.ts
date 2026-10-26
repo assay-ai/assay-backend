@@ -130,12 +130,11 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
  * with the other — the API, worker and MCP bootstraps already differ on the fee
  * payer for exactly that reason.
  *
- * ## `eip155:4663` cannot be enabled from here or anywhere
+ * ## `eip155:4663` (mainnet)
  *
- * `assertChainMetadata` refuses it at boot because the mainnet USDG address is
- * unmeasured (`docs/chain-facts.md` in assay-evm), so it never reaches this module's
- * factories. Adding an `EVM_DEPLOYMENTS` entry for it does not help and is not a
- * workaround: the asset registry has a testnet row only.
+ * Served like 46630 once `ENABLED_CHAINS` names it; it needs its own
+ * `EVM_RPC_URLS` and `EVM_DEPLOYMENTS` entries, whose `asset` must be mainnet
+ * USDG from `asset-registry.ts`.
  */
 @Module({
   // `createSanctionedEvmClient` issues every JSON-RPC request through

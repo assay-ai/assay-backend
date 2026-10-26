@@ -86,13 +86,20 @@ describe('each chain is held to its own rails', () => {
     expect(thrown?.statusCode).toBe(409);
   });
 
-  it('refuses a chain with no metadata row at all', () => {
-    // `eip155:4663` — Robinhood MAINNET — has no row on purpose: the mainnet
-    // USDG address is unmeasured (`docs/chain-facts.md` in assay-evm). A rail check
-    // that answered "yes" for an undescribed chain would make that refusal
-    // reachable only at boot.
+  it('offers rail B only on Robinhood Chain mainnet', () => {
     expect(() =>
       assertRailOffered(CHAIN_IDS.ROBINHOOD_MAINNET, railName(PaymentRail.RAIL_B_VOUCHER)),
+    ).not.toThrow();
+    expect(() =>
+      assertRailOffered(CHAIN_IDS.ROBINHOOD_MAINNET, railName(PaymentRail.RAIL_A_PER_CALL)),
+    ).toThrow(expect.objectContaining({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED }));
+  });
+
+  it('refuses a chain with no metadata row at all', () => {
+    // A rail check that answered "yes" for an undescribed chain would make the
+    // boot refusal of that chain reachable only at boot.
+    expect(() =>
+      assertRailOffered(CHAIN_IDS.BASE_MAINNET, railName(PaymentRail.RAIL_B_VOUCHER)),
     ).toThrow(expect.objectContaining({ errorCode: ChainErrorCode.CHAIN_UNSUPPORTED }));
   });
 
