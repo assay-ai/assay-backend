@@ -13,6 +13,8 @@
  * ```
  */
 
+import { TOOL_TOPICS } from './topics';
+
 export const HANDLE_RE = /^[a-z][a-z0-9-]{2,23}$/;
 
 /** The handle Official (platform) toolsets are served under: `/@assay/{slug}`. */
@@ -52,24 +54,7 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
  * categories present in `tools` are added at claim time.
  */
 export const RESERVED_CATEGORY_NAMES: ReadonlySet<string> = new Set([
-  'weather',
-  'finance',
-  'maps',
-  'crypto',
-  'web',
-  'knowledge',
-  'search',
-  'news',
-  'social',
-  'data',
-  'code',
-  'chat',
-  'ai',
-  'media',
-  'commerce',
-  'travel',
-  'sports',
-  'health-care',
+  ...TOOL_TOPICS,
   'uncategorised',
 ]);
 
