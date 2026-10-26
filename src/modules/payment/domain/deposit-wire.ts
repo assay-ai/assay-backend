@@ -30,7 +30,7 @@ import { PaymentErrors } from '../errors/payment.errors';
  * builds and signs a transaction against it, and the failure surfaces at the
  * facilitator as an invalid payload the buyer has no way to interpret.
  *
- * `502`, not `400`: the value comes from the facilitator, so nothing the
+ * `503`, not `400`: the value comes from the facilitator, so nothing the
  * caller sent could have caused it or can fix it.
  */
 export function readRequiredExtra(requirements: PaymentRequirements, field: string): string {

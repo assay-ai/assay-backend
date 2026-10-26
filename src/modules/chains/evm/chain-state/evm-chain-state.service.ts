@@ -6,6 +6,7 @@ import { AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import { ChainErrors } from '../../errors/chains.errors';
 import { ChainDoor, ChainParty, ChainStateGatePort } from '../../ports/chain-state-gate.port';
+import { ChainParamsPort } from '../../ports/chain-params.port';
 import { ChainId, ChainNamespace, namespaceOf, parseAccountId } from '../../ports/caip.types';
 import { ASSAY_CONFIG_ABI } from '../abi/assay.abi';
 import { readDomainMismatches } from '../eip712/domain-guard';
@@ -67,6 +68,8 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
   /** Chains whose proxies sign under another EIP-712 domain: the contracts named. */
   private readonly domainMismatches = new Map<ChainId, string>();
   private domainCheckedAt = 0;
+  /** `params_changed_at` per chain as last seen; `undefined` before the first load. */
+  private paramsChangedAt: ReadonlyMap<string, number> | undefined;
 
   constructor(
     private readonly repository: EvmChainStateRepository,
@@ -74,6 +77,9 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     private readonly config: { readonly pollMs: number; readonly now?: () => number },
     private readonly alerts: AlertPort | null = null,
+    // The on-chain params cache: read again at once when the indexer records
+    // a config-change event, instead of waiting for its own 5-minute refresh.
+    private readonly params: ChainParamsPort | null = null,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -126,6 +132,32 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
       });
     }
     this.chains = next;
+    this.followParamsChanges(states);
+  }
+
+  /**
+   * `params_changed_at` is stamped by the indexer when it reads
+   * `ConfigUpdated`, `SlashDelaySet`, `CollectHoldSet` or `ArbiterSet`. A
+   * stamp this process has not seen yet re-reads the on-chain params now. The
+   * first load only records the stamps: the params cache read the chain at
+   * boot anyway.
+   */
+  private followParamsChanges(
+    states: readonly { chainId: string; paramsChangedAt?: Date | null }[],
+  ): void {
+    const seen = new Map(
+      states.map((state) => [state.chainId, state.paramsChangedAt?.getTime() ?? 0]),
+    );
+    const previous = this.paramsChangedAt;
+    this.paramsChangedAt = seen;
+    if (!previous || !this.params) return;
+    const changed = [...seen].filter(([chainId, at]) => at !== (previous.get(chainId) ?? 0));
+    if (changed.length === 0) return;
+    this.logger.log(
+      `on-chain config changed on ${changed.map(([chainId]) => chainId).join(', ')}; ` +
+        `re-reading the chain params`,
+    );
+    void this.params.refresh();
   }
 
   /**

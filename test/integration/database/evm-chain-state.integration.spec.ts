@@ -65,6 +65,34 @@ describe('EvmChainStateRepository, against a real database', () => {
     expect(blocked).toEqual([B]);
   });
 
+  it('stamps params_changed_at and the slash delay only for a range that changed them', async () => {
+    const later = new Date('2026-10-14T00:05:00Z');
+    await repository.applyIndexedRange({
+      chainId: CHAIN,
+      cursorBlock: 125n,
+      headBlock: 130n,
+      caughtUp: false,
+      now: NOW,
+      blocked: [],
+    });
+    expect((await repository.findState(CHAIN))?.paramsChangedAt).toBeNull();
+
+    await repository.applyIndexedRange({
+      chainId: CHAIN,
+      cursorBlock: 128n,
+      headBlock: 130n,
+      caughtUp: false,
+      now: later,
+      slashDelaySeconds: 600,
+      paramsChanged: true,
+      blocked: [],
+    });
+    expect(await repository.findState(CHAIN)).toMatchObject({
+      paramsChangedAt: later,
+      slashDelaySeconds: 600,
+    });
+  });
+
   it('applies a reconcile correction and the Config terms whatever the event order', async () => {
     await repository.applyReconcile(
       CHAIN,

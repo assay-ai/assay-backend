@@ -48,6 +48,7 @@ function build(options: {
   const ranges: [bigint, bigint][] = [];
   const proxyReads: string[][] = [];
   const alerts: Alert[] = [];
+  const ranges_written: { paramsChanged?: boolean; slashDelaySeconds?: number }[] = [];
   const ensure = () =>
     (state ??= {
       chainId: CHAIN,
@@ -67,9 +68,12 @@ function build(options: {
       now: Date;
       paused?: boolean;
       arbiter?: string | null;
+      slashDelaySeconds?: number;
+      paramsChanged?: boolean;
       blocked: { address: string; blocked: boolean }[];
     }) => {
       const s = ensure();
+      ranges_written.push(range);
       s.cursorBlock = range.cursorBlock.toString();
       if (range.caughtUp) s.caughtUpAt = range.now;
       if (range.paused !== undefined) s.paused = range.paused;
@@ -128,7 +132,15 @@ function build(options: {
       now: () => NOW,
     },
   );
-  return { indexer, ranges, proxyReads, alerts, blocked, state: () => state };
+  return {
+    indexer,
+    ranges,
+    proxyReads,
+    alerts,
+    blocked,
+    written: ranges_written,
+    state: () => state,
+  };
 }
 
 const log = (eventName: string, args: Record<string, unknown>, block = 100n, index = 0) => ({
@@ -199,6 +211,34 @@ describe('EvmChainStateIndexer', () => {
     ).toMatchObject({
       severity: AlertSeverity.WARN,
     });
+  });
+
+  it('alerts CollectHoldSet like the other levers, and stamps a params change for every process', async () => {
+    const { indexer, alerts, written } = build({
+      head: 200n,
+      state: { cursorBlock: '99', reconciledAt: new Date(NOW) },
+      logs: [
+        log('CollectHoldSet', { previous: 3_600n, next: 7_200n }, 100n, 0),
+        log('SlashDelaySet', { previousDelay: 259_200n, newDelay: 600n }, 100n, 1),
+      ],
+    });
+    await indexer.tick();
+    const levers = alerts.filter((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER);
+    expect(levers.map((alert) => [alert.severity, alert.details.event])).toEqual([
+      [AlertSeverity.CRITICAL, 'CollectHoldSet'],
+      [AlertSeverity.CRITICAL, 'SlashDelaySet'],
+    ]);
+    expect(written[0]).toMatchObject({ paramsChanged: true, slashDelaySeconds: 600 });
+  });
+
+  it('stamps no params change for a range without a config-change event', async () => {
+    const { indexer, written } = build({
+      head: 200n,
+      state: { cursorBlock: '99', reconciledAt: new Date(NOW) },
+      logs: [log('PauseToggled', { paused: true }, 100n)],
+    });
+    await indexer.tick();
+    expect(written[0].paramsChanged).toBeUndefined();
   });
 
   it('warns when it is more than five minutes behind the head', async () => {

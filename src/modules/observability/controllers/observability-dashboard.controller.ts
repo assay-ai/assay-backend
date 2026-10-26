@@ -1,5 +1,6 @@
 import { Controller, Get, Header, UseGuards } from '@nestjs/common';
 
+import { NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { RawResponse } from '@shared/decorators/raw-response.decorator';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
@@ -26,16 +27,23 @@ import { MetricsCollectorService } from '../services/metrics-collector.service';
 export class ObservabilityDashboardController {
   constructor(private readonly collector: MetricsCollectorService) {}
 
+  /**
+   * `@NoCacheHeader()`, not `@Header('Cache-Control', 'no-store')`: Nest writes
+   * a `@Header` before the interceptors run, and `CacheHeaderInterceptor` then
+   * overwrote it with its `private, no-cache` default for an undecorated GET
+   * (BUG-PROD-OPS-CORE-04). Operator-only numbers are never kept by the browser.
+   */
+  @NoCacheHeader()
   @Get('dashboard')
   @RawResponse()
   @Header('Content-Type', 'text/html; charset=utf-8')
-  @Header('Cache-Control', 'no-store')
   @ApiOperation({ summary: 'The Money and Traffic dashboard rows, server-rendered' })
   async getDashboard(@CurrentOperator() operator: OperatorSession): Promise<string> {
     const snapshot = await this.collector.snapshot();
     return renderDashboardHtml(snapshot, operator.displayName);
   }
 
+  @NoCacheHeader()
   @Get('dashboard/data.json')
   @ApiOperation({ summary: 'The same numbers the dashboard renders, as JSON' })
   @ApiResponse({ status: 200, type: MetricsSnapshotDto })

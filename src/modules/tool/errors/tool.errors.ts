@@ -180,13 +180,14 @@ export const ToolErrors = createDomainErrorFactory('TOOL', {
    * or stake problem, the second is an outage — and a single code for both
    * would put a catalogue gap and a multi-provider incident on the same alert.
    *
-   * `502`, because the failure is upstream of us and every attempt is recorded:
+   * `503`, because the failure is upstream of us and every attempt is recorded:
    * no charge settles, no strike lands, and no provider's stake is reachable
-   * through this path.
+   * through this path. `503`, not `502`, because the edge replaces an origin
+   * `502` (`edgeSafeStatus`).
    */
   allBindingsFailed: {
     code: ToolErrorCode.TOOL_ALL_BINDINGS_FAILED,
-    statusCode: 502,
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `All ${context?.attempts ?? 0} provider attempts failed` +
       `${context?.toolId ? ` for tool: ${context.toolId}` : ''}` +

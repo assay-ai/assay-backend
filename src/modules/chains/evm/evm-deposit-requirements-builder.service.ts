@@ -36,7 +36,7 @@ import { EVM_DEPOSIT_METHOD } from './evm.constants';
  * copy of the fact, which is the shape the defect this file ships alongside was
  * (`payment/domain/deposit-asset.ts`).
  *
- * `readRequiredExtra` refuses a missing or non-string field with `502
+ * `readRequiredExtra` refuses a missing or non-string field with `503
  * PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE`, the same as the Solana builder and
  * for a sharper reason: a `contract` that cast to the string `"undefined"`
  * would be rendered to a buyer as the address to approve.

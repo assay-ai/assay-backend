@@ -118,7 +118,7 @@ export const ASSAY_CONFIG_ABI = parseAbi([
  * `AssayConfig`'s events the chain-state indexer reads (`EvmChainStateIndexer`):
  * `PauseToggled` and `BlockedSet` into Postgres; `AdminSet`, `ConfigUpdated`
  * (treasury, bps, caps), `VerifierRevokedEvent`, `ArbiterSet`,
- * `SlashDelaySet` and `VerifierRegistered` as CRITICAL alerts (the levers a
+ * `SlashDelaySet`, `CollectHoldSet` and `VerifierRegistered` as CRITICAL alerts (the levers a
  * stolen admin key pulls); `PauseToggled`, an unblock (`BlockedSet` false,
  * which only the admin can send) and a block by the arbiter as a WARN. Events
  * only, no function: nothing here may write the Config.
@@ -132,6 +132,8 @@ export const ASSAY_CONFIG_EVENTS_ABI = parseAbi([
   'event BlockedSet(address indexed account, bool blocked, address indexed by)',
   'event ArbiterSet(address indexed previousArbiter, address indexed newArbiter)',
   'event SlashDelaySet(uint64 previousDelay, uint64 newDelay)',
+  // The rail-B dispute hold (`setCollectHold`), a lever like the slash delay.
+  'event CollectHoldSet(uint64 previous, uint64 next)',
   'event VerifierRegistered(address indexed verifier, address indexed admin, bytes32 label, uint64 registeredAt, uint64 expiresAt)',
 ]);
 

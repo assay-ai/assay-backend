@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { CHAIN_PARAMS } from '@modules/chains/ports/chain-params.port';
 import { ContractMinimumStakeFloors } from '@modules/tool/services/contract-minimum-stake-floors.service';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolEgressModule } from '@modules/tool/tool-egress.module';
@@ -39,7 +40,7 @@ import { ProviderRegistrationService } from './services/provider-registration.se
 import { ProviderStakeAuthorityService } from './services/provider-stake-authority.service';
 import { ProviderStakeIntentService } from './services/provider-stake-intent.service';
 import { ProviderVerificationService } from './services/provider-verification.service';
-import { PROVIDER_TERMS, loadProviderTerms } from './services/provider-terms';
+import { PROVIDER_TERMS, providerTermsSource } from './services/provider-terms';
 import {
   PROVIDER_MINIMUM_STAKE_BY_CHAIN,
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
@@ -134,7 +135,17 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderStakeIntentController,
   ],
   providers: [
-    { provide: PROVIDER_TERMS, useFactory: loadProviderTerms, inject: [ConfigService] },
+    {
+      // Built per request from the live routing floor and the on-chain params
+      // cache, never once at boot.
+      provide: PROVIDER_TERMS,
+      useFactory: providerTermsSource,
+      inject: [
+        ConfigService,
+        PROVIDER_MINIMUM_STAKE_PARAMETERS,
+        { token: CHAIN_PARAMS, optional: true },
+      ],
+    },
     ProviderRegistrationService,
     ProviderPayoutAddressService,
     ProviderStakeAuthorityService,
@@ -157,7 +168,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderSlaWindowsService,
     {
       // The Capital screen's requirement: the effective routing floor of the
-      // platform stake chain, never below config (review M-8).
+      // platform stake chain, the contract's minimum once read (review M-8).
       provide: PROVIDER_MINIMUM_STAKE_PARAMETERS,
       useFactory: (config: ConfigService, floors: ContractMinimumStakeFloors) =>
         liveMinimumStakeParameters(loadMinimumStakeParameters(config), floors.byChain),

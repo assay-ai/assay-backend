@@ -163,7 +163,7 @@ function build(
     payoutChallenges,
     chainEnrolments,
     connectivityChecks,
-    TERMS,
+    { current: () => TERMS },
   );
 
   return { service, providers, payoutChallenges, chainEnrolments, connectivityChecks };

@@ -21,6 +21,7 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_EXPIRED = 'PAYMENT_DEPOSIT_EXPIRED',
   PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED = 'PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED',
   PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED = 'PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED',
+  PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED = 'PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED',
   PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET = 'PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET',
   PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE = 'PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE',
   PAYMENT_DEPOSIT_CHAIN_REQUIRED = 'PAYMENT_DEPOSIT_CHAIN_REQUIRED',
@@ -441,16 +442,17 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * The facilitator did not advertise everything the browser needs to build
    * the transfer.
    *
-   * `502`, not `400`: `PaymentRequirements.extra` is typed `unknown` and is
+   * `503`, not `400`: `PaymentRequirements.extra` is typed `unknown` and is
    * filled in from what the facilitator told us, so a missing `feePayer` or
    * `memo` is the upstream failing to hold up its end — nothing the caller
    * sent could have caused it or can fix it. Raised rather than cast, because
    * casting produces a `402` whose fee-payer slot names `undefined` and whose
-   * only symptom is a wallet signature the facilitator later rejects.
+   * only symptom is a wallet signature the facilitator later rejects. `503`,
+   * not `502`, because the edge replaces an origin `502` (`edgeSafeStatus`).
    */
   depositRequirementsIncomplete: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE,
-    statusCode: 502,
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `The payment requirements are missing a field the client needs` +
       `${context?.field ? `: ${context.field}` : ''}`,
@@ -560,9 +562,26 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `Transaction ${context?.transaction ?? ''} already settled deposit ` +
       `${context?.claimedBy ?? 'another deposit'}`,
   },
+  /**
+   * No escrow transfer crediting this intent's buyer was observed in the
+   * transaction within the observation window; the intent is now `FAILED`.
+   *
+   * `422`, not `502` (BUG-PROD-BUY-MONEY-02): the edge in front of the API
+   * replaces an origin `502`/`504` with its own page, which carries no CORS
+   * headers, so a browser on the web app saw "Failed to fetch" and never this
+   * body. The transaction is readable; it just does not credit this buyer.
+   */
+  depositTransferNotObserved: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `No transfer crediting this buyer was observed in transaction ` +
+      `${context?.transaction ?? ''}; the deposit is marked failed`,
+  },
   settlementFailed: {
     code: PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,
-    statusCode: 502,
+    // `503`, never `502`: see `edgeSafeStatus`.
+    statusCode: 503,
     message: (context?: Record<string, any>) =>
       `Facilitator settlement failed${context?.reason ? `: ${context.reason}` : ''}`,
   },

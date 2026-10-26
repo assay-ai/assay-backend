@@ -275,7 +275,7 @@ describe('ProviderRouterService', () => {
 
       expect(error).toBeInstanceOf(AppError);
       expect(error?.errorCode).toBe(ToolErrorCode.TOOL_ALL_BINDINGS_FAILED);
-      expect(error?.statusCode).toBe(502);
+      expect(error?.statusCode).toBe(503);
       expect(error?.message).toContain('All 2 provider attempts failed');
       expect(error?.message).toContain('failover exhausted every remaining provider');
       // Each provider tried exactly once. No hanging, no loop.

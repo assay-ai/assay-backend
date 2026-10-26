@@ -581,13 +581,14 @@ export class EvmSlashExecutor
         abi: ASSAY_CONFIG_ABI,
         functionName: 'params',
         args: [],
-      }) as Promise<{ slashAgentBps: number | bigint }>,
+      }) as Promise<{ slashAgentBps: number | bigint; slashPlatformBps: number | bigint }>,
     ]);
     return {
       chainId,
       ...terms,
       admin: getAddress(admin),
       slashAgentBps: Number(params.slashAgentBps),
+      slashPlatformBps: Number(params.slashPlatformBps),
     };
   }
 

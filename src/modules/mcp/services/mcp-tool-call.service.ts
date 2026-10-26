@@ -9,7 +9,7 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
 import { checksummedAccount, checksummedAsset } from '@modules/chains/evm/eip55';
-import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import {
@@ -1171,7 +1171,9 @@ export class McpToolCallService {
    * otherwise, it just keeps the number out of a deploy.
    */
   private platformFee(price: Money): Money {
-    const fee = (BigInt(price.amount) * BigInt(this.pricing.platformFeeBps)) / 10_000n;
+    const bps =
+      this.pricing.platformFeeBpsFor?.(chainIdOf(price.asset)) ?? this.pricing.platformFeeBps;
+    const fee = (BigInt(price.amount) * BigInt(bps)) / 10_000n;
     return MoneyUtil.of(fee, price.asset, price.decimals);
   }
 

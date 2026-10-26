@@ -14,9 +14,9 @@ import { ToolModule } from '@modules/tool/tool.module';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 /**
- * The slash module's minimum stake is the routing floor (lot 1 C11): config,
- * raised to the contract minimum when stricter, read from `ToolModule`'s one
- * `ContractMinimumStakeFloors` — never below config.
+ * The slash module's minimum stake is the routing floor (lot 1 C11): the
+ * contract minimum once read (higher or lower), config until then, read from
+ * `ToolModule`'s one `ContractMinimumStakeFloors`.
  */
 interface FactoryProvider {
   provide: unknown;
@@ -65,22 +65,35 @@ describe('SlashModule — minimum stake parameters', () => {
   });
 
   it('follows a later refresh of the routing floors', async () => {
-    const reader = {
-      readMinimumStakes: jest.fn(async () => [{ chainId, minimumStake: times(3), failure: null }]),
+    let read = false;
+    const params = {
+      current: jest.fn(() => ({
+        chainId,
+        source: read ? 'chain' : 'config',
+        minimumStake: read ? times(3) : configured.floor,
+      })),
+      all: jest.fn(() => []),
+      refresh: jest.fn(async () => {
+        read = true;
+      }),
+      subscribe: jest.fn(() => () => undefined),
     };
-    const floors = new ContractMinimumStakeFloors(new Map([[chainId, configured]]), reader);
+    const floors = new ContractMinimumStakeFloors(
+      new Map([[chainId, configured]]),
+      params as never,
+    );
     const parameters = parametersProvider.useFactory(config, floors);
     expect(parameters.floor).toEqual(configured.floor);
     await floors.refresh();
     expect(parameters.floor).toEqual(times(3));
   });
 
-  it('never goes below the configured floor', () => {
+  it('follows a routing floor below the configured one (the chain wins)', () => {
     const lower = MoneyUtil.of('1', configured.floor.asset, configured.floor.decimals);
     const floors = new ContractMinimumStakeFloors(
       new Map([[chainId, { ...configured, floor: lower }]]),
       null,
     );
-    expect(parametersProvider.useFactory(config, floors).floor).toEqual(configured.floor);
+    expect(parametersProvider.useFactory(config, floors).floor).toEqual(lower);
   });
 });

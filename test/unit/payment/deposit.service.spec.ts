@@ -1,3 +1,5 @@
+import { BadRequestException } from '@nestjs/common';
+
 import { DEPOSIT_PAYMENT_SCHEMES } from '@modules/payment/domain/deposit-wire';
 import { EVM_PAYMENT_SCHEME } from '@modules/chains/evm/evm-chain.adapter';
 import { SOLANA_PAYMENT_SCHEME } from '@modules/chains/solana/solana.constants';
@@ -843,7 +845,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
 
       const settling = expectErrorCodeAsync(
         () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
-        PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
       );
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
       await settling;
@@ -1055,7 +1057,7 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
 
       const settling = expectErrorCodeAsync(
         () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-        PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
       );
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
       await settling;
@@ -1067,6 +1069,174 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       jest.useRealTimers();
     }
   });
+
+  // BUG-PROD-BUY-MONEY-02: the refusal is a 4xx. A 502 from the origin is
+  // replaced at the edge by a page without CORS headers, so the browser saw
+  // "Failed to fetch" instead of this body.
+  it('answers an unobserved transfer with a readable 422, not a 502', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    try {
+      const adapter = selfBroadcastAdapter({ observeTransfer: jest.fn().mockResolvedValue(null) });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      const settling = harness.service
+        .settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH)
+        .catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
+      const error = (await settling) as { statusCode: number; errorCode: string };
+
+      expect(error.statusCode).toBe(422);
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // BUG-PROD-BUY-MONEY-02: one RPC read may take the egress client's whole
+  // 30 s budget. The observation window is a hard bound, not a check made
+  // only between reads.
+  it('stops waiting at the observation deadline even when a chain read hangs', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    try {
+      const adapter = selfBroadcastAdapter({
+        observeTransfer: jest.fn().mockReturnValue(new Promise(() => undefined)),
+      });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      let settled = false;
+      const settling = expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+      ).finally(() => {
+        settled = true;
+      });
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + 1);
+      expect(settled).toBe(true);
+      await settling;
+
+      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.FAILED);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /*
+    BUG-PROD-DEPOSIT-01: an EVM deposit is two wallet prompts (approve, wait
+    for it to be mined, depositFor) after a slow wallet-session refresh, and
+    the 90 s Solana lifetime expired real ones mid-flow. On eip155 the intent
+    lives 10 minutes; the expiry check itself is unchanged.
+  */
+  describe('on eip155, where the intent lives 10 minutes', () => {
+    async function createdEvmIntent(harness: ReturnType<typeof buildHarness>) {
+      const { intent } = await harness.service.createDeposit({
+        ...input(),
+        agentAccount: EVM_AGENT_ACCOUNT,
+        chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
+        amount: MoneyUtil.of(5_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+      });
+      return intent;
+    }
+
+    afterEach(() => jest.useRealTimers());
+
+    it('still settles a broadcast that arrives after the old 90 s bound', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const intent = await createdEvmIntent(harness);
+      expect(intent.expiresAt.getTime() - Date.now()).toBe(10 * 60 * 1000);
+
+      jest.setSystemTime(Date.now() + 2 * 60 * 1000);
+      const settled = await harness.service.settleDepositByBroadcast(
+        ORGANIZATION_ID,
+        intent.id,
+        TX_HASH,
+      );
+
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    it('refuses a broadcast after the 10 minutes, before reading the chain', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const adapter = selfBroadcastAdapter();
+      const harness = buildHarness({ adapter });
+      const intent = await createdEvmIntent(harness);
+
+      jest.setSystemTime(Date.now() + 10 * 60 * 1000 + 1);
+      await expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,
+      );
+
+      expect(adapter.observeTransfer).not.toHaveBeenCalled();
+      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+    });
+  });
+
+  // The pause between reads is clamped to the deadline too: a 750 ms sleep
+  // begun just before it would otherwise end the window up to 750 ms late.
+  it('answers at the observation deadline, not one poll interval after it', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    try {
+      const adapter = selfBroadcastAdapter({
+        observeTransfer: jest.fn().mockResolvedValue(null),
+      });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      let settled = false;
+      const settling = expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+      ).finally(() => {
+        settled = true;
+      });
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + 1);
+      expect(settled).toBe(true);
+      await settling;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the observation window at 20 s, under the 30 s client timeout', () => {
+    expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBe(20_000);
+    expect(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS).toBeLessThan(30_000);
+  });
+
+  // BUG-PROD-BUY-MONEY-02: `0xdeadbeef` was polled for the whole observation
+  // window before failing the intent. A hash that cannot exist is a bad
+  // request, refused before the intent moves or the chain is read.
+  it.each([
+    '0xdeadbeef',
+    `0x${'ab'.repeat(31)}`,
+    `0x${'ab'.repeat(33)}`,
+    `0x${'zz'.repeat(32)}`,
+    'ab'.repeat(32),
+  ])(
+    'refuses the malformed EVM hash %p with a 400 VALIDATION_FAILED, leaving the intent CREATED',
+    async (hash) => {
+      const adapter = selfBroadcastAdapter({ namespace: ChainNamespace.EIP155 });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      const error = await harness.service
+        .settleDepositByBroadcast(ORGANIZATION_ID, intent.id, hash as TxRef)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      const response = (error as BadRequestException).getResponse() as { message: string[] };
+      expect(response.message).toEqual([
+        'transactionHash must be a 0x-prefixed 32-byte hex transaction hash',
+      ]);
+      expect(adapter.observeTransfer).not.toHaveBeenCalled();
+      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+    },
+  );
 
   it('never credits less than was requested', async () => {
     const adapter = selfBroadcastAdapter({

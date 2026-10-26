@@ -125,6 +125,76 @@ describe('ChainDirectoryService', () => {
     ]);
   });
 
+  it('serves the contracts and on-chain params of a chain that has them, and none for one that has not', () => {
+    const enabled = [DEVNET, CHAIN_IDS.ROBINHOOD_TESTNET];
+    const evm = CHAIN_IDS.ROBINHOOD_TESTNET as ChainId;
+    const params = {
+      current: (chainId: ChainId) =>
+        chainId === evm
+          ? {
+              chainId,
+              source: 'chain',
+              readAt: new Date('2026-10-25T00:00:00Z'),
+              contracts: { config: '0xC0', stake: '0xC1', escrow: '0xC2', asset: '0xA5' },
+              minimumStake: { amount: '50000000' },
+              penaltyAmount: { amount: '1000000' },
+              verifierDailyCap: { amount: '500000000' },
+              takeRateBps: 1000,
+              slashAgentBps: 6000,
+              slashPlatformBps: 3000,
+              slashCapBps: 1000,
+              unbondingPeriodSeconds: 950_400,
+              slashDelaySeconds: 600,
+              policySlashDelaySeconds: 259_200,
+              collectHoldSeconds: 3600,
+              paused: false,
+              arbiter: null,
+            }
+          : null,
+    };
+    const service = new ChainDirectoryService(
+      enabled,
+      new ChainAdapterRegistry(
+        [stubAdapter([DEVNET]), stubEvmAdapter([CHAIN_IDS.ROBINHOOD_TESTNET])],
+        enabled,
+      ),
+      NO_PUBLIC_RPCS,
+      params as never,
+    );
+
+    const [solana, robinhood] = service.listChains().chains;
+    expect(solana).not.toHaveProperty('params');
+    expect(solana).not.toHaveProperty('contracts');
+    expect(robinhood.contracts).toEqual({
+      config: '0xC0',
+      stake: '0xC1',
+      escrow: '0xC2',
+      asset: '0xA5',
+    });
+    expect(robinhood.params).toEqual({
+      source: 'chain',
+      readAt: '2026-10-25T00:00:00.000Z',
+      minimumStake: '50000000',
+      penaltyAmount: '1000000',
+      takeRateBps: 1000,
+      slashAgentBps: 6000,
+      slashPlatformBps: 3000,
+      slashCapBps: 1000,
+      unbondingPeriodSeconds: 950_400,
+      slashDelaySeconds: 600,
+      // The platform's 72 h floor is longer than the chain's 10 min.
+      effectiveSlashDelaySeconds: 259_200,
+      collectHoldSeconds: 3600,
+      withdrawDelaySeconds: 10_800,
+      tightenDelaySeconds: 10_800,
+      redeemGraceSeconds: 7_200,
+      heldTimeoutSeconds: 604_800,
+      disputeTimeoutSeconds: 2_592_000,
+      paused: false,
+      arbiter: null,
+    });
+  });
+
   it('omits a chain the adapter serves but ENABLED_CHAINS does not name', () => {
     // The guard's subject is the ENABLED list, so the adapter here deliberately
     // supports MORE than the list does. A service that read `registry

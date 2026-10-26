@@ -1,6 +1,9 @@
 import { Type, ValidationPipe } from '@nestjs/common';
 
-import { AddOperatorBodyDto } from '@modules/operator/dto/operator-directory.dto';
+import {
+  AddOperatorBodyDto,
+  ChangeOperatorBodyDto,
+} from '@modules/operator/dto/operator-directory.dto';
 import {
   CompensatedBodyDto,
   ManualCaseActionBodyDto,
@@ -99,6 +102,24 @@ describe('operator action bodies', () => {
 
     it('refuses an empty roles list with a plain message', async () => {
       const message = await messageOf(parse(AddOperatorBodyDto, { ...valid, roles: [] }));
+      expect(message).toBe('Choose at least one role');
+    });
+  });
+
+  describe('change operator (BUG-PROD-OPS-CORE-01)', () => {
+    const valid = { reasonCode: 'ROLE_CHANGE', note: 'moving to the on-call rota' };
+
+    it('accepts a new set of one role or more, or no roles field at all', async () => {
+      await expect(
+        parse(ChangeOperatorBodyDto, { ...valid, roles: ['SRE'] }),
+      ).resolves.toMatchObject({ roles: ['SRE'] });
+      await expect(
+        parse(ChangeOperatorBodyDto, { ...valid, authorityLimitMinor: '0' }),
+      ).resolves.toMatchObject({ authorityLimitMinor: '0' });
+    });
+
+    it('refuses an empty roles list with the same message as add', async () => {
+      const message = await messageOf(parse(ChangeOperatorBodyDto, { ...valid, roles: [] }));
       expect(message).toBe('Choose at least one role');
     });
   });

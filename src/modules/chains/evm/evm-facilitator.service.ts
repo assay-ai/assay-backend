@@ -68,7 +68,7 @@ type Verdict =
  *  - **Who signed it.** `depositFor` pulls from `msg.sender`, so the recovered
  *    sender is who pays, and it must be the buyer being credited.
  *  - **Whether the sender can pay the gas they signed for.** Otherwise the node
- *    refuses the send and the buyer sees a 502 for a problem that is theirs.
+ *    refuses the send and the buyer sees a 503 for a problem that is theirs.
  *  - **Whether it would succeed now**, by `eth_call` as the sender. A missing
  *    `approve` is the common failure, and this is where it is caught — before a
  *    reverted transaction spends the buyer's gas.
