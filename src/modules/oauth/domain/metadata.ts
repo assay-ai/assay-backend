@@ -8,6 +8,10 @@
  */
 export const PRM_WELL_KNOWN = '/.well-known/oauth-protected-resource';
 
+/** The public page that explains connecting an MCP client to Assay. */
+export const MCP_DOCS_URL =
+  'https://docs.goassay.ai/developers/use-tools-get-started/install-assay-mcp';
+
 export interface ProtectedResourceMetadata {
   resource: string;
   authorization_servers: string[];
@@ -65,7 +69,6 @@ export function protectedResourceMetadataUrl(mcp: string, requestPath: string): 
 
 export function protectedResourceMetadata(
   mcp: string,
-  web: string,
   path: string | null | undefined,
 ): ProtectedResourceMetadata {
   return {
@@ -74,11 +77,11 @@ export function protectedResourceMetadata(
     scopes_supported: ['assay:agent'],
     bearer_methods_supported: ['header'],
     resource_name: 'Assay',
-    resource_documentation: `${web}/docs/mcp`,
+    resource_documentation: MCP_DOCS_URL,
   };
 }
 
-export function authorizationServerMetadata(mcp: string, web: string): AuthorizationServerMetadata {
+export function authorizationServerMetadata(mcp: string): AuthorizationServerMetadata {
   return {
     issuer: mcp,
     authorization_endpoint: `${mcp}/oauth/authorize`,
@@ -94,6 +97,6 @@ export function authorizationServerMetadata(mcp: string, web: string): Authoriza
     scopes_supported: ['assay:agent', 'offline_access'],
     client_id_metadata_document_supported: true,
     authorization_response_iss_parameter_supported: true,
-    service_documentation: `${web}/docs/mcp`,
+    service_documentation: MCP_DOCS_URL,
   };
 }
