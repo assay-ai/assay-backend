@@ -2,7 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
-import { authorizationServerMetadata } from '@modules/oauth/domain/metadata';
+import { MCP_DOCS_URL, authorizationServerMetadata } from '@modules/oauth/domain/metadata';
 import { OAuthDiscoveryModule } from '@modules/oauth/oauth-discovery.module';
 import { MCP_HOST_CONFIG } from '@modules/toolset/config/mcp-host.config';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -41,7 +41,7 @@ describe('OAuth metadata controller', () => {
         scopes_supported: ['assay:agent'],
         bearer_methods_supported: ['header'],
         resource_name: 'Assay',
-        resource_documentation: `${WEB}/docs/mcp`,
+        resource_documentation: MCP_DOCS_URL,
       });
     });
 
@@ -97,7 +97,7 @@ describe('OAuth metadata controller', () => {
       const response = await get('/.well-known/oauth-authorization-server');
       expect(response.status).toBe(200);
       expect(response.body.issuer).toBe(MCP);
-      expect(response.body).toEqual(authorizationServerMetadata(MCP, WEB));
+      expect(response.body).toEqual(authorizationServerMetadata(MCP));
       expect(response.body).toMatchObject({
         authorization_endpoint: `${MCP}/oauth/authorize`,
         token_endpoint: `${MCP}/oauth/token`,
@@ -106,7 +106,7 @@ describe('OAuth metadata controller', () => {
         code_challenge_methods_supported: ['S256'],
         client_id_metadata_document_supported: true,
         authorization_response_iss_parameter_supported: true,
-        service_documentation: `${WEB}/docs/mcp`,
+        service_documentation: MCP_DOCS_URL,
       });
     });
 
