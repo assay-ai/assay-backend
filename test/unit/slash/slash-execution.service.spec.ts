@@ -1978,7 +1978,14 @@ describe('executeDue', () => {
     expect(sent.title).toBe('$0.04 penalty on get_weather was executed');
     expect(sent.title).not.toContain('40000');
     expect(sent.body).not.toMatch(/timelock|proposal/i);
-    expect(sent.payload).toMatchObject({ applied: '40000', decimals: 6, toolName: 'get_weather' });
+    expect(sent.payload).toMatchObject({
+      applied: '40000',
+      decimals: 6,
+      toolName: 'get_weather',
+      // The split the chain recorded, for the inbox to show as is.
+      agentAmount: '24000',
+      platformAmount: '12000',
+    });
   });
 
   it('leaves the tool out of the notice rather than naming an id', async () => {

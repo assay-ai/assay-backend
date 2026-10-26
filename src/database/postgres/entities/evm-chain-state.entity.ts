@@ -35,6 +35,15 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'slash_delay_seconds', type: 'integer', nullable: true })
   slashDelaySeconds: number | null;
 
+  /**
+   * When the indexer last read a config-change event (`ConfigUpdated`,
+   * `SlashDelaySet`, `CollectHoldSet`, `ArbiterSet`). Every process's
+   * `EvmChainStateService` polls this row; a new stamp makes it re-read the
+   * on-chain params at once (`EvmChainParamsCache`).
+   */
+  @Column({ name: 'params_changed_at', type: 'timestamptz', nullable: true })
+  paramsChangedAt: Date | null;
+
   @Column({ name: 'cursor_block', type: 'bigint', nullable: true })
   cursorBlock: string | null;
 

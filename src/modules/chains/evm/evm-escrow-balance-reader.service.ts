@@ -49,7 +49,8 @@ export interface EvmReaderClient {
       functionName: string;
       args: readonly unknown[];
     }[];
-    allowFailure: false;
+    /** `true` answers `{ status, result, error }` per call instead of throwing (viem). */
+    allowFailure: boolean;
   }): Promise<readonly unknown[]>;
 }
 

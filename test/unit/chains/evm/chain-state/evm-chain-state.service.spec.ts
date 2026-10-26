@@ -258,3 +258,32 @@ describe('EvmChainStateService.isBlockedLive — the whose-address read (review 
     ).resolves.toBeNull();
   });
 });
+
+describe('EvmChainStateService — follows on-chain config changes', () => {
+  it('re-reads the on-chain params when the indexer stamps a new params change, not before', async () => {
+    let stamp: Date | null = null;
+    const params = { refresh: jest.fn(async () => undefined) };
+    const service = new EvmChainStateService(
+      {
+        findAllStates: async () => [{ chainId: CHAIN, paused: false, paramsChangedAt: stamp }],
+        findBlocked: async () => [],
+      } as never,
+      new Map() as never,
+      new Map([[CHAIN, { config: CONFIG }]]) as never,
+      { pollMs: 60_000 },
+      null,
+      params as never,
+    );
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+
+    await service.refresh();
+    await service.refresh();
+    expect(params.refresh).not.toHaveBeenCalled();
+
+    stamp = new Date('2026-10-25T00:00:00Z');
+    await service.refresh();
+    await service.refresh();
+    expect(params.refresh).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
+  });
+});

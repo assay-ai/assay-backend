@@ -11,8 +11,11 @@ import { ChainDirectoryService } from '../services/chain-directory.service';
  *
  * Unauthenticated on purpose: the deposit chain picker, the balance cards and
  * the wallet menu all render from it, and the list is not a secret — it is the
- * same set every 402 already advertises. It carries no tenant either: four
- * static strings and a number per chain, the same for every caller.
+ * same set every 402 already advertises. It carries no tenant either: a few
+ * static strings per chain, plus the contract addresses and on-chain
+ * parameters (`params`, from the in-memory params cache), the same for every
+ * caller. Those parameters are public chain state; the 60 s below bounds how
+ * long a browser shows one after it changed on chain.
  *
  * ## Why the browser cache directives are overridden
  *

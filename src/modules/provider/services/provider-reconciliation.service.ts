@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
@@ -13,7 +13,8 @@ import {
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
-import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
+import { AssetId, chainIdOf, isAssetId } from '@modules/chains/ports/caip.types';
+import { CHAIN_PARAMS, ChainParamsPort } from '@modules/chains/ports/chain-params.port';
 import {
   CALL_RECONCILIATION_CLASSES,
   CallClassValue,
@@ -162,6 +163,9 @@ export class ProviderReconciliationService {
   constructor(
     private readonly intents: PaymentIntentRepository,
     private readonly config: ConfigService,
+    @Optional()
+    @Inject(CHAIN_PARAMS)
+    private readonly chainParams: ChainParamsPort | null = null,
   ) {}
 
   async getReconciliation(
@@ -269,11 +273,15 @@ export class ProviderReconciliationService {
       };
     });
 
-    // The rate a call is charged at today (`PLATFORM_FEE_BPS`, the value
-    // `MCP_PRICING` splits every live call with): this number sits next to the
-    // real Σ platform_fee, and only the charged rate is one that sum can be
-    // checked against (R17-R-03).
-    const takeRatePercent = platformTakeRatePercent(this.config);
+    // The rate a call is charged at today (the contract's `takeRateBps` once
+    // read, else `PLATFORM_FEE_BPS` — the value `MCP_PRICING` splits every
+    // live call with): this number sits next to the real Σ platform_fee, and
+    // only the charged rate is one that sum can be checked against (R17-R-03).
+    const live = asset ? this.chainParams?.current(chainIdOf(asset)) : null;
+    const takeRatePercent =
+      live?.source === 'chain' && live.takeRateBps !== null
+        ? live.takeRateBps / 100
+        : platformTakeRatePercent(this.config);
 
     return {
       from: query.from,

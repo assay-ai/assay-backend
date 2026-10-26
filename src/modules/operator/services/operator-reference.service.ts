@@ -8,9 +8,10 @@ import { VerifierSigningKeyEntity } from '@database/postgres/entities/verifier-s
 import { VerifierSigningKeyRepository } from '@database/postgres/repositories/verifier-signing-key.repository';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import {
-  MINIMUM_STAKE_READER,
-  MinimumStakeReaderPort,
-} from '@modules/chains/ports/minimum-stake-reader.port';
+  CHAIN_PARAMS,
+  ChainParams,
+  ChainParamsPort,
+} from '@modules/chains/ports/chain-params.port';
 import { Money } from '@modules/chains/ports/money.types';
 import { PolicyLifecycle } from '@modules/verification/domain/aggregation/decision-policy.types';
 import {
@@ -34,9 +35,6 @@ import {
   VerifierRegistryRowDto,
 } from '../dto/operator-reference.dto';
 
-/** The economics panel waits this long per chain for `minimumStake`, then shows the configured floor. */
-export const MINIMUM_STAKE_READ_TIMEOUT_MS = 2_000;
-
 /**
  * The three read-only reference panels behind `GET /operator/policies`,
  * `/verifiers`, `/economics` and `/override-register`.
@@ -57,12 +55,12 @@ export class OperatorReferenceService {
     private readonly providers: ProviderRepository,
     @Inject(PROVIDER_REGISTRY) private readonly providerRegistry: ProviderRegistryPort,
     private readonly config: ConfigService,
-    // The settlement contracts' own minimum stake — the value the operator
-    // Contracts page reads. Optional so a process (or a test) without it
-    // still lists the panel from config.
+    // The settlement contracts' own parameters (the on-chain params cache) —
+    // the values the operator Contracts page reads. Optional so a process (or
+    // a test) without it still lists the panel from config.
     @Optional()
-    @Inject(MINIMUM_STAKE_READER)
-    private readonly minimumStakes: MinimumStakeReaderPort | null = null,
+    @Inject(CHAIN_PARAMS)
+    private readonly chainParams: ChainParamsPort | null = null,
   ) {}
 
   // ── Policy lifecycle ─────────────────────────────────────────────────────
@@ -162,120 +160,122 @@ export class OperatorReferenceService {
   // ── Economic parameters ──────────────────────────────────────────────────
 
   /**
-   * The six economic parameters, read from the same configuration
-   * `loadProviderTerms`/`loadMinimumStakeParameters` already read — never a
-   * second, independently-typed copy of the same numbers. The minimum stake
-   * is the exception: it is read from the settlement contract's own
-   * `params()`, the value the Contracts page shows and the stake contract
-   * enforces (see {@link minimumStakeRow}).
+   * The six economic parameters. Each is the settlement contracts' own value
+   * (the on-chain params cache, `source: 'chain'`) once a chain was read, and
+   * the env value kept as its fallback (`source: 'config'`) until then: the
+   * take rate (`takeRateBps` / `PLATFORM_FEE_BPS`), the minimum stake
+   * (`minimumStake` / `PROVIDER_MINIMUM_STAKE_FLOOR`), the per-record penalty
+   * ceiling (`penaltyAmount`, no env fallback) and the split
+   * (`slashAgentBps` / `slashPlatformBps` / `PROVIDER_TERMS_PENALTY_SPLIT`).
+   * One value when the chains agree, one `chain value` pair per chain when
+   * they do not.
    */
   async listEconomicParameters(): Promise<EconomicParameterRowDto[]> {
-    // `PLATFORM_FEE_BPS`, the rate a call is charged at (R17-R-03).
-    const takeRatePercent = platformTakeRatePercent(this.config);
-    const penaltySplitRaw =
-      this.config.get<string>('PROVIDER_TERMS_PENALTY_SPLIT') ?? '60 / 30 / 10';
+    const read = (this.chainParams?.all() ?? []).filter((params) => params.source === 'chain');
     const stakeParameters = loadMinimumStakeParameters(this.config);
     const minimumStakeOverrideCount = await this.minimumStakeOverrideCount();
-    const split = parsePenaltySplit(penaltySplitRaw);
+    const split = parsePenaltySplit(
+      this.config.get<string>('PROVIDER_TERMS_PENALTY_SPLIT') ?? '60 / 30 / 10',
+    );
+    const percent = (bps: number | null) => (bps === null ? null : `${bps / 100}%`);
 
     return [
-      {
-        key: 'takeRate',
-        label: 'Take rate',
-        value: `${takeRatePercent}%`,
-        source: 'config',
-        overrideCount: null,
+      chainRow('takeRate', 'Take rate', read, (params) => percent(params.takeRateBps), {
+        value: `${platformTakeRatePercent(this.config)}%`,
         note: null,
-      },
-      await this.minimumStakeRow(toDisplayAmount(stakeParameters.floor), minimumStakeOverrideCount),
-      {
-        key: 'penaltySize',
-        label: 'Penalty size',
-        value: null,
-        source: 'config',
-        overrideCount: null,
-        note:
-          'No fixed penalty-size parameter exists in this codebase. An SLA-strike penalty is ' +
-          'computed dynamically per window — totalCallAmount × excessRate × penaltyMultiplier ' +
-          '(2x, `SLA_PENALTY_MULTIPLIER`) — with no per-call or per-strike ceiling. ' +
-          '`SlashConfig.secondSignatureThresholdMinor` and `deMinimisMinor` are a materiality ' +
-          'threshold and a floor, neither of which is "the penalty size".',
-      },
-      splitRow('splitAgent', 'Split — agent', split?.agent ?? null, split === null),
-      splitRow('splitPlatform', 'Split — platform', split?.platform ?? null, split === null),
-      splitRow('splitProvider', 'Split — provider', split?.provider ?? null, split === null),
+      }),
+      this.minimumStakeRow(read, toDisplayAmount(stakeParameters.floor), minimumStakeOverrideCount),
+      this.penaltySizeRow(read),
+      chainRow('splitAgent', 'Split — agent', read, (params) => percent(params.slashAgentBps), {
+        value: split?.agent ?? null,
+        note: split ? null : SPLIT_MALFORMED,
+      }),
+      chainRow(
+        'splitPlatform',
+        'Split — platform',
+        read,
+        (params) => percent(params.slashPlatformBps),
+        { value: split?.platform ?? null, note: split ? null : SPLIT_MALFORMED },
+      ),
+      chainRow(
+        'splitProvider',
+        'Split — provider',
+        read,
+        (params) =>
+          params.slashAgentBps === null || params.slashPlatformBps === null
+            ? null
+            : percent(10_000 - params.slashAgentBps - params.slashPlatformBps),
+        { value: split?.provider ?? null, note: split ? null : SPLIT_MALFORMED },
+      ),
     ];
   }
 
   /**
-   * The minimum stake of every settlement deployment (EVM `params()`), read live.
-   * One value when the chains agree, one `chain value` pair per chain when
-   * they do not. When the configured routing floor
-   * (`PROVIDER_MINIMUM_STAKE_FLOOR`) differs, `note` names it so the panel
-   * does not hide the gap. Each chain is read within
-   * {@link MINIMUM_STAKE_READ_TIMEOUT_MS}; a chain that does not answer shows
-   * the configured floor, and with no answer at all the row is the configured
-   * floor, the note saying which chains and why (a short code, never the
-   * error text).
+   * The minimum stake of every settlement deployment (`params().minimumStake`).
+   * When the configured fallback (`PROVIDER_MINIMUM_STAKE_FLOOR`) differs,
+   * `note` names it so the panel does not hide the gap. With no chain read,
+   * the row is the configured floor.
    */
-  private async minimumStakeRow(
+  private minimumStakeRow(
+    read: readonly ChainParams[],
     configured: string,
     overrideCount: number,
-  ): Promise<EconomicParameterRowDto> {
-    const configRow = (note: string | null): EconomicParameterRowDto => ({
-      key: 'minimumStake',
-      label: 'Minimum stake',
-      value: configured,
-      source: 'config',
-      overrideCount,
-      note,
-    });
-
-    if (!this.minimumStakes) return configRow(null);
-
-    const readings = await this.minimumStakes.readMinimumStakes({
-      timeoutMs: MINIMUM_STAKE_READ_TIMEOUT_MS,
-    });
-    if (readings.length === 0) return configRow(null);
-
-    const answered = readings.filter((reading) => reading.minimumStake !== null);
-    const failed = readings.filter((reading) => reading.failure !== null);
-    // A fixed sentence and a short code, never the error itself: an RPC
-    // error can carry an internal node address (the reader logs the detail).
-    const failedNote =
-      failed.length > 0
-        ? `No answer from the settlement contract on ${failed
-            .map((reading) => `${reading.chainId} (${reading.failure})`)
-            .join(', ')}; the configured floor is shown for it.`
-        : null;
-    if (answered.length === 0) return configRow(failedNote);
-
-    // A chain that did not answer shows the configured floor, labelled in the note.
-    const perChain = readings.map((reading) => ({
-      chainId: reading.chainId,
-      value: reading.minimumStake ? toDisplayAmount(reading.minimumStake) : configured,
-    }));
-    const distinct = new Set(perChain.map((entry) => entry.value));
-    const value =
-      distinct.size === 1
-        ? perChain[0].value
-        : perChain.map((entry) => `${entry.chainId} ${entry.value}`).join(' · ');
-    const differs = answered.some(
-      (reading) => toDisplayAmount(reading.minimumStake!) !== configured,
+  ): EconomicParameterRowDto {
+    const row = chainRow(
+      'minimumStake',
+      'Minimum stake',
+      read,
+      (params) => (params.minimumStake ? toDisplayAmount(params.minimumStake) : null),
+      { value: configured, note: null },
     );
-    const notes = [
-      differs
-        ? `The configured routing floor (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}.`
-        : null,
-      failedNote,
-    ].filter((note): note is string => note !== null);
+    const differs = read.some(
+      (params) => params.minimumStake && toDisplayAmount(params.minimumStake) !== configured,
+    );
     return {
-      key: 'minimumStake',
-      label: 'Minimum stake',
-      value,
-      source: 'chain',
+      ...row,
       overrideCount,
-      note: notes.length > 0 ? notes.join(' ') : null,
+      note: differs
+        ? `The configured fallback (PROVIDER_MINIMUM_STAKE_FLOOR) is ${configured}; the chain ` +
+          `value is the one enforced.`
+        : row.note,
+    };
+  }
+
+  /**
+   * The most one attestation (one record) can slash: `params().penaltyAmount`.
+   * The window penalty the platform computes (`totalCallAmount × excessRate ×
+   * penaltyMultiplier`, `SLA_PENALTY_MULTIPLIER` 2x) is clipped to it on chain,
+   * and to `slashCapBps` of the provider's stake per rolling 24 h.
+   */
+  private penaltySizeRow(read: readonly ChainParams[]): EconomicParameterRowDto {
+    const row = chainRow(
+      'penaltySize',
+      'Penalty size',
+      read,
+      (params) =>
+        params.penaltyAmount ? `${toDisplayAmount(params.penaltyAmount)} per record` : null,
+      {
+        value: null,
+        note:
+          'The per-record ceiling is set on chain (params().penaltyAmount) and the chain has ' +
+          'not been read yet.',
+      },
+    );
+    if (row.source !== 'chain') return row;
+    const caps = distinctValue(
+      read.map((params) => ({
+        chainId: params.chainId,
+        value: params.slashCapBps === null ? null : `${params.slashCapBps / 100}%`,
+      })),
+    );
+    return {
+      ...row,
+      note:
+        'The most one attestation can slash, set on chain (params().penaltyAmount). An ' +
+        'SLA-strike penalty is computed per window — totalCallAmount × excessRate × ' +
+        'penaltyMultiplier (2x, `SLA_PENALTY_MULTIPLIER`) — and the chain clips it to this ' +
+        `ceiling and to ${caps ?? 'the slash cap'} of the provider's stake per rolling 24 h ` +
+        '(params().slashCapBps).',
     };
   }
 
@@ -412,22 +412,46 @@ function parsePenaltySplit(raw: string): PenaltySplit | null {
   return { agent: `${agent}%`, platform: `${platform}%`, provider: `${provider}%` };
 }
 
-function splitRow(
+const SPLIT_MALFORMED =
+  'PROVIDER_TERMS_PENALTY_SPLIT did not parse as "agent / platform / provider" percentages.';
+
+/**
+ * One economics row: the chains' own value when any chain was read (one
+ * value when they agree, `chain value` pairs when they do not), else the
+ * configured fallback.
+ */
+function chainRow(
   key: string,
   label: string,
-  value: string | null,
-  malformed: boolean,
+  read: readonly ChainParams[],
+  valueOf: (params: ChainParams) => string | null,
+  configured: { value: string | null; note: string | null },
 ): EconomicParameterRowDto {
-  return {
-    key,
-    label,
-    value,
-    source: 'config',
-    overrideCount: null,
-    note: malformed
-      ? `PROVIDER_TERMS_PENALTY_SPLIT did not parse as "agent / platform / provider" percentages.`
-      : null,
-  };
+  const value =
+    read.length > 0
+      ? distinctValue(read.map((params) => ({ chainId: params.chainId, value: valueOf(params) })))
+      : null;
+  if (value === null) {
+    return {
+      key,
+      label,
+      value: configured.value,
+      source: 'config',
+      overrideCount: null,
+      note: configured.note,
+    };
+  }
+  return { key, label, value, source: 'chain', overrideCount: null, note: null };
+}
+
+/** One value when every chain agrees, `chainId value` pairs otherwise; `null` when none has one. */
+function distinctValue(rows: readonly { chainId: string; value: string | null }[]): string | null {
+  const known = rows.filter((row): row is { chainId: string; value: string } => row.value !== null);
+  if (known.length === 0) return null;
+  const distinct = new Set(known.map((row) => row.value));
+  return distinct.size === 1
+    ? known[0].value
+    : known.map((row) => `${row.chainId} ${row.value}`).join(' · ');
 }
 
 /**

@@ -793,6 +793,8 @@ export interface McpHarnessOptions {
   /** The chain credits a deposit on its first confirmation (the "within a minute" text). */
   readonly depositCreditsOnSoftConfirmation?: boolean;
   readonly platformFeeBps?: number;
+  /** The contract's own take rate per chain (the on-chain params cache). */
+  readonly platformFeeBpsFor?: (chainId: string) => number | null;
   readonly random?: () => number;
   /** What `FakeSettlement.enqueue` does after recording the call. Defaults to succeeding. */
   readonly settlementBehaviour?: (input: EnqueueVerificationInput) => Promise<void>;
@@ -892,7 +894,10 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     vouchers,
     seqs as unknown as EscrowSeqService,
     escrow,
-    { platformFeeBps: options.platformFeeBps ?? DEFAULT_PLATFORM_FEE_BPS },
+    {
+      platformFeeBps: options.platformFeeBps ?? DEFAULT_PLATFORM_FEE_BPS,
+      ...(options.platformFeeBpsFor ? { platformFeeBpsFor: options.platformFeeBpsFor } : {}),
+    },
     [CHAIN_ID],
     // The real store over a fake Redis: claim, replay and release run as in
     // production. Untouched by every call that carries no key.

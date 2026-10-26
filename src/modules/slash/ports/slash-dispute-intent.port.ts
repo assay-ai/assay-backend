@@ -33,6 +33,8 @@ export interface SlashChainTerms {
   readonly slashDelaySeconds: number;
   /** `params().slashAgentBps`: the beneficiary's share of an executed slash. */
   readonly slashAgentBps: number;
+  /** `params().slashPlatformBps`: the treasury's share; the provider keeps the rest. */
+  readonly slashPlatformBps: number;
 }
 
 /** Who must sign a built call. */

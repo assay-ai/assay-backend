@@ -102,10 +102,13 @@ export interface EvmChainStateIndexerClient {
  *   logged — the events are the fast path, this is the bound.
  * - **The levers a stolen key pulls** (contract security review, audit E-6):
  *   `AdminSet`, `ConfigUpdated` (treasury, bps, caps), `VerifierRevokedEvent`,
- *   `ArbiterSet`, `SlashDelaySet`, `VerifierRegistered` and an ERC-1967
+ *   `ArbiterSet`, `SlashDelaySet`, `CollectHoldSet`, `VerifierRegistered` and an ERC-1967
  *   `Upgraded` on any of the three proxies are CRITICAL alerts;
  *   `PauseToggled`, an unblock (`BlockedSet` false — the admin's door) and a
  *   block sent by the arbiter are WARNs.
+ * - **Params:** `ConfigUpdated`, `SlashDelaySet`, `CollectHoldSet` and
+ *   `ArbiterSet` stamp `params_changed_at`, so every process re-reads the
+ *   on-chain params within one poll (`EvmChainStateService`).
  * - **Confirmations:** events are read only up to `head − confirmations`.
  * - **Lag:** `now − caught_up_at`. Past `maxLagMs` it is a WARN in the log and
  *   an alert, and `GET /operator/health` reports it (`chainState`).
@@ -226,6 +229,8 @@ export class EvmChainStateIndexer {
 
     let paused: boolean | undefined;
     let arbiter: string | null | undefined;
+    let slashDelaySeconds: number | undefined;
+    let paramsChanged = false;
     let knownArbiter = state?.arbiter ?? null;
     if (knownArbiter === null && logs.some((log) => log.eventName === 'BlockedSet')) {
       // Before the first reconcile the arbiter is not cached yet: read it, so
@@ -282,12 +287,22 @@ export class EvmChainStateIndexer {
           arbiter = lower(log.args.newArbiter);
           if (arbiter && BigInt(arbiter) === 0n) arbiter = null;
           knownArbiter = arbiter;
+          paramsChanged = true;
           await this.alertLever(chainId, log);
           break;
         case 'SlashDelaySet':
+          slashDelaySeconds = Number(log.args.newDelay);
+          paramsChanged = true;
+          await this.alertLever(chainId, log);
+          break;
+        case 'ConfigUpdated':
+        case 'CollectHoldSet':
+          // Every process re-reads the on-chain params when it sees the stamp.
+          paramsChanged = true;
+          await this.alertLever(chainId, log);
+          break;
         case 'VerifierRegistered':
         case 'AdminSet':
-        case 'ConfigUpdated':
         case 'VerifierRevokedEvent':
           await this.alertLever(chainId, log);
           break;
@@ -306,6 +321,10 @@ export class EvmChainStateIndexer {
       now,
       ...(paused !== undefined ? { paused } : {}),
       ...(arbiter !== undefined ? { arbiter } : {}),
+      ...(slashDelaySeconds !== undefined && Number.isFinite(slashDelaySeconds)
+        ? { slashDelaySeconds }
+        : {}),
+      ...(paramsChanged ? { paramsChanged } : {}),
       blocked: blocked.filter((row) => row.address !== ''),
     });
   }
@@ -451,8 +470,8 @@ export class EvmChainStateIndexer {
       name: EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER,
       summary:
         `AssayConfig on ${chainId} emitted ${log.eventName}. This is a lever a stolen admin key ` +
-        `pulls (admin, treasury, bps, caps, arbiter, slash delay, verifier registry): confirm ` +
-        `it was intended`,
+        `pulls (admin, treasury, bps, caps, arbiter, slash delay, collect hold, verifier ` +
+        `registry): confirm it was intended`,
       details: { chainId, event: log.eventName, ...stringArgs(log) },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,

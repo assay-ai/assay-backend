@@ -113,11 +113,11 @@ import {
     // dial providers. See that module for why.
 
     {
-      // The floor per chain, raised to the settlement contract's own
-      // `params().minimumStake` when that is stricter (BUG: routing and the
-      // contract disagreed, $50 vs $100 on the e2e stack). Read before the
-      // module finishes starting and every 5 minutes after, each chain within
-      // 2 s; an unreadable chain keeps its last reading or the configured
+      // The floor per chain: the settlement contract's own
+      // `params().minimumStake` once the on-chain params cache read it, higher
+      // or lower than config (BUG: routing and the contract disagreed, $50 vs
+      // $100 on the e2e stack). The cache reads at boot, every 5 minutes and
+      // after a config-change event; a chain never read keeps the configured
       // floor. One instance, shared with the binding editor's and the
       // publish gate's `PROVIDER_MINIMUM_STAKE_BY_CHAIN`.
       ...CONTRACT_MINIMUM_STAKE_FLOORS_PROVIDER,
@@ -136,8 +136,8 @@ import {
         // deployment offers with no floor fails the boot rather than serving
         // paid calls it cannot price the collateral for.
         //
-        // The floor itself is `ContractMinimumStakeFloors.byChain`: config,
-        // raised to the contract's minimum where that is stricter.
+        // The floor itself is `ContractMinimumStakeFloors.byChain`: the
+        // contract's minimum once read, config until then.
         return {
           ...DEFAULT_ROUTER_TUNING,
           maxAttempts: Number(config.get<string>('ROUTER_MAX_ATTEMPTS') ?? 3),
