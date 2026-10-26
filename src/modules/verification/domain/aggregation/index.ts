@@ -21,3 +21,4 @@ export * from './aggregate';
 export * from './run-verifiers';
 export * from './withdrawn';
 export * from './settlement-decision';
+export * from './default-policy';
