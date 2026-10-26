@@ -223,7 +223,8 @@ describe('UserRateLimitInterceptor (integration, real Redis)', () => {
     clock += 20_000;
     const refused = await get(bob, '/tool-calls');
     expect(refused.status).toBe(429);
-    expect(refused.headers['retry-after']).toBe('39');
+    // 39 s left in the window, and under a second into the next for the burst's weight to fall under the limit.
+    expect(refused.headers['retry-after']).toBe('40');
     expect(refused.body).toMatchObject({
       success: false,
       error: { code: 'TOO_MANY_REQUESTS', statusCode: 429, path: '/api/v1/tool-calls' },
@@ -231,8 +232,8 @@ describe('UserRateLimitInterceptor (integration, real Redis)', () => {
 
     // Another person of the same organization has a window of their own.
     expect((await get({ ...bob, agent: 'agent-other' }, '/tool-calls')).status).toBe(200);
-    // And the next minute is a fresh window.
-    clock += 39_000;
+    // And once Retry-After has passed, a request passes again.
+    clock += 40_000;
     expect((await get(bob, '/tool-calls')).status).toBe(200);
   });
 

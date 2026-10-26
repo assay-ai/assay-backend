@@ -32,16 +32,18 @@ describe('PublicReadRateLimitInterceptor', () => {
     expect(interceptor.take('5.6.7.8').allowed).toBe(true);
   });
 
-  it('opens a fresh window once the old one has passed', () => {
+  it('allows again once the burst has slid out of the window', () => {
     const { interceptor, advance } = limiter();
 
     for (let i = 0; i <= PUBLIC_READ_LIMIT; i += 1) interceptor.take('1.2.3.4');
+    advance(PUBLIC_READ_WINDOW_MS);
+    expect(interceptor.take('1.2.3.4').allowed).toBe(false);
     advance(PUBLIC_READ_WINDOW_MS);
 
     expect(interceptor.take('1.2.3.4').allowed).toBe(true);
   });
 
-  it('answers 429 with Retry-After set to the seconds left in the window', () => {
+  it('answers 429 with Retry-After set to the wait until a request would pass', () => {
     const { interceptor, advance } = limiter();
     const headers: Record<string, string> = {};
     const context = {
@@ -60,7 +62,8 @@ describe('PublicReadRateLimitInterceptor', () => {
     expect(() => interceptor.intercept(context, next)).toThrow(
       expect.objectContaining({ status: 429 }),
     );
-    expect(headers['Retry-After']).toBe('45');
+    // 44.5 s left in the window, and ~1 s into the next for the burst's weight to fall under the limit.
+    expect(headers['Retry-After']).toBe('46');
     expect(next.handle).toHaveBeenCalledTimes(PUBLIC_READ_LIMIT);
   });
 
@@ -83,12 +86,12 @@ describe('PublicReadRateLimitInterceptor', () => {
  * in-process window when Redis does not answer.
  */
 describe('PublicReadRateLimitInterceptor with Redis', () => {
-  /** Enough of ioredis for `MULTI INCR PEXPIRE EXEC`, over one shared map. */
+  /** Enough of ioredis for `MULTI INCR PEXPIRE GET EXEC`, over one shared map. */
   function fakeRedis(store = new Map<string, number>()) {
     const redis = {
       fail: false,
       multi: () => {
-        const ops: Array<() => [null, number]> = [];
+        const ops: Array<() => [null, number | string | null]> = [];
         const chain = {
           incr: (key: string) => {
             ops.push(() => {
@@ -100,6 +103,10 @@ describe('PublicReadRateLimitInterceptor with Redis', () => {
           },
           pexpire: () => {
             ops.push(() => [null, 1]);
+            return chain;
+          },
+          get: (key: string) => {
+            ops.push(() => [null, store.has(key) ? String(store.get(key)) : null]);
             return chain;
           },
           exec: () =>
@@ -138,7 +145,7 @@ describe('PublicReadRateLimitInterceptor with Redis', () => {
     const { interceptor, advance } = limiter(redis);
 
     for (let i = 0; i <= PUBLIC_READ_LIMIT; i += 1) await interceptor.takeShared('1.2.3.4');
-    advance(PUBLIC_READ_WINDOW_MS);
+    advance(2 * PUBLIC_READ_WINDOW_MS);
 
     expect((await interceptor.takeShared('1.2.3.4')).allowed).toBe(true);
     expect([...store.keys()].every((key) => key.startsWith('rate:public-read:1.2.3.4:'))).toBe(
@@ -146,16 +153,17 @@ describe('PublicReadRateLimitInterceptor with Redis', () => {
     );
   });
 
-  it('answers Retry-After with the seconds left in the shared window', async () => {
+  it('answers Retry-After with the wait until a request would pass in the shared window', async () => {
     const { redis } = fakeRedis();
     // 15.5 s into a window.
     const { interceptor } = limiter(redis, 100 * PUBLIC_READ_WINDOW_MS + 15_500);
 
     for (let i = 0; i < PUBLIC_READ_LIMIT; i += 1) await interceptor.takeShared('9.9.9.9');
 
+    // 44.5 s left in the window, and ~1 s into the next for the burst's weight to fall under the limit.
     expect(await interceptor.takeShared('9.9.9.9')).toEqual({
       allowed: false,
-      retryAfterSeconds: 45,
+      retryAfterSeconds: 46,
     });
   });
 
@@ -178,6 +186,7 @@ describe('PublicReadRateLimitInterceptor with Redis', () => {
           const chain = {
             incr: () => chain,
             pexpire: () => chain,
+            get: () => chain,
             exec: () => new Promise(() => undefined),
           };
           return chain;
