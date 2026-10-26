@@ -6,6 +6,7 @@ import { BindingVersionEntity } from '@database/postgres/entities/binding-versio
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { AuditLogWriter } from '@shared/audit';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
@@ -14,7 +15,7 @@ import {
   evaluateStakeGateOnChain,
 } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import {
@@ -105,6 +106,10 @@ export class BindingPublishService {
     // The revision log, to find earlier revisions with the same call. From the
     // `@Global` `PostgresModule`; optional only for hand-built harnesses.
     @Optional() private readonly versions?: BindingVersionRepository,
+    // The registration row, for the second contact a PAID binding needs. From
+    // the `@Global` `PostgresModule`; optional only for hand-built harnesses,
+    // which then do not ask `SECOND_CONTACT`.
+    @Optional() private readonly providers?: ProviderRepository,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -267,8 +272,21 @@ export class BindingPublishService {
       ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
       : false;
 
+    // The draft's pricing mode, as for stake: it is what goes live. `FREEMIUM`
+    // is paid. The provider row is read only for a paid binding.
+    const paid = row.pricingMode !== PricingMode.FREE;
+    const secondContact = this.providers
+      ? {
+          paid,
+          present: paid
+            ? Boolean((await this.providers.findOneBy({ organizationId }))?.ownerContact)
+            : false,
+        }
+      : undefined;
+
     return evaluatePublishGate({
       credentials: { required, origin, present },
+      secondContact,
       mappingVersion: row.mappingVersion,
       sameCallRevisions: revisions.filter((revision) => revision !== row.mappingVersion),
       authMode: row.authMode,

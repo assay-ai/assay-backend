@@ -1,5 +1,6 @@
 import {
   PublishRequirement,
+  SECOND_CONTACT_REQUIRED_CODE,
   evaluatePublishGate,
   unmetRequirements,
 } from '@modules/provider/domain/publish-gate';
@@ -210,6 +211,44 @@ describe('evaluatePublishGate', () => {
       const check = evaluatePublishGate(base);
       expect(check.requirements.map((r) => r.requirement)).not.toContain(
         PublishRequirement.API_KEY_CREDENTIALS,
+      );
+    });
+  });
+
+  describe('SECOND_CONTACT', () => {
+    const base = {
+      mappingVersion: 4,
+      latestRun: GREEN_RUN,
+      payoutByChain: on(PAYOUT_OK),
+      stakeByChain: on(STAKE_OK),
+    };
+
+    it('refuses a paid binding whose provider has no second contact', () => {
+      const check = evaluatePublishGate({ ...base, secondContact: { paid: true, present: false } });
+      const row = requirement(check, PublishRequirement.SECOND_CONTACT);
+      expect(row.met).toBe(false);
+      expect(row.code).toBe(SECOND_CONTACT_REQUIRED_CODE);
+      expect(row.code).toBe('PROVIDER_SECOND_CONTACT_REQUIRED');
+      expect(row.detail).toBe('Add a second contact before you list paid tools.');
+      expect(check.publishable).toBe(false);
+    });
+    it('lets a free binding through without a second contact', () => {
+      const check = evaluatePublishGate({
+        ...base,
+        secondContact: { paid: false, present: false },
+      });
+      expect(requirement(check, PublishRequirement.SECOND_CONTACT).met).toBe(true);
+      expect(check.publishable).toBe(true);
+    });
+    it('lets a paid binding through once the second contact is added', () => {
+      const check = evaluatePublishGate({ ...base, secondContact: { paid: true, present: true } });
+      expect(requirement(check, PublishRequirement.SECOND_CONTACT).met).toBe(true);
+      expect(check.publishable).toBe(true);
+    });
+    it('is not asked without the facts', () => {
+      const check = evaluatePublishGate(base);
+      expect(check.requirements.map((r) => r.requirement)).not.toContain(
+        PublishRequirement.SECOND_CONTACT,
       );
     });
   });

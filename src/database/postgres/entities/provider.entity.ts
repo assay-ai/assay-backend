@@ -94,9 +94,15 @@ export class ProviderEntity extends OrganizationScopedEntityWithoutSoftDelete {
   @Column({ name: 'technical_contact', type: 'jsonb' })
   technicalContact: ProviderContact;
 
-  /** Escalation. Enforced distinct from {@link technicalContact} — see the DTO. */
-  @Column({ name: 'owner_contact', type: 'jsonb' })
-  ownerContact: ProviderContact;
+  /**
+   * The second contact, for escalations. Enforced distinct from
+   * {@link technicalContact} — see the DTO. Optional at registration (a solo
+   * developer has no second person yet); required before a PAID listing is
+   * published (`SECOND_CONTACT` in the binding publish gate). Nothing else
+   * reads it: not sign-in, recovery, payouts or approvals.
+   */
+  @Column({ name: 'owner_contact', type: 'jsonb', nullable: true })
+  ownerContact: ProviderContact | null;
 
   /** IANA zone name. Every deadline the platform quotes is counted here. */
   @Column({ name: 'timezone', type: 'varchar', length: 64 })

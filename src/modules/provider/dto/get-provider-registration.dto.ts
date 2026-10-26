@@ -140,11 +140,16 @@ export class UpdateProviderAccountBodyDto {
   @Type(() => ProviderContactInputDto)
   technicalContact?: ProviderContactInputDto;
 
-  @ApiPropertyOptional({ type: ProviderContactInputDto })
+  @ApiPropertyOptional({
+    type: ProviderContactInputDto,
+    description:
+      'Adds or replaces the second contact (required before a PAID listing is published). ' +
+      'Omitted or null leaves it as it is: once set, it can be replaced but not removed.',
+  })
   @IsOptional()
   @ValidateNested()
   @Type(() => ProviderContactInputDto)
-  ownerContact?: ProviderContactInputDto;
+  ownerContact?: ProviderContactInputDto | null;
 
   @ApiPropertyOptional({ example: 'Europe/Oslo' })
   @IsOptional()

@@ -21,6 +21,7 @@ import {
  * TESTER_PASSED                     that run was green
  * PAYOUT_ACCOUNT                    a proved payee, ON EVERY settlement chain
  * STAKE_AT_MINIMUM_ON_EVERY_CHAIN   stake >= max($50, 1000 × price), per chain
+ * SECOND_CONTACT                    a paid binding's provider named a second contact
  * ```
  *
  * ## Why the stake requirement names every chain
@@ -101,7 +102,17 @@ export enum PublishRequirement {
    * `BOTH` still has the API key.
    */
   SIGNATURE_PROVIDER_CHECKED = 'SIGNATURE_PROVIDER_CHECKED',
+  /**
+   * A PAID binding's provider has a second contact on its registration
+   * (`providers.owner_contact`). Optional at sign-up so a solo developer can
+   * register and list free tools; asked before money flows. `FREE` bindings
+   * pass. Asked only when the input carries {@link PublishGateInput.secondContact}.
+   */
+  SECOND_CONTACT = 'SECOND_CONTACT',
 }
+
+/** The unmet code of {@link PublishRequirement.SECOND_CONTACT}. */
+export const SECOND_CONTACT_REQUIRED_CODE = 'PROVIDER_SECOND_CONTACT_REQUIRED';
 
 export interface PublishRequirementResult {
   readonly requirement: PublishRequirement;
@@ -193,6 +204,14 @@ export interface PublishGateInput {
     readonly origin: string;
     readonly present: boolean;
   };
+  /**
+   * Whether the binding is paid (its pricing mode is not `FREE`) and whether
+   * its provider has a second contact. Absent, the requirement is not asked.
+   */
+  readonly secondContact?: {
+    readonly paid: boolean;
+    readonly present: boolean;
+  };
 }
 
 export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
@@ -203,6 +222,7 @@ export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
       ? perMajor(input, signatureProviderRequirement, PublishRequirement.SIGNATURE_PROVIDER_CHECKED)
       : []),
     ...credentialRequirements(input),
+    ...secondContactRequirements(input),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
   ].map((result) => ({ ...result, major: result.major ?? null }));
@@ -366,6 +386,27 @@ function credentialRequirements(input: PublishGateInput): readonly PublishRequir
       detail:
         `No API key is stored for ${credentials.origin}. Add it under Authentication → ` +
         `API key, or set the authentication mode to none or signature only.`,
+    },
+  ];
+}
+
+/**
+ * A paid listing needs a second contact on the provider's registration. One
+ * entry, met for a `FREE` binding, so the checklist keeps a stable shape.
+ */
+function secondContactRequirements(input: PublishGateInput): readonly PublishRequirementResult[] {
+  const { secondContact } = input;
+  if (!secondContact) return [];
+  const requirement = PublishRequirement.SECOND_CONTACT;
+  if (!secondContact.paid || secondContact.present) {
+    return [{ requirement, met: true, code: null, detail: null }];
+  }
+  return [
+    {
+      requirement,
+      met: false,
+      code: SECOND_CONTACT_REQUIRED_CODE,
+      detail: 'Add a second contact before you list paid tools.',
     },
   ];
 }
