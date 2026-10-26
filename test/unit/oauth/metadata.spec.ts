@@ -1,47 +1,45 @@
 import {
+  MCP_DOCS_URL,
   authorizationServerMetadata,
   protectedResourceMetadata,
   protectedResourceMetadataUrl,
 } from '@modules/oauth/domain/metadata';
 
 const MCP = 'https://mcp.goassay.ai';
-const WEB = 'https://app.example.com';
 
 describe('PRM (§6.3.1)', () => {
   it('for path /c/weather has resource === "{MCP}/c/weather"', () => {
-    expect(protectedResourceMetadata(MCP, WEB, '/c/weather')).toEqual({
+    expect(protectedResourceMetadata(MCP, '/c/weather')).toEqual({
       resource: 'https://mcp.goassay.ai/c/weather',
       authorization_servers: ['https://mcp.goassay.ai'],
       scopes_supported: ['assay:agent'],
       bearer_methods_supported: ['header'],
       resource_name: 'Assay',
-      resource_documentation: 'https://app.example.com/docs/mcp',
+      resource_documentation: MCP_DOCS_URL,
     });
   });
 
   it('the bare PRM has resource === "{MCP}"', () => {
-    expect(protectedResourceMetadata(MCP, WEB, '').resource).toBe(MCP);
-    expect(protectedResourceMetadata(MCP, WEB, '/').resource).toBe(MCP);
-    expect(protectedResourceMetadata(MCP, WEB, undefined).resource).toBe(MCP);
+    expect(protectedResourceMetadata(MCP, '').resource).toBe(MCP);
+    expect(protectedResourceMetadata(MCP, '/').resource).toBe(MCP);
+    expect(protectedResourceMetadata(MCP, undefined).resource).toBe(MCP);
   });
 
   it('drops a query or fragment from the resource', () => {
-    expect(protectedResourceMetadata(MCP, WEB, '/?tools=a').resource).toBe(MCP);
-    expect(protectedResourceMetadata(MCP, WEB, '/c/weather?free=1').resource).toBe(
-      `${MCP}/c/weather`,
-    );
-    expect(protectedResourceMetadata(MCP, WEB, '/c/weather#x').resource).toBe(`${MCP}/c/weather`);
+    expect(protectedResourceMetadata(MCP, '/?tools=a').resource).toBe(MCP);
+    expect(protectedResourceMetadata(MCP, '/c/weather?free=1').resource).toBe(`${MCP}/c/weather`);
+    expect(protectedResourceMetadata(MCP, '/c/weather#x').resource).toBe(`${MCP}/c/weather`);
   });
 
   it('keeps an encoded path as it is and encodes characters a URL cannot hold', () => {
-    expect(protectedResourceMetadata(MCP, WEB, '/@acme/my%20tools').resource).toBe(
+    expect(protectedResourceMetadata(MCP, '/@acme/my%20tools').resource).toBe(
       `${MCP}/@acme/my%20tools`,
     );
-    expect(protectedResourceMetadata(MCP, WEB, '/a"b c').resource).toBe(`${MCP}/a%22b%20c`);
+    expect(protectedResourceMetadata(MCP, '/a"b c').resource).toBe(`${MCP}/a%22b%20c`);
   });
 
   it('lists only assay:agent, never offline_access', () => {
-    expect(JSON.stringify(protectedResourceMetadata(MCP, WEB, '/c/weather'))).not.toContain(
+    expect(JSON.stringify(protectedResourceMetadata(MCP, '/c/weather'))).not.toContain(
       'offline_access',
     );
   });
@@ -57,11 +55,11 @@ describe('PRM (§6.3.1)', () => {
 });
 
 describe('AS metadata (§6.3.2)', () => {
-  const metadata = authorizationServerMetadata(MCP, WEB);
+  const metadata = authorizationServerMetadata(MCP);
 
   it('has issuer === MCP_PUBLIC_URL exactly', () => {
     expect(metadata.issuer).toBe(MCP);
-    expect(authorizationServerMetadata('http://localhost:3200', WEB).issuer).toBe(
+    expect(authorizationServerMetadata('http://localhost:3200').issuer).toBe(
       'http://localhost:3200',
     );
   });
@@ -82,7 +80,7 @@ describe('AS metadata (§6.3.2)', () => {
       scopes_supported: ['assay:agent', 'offline_access'],
       client_id_metadata_document_supported: true,
       authorization_response_iss_parameter_supported: true,
-      service_documentation: 'https://app.example.com/docs/mcp',
+      service_documentation: MCP_DOCS_URL,
     });
   });
 
@@ -93,9 +91,9 @@ describe('AS metadata (§6.3.2)', () => {
   });
 
   it('returns fresh arrays each call (callers cannot mutate a shared document)', () => {
-    const first = authorizationServerMetadata(MCP, WEB);
+    const first = authorizationServerMetadata(MCP);
     first.scopes_supported.push('x');
-    expect(authorizationServerMetadata(MCP, WEB).scopes_supported).toEqual([
+    expect(authorizationServerMetadata(MCP).scopes_supported).toEqual([
       'assay:agent',
       'offline_access',
     ]);

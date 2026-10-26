@@ -36,7 +36,7 @@ export class DepositFinalityWatcher implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     this.logger.log(
       'Deposit finality watcher is off (escrow deposits are per-buyer, a single-account ' +
-        'watch no longer fits); deposits are credited by the five-minute sweep alone',
+        'watch no longer fits); deposits are credited by the finality sweep alone (every 5 seconds)',
     );
   }
 }

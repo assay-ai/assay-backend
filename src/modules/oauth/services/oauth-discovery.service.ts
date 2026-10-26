@@ -32,11 +32,11 @@ export class OAuthDiscoveryService {
   protectedResource(originalUrl: string): ProtectedResourceMetadata {
     const path = pathAfterPrefix(originalUrl);
     if (path === null || !parseMcpUrl(path === '' ? '/' : path)) throw McpErrors.urlNotFound();
-    return protectedResourceMetadata(this.host.mcpPublicUrl, this.host.webAppUrl, path);
+    return protectedResourceMetadata(this.host.mcpPublicUrl, path);
   }
 
   authorizationServer(): AuthorizationServerMetadata {
-    return authorizationServerMetadata(this.host.mcpPublicUrl, this.host.webAppUrl);
+    return authorizationServerMetadata(this.host.mcpPublicUrl);
   }
 
   /** The AS is not an OpenID provider (§6.3.2). */
