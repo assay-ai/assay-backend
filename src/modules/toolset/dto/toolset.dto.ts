@@ -25,8 +25,8 @@ import { OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
 import { ListQueryDto } from '@shared/api';
 
 export const TOOLSET_SLUG_RE = /^[a-z0-9-]{2,64}$/;
-const CATEGORY_RE = /^[a-z][a-z0-9-]{1,63}$/;
-const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const CATEGORY_RE = /^[a-z][a-z0-9-]{1,63}$/;
+export const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /** The fixed icon set a toolset may pick from (design spec §7.2). */
 export const TOOLSET_ICONS = [
