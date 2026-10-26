@@ -54,6 +54,7 @@ import { VerificationPolicy } from '@modules/verification/domain/policy.types';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 
 import { AppMcpModule } from '../../src/bootstrap/mcp/app.module';
+import { assertNotProduction } from './production-guard';
 
 /**
  * The approver recorded on every row this script promotes.
@@ -90,6 +91,7 @@ export function readPolicySeed(): readonly SeedEntry[] {
 }
 
 async function main(): Promise<void> {
+  assertNotProduction();
   const command = process.argv[2] ?? 'seed';
   const app = await NestFactory.createApplicationContext(AppMcpModule, { logger: false });
   const policies = app.get(DecisionPolicyService);
@@ -129,6 +131,8 @@ export async function seedDecisionPolicy(
   policies: DecisionPolicyService,
   entry: SeedEntry,
 ): Promise<void> {
+  // Here too: `scripts/demo/seed-provider-console.ts` imports this function.
+  assertNotProduction();
   const existing = await policies.resolveForTraffic(entry.toolId);
   if (existing && existing.lifecycle === PolicyLifecycle.ACTIVE) {
     return;
