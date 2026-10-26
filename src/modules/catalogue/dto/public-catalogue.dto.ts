@@ -2,7 +2,7 @@ import { ToolVersionBriefDto } from '@modules/tool/dto/tool-contract-version.dto
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsOptional, Matches } from 'class-validator';
 
-import { ToolTier } from '@modules/tool/ports/tool.types';
+import { ToolChecks, ToolTier } from '@modules/tool/ports/tool.types';
 
 /**
  * The public Explorer's catalogue — an explicit **allowlist**, not the
@@ -209,6 +209,14 @@ export class PublicToolDto {
 
   @ApiProperty({ enum: ToolTier, description: 'A provider tool is never GUARANTEED (§7.6).' })
   tier: ToolTier;
+
+  @ApiProperty({
+    enum: ['ACTIVE', 'SHADOW', 'NONE'],
+    description:
+      'Quality checks on this tool: ACTIVE decides the charge, SHADOW is in trial and does ' +
+      'not affect it, NONE is not switched on. The response shape is checked on every paid call.',
+  })
+  checks: ToolChecks;
 
   @ApiProperty({
     enum: ['STANDARD', 'PROVIDER'],

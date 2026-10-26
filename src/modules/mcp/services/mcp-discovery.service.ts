@@ -51,6 +51,7 @@ import {
   McpCatalogueViewer,
   McpPriceAnnotation,
   McpToolDescriptor,
+  checksLabel,
   contractMetaOf,
 } from './mcp-catalogue.service';
 import {
@@ -263,6 +264,7 @@ export class McpDiscoveryService {
       ...(version.changelog ? { changelog: version.changelog } : {}),
       ...contractMetaOf(tool),
       tier: String(tool.tier).toLowerCase(),
+      checks: checksLabel(tool),
       price,
       noProviderFits: descriptor.annotations[ASSAY_NO_PROVIDER_FITS] === true,
       freeCallsLeftToday: await this.freeCallsLeft(viewer, tool, descriptor),

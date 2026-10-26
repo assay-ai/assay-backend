@@ -14,6 +14,7 @@ import { JsonSchema } from '../domain/mapping/schema-validator';
 import { RemovedTool, ToolContractChanges, ToolContractsPort } from '../ports/tool-contracts.port';
 import {
   Tool,
+  ToolChecks,
   ToolContractVersion,
   ToolExample,
   ToolKind,
@@ -120,7 +121,10 @@ export class DatabaseToolContracts implements ToolContractsPort {
               status: Not(ToolVersionStatus.DRAFT),
             },
           });
-    const tools = buildTools(rows, versions, await this.activeHandles(rows));
+    const tools = withChecks(
+      buildTools(rows, versions, await this.activeHandles(rows)),
+      rows.length === 0 ? new Map() : await this.checksByTool(),
+    );
     const snapshot: Snapshot = {
       tools,
       removed: new Map(
@@ -163,6 +167,21 @@ export class DatabaseToolContracts implements ToolContractsPort {
       [owners],
     )) as { id: string; handle: string }[];
     return new Map(found.map((row) => [row.id, row.handle]));
+  }
+
+  /**
+   * Each tool's serving policy lifecycle, in one statement. A withdrawal moves
+   * the row too, so a withdrawn policy reads as `NONE` here.
+   */
+  private async checksByTool(): Promise<ReadonlyMap<string, ToolChecks>> {
+    const rows = (await this.toolRows.query(
+      `SELECT tool_id, lifecycle FROM verification_policies WHERE lifecycle IN ('ACTIVE', 'SHADOW')`,
+    )) as { tool_id: string; lifecycle: 'ACTIVE' | 'SHADOW' }[];
+    const out = new Map<string, ToolChecks>();
+    for (const row of rows) {
+      if (out.get(row.tool_id) !== 'ACTIVE') out.set(row.tool_id, row.lifecycle);
+    }
+    return out;
   }
 
   private async readEpoch(): Promise<string | null> {
@@ -277,6 +296,16 @@ export function buildTools(
     });
   }
   return tools;
+}
+
+/** Every tool with its `checks`: `NONE` when no policy serves it. */
+function withChecks(
+  tools: ReadonlyMap<string, Tool>,
+  checks: ReadonlyMap<string, ToolChecks>,
+): ReadonlyMap<string, Tool> {
+  const out = new Map<string, Tool>();
+  for (const [id, tool] of tools) out.set(id, { ...tool, checks: checks.get(id) ?? 'NONE' });
+  return out;
 }
 
 export function toContractVersion(row: ToolVersionEntity): ToolContractVersion {

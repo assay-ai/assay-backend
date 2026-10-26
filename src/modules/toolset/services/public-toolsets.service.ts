@@ -311,7 +311,10 @@ export class PublicToolsetsService {
   private async listedProviderTools(organizationId: string): Promise<PublicHandleToolDto[]> {
     const rows = (await this.dataSource.query(
       `SELECT t.id, t.name, t.category, t.tags, v.summary, v.semver, v.tier,
-              r.name AS "replacementName"
+              r.name AS "replacementName",
+              (SELECT p.lifecycle FROM verification_policies p
+                WHERE p.tool_id = t.id AND p.lifecycle IN ('ACTIVE', 'SHADOW')
+                ORDER BY p.lifecycle = 'ACTIVE' DESC LIMIT 1) AS checks
          FROM tools t
          JOIN tool_versions v ON v.tool_id = t.id AND v.version = t.current_version
          LEFT JOIN tools r ON r.id = t.replacement_tool_id AND r.visibility = 'LISTED'
@@ -331,6 +334,7 @@ export class PublicToolsetsService {
       semver: string | null;
       tier: string | null;
       replacementName: string | null;
+      checks: 'ACTIVE' | 'SHADOW' | null;
     }[];
     return rows.map((row) => ({
       id: row.id,
@@ -340,6 +344,7 @@ export class PublicToolsetsService {
       tags: [...(row.tags ?? [])],
       // Never GUARANTEED, whatever a row says (§7.6).
       tier: row.tier === 'GUARANTEED' ? 'VERIFIED' : (row.tier ?? 'UNVERIFIED'),
+      checks: row.checks ?? 'NONE',
       version: row.semver,
       kind: 'PROVIDER' as const,
       reviewed: true,
