@@ -197,16 +197,10 @@ export const CHAIN_IDS = {
   BASE_MAINNET: 'eip155:8453' as ChainId,
   BASE_SEPOLIA: 'eip155:84532' as ChainId,
   /**
-   * Robinhood Chain mainnet. **Named here, never enabled.**
-   *
-   * The constant exists so that code and tests can refer to the chain that is
-   * refused — `assertChainMetadata` has no row for it, and `asset-registry.ts`
-   * has no asset on it, because assay-evm's `docs/chain-facts.md` measured
-   * `cast code` at the testnet USDG address on 4663 and got `0x`. Until the operator
-   * supplies the real mainnet token address, a boot failure is the correct
-   * behaviour and this identifier is what names it.
+   * Robinhood Chain mainnet. Described in `chain-metadata.ts` and settles in
+   * mainnet USDG (`asset-registry.ts`); live wherever `ENABLED_CHAINS` names it.
    */
   ROBINHOOD_MAINNET: 'eip155:4663' as ChainId,
-  /** Robinhood Chain testnet — the one EVM chain this deployment can serve. */
+  /** Robinhood Chain testnet. */
   ROBINHOOD_TESTNET: 'eip155:46630' as ChainId,
 } as const;

@@ -144,9 +144,8 @@ export const PROVIDER_MINIMUM_STAKE_BY_CHAIN = 'PROVIDER_MINIMUM_STAKE_BY_CHAIN'
  * at 6 decimals at boot in every process. So the derivation is total, needs no
  * operator input, and cannot disagree with the asset the escrow actually holds.
  *
- * Deriving it also means a chain with no metadata row — `eip155:4663`, whose
- * mainnet USDG address is unmeasured — has no floor and cannot acquire one by
- * configuration. That refusal is a deliverable rather than a gap.
+ * Deriving it also means a chain with no metadata row has no floor and cannot
+ * acquire one by configuration.
  *
  * ## `PLATFORM_STAKE_ASSET_ID` is still checked
  *

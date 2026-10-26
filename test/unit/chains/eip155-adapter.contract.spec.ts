@@ -70,10 +70,9 @@ const SERVED_OTHER = CHAIN_IDS.BASE_SEPOLIA;
 /**
  * In this namespace, NOT served — assertion 22's real subject.
  *
- * `eip155:4663` is Robinhood **mainnet**, which `assertChainMetadata` refuses
- * at boot because the mainnet USDG address is unmeasured. That it is also the
- * chain this deployment must never touch makes it the honest fixture: an
- * adapter whose guard is namespace equality serves it happily.
+ * `eip155:4663` is Robinhood **mainnet**, which the fixture's deployment map
+ * does not include: an adapter whose guard is namespace equality serves it
+ * happily.
  */
 const UNSERVED_SAME_NAMESPACE = CHAIN_IDS.ROBINHOOD_MAINNET;
 
