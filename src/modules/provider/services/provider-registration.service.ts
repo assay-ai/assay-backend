@@ -84,7 +84,9 @@ export class ProviderRegistrationService {
     body: RegisterProviderBodyDto,
   ): Promise<RegisterProviderResponseDto> {
     const technicalContact = toContact(body.technicalContact);
-    const ownerContact = toContact(body.ownerContact);
+    // Optional: a solo developer has no second person yet. The publish gate
+    // asks for one before a PAID listing goes live (`SECOND_CONTACT`).
+    const ownerContact = body.ownerContact ? toContact(body.ownerContact) : null;
     this.assertDistinctContacts(technicalContact, ownerContact);
     this.assertValidTimezone(body.timezone);
     const acceptedTerms = this.buildAcceptedTerms(body.acceptedTerms, session.credentialId);
@@ -327,7 +329,8 @@ export class ProviderRegistrationService {
 
   // ── Validation ──────────────────────────────────────────────────────────
 
-  private assertDistinctContacts(technical: ProviderContact, owner: ProviderContact): void {
+  private assertDistinctContacts(technical: ProviderContact, owner: ProviderContact | null): void {
+    if (!owner) return;
     if (technical.email.trim().toLowerCase() === owner.email.trim().toLowerCase()) {
       throw ProviderErrors.contactsNotDistinct({ email: technical.email });
     }
@@ -384,7 +387,7 @@ export class ProviderRegistrationService {
       providerId: provider.organizationId,
       legalName: provider.legalName,
       technicalContact: toContactDto(provider.technicalContact),
-      ownerContact: toContactDto(provider.ownerContact),
+      ownerContact: provider.ownerContact ? toContactDto(provider.ownerContact) : null,
       timezone: provider.timezone,
       acceptedTerms: provider.acceptedTerms,
       status: provider.status as ProviderStatus,

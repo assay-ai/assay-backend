@@ -236,6 +236,26 @@ describe('ProviderRegistrationService — register (open, no approval)', () => {
     );
   });
 
+  it('registers without a second contact (solo developer): owner contact is stored as null', async () => {
+    const save = jest.fn().mockImplementation(async (draft) => providerEntity(draft));
+    const { service } = build({ save });
+
+    const result = await service.register(SESSION, registerBody({ ownerContact: undefined }));
+
+    expect(save.mock.calls[0][0].ownerContact).toBeNull();
+    expect(result.ownerContact).toBeNull();
+    expect(result.technicalContact.email).toBe('alex@vesseldata.example');
+  });
+
+  it('a null second contact is accepted the same as an absent one', async () => {
+    const save = jest.fn().mockImplementation(async (draft) => providerEntity(draft));
+    const { service } = build({ save });
+
+    const result = await service.register(SESSION, registerBody({ ownerContact: null }));
+
+    expect(result.ownerContact).toBeNull();
+  });
+
   it('unknown timezone -> PROVIDER_TIMEZONE_UNKNOWN', async () => {
     const { service } = build();
 
@@ -577,6 +597,52 @@ describe('ProviderRegistrationService — updateAccount', () => {
           acceptedTerms: acceptedTermsInput({ providerAgreementVersion: 'v2.0' }),
         } as any),
       ProviderErrorCode.PROVIDER_TERMS_VERSION_MISMATCH,
+    );
+  });
+
+  it('adds the second contact later to a provider registered without one', async () => {
+    const update = jest.fn().mockResolvedValue({ affected: 1 });
+    const { service } = build({
+      findOneBy: jest.fn().mockResolvedValue(providerEntity({ ownerContact: null })),
+      update,
+    });
+
+    const result = await service.updateAccount(SESSION, {
+      ownerContact: contact({ name: 'Sam Example', email: 'sam@vesseldata.example' }),
+    } as any);
+
+    expect(update.mock.calls[0][1].ownerContact).toEqual({
+      name: 'Sam Example',
+      email: 'sam@vesseldata.example',
+      phone: null,
+    });
+    expect(result.registration.ownerContact?.email).toBe('sam@vesseldata.example');
+  });
+
+  it('a patch without the second contact keeps it absent, and the read shows null', async () => {
+    const update = jest.fn().mockResolvedValue({ affected: 1 });
+    const { service } = build({
+      findOneBy: jest.fn().mockResolvedValue(providerEntity({ ownerContact: null })),
+      update,
+    });
+
+    const result = await service.updateAccount(SESSION, { legalName: 'New Name AS' });
+
+    expect(update.mock.calls[0][1].ownerContact).toBeNull();
+    expect(result.registration.ownerContact).toBeNull();
+  });
+
+  it('a later second contact with the technical inbox -> PROVIDER_CONTACTS_NOT_DISTINCT', async () => {
+    const { service } = build({
+      findOneBy: jest.fn().mockResolvedValue(providerEntity({ ownerContact: null })),
+    });
+
+    await expectErrorCodeAsync(
+      () =>
+        service.updateAccount(SESSION, {
+          ownerContact: contact({ email: 'ALEX@vesseldata.example' }),
+        } as any),
+      ProviderErrorCode.PROVIDER_CONTACTS_NOT_DISTINCT,
     );
   });
 
