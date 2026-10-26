@@ -96,13 +96,19 @@ export class RegisterProviderBodyDto {
   @Type(() => ProviderContactInputDto)
   technicalContact: ProviderContactInputDto;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     type: ProviderContactInputDto,
-    description: 'Escalation — must not be the same inbox as `technicalContact`.',
+    nullable: true,
+    description:
+      'The second contact, for escalations — must not be the same inbox as ' +
+      '`technicalContact`. Optional here: it is required before a PAID listing is ' +
+      'published (`SECOND_CONTACT`, code `PROVIDER_SECOND_CONTACT_REQUIRED`), and is ' +
+      'added later with `PATCH /providers/me/registration`.',
   })
+  @IsOptional()
   @ValidateNested()
   @Type(() => ProviderContactInputDto)
-  ownerContact: ProviderContactInputDto;
+  ownerContact?: ProviderContactInputDto | null;
 
   @ApiProperty({
     example: 'Europe/Oslo',
@@ -182,8 +188,13 @@ export class ProviderRegistrationRecordDto {
   @ApiProperty({ type: ProviderContactDto })
   technicalContact: ProviderContactDto;
 
-  @ApiProperty({ type: ProviderContactDto })
-  ownerContact: ProviderContactDto;
+  @ApiPropertyOptional({
+    type: ProviderContactDto,
+    nullable: true,
+    description:
+      'The second contact. Null until added; required before a PAID listing is published.',
+  })
+  ownerContact: ProviderContactDto | null;
 
   @ApiProperty({ example: 'Europe/Oslo' })
   timezone: string;
