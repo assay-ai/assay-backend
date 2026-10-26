@@ -41,6 +41,7 @@ import {
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { HandleStatus } from '@modules/toolset/domain/handle';
 import { TAKEDOWN_REASON_LABEL, TakedownReasonCode } from '@modules/toolset/domain/takedown-reason';
+import { NEUTRAL_TOPIC, acceptedTopics, topicProblem } from '@modules/toolset/domain/topics';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { HandlesService, lockHandle } from '@modules/toolset/services/handles.service';
 import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@shared/api';
@@ -74,6 +75,7 @@ import {
   ProviderToolReviewDto,
   ProviderToolSummaryDto,
   ProviderToolTakedownDto,
+  ProviderToolTopicsDto,
   ProviderToolVersionDto,
   UpdateProviderToolBodyDto,
 } from '../dto/provider-tools.dto';
@@ -1026,17 +1028,25 @@ export class ProviderToolsService {
     }
   }
 
-  /** A provider tool's category is the platform's: one a standard tool already uses. */
+  /**
+   * `GET …/topics`: the topics a provider tool may take, the fixed list
+   * (`TOOL_TOPICS`) then any other category a standard tool already uses.
+   */
+  async topics(): Promise<ProviderToolTopicsDto> {
+    return { topics: acceptedTopics(await this.categoriesInUse()), neutral: NEUTRAL_TOPIC };
+  }
+
+  /** A provider tool's category is a topic: the fixed list, or one a standard tool already uses. */
   private async assertCategory(category: string): Promise<void> {
+    const problem = topicProblem(category, await this.categoriesInUse());
+    if (problem) throw ProviderToolErrors.invalid({ problems: [problem] });
+  }
+
+  private async categoriesInUse(): Promise<string[]> {
     const rows = (await this.dataSource.query(
       `SELECT DISTINCT category FROM tools WHERE kind = 'STANDARD' ORDER BY category`,
     )) as { category: string }[];
-    const known = rows.map((row) => row.category);
-    if (!known.includes(category)) {
-      throw ProviderToolErrors.invalid({
-        problems: [`category must be one of the catalogue's: ${known.join(', ')}`],
-      });
-    }
+    return rows.map((row) => row.category);
   }
 
   private async replacementNames(rows: readonly ToolEntity[]): Promise<Map<string, string>> {

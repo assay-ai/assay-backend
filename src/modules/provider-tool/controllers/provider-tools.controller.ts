@@ -29,6 +29,7 @@ import {
   ProviderToolGateDto,
   ProviderToolIdParamDto,
   ProviderToolSummaryDto,
+  ProviderToolTopicsDto,
   ProviderToolVersionParamDto,
   ProviderToolTryResultDto,
   SetReplacementBodyDto,
@@ -47,7 +48,7 @@ import { BumpsOperatorConsole } from '@shared/decorators/tenant-write.decorator'
  *
  * Person-only, reads included, like the binding editor: a provider tool's
  * text reaches every model that lists it, and its review is a promise made
- * by a person. Literal segments (`try`, `invitations`) are declared before `:id`.
+ * by a person. Literal segments (`try`, `topics`, `invitations`) are declared before `:id`.
  * Another organization's tool is the same 404 as one that does not exist.
  */
 @ApiTags('Provider')
@@ -115,6 +116,17 @@ export class ProviderToolsController {
     @Body() body: TryProviderToolBodyDto,
   ): Promise<ProviderToolTryResultDto> {
     return this.trial.try(session, body);
+  }
+
+  @Get('topics')
+  @ApiOperation({
+    summary:
+      'The topics (categories) a provider tool may take: a fixed list ending in "other", then ' +
+      'any category already in use',
+  })
+  @ApiResponse({ status: 200, type: ProviderToolTopicsDto })
+  async topics(): Promise<ProviderToolTopicsDto> {
+    return this.tools.topics();
   }
 
   @Get('invitations')
