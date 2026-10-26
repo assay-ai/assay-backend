@@ -98,15 +98,27 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     statusCode: 409,
     message: () => 'Choose a public name before sharing',
   },
-  /** `NOT_VERIFIED` (fund once first) | `CLAIM_LIMIT` (3 organizations per person per 30 days). */
+  /**
+   * `NOT_VERIFIED` (fund once first; a set-up provider's first name is free)
+   * | `CLAIM_LIMIT` (3 organizations per person per 30 days). `NOT_VERIFIED`
+   * carries `fundingRequired: true`, `minimumDepositUsd` and `providerSetUp`
+   * (true: the free first name is used, so only funding helps).
+   */
   handleClaimRefused: {
     code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED,
     statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      context?.reason === 'CLAIM_LIMIT'
-        ? 'You have claimed public names for 3 organizations in the last 30 days'
-        : 'Add funds once before choosing a public name',
-    publicContext: ['reason'],
+    message: (context?: Record<string, any>) => {
+      if (context?.reason === 'CLAIM_LIMIT') {
+        return 'You have claimed public names for 3 organizations in the last 30 days';
+      }
+      const funds = context?.minimumDepositUsd
+        ? `add at least $${context.minimumDepositUsd} in funds once`
+        : 'add funds once';
+      return context?.providerSetUp
+        ? `Your free public name is used; ${funds} to choose another`
+        : `${funds[0].toUpperCase()}${funds.slice(1)}, or finish provider setup, before choosing a public name`;
+    },
+    publicContext: ['reason', 'fundingRequired', 'minimumDepositUsd', 'providerSetUp'],
   },
   /** A share-state change the state machine refuses (`refusal`). */
   sharingRefused: {
