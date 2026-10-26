@@ -27,6 +27,9 @@ import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { DatabaseToolContracts } from '@modules/tool/services/database-tool-contracts';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { ContractLifecycleService } from '@modules/toolset/services/contract-lifecycle.service';
+import { VerificationPolicyRepository } from '@database/postgres/repositories/verification-policy.repository';
+import { PolicyKillSwitchPort } from '@modules/verification/ports/policy-kill-switch.port';
+import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 
@@ -118,6 +121,9 @@ describe('the operator contract editor, against a real database', () => {
       changeSignal,
       [CHAIN_IDS.SOLANA_MAINNET],
       dataSource,
+      new DecisionPolicyService(new VerificationPolicyRepository(dataSource), {
+        isKilled: () => null,
+      } as unknown as PolicyKillSwitchPort),
     );
 
     author = await seedOperator('policy-author', [OperatorRole.POL]);
@@ -221,6 +227,27 @@ describe('the operator contract editor, against a real database', () => {
       actor_operator_id: author.operatorId,
       approver_operator_id: approver.operatorId,
     });
+
+    // The publish registered a shape-only trial policy, authored by the system.
+    const policies = (await dataSource.query(
+      `SELECT policy_id, policy_version, lifecycle, created_by, decision_document
+         FROM verification_policies WHERE tool_id = $1`,
+      [toolId],
+    )) as {
+      policy_id: string;
+      policy_version: number;
+      lifecycle: string;
+      created_by: string;
+      decision_document: { verifiers: { verifierId: string }[] };
+    }[];
+    expect(policies).toHaveLength(1);
+    expect(policies[0]).toMatchObject({
+      policy_id: 'get_example_weather.default',
+      policy_version: 1,
+      lifecycle: 'SHADOW',
+      created_by: 'system',
+    });
+    expect(policies[0].decision_document.verifiers.map((v) => v.verifierId)).toEqual(['schema']);
   });
 
   it('an optional field added is a MINOR that moves current with it', async () => {
@@ -241,6 +268,12 @@ describe('the operator contract editor, against a real database', () => {
     });
     const published = await publish(toolId, saved.draft!.version);
     expect(published.currentSemver).toBe('1.1.0');
+    // Idempotent: a second publish adds no policy version.
+    const [{ n }] = (await dataSource.query(
+      `SELECT count(*)::int AS n FROM verification_policies WHERE tool_id = $1`,
+      [toolId],
+    )) as { n: number }[];
+    expect(n).toBe(1);
   });
 
   it('a promoted field is a MAJOR that does not move unpinned URLs', async () => {

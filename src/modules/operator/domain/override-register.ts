@@ -373,18 +373,44 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
   }),
 
   // ── P · Policy lifecycle ─────────────────────────────────────────────────
+  /**
+   * Verification policies (operator console). A trial (SHADOW) policy moves
+   * no money, so registering one is one operator's act. Switching one on
+   * (ACTIVE) is the gate: two-person, on evidence the server measures, and an
+   * approver who is neither the requester nor the policy's author. The kill
+   * switch is a single-operator emergency action; a withdrawn policy comes
+   * back only as a new trial version.
+   */
+  'P-1': define({
+    code: 'P-1',
+    family: OverrideFamily.POLICY,
+    action: 'policy.promoted',
+    label: 'Switch on a verification policy (SHADOW to ACTIVE)',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: false,
+    implemented: true,
+  }),
+  'P-2': define({
+    code: 'P-2',
+    family: OverrideFamily.POLICY,
+    action: 'policy.shadow_registered',
+    label: 'Register a trial (SHADOW) verification policy',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
   'P-3': define({
     code: 'P-3',
     family: OverrideFamily.POLICY,
     action: 'policy.killed',
-    label: 'Demote ACTIVE to SHADOW (kill switch)',
-    roles: [OperatorRole.POL, OperatorRole.SRE],
+    label: 'Withdraw a policy (kill switch)',
+    roles: [OperatorRole.POL, OperatorRole.POLA, OperatorRole.SRE],
     approval: ApprovalMode.BREAK_GLASS,
     reversible: true,
-    // The policy panel. The kill switch itself already exists behind the
-    // verification aggregator; what does not exist is the operator-facing route, and
-    // building it means the policy lifecycle states it belongs to.
-    implemented: false,
+    implemented: true,
   }),
 
   /**

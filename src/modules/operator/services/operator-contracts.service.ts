@@ -44,6 +44,7 @@ import {
 } from '@modules/tool/services/database-tool-contracts';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { ContractLifecycleService } from '@modules/toolset/services/contract-lifecycle.service';
+import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
@@ -62,6 +63,7 @@ import { OperatorApprover, OperatorSession } from '../ports/operator-session.por
 import { OperatorErrors } from '../errors/operator.errors';
 import { OperatorApprovalService, canonicalJson } from './operator-approval.service';
 import { OverrideLogService } from './override-log.service';
+import { registerDefaultShadowIfNone } from './standard-tool-policy';
 
 export const PUBLISH_VERSION_APPROVAL_ACTION = 'tool_version.publish';
 export const MOVE_CURRENT_VERSION_APPROVAL_ACTION = 'tool.current_version';
@@ -99,6 +101,7 @@ export class OperatorContractsService {
     @Inject(TOOL_CONTRACT_CHANGES) private readonly changes: ToolContractChanges,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly policies: DecisionPolicyService,
   ) {
     approvals.register(PUBLISH_VERSION_APPROVAL_ACTION, {
       code: 'P-10',
@@ -381,6 +384,9 @@ export class OperatorContractsService {
               updatedAt: now,
             },
           );
+          // Evidence from the first call: a shape-only trial policy, unless
+          // the tool has one already (idempotent), in this transaction.
+          const shadow = await registerDefaultShadowIfNone(this.policies, manager, row);
           return {
             value: { semver, movedCurrent: movesCurrent },
             before: { status: 'DRAFT', currentVersion: tool.currentVersion },
@@ -389,6 +395,7 @@ export class OperatorContractsService {
               semver,
               contentHash: hash,
               currentVersion: movesCurrent ? version : tool.currentVersion,
+              ...(shadow ? { shadowPolicy: `${shadow.id}@${shadow.version}` } : {}),
             },
           };
         },
@@ -871,7 +878,7 @@ export function draftContentHash(row: ToolVersionEntity): string {
 }
 
 /** The tool row, locked for the rest of the transaction. */
-async function lockTool(manager: EntityManager, toolId: string): Promise<ToolEntity> {
+export async function lockTool(manager: EntityManager, toolId: string): Promise<ToolEntity> {
   const row = await manager
     .createQueryBuilder(ToolEntity, 'tool')
     .setLock('pessimistic_write')

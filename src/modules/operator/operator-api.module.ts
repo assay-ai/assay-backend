@@ -8,6 +8,7 @@ import { SlashModule } from '@modules/slash/slash.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
 import { ProviderToolModule } from '@modules/provider-tool/provider-tool.module';
+import { VerificationModule } from '@modules/verification/verification.module';
 
 import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
@@ -22,6 +23,7 @@ import { OperatorOperatorsController } from './controllers/operator-operators.co
 import { OperatorOverrideLogController } from './controllers/operator-override-log.controller';
 import { OperatorProvidersController } from './controllers/operator-providers.controller';
 import { OperatorSignInController } from './controllers/operator-sign-in.controller';
+import { OperatorToolVerificationController } from './controllers/operator-tool-verification.controller';
 import { OperatorModule } from './operator.module';
 import { OperatorCaseBriefService } from './services/operator-case-brief.service';
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
@@ -37,6 +39,7 @@ import { OperatorProviderToolsService } from './services/operator-provider-tools
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
+import { OperatorToolVerificationService } from './services/operator-tool-verification.service';
 import { LastSeenModule } from '@shared/last-seen';
 
 /**
@@ -88,6 +91,9 @@ import { LastSeenModule } from '@shared/last-seen';
     ProviderToolModule,
     // `CallDisputeService`, which `OperatorCallDisputeService` decides through (G3.B1).
     DisputeModule,
+    // `DecisionPolicyService` and `PolicyEvidenceService`: the verification
+    // policy routes (P-1/P-2/P-3) and the trial policy a publish (P-10) registers.
+    VerificationModule,
   ],
   controllers: [
     OperatorApprovalsController,
@@ -103,6 +109,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorProvidersController,
     OperatorSignInController,
     OperatorReferenceController,
+    OperatorToolVerificationController,
   ],
   providers: [
     OperatorCaseBriefService,
@@ -122,6 +129,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorProviderVerificationService,
     PlatformHealthService,
     OperatorReferenceService,
+    OperatorToolVerificationService,
   ],
 })
 export class OperatorApiModule {}
