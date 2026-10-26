@@ -1,16 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import { PolicyLifecycle } from '@modules/verification/domain/aggregation/decision-policy.types';
-import { PolicyMode, VerificationPolicy } from '@modules/verification/domain/policy.types';
-import { VerdictStatus } from '@modules/verification/domain/verdict';
-import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import {
-  DecisionClause,
-  DecisionTrigger,
-} from '@modules/verification/domain/aggregation/decision-policy.types';
+  DEFAULT_PASS_THRESHOLD,
+  defaultDecisionPolicy,
+  defaultVerificationPolicy,
+} from '@modules/verification/domain/aggregation/default-policy';
+import { PolicyLifecycle } from '@modules/verification/domain/aggregation/decision-policy.types';
+import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 
 import { asDeclaredRules } from '../domain/declared-rules';
-
 /**
  * The policy id a provider tool is judged by: one per tool, versioned by the
  * policy service. Keyed on the tool's id, never its name, which follows a
@@ -21,7 +19,7 @@ export function providerPolicyId(toolId: string): string {
 }
 
 /** A rule set scores its passed weight over the weight that applied; below this it fails. */
-export const PROVIDER_POLICY_PASS_THRESHOLD = 0.7;
+export const PROVIDER_POLICY_PASS_THRESHOLD = DEFAULT_PASS_THRESHOLD;
 
 /**
  * A provider tool's verification (design spec §7.6 "Verification"): the
@@ -51,28 +49,15 @@ export class ProviderToolPolicyService {
   }): Promise<void> {
     const id = providerPolicyId(input.toolId);
     const rules = asDeclaredRules(input.rules);
-    const verificationPolicy: VerificationPolicy = {
+    const verificationPolicy = defaultVerificationPolicy({
       id,
       toolId: input.toolId,
-      version: 1,
       rules,
       passThreshold: PROVIDER_POLICY_PASS_THRESHOLD,
-      mode: PolicyMode.SHADOW,
-      crossCheck: { enabled: false },
-      semantic: { enabled: false },
-    } as VerificationPolicy;
+    });
     try {
       await this.policies.register({
-        draft: {
-          id,
-          toolId: input.toolId,
-          verifiers: [
-            { verifierId: 'schema', label: 'Response shape' },
-            ...(rules.length > 0 ? [{ verifierId: 'rules', label: 'Declared rules' }] : []),
-          ],
-          clauses: clausesOf(rules.length > 0),
-          otherwise: VerdictStatus.PASS,
-        },
+        draft: defaultDecisionPolicy({ id, toolId: input.toolId, withRules: rules.length > 0 }),
         verificationPolicy,
         createdBy: `provider:${input.organizationId}`,
         startIn: PolicyLifecycle.SHADOW,
@@ -85,37 +70,4 @@ export class ProviderToolPolicyService {
       );
     }
   }
-}
-
-/** The decision clauses: a misapplied check voids, the schema or a declared rule fails. */
-function clausesOf(withRules: boolean): DecisionClause[] {
-  const clauses: DecisionClause[] = [
-    {
-      when: DecisionTrigger.MISAPPLIED_AT_LEAST,
-      count: 1,
-      then: VerdictStatus.MISAPPLIED,
-      label: 'A check did not fit this response; the call was not charged.',
-    },
-    {
-      when: DecisionTrigger.VERIFIER_FAILED,
-      verifierId: 'schema',
-      then: VerdictStatus.FAIL,
-      label: 'The response did not match the shape this tool promises.',
-    },
-  ];
-  if (withRules) {
-    clauses.push({
-      when: DecisionTrigger.VERIFIER_FAILED,
-      verifierId: 'rules',
-      then: VerdictStatus.FAIL,
-      label: 'The response broke a rule its provider declared.',
-    });
-  }
-  clauses.push({
-    when: DecisionTrigger.VOTES_BELOW,
-    count: 1,
-    then: VerdictStatus.DEGRADED,
-    label: 'Too few checks completed to judge this response.',
-  });
-  return clauses;
 }

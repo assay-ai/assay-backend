@@ -99,6 +99,7 @@ describe('DatabaseToolContracts', () => {
           reads += 1;
           return [toolRow({})];
         },
+        query: async () => [],
       } as never,
       { find: async () => [versionRow({ version: 2, semver: '1.1.0' })] } as never,
     );
@@ -108,5 +109,39 @@ describe('DatabaseToolContracts', () => {
     contracts.invalidate();
     await contracts.findContract('t1');
     expect(reads).toBe(2);
+  });
+
+  it('loads each tool’s checks: ACTIVE beats SHADOW, and no serving policy reads as NONE', async () => {
+    const queries: string[] = [];
+    const contracts = new DatabaseToolContracts(
+      {
+        find: async () => [
+          toolRow({}),
+          toolRow({ id: 't2', name: 'get_trial' }),
+          toolRow({ id: 't3', name: 'get_none' }),
+        ],
+        query: async (sql: string) => {
+          queries.push(sql);
+          return [
+            { tool_id: 't1', lifecycle: 'SHADOW' },
+            { tool_id: 't1', lifecycle: 'ACTIVE' },
+            { tool_id: 't2', lifecycle: 'SHADOW' },
+          ];
+        },
+      } as never,
+      {
+        find: async () => [
+          versionRow({ version: 2, semver: '1.1.0' }),
+          versionRow({ toolId: 't2', version: 2, semver: '1.1.0' }),
+          versionRow({ toolId: 't3', version: 2, semver: '1.1.0' }),
+        ],
+      } as never,
+    );
+    expect((await contracts.findContract('t1'))?.checks).toBe('ACTIVE');
+    expect((await contracts.findContract('t2'))?.checks).toBe('SHADOW');
+    expect((await contracts.findContract('t3'))?.checks).toBe('NONE');
+    // One statement, for every tool.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("lifecycle IN ('ACTIVE', 'SHADOW')");
   });
 });

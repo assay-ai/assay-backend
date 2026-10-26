@@ -728,6 +728,7 @@ export class CatalogueService {
         description: tool.description,
         ...versionFieldsOf(tool, (toolId) => publicTools.has(toolId)),
         tier: tool.tier,
+        checks: tool.checks ?? 'NONE',
         kind: isProviderTool(tool) ? ToolKind.PROVIDER : ToolKind.STANDARD,
         handle: isProviderTool(tool) ? (parseProviderToolName(tool.name)?.handle ?? null) : null,
         notReviewed: isNotReviewed(tool),

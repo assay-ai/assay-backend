@@ -227,4 +227,24 @@ export class VerificationRecordEntity extends OrganizationScopedEntityWithoutSof
    */
   @Column({ name: 'dispute_outcome', type: 'varchar', length: 16, nullable: true })
   disputeOutcome: string | null;
+
+  // ── Trial labels ──────────────────────────────────────────────────────────
+
+  /**
+   * An operator's label on a trial (SHADOW) verdict: `POLICY_RIGHT` |
+   * `POLICY_WRONG`. The promotion gate's labelled samples and false positives
+   * are counted from it. By CHECK: only on a SHADOW record, and set together
+   * with {@link labelledBy} and {@link labelledAt}.
+   */
+  @Column({ name: 'label', type: 'varchar', length: 16, nullable: true })
+  label: string | null;
+
+  @Column({ name: 'labelled_by', type: 'varchar', length: 128, nullable: true })
+  labelledBy: string | null;
+
+  @Column({ name: 'labelled_at', type: 'timestamptz', nullable: true })
+  labelledAt: Date | null;
+
+  @Column({ name: 'label_note', type: 'varchar', length: 500, nullable: true })
+  labelNote: string | null;
 }

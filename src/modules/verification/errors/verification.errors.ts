@@ -13,6 +13,9 @@ export enum VerificationErrorCode {
   VERIFICATION_DECISION_POLICY_INVALID = 'VERIFICATION_DECISION_POLICY_INVALID',
   VERIFICATION_POLICY_PROMOTION_REFUSED = 'VERIFICATION_POLICY_PROMOTION_REFUSED',
   VERIFICATION_POLICY_TRANSITION_LOST = 'VERIFICATION_POLICY_TRANSITION_LOST',
+  VERIFICATION_POLICY_RULES_INVALID = 'VERIFICATION_POLICY_RULES_INVALID',
+  VERIFICATION_RECORD_NOT_FOUND = 'VERIFICATION_RECORD_NOT_FOUND',
+  VERIFICATION_LABEL_REFUSED = 'VERIFICATION_LABEL_REFUSED',
   VERIFICATION_RECEIPT_NOT_FOUND = 'VERIFICATION_RECEIPT_NOT_FOUND',
   VERIFICATION_SUMMARY_INVALID_RANGE = 'VERIFICATION_SUMMARY_INVALID_RANGE',
   VERIFICATION_SUMMARY_MULTIPLE_ASSETS = 'VERIFICATION_SUMMARY_MULTIPLE_ASSETS',
@@ -142,6 +145,8 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
       `${context?.policyId ? ` for ${context.policyId}` : ''}` +
       `${context?.version ? ` v${context.version}` : ''}` +
       `${context?.reasons ? `: ${context.reasons}` : ''}`,
+    // Counts and bar names only: the operator console lists every unmet bar.
+    publicContext: ['failures', 'falsePositiveRate'],
   },
   /**
    * A lifecycle compare-and-swap that changed no rows.
@@ -159,6 +164,34 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
       `${context?.policyId && context?.version ? ` v${context.version}` : ''}` +
       `${context?.policyId ? ')' : ''}` +
       `${context?.expected ? ` — expected ${context.expected}` : ''}`,
+  },
+  /** Declared verification rules that cannot be registered; every problem listed. */
+  policyRulesInvalid: {
+    code: VerificationErrorCode.VERIFICATION_POLICY_RULES_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not valid verification rules` +
+      `${Array.isArray(context?.problems) && context.problems.length ? `: ${context.problems.join('; ')}` : ''}`,
+    publicContext: ['problems'],
+  },
+  /** No such verification record (operator surface: records span tenants). */
+  recordNotFound: {
+    code: VerificationErrorCode.VERIFICATION_RECORD_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `Verification record not found${context?.recordId ? `: ${context.recordId}` : ''}`,
+  },
+  /**
+   * A trial label that cannot be written: the record is not a trial verdict,
+   * its policy version left SHADOW, the labeller wrote that policy, or another
+   * operator already labelled it.
+   */
+  labelRefused: {
+    code: VerificationErrorCode.VERIFICATION_LABEL_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This call cannot be labelled${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason'],
   },
   /**
    * No such intent in this organization — distinct from an intent that

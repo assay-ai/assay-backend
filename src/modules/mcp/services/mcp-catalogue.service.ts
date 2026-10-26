@@ -44,6 +44,7 @@ import {
   ASSAY_REFUND_ON_FAILURE,
   ASSAY_SETTLEMENT_CHAINS,
   ASSAY_TIER,
+  ASSAY_CHECKS,
   ASSAY_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
@@ -470,6 +471,7 @@ function describe(
       maxAmountOf(quote, price, freeOnly),
     ),
     [ASSAY_TIER]: tierLabel(tool.tier),
+    [ASSAY_CHECKS]: checksLabel(tool),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
     // of the platform today rather than of the tool. It is published per tool
@@ -528,7 +530,7 @@ function describe(
     name: tool.name,
     // The version's stored summary (at most 200 characters), never the full
     // description: that is `get_tool`'s (§7.4).
-    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}${reviewNote(tool)}`,
+    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}${checksNote(tool)}${reviewNote(tool)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
@@ -560,6 +562,24 @@ export function contractMetaOf(tool: Tool): Record<string, unknown> {
  */
 export function reviewNote(tool: Tool): string {
   return isNotReviewed(tool) ? ' · Not reviewed' : '';
+}
+
+/** `assay/checks` on the wire: `active`, `trial` or `none` (a missing value reads as none). */
+export function checksLabel(tool: Tool): 'active' | 'trial' | 'none' {
+  if (tool.checks === 'ACTIVE') return 'active';
+  if (tool.checks === 'SHADOW') return 'trial';
+  return 'none';
+}
+
+/**
+ * The stable note a description line ends with while quality checks do not
+ * decide the charge, so a model reading `tools/list` knows before it pays.
+ */
+export function checksNote(tool: Tool): string {
+  const label = checksLabel(tool);
+  if (label === 'trial') return ' · Quality checks in trial';
+  if (label === 'none') return ' · Quality checks not switched on yet';
+  return '';
 }
 
 /** `_meta["assay/kind"]`: `PROVIDER` on one maker's own tool (absent on a standard one). */
@@ -602,13 +622,14 @@ function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
   const { tool } = quote;
   const annotations: Record<string, unknown> = {
     [ASSAY_TIER]: tierLabel(tool.tier),
+    [ASSAY_CHECKS]: checksLabel(tool),
     [ASSAY_TOOL_ID]: tool.id,
     [ASSAY_SETTLEMENT_CHAINS]: [],
     [ASSAY_NO_PROVIDER_FITS]: true,
   };
   return {
     name: tool.name,
-    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.${reviewNote(tool)}`,
+    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.${checksNote(tool)}${reviewNote(tool)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,

@@ -124,7 +124,7 @@ const VERIFICATION_VOIDED_REASON = 'verification: judged void by the worker — 
 const UNVERIFIED_VERDICT_STATUS = 'UNVERIFIED';
 const NO_DECISION_POLICY_REASON_CODE = 'no_decision_policy';
 const NO_DECISION_POLICY_REASON =
-  'This check was not run: no policy is configured for this tool. The call settles unverified.';
+  'Not checked: quality checks are not switched on for this tool yet. The call was charged as served.';
 
 /**
  * Sentinels for `decision_policy_id` / `decision_policy_version`.

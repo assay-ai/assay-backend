@@ -31,6 +31,7 @@
  */
 
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 
 import { VerificationPolicyEntity, VerificationPolicyRepository } from '@database/postgres';
 
@@ -116,9 +117,15 @@ export class DecisionPolicyService {
     };
   }
 
-  /** Registers the next version of a policy. Validated before it is stored. */
-  async register(input: RegisterPolicyInput): Promise<DecisionPolicy> {
-    const version = (await this.policies.latestVersion(input.draft.id)) + 1;
+  /**
+   * Registers the next version of a policy. Validated before it is stored.
+   *
+   * Every method that writes takes an optional `manager`: given, every read
+   * and write goes through it, so the change commits or rolls back with the
+   * caller's transaction (the operator override log's).
+   */
+  async register(input: RegisterPolicyInput, manager?: EntityManager): Promise<DecisionPolicy> {
+    const version = (await this.policies.latestVersion(input.draft.id, manager)) + 1;
     const decisionPolicy: DecisionPolicy = { ...input.draft, version };
 
     // Before the write, so a policy that could strike somebody for the wrong
@@ -127,7 +134,7 @@ export class DecisionPolicyService {
 
     const lifecycle = input.startIn ?? PolicyLifecycle.DRAFT;
     if (lifecycle === PolicyLifecycle.SHADOW) {
-      await this.archiveShadowFor(decisionPolicy.toolId);
+      await this.archiveShadowFor(decisionPolicy.toolId, manager);
     }
 
     const entity = new VerificationPolicyEntity();
@@ -146,7 +153,7 @@ export class DecisionPolicyService {
     entity.withdrawnBy = null;
     entity.withdrawnReason = null;
 
-    await this.policies.save(entity);
+    await this.policies.on(manager).save(entity);
 
     this.logger.log(
       `Registered ${decisionPolicy.id} v${version} for tool ${decisionPolicy.toolId} in ${lifecycle}`,
@@ -155,15 +162,17 @@ export class DecisionPolicyService {
   }
 
   /** `DRAFT` → `SHADOW`. Starts collecting the evidence the gate asks for. */
-  async beginShadow(policyId: string, version: number): Promise<void> {
-    const row = await this.require(policyId, version);
-    await this.archiveShadowFor(row.toolId);
+  async beginShadow(policyId: string, version: number, manager?: EntityManager): Promise<void> {
+    const row = await this.require(policyId, version, manager);
+    await this.archiveShadowFor(row.toolId, manager);
 
     const moved = await this.policies.transitionIfInLifecycle(
       policyId,
       version,
       PolicyLifecycle.DRAFT,
       PolicyLifecycle.SHADOW,
+      {},
+      manager,
     );
     if (moved === 0) {
       throw VerificationErrors.policyTransitionLost({
@@ -183,8 +192,13 @@ export class DecisionPolicyService {
    * was enough, because "we tried to promote this on 40 samples" is exactly
    * what an incident review wants and exactly what gets lost otherwise.
    */
-  async promote(policyId: string, version: number, evidence: PromotionEvidence): Promise<void> {
-    const row = await this.require(policyId, version);
+  async promote(
+    policyId: string,
+    version: number,
+    evidence: PromotionEvidence,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const row = await this.require(policyId, version, manager);
     const decision = evaluatePromotion(row.lifecycle as PolicyLifecycle, evidence);
 
     if (!decision.promotable) {
@@ -200,7 +214,7 @@ export class DecisionPolicyService {
     // At most one ACTIVE version per tool, enforced by a partial unique index —
     // so the outgoing one is archived first, in its own statement, rather than
     // discovered as a constraint violation halfway through a promotion.
-    await this.archiveActiveFor(row.toolId);
+    await this.archiveActiveFor(row.toolId, manager);
 
     const moved = await this.policies.transitionIfInLifecycle(
       policyId,
@@ -215,6 +229,7 @@ export class DecisionPolicyService {
           falsePositiveRate: decision.falsePositiveRate,
         } as unknown as Record<string, unknown>,
       },
+      manager,
     );
 
     if (moved === 0) {
@@ -241,12 +256,18 @@ export class DecisionPolicyService {
    * failure mode to prefer — an incident where the switch worked and the audit
    * row is missing is recoverable, and one where the audit row is perfect and
    * the policy kept slashing people is not.
+   *
+   * Given a `manager`, the row moves inside the caller's transaction and a
+   * failure there is rethrown (a statement that failed has aborted that
+   * transaction, so swallowing it would only fail the next one). The switch
+   * stays engaged either way. Without one, the row is best effort as before.
    */
   async withdraw(
     policyId: string,
     version: number,
     reason: string,
     actor: string,
+    manager?: EntityManager,
   ): Promise<KillRecord> {
     const record = await this.killSwitch.kill(
       { scope: KillScope.POLICY_VERSION, policyId, version },
@@ -254,17 +275,19 @@ export class DecisionPolicyService {
       actor,
     );
 
-    try {
-      for (const from of [PolicyLifecycle.ACTIVE, PolicyLifecycle.SHADOW]) {
-        const moved = await this.policies.transitionIfInLifecycle(
+    if (manager) {
+      if ((await this.withdrawRow(policyId, version, reason, actor, manager)) === 0) {
+        throw VerificationErrors.policyTransitionLost({
           policyId,
           version,
-          from,
-          PolicyLifecycle.WITHDRAWN,
-          { withdrawnAt: new Date(), withdrawnBy: actor, withdrawnReason: reason },
-        );
-        if (moved > 0) break;
+          expected: `${PolicyLifecycle.ACTIVE} or ${PolicyLifecycle.SHADOW}`,
+        });
       }
+      return record;
+    }
+
+    try {
+      await this.withdrawRow(policyId, version, reason, actor);
     } catch (error) {
       this.logger.error(
         `Kill switch engaged on ${policyId} v${version} but the audit row was not written`,
@@ -304,35 +327,63 @@ export class DecisionPolicyService {
     }
   }
 
-  private async require(policyId: string, version: number): Promise<VerificationPolicyEntity> {
-    const row = await this.policies.findVersion(policyId, version);
+  /** ACTIVE or SHADOW → WITHDRAWN; the number of rows moved. */
+  private async withdrawRow(
+    policyId: string,
+    version: number,
+    reason: string,
+    actor: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    for (const from of [PolicyLifecycle.ACTIVE, PolicyLifecycle.SHADOW]) {
+      const moved = await this.policies.transitionIfInLifecycle(
+        policyId,
+        version,
+        from,
+        PolicyLifecycle.WITHDRAWN,
+        { withdrawnAt: new Date(), withdrawnBy: actor, withdrawnReason: reason },
+        manager,
+      );
+      if (moved > 0) return moved;
+    }
+    return 0;
+  }
+
+  private async require(
+    policyId: string,
+    version: number,
+    manager?: EntityManager,
+  ): Promise<VerificationPolicyEntity> {
+    const row = await this.policies.findVersion(policyId, version, manager);
     if (!row) {
       throw VerificationErrors.policyVersionNotFound({ policyId, version });
     }
     return row;
   }
 
-  private async archiveActiveFor(toolId: string): Promise<void> {
-    const current = await this.policies.findOne({ where: { toolId, lifecycle: 'ACTIVE' } });
-    if (!current) return;
-
-    await this.policies.transitionIfInLifecycle(
-      current.policyId,
-      current.policyVersion,
-      PolicyLifecycle.ACTIVE,
-      PolicyLifecycle.ARCHIVED,
-    );
+  private async archiveActiveFor(toolId: string, manager?: EntityManager): Promise<void> {
+    await this.archiveFor(toolId, PolicyLifecycle.ACTIVE, manager);
   }
 
-  private async archiveShadowFor(toolId: string): Promise<void> {
-    const current = await this.policies.findOne({ where: { toolId, lifecycle: 'SHADOW' } });
+  private async archiveShadowFor(toolId: string, manager?: EntityManager): Promise<void> {
+    await this.archiveFor(toolId, PolicyLifecycle.SHADOW, manager);
+  }
+
+  private async archiveFor(
+    toolId: string,
+    from: PolicyLifecycle,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const current = await this.policies.on(manager).findOne({ where: { toolId, lifecycle: from } });
     if (!current) return;
 
     await this.policies.transitionIfInLifecycle(
       current.policyId,
       current.policyVersion,
-      PolicyLifecycle.SHADOW,
+      from,
       PolicyLifecycle.ARCHIVED,
+      {},
+      manager,
     );
   }
 }

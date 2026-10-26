@@ -162,7 +162,7 @@ export class VerificationAggregatorService {
         })
       : unrunStages(
           'no_verification_policy',
-          'This check was not run: no verification policy is configured for this tool.',
+          'Not checked: quality checks are not switched on for this tool yet.',
         );
 
     // Built-in results the policy does not declare are dropped *here* rather

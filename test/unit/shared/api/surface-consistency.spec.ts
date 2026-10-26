@@ -443,6 +443,9 @@ describe('REST surface consistency', () => {
       // operator surface rather than behind `SessionAuthGuard`.
       'modules/operator/controllers/operator-providers.controller.ts',
       'modules/operator/controllers/operator-reference.controller.ts',
+      // `P-1`–`P-3`, verification policies and the trial-call labels. A policy
+      // belongs to a tool and its trial calls span every buyer: no tenant.
+      'modules/operator/controllers/operator-tool-verification.controller.ts',
       // The tool-request triage queue. Same shape as the adjudication queue above: a
       // worklist of tickets filed by tenants, read by an operator who has none.
       // Note the split — the provider's own `tool-requests.controller.ts` is
