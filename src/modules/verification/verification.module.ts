@@ -30,6 +30,7 @@ import {
 } from './services/redis-policy-kill-switch.service';
 import { POLICY_KILL_SWITCH } from './ports/policy-kill-switch.port';
 import { DecisionPolicyService } from './services/decision-policy.service';
+import { PolicyEvidenceService } from './services/policy-evidence.service';
 import { VerificationAggregatorService } from './services/verification-aggregator.service';
 import { VerificationSettlementService } from './services/verification-settlement.service';
 
@@ -134,6 +135,8 @@ const providers: Provider[] = [
     useFactory: verificationSamplingConfigFactory,
   },
   DecisionPolicyService,
+  // The promotion gate's evidence and the trial labels (operator console).
+  PolicyEvidenceService,
   VerificationAggregatorService,
   VerificationJudgePublisher,
   VerificationSettlementService,
@@ -155,6 +158,7 @@ const providers: Provider[] = [
     EvidencePackService,
     EvidenceRetentionService,
     DecisionPolicyService,
+    PolicyEvidenceService,
     VerificationAggregatorService,
     POLICY_KILL_SWITCH,
     VerificationSettlementService,
