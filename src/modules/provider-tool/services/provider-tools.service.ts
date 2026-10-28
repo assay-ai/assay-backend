@@ -48,7 +48,12 @@ import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@sha
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import { declaredRuleProblems } from '../domain/declared-rules';
-import { isServedRow, servedVersionsOf } from '../domain/served-versions';
+import {
+  boundMajorsOf,
+  isServedRow,
+  screenedVersionsOf,
+  servedVersionsOf,
+} from '../domain/served-versions';
 import {
   ReviewKind,
   ReviewStatus,
@@ -766,9 +771,9 @@ export class ProviderToolsService {
   }
 
   /**
-   * `POST …/review`: submit for LISTED. A tool never approved submits every
-   * version it serves; a LISTED one submits its draft (the same as
-   * publishing that draft).
+   * `POST …/review`: submit for LISTED. A tool never approved submits what
+   * the gate screened (`screenedVersionsOf`); a LISTED one submits its draft
+   * (the same as publishing that draft).
    */
   async submitReview(
     organizationId: string,
@@ -802,7 +807,11 @@ export class ProviderToolsService {
       const now = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
       assertSameServedVersions(versions, now);
       await this.handles.lockForSharing(manager, organizationId);
-      const served = servedVersionsOf(now);
+      const served = screenedVersionsOf(
+        now,
+        [row.currentVersion],
+        await boundMajorsAt(manager, row),
+      );
       await submitForReview(
         manager,
         row,
@@ -1166,6 +1175,19 @@ export async function publishDraft(
       ...extra,
       updatedAt: now,
     },
+  );
+}
+
+/** The majors the owner's binding serves, read on `manager` (`boundMajorsOf`). */
+export async function boundMajorsAt(
+  manager: EntityManager,
+  row: Pick<ToolEntity, 'id' | 'ownerOrgId'>,
+): Promise<Set<number>> {
+  if (!row.ownerOrgId) return new Set();
+  return boundMajorsOf(
+    await manager.find(ToolBindingEntity, {
+      where: { organizationId: row.ownerOrgId, toolId: row.id },
+    }),
   );
 }
 

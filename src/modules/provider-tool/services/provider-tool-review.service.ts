@@ -23,6 +23,7 @@ import {
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 
 import { providerToolNotification } from '../domain/notices';
+import { boundMajorsOf, screenedVersionsOf } from '../domain/served-versions';
 import {
   ReviewKind,
   ReviewReasonCode,
@@ -42,12 +43,12 @@ import { ProviderToolGateService, screenVersion } from './provider-tool-gate.ser
 import { ProviderToolPolicyService } from './provider-tool-policy.service';
 import {
   ProviderToolsService,
+  boundMajorsAt,
   draftShapeOf,
   lockTool,
   publishDraft,
   reviewMetaOf,
   reviewedVersionOf,
-  servedVersionsOf,
   settledSemver,
   versionDtoOf,
 } from './provider-tools.service';
@@ -161,7 +162,8 @@ export class ProviderToolReviewService {
     const row = await this.requireProviderTool(toolId);
     const versions = (await this.owned.versionsOf([row.id])).get(row.id) ?? [];
     const kind = reviewKindOf(row);
-    const covered = coveredVersions(row, versions, kind);
+    const binding = await this.gate.bindingOf(row);
+    const covered = coveredVersions(row, versions, kind, boundMajorsOf(binding ? [binding] : []));
     const approved = versions.find((version) => version.version === row.approvedVersion) ?? null;
     const draft = kind === ReviewKind.CHANGE ? (covered[0] ?? null) : null;
     const findings = covered.flatMap((version) =>
@@ -170,11 +172,10 @@ export class ProviderToolReviewService {
         location: `v${version.semver}/${finding.location}`,
       })),
     );
-    const [tool, gate, provider, binding] = await Promise.all([
+    const [tool, gate, provider] = await Promise.all([
       this.owned.detail(row),
       this.gate.evaluate(row, versions, draft),
       this.providers.findOne({ where: { organizationId: row.ownerOrgId as string } }),
-      this.gate.bindingOf(row),
     ]);
     return {
       tool,
@@ -229,7 +230,7 @@ export class ProviderToolReviewService {
     }
     const versions = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
     const kind = reviewKindOf(row);
-    const covered = coveredVersions(row, versions, kind);
+    const covered = coveredVersions(row, versions, kind, await boundMajorsAt(manager, row));
     const meta = reviewMetaOf(row, kind);
     const hash = reviewContentHash(row.name, covered.map(reviewedVersionOf), meta);
     if (covered.length === 0 || hash !== row.reviewContentHash || hash !== input.contentHash) {
@@ -385,16 +386,17 @@ export class ProviderToolReviewService {
   }
 }
 
-/** What a review covers: FIRST, every version the tool serves; CHANGE, the draft submitted. */
+/** What a review covers: FIRST, what the gate screened (`screenedVersionsOf`); CHANGE, the draft submitted. */
 export function coveredVersions(
-  row: Pick<ToolEntity, 'reviewVersion'>,
+  row: Pick<ToolEntity, 'reviewVersion' | 'currentVersion'>,
   versions: readonly ToolVersionEntity[],
   kind: ReviewKind,
+  boundMajors: ReadonlySet<number>,
 ): ToolVersionEntity[] {
   if (kind === ReviewKind.CHANGE) {
     return versions.filter((version) => version.version === row.reviewVersion);
   }
-  return servedVersionsOf(versions);
+  return screenedVersionsOf(versions, [row.currentVersion], boundMajors);
 }
 
 /** The checklist, machine half filled in; PASS/FAIL are the screen's, CHECK is the operator's. */
