@@ -19,7 +19,7 @@ import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { HandlesService } from '@modules/toolset/services/handles.service';
 
 import { declaredRuleProblems } from '../domain/declared-rules';
-import { servedVersionsOf } from '../domain/served-versions';
+import { boundMajorsOf, screenedVersionsOf, servedVersionsOf } from '../domain/served-versions';
 import {
   ProviderToolGateDto,
   ProviderToolGateRequirementDto,
@@ -73,8 +73,8 @@ export class ProviderToolGateService {
   }
 
   /**
-   * The checklist for `tool`, screening every version it would serve and,
-   * when given, the draft about to be submitted.
+   * The checklist for `tool`, screening its current version, each version
+   * its binding serves and, when given, the draft about to be submitted.
    */
   async evaluate(
     tool: ToolEntity,
@@ -145,13 +145,19 @@ export class ProviderToolGateService {
 
     // With a draft, what the tool would serve once it is published: the
     // draft replaces the newest version of its major, so a version it
-    // supersedes never blocks the fix that supersedes it.
+    // supersedes never blocks the fix that supersedes it. Of that, the
+    // current and draft majors and every major the binding serves.
+    const majors = boundMajorsOf(binding ? [binding] : []);
     const screened = draft
-      ? servedVersionsOf([
-          ...versions.filter((version) => version.version !== draft.version),
-          { ...draft, status: 'ACTIVE' } as ToolVersionEntity,
-        ]).map((version) => (version.version === draft.version ? draft : version))
-      : servable;
+      ? screenedVersionsOf(
+          [
+            ...versions.filter((version) => version.version !== draft.version),
+            { ...draft, status: 'ACTIVE' } as ToolVersionEntity,
+          ],
+          [tool.currentVersion, draft.version],
+          majors,
+        ).map((version) => (version.version === draft.version ? draft : version))
+      : screenedVersionsOf(versions, [tool.currentVersion], majors);
     const screen: ProviderToolScreenDto[] = screened.map((version) => ({
       version: version.version,
       semver: version.semver,
