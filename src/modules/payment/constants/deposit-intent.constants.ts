@@ -19,8 +19,8 @@ import { ChainId, ChainNamespace, parseChainId } from '@modules/chains/ports/cai
  *   `depositFor`) plus the embedded wallet's session refresh before the first
  *   prompt, which is slow on a cold tab. 90 seconds expired real deposits
  *   mid-flow (BUG-PROD-DEPOSIT-01: a successful retry already used 66 of
- *   them). Ten minutes covers a slow signer without leaving a `CREATED` row —
- *   counted in `pendingDeposits` — around for long.
+ *   them). Ten minutes covers a slow signer without leaving a `CREATED` row
+ *   around for long.
  *
  * A longer window weakens nothing else: the intent is still single use (the
  * `CREATED -> SETTLING` CAS and the per-transaction claim), still bound to its

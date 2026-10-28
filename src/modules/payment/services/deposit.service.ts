@@ -118,13 +118,11 @@ export class DepositService {
    *
    * ## Why both remote reads happen before the row is written
    *
-   * A `CREATED` deposit intent is not an inert draft. `BalancesService.
-   * pendingDepositsByAsset` sums `requestedAmount` over exactly this status,
-   * so the row *is* the `pendingDeposits` figure the funding screen renders,
-   * and it stays that until the expiry sweep moves it. Writing it first and
-   * then failing on `ensureEscrow` or `getFeePayer` answers the caller `503`
-   * (or `409`) while leaving money the buyer never sent counted as in flight —
-   * the request errors and the balance changes anyway.
+   * A `CREATED` deposit intent is not an inert draft: the funding
+   * screen lists it as "Awaiting transfer" until the expiry sweep moves it.
+   * Writing it first and then failing on `ensureEscrow` or `getFeePayer`
+   * answers the caller `503` (or `409`) while leaving a deposit the buyer
+   * never started — the request errors and the screen changes anyway.
    *
    * So every call that can fail for a reason outside this request runs first,
    * and the write is last. What remains after it — `buildPaymentRequirements`
@@ -568,8 +566,8 @@ export class DepositService {
     // submit `open_escrow` to a disabled chain and only then refuse.
     const adapter = this.registry.resolve(chainId);
     // The deposit door (paused, buyer blocked on chain) before anything is
-    // written: refusing after the intent row left a CREATED row counted in
-    // `pendingDeposits` until the expiry sweep.
+    // written: refusing after the intent row left a CREATED row behind until
+    // the expiry sweep.
     await this.chainState?.assertActive(ChainDoor.DEPOSIT, [{ role: 'BUYER', account }]);
     const escrow = await this.ensureEscrow(organizationId, account, asset);
     // Asked of the adapter, never branched on the namespace here — the whole
