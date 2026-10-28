@@ -70,22 +70,19 @@ interface PendingDepositTotal {
 }
 
 /**
- * Deposit intents that have not yet landed on chain — see
+ * Deposit intents that have been sent but have not yet landed on chain — see
  * `AccountBalanceDto.pendingDeposits`.
  *
- * **Status alone is not the bound.** A `CREATED` intent the buyer never funded
- * stays `CREATED` until `DepositIntentExpiryJob` reaches it, and that job runs
- * only in the scheduler process — so on an API-only deployment the status
- * never changes at all. Counting such a row shows the buyer money nobody ever
- * sent. The deadline is already on the row; `pendingDepositsByAsset` reads it.
- *
- * `SETTLING` is deliberately *not* bounded by the deadline: settlement is
- * already in flight and the transaction may have landed. `expiresAt` stops a
- * new payload being accepted (`DepositService.settleDeposit`), it does not
- * mean the money is gone.
+ * **Only `SETTLING` counts.** A `CREATED` intent is a quote the buyer may never
+ * sign (declined wallet prompt, closed tab): no transfer was submitted, so no
+ * money is in flight, and it would stay counted until the expiry sweep. The
+ * `CREATED -> SETTLING` step is taken when the client submits its payload, so
+ * `SETTLING` is exactly "a transfer is known". It is deliberately *not*
+ * bounded by `expiresAt`: settlement is already in flight and the transaction
+ * may have landed. `expiresAt` stops a new payload being accepted
+ * (`DepositService.settleDeposit`), it does not mean the money is gone.
  */
-const PENDING_DEPOSIT_PREDICATE =
-  '(intent.status = :settling OR (intent.status = :created AND intent.expiresAt > :now))';
+const PENDING_DEPOSIT_PREDICATE = 'intent.status = :settling';
 
 /**
  * `GET /balances` — the account's balances, and the `withheld` figure
@@ -229,8 +226,8 @@ export class BalancesService {
    * on `AccountBalance`, which is money the ledger has already observed on
    * chain but not yet finalised).
    *
-   * "In flight" is `PENDING_DEPOSIT_PREDICATE`, which is a deadline and not
-   * just a status — see its comment for why.
+   * "In flight" is `PENDING_DEPOSIT_PREDICATE`: a transfer was submitted
+   * (`SETTLING`); an unsigned `CREATED` intent is not counted.
    */
   private async pendingDepositsByAsset(
     organizationId: string,
@@ -243,8 +240,6 @@ export class BalancesService {
       .where('intent.organizationId = :organizationId', { organizationId })
       .andWhere(PENDING_DEPOSIT_PREDICATE, {
         settling: DepositIntentStatus.SETTLING,
-        created: DepositIntentStatus.CREATED,
-        now: new Date(),
       })
       .groupBy('intent.assetId')
       .addGroupBy('intent.decimals')

@@ -60,8 +60,9 @@ export class AccountBalanceDto {
   @ApiProperty({
     type: MoneyDto,
     description:
-      'Deposit intents still `CREATED`/`SETTLING` — money the agent has started sending but ' +
-      'that has not yet been observed on chain. Distinct from `pending`, which is money that ' +
+      'Deposit intents in `SETTLING` — money the agent has actually sent (a transfer was ' +
+      'submitted) but that has not yet been observed on chain. An intent nobody signed ' +
+      '(`CREATED`) is not counted. Distinct from `pending`, which is money that ' +
       'has been observed but is not yet final.',
   })
   pendingDeposits: MoneyDto;

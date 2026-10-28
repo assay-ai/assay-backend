@@ -162,7 +162,7 @@ describe('BalancesService.getBalances', () => {
     });
   });
 
-  it('sums CREATED/SETTLING deposit intents into pendingDeposits, per asset', async () => {
+  it('sums SETTLING deposit intents into pendingDeposits, per asset', async () => {
     const { service } = build({
       balances: [accountBalance()],
       pendingRows: [{ assetId: USDC, decimals: USDC_DECIMALS, amount: '5000000' }],
@@ -177,35 +177,18 @@ describe('BalancesService.getBalances', () => {
     });
   });
 
-  it('stops counting a CREATED deposit intent once its deadline has passed', async () => {
-    // A `POST /deposits` that the buyer never funded — or that answered an
-    // error after the row was written — leaves a `CREATED` row behind until
-    // the expiry sweep reaches it. Counting it as `pendingDeposits` shows the
-    // buyer money nobody ever sent, and the sweep only runs in the scheduler
-    // process, so status alone is not a bound.
+  it('counts only SETTLING deposit intents, never an unsigned CREATED one', async () => {
+    // The buyer declined the wallet prompt: the intent stays `CREATED` with no
+    // transfer submitted. That is not money in flight, so it must not show as
+    // "confirming on chain" (BUG-DEV-BUY-MONEY-01).
     const { service, fake } = build({ balances: [accountBalance()], pendingRows: [] });
 
     await service.getBalances(ORG);
 
     const clause = fake.wheres.find((where) => where.sql.includes('intent.status'));
     expect(clause).toBeDefined();
-    expect(clause!.sql).toBe(
-      '(intent.status = :settling OR (intent.status = :created AND intent.expiresAt > :now))',
-    );
-    expect(clause!.params.now).toBeInstanceOf(Date);
-  });
-
-  it('counts a SETTLING deposit intent whatever its deadline says', async () => {
-    // Settlement is already in flight and the transaction may well have
-    // landed; the deadline stops a *new* payload being accepted, it does not
-    // mean the money is gone. Only the CREATED branch is bounded by it.
-    const { service, fake } = build({ balances: [accountBalance()], pendingRows: [] });
-
-    await service.getBalances(ORG);
-
-    const clause = fake.wheres.find((where) => where.sql.includes('intent.status'))!;
-    const settlingTerm = clause.sql.slice(0, clause.sql.indexOf(' OR '));
-    expect(settlingTerm).toBe('(intent.status = :settling');
+    expect(clause!.sql).toBe('intent.status = :settling');
+    expect(clause!.params).toEqual({ settling: 'SETTLING' });
   });
 
   it('reconciles withheld once per distinct asset across balances', async () => {
