@@ -62,10 +62,11 @@ export interface Spendable {
  * **Rail B is always priced against the chain**, whatever the flag says. A
  * rail-B voucher is collected from the buyer's escrow and from nothing else,
  * so a voucher the escrow cannot cover is a served call nobody can be charged
- * for. The ledger mirror cannot answer that question: nothing writes a
- * `WITHDRAWAL` entry, so after `request_withdraw` → wait → `withdraw` the
- * mirror still shows the old balance while the escrow is empty (A6 in the
- * no-platform-debt review). See {@link assertAffordable}.
+ * for. The ledger mirror cannot answer that question: its `WITHDRAWAL` entry
+ * is booked from the indexed claim, so for a minute or so after
+ * `request_withdraw` → wait → `withdraw` the mirror still shows the old
+ * balance while the escrow is empty (A6 in the no-platform-debt review). See
+ * {@link assertAffordable}.
  *
  * ## Rail A has no rail here
  *
@@ -151,8 +152,8 @@ export class EscrowSpendGateService {
    * spend the escrow on calls in the meantime, and `withdraw` before the
    * redemption cron lands any of the vouchers those calls produced. And once
    * `withdraw` has landed, `withdrawRequested` is back to zero and only the
-   * chain balance shows the escrow is empty — the ledger mirror does not,
-   * because nothing writes a `WITHDRAWAL` entry. Either way every voucher
+   * chain balance shows the escrow is empty — the ledger mirror does not
+   * until the claim is indexed and booked. Either way every voucher
    * admitted dies `EscrowInsufficient` after its call was served.
    *
    * Nothing on chain stops that and nothing is meant to. The backend refusing

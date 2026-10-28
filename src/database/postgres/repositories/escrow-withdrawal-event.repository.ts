@@ -32,10 +32,27 @@ export interface EscrowBuyerKey {
   readonly buyerAddress: string;
 }
 
+/** A claim still to be booked as a `WITHDRAWAL` entry. See `listUnbookedClaims`. */
+export interface UnbookedClaim {
+  readonly organizationId: string;
+  /** The `buyer_escrows` account id, as the ledger keys the buyer's balance. */
+  readonly accountId: string;
+  readonly assetId: string;
+  /** Atomic units the contract paid. */
+  readonly amount: bigint;
+  /** The entry's `chain_tx_ref`. */
+  readonly ref: string;
+}
+
+/** A claim's `WITHDRAWAL` `chain_tx_ref`: `<lower-case transaction hash>:<log index>`. */
+export function withdrawalRef(transactionHash: string, logIndex: number): string {
+  return `${transactionHash.toLowerCase()}:${logIndex}`;
+}
+
 /**
  * `escrow_withdrawal_events` and `evm_chain_states.withdrawal_cursor_block`:
- * what `EvmEscrowWithdrawalIndexer` writes and the withdrawal history reads
- * (B7). Read-side bookkeeping only; see the entity.
+ * what `EvmEscrowWithdrawalIndexer` writes, the withdrawal history reads (B7)
+ * and `ClaimedWithdrawalBooker` books as `WITHDRAWAL` entries. See the entity.
  */
 @Injectable()
 export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWithdrawalEventEntity> {
@@ -128,6 +145,45 @@ export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWi
     return row
       ? { organizationId: row.organization_id, accountId: row.account_id, assetId: row.asset_id }
       : null;
+  }
+
+  /**
+   * The claims of this platform's buyers with no `WITHDRAWAL` ledger entry
+   * yet, oldest first, at most `limit`. A claim's entry carries
+   * {@link withdrawalRef}; `uq_ledger_entries_withdrawal` makes it single-use.
+   * A claim of an address with no `buyer_escrows` row has no books to debit
+   * and is never listed.
+   */
+  async listUnbookedClaims(limit: number): Promise<UnbookedClaim[]> {
+    const rows: {
+      organization_id: string;
+      account_id: string;
+      asset_id: string;
+      amount: string;
+      transaction_hash: string;
+      log_index: number;
+    }[] = await this.manager.query(
+      `SELECT e."transaction_hash", e."log_index", e."amount",
+              b."organization_id", b."account_id", b."asset_id"
+         FROM "escrow_withdrawal_events" e
+         JOIN "buyer_escrows" b
+           ON lower(b."account_id") = e."chain_id" || ':' || e."buyer_address"
+        WHERE e."kind" = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM "ledger_entries" l
+             WHERE l."entry_type" = 'WITHDRAWAL'
+               AND l."chain_tx_ref" = e."transaction_hash" || ':' || e."log_index")
+        ORDER BY e."block_number", e."log_index"
+        LIMIT $2`,
+      [EscrowWithdrawalEventKind.WITHDRAWN, limit],
+    );
+    return rows.map((row) => ({
+      organizationId: row.organization_id,
+      accountId: row.account_id,
+      assetId: row.asset_id,
+      amount: BigInt(row.amount),
+      ref: withdrawalRef(row.transaction_hash, row.log_index),
+    }));
   }
 
   /** Every stored event of these buyers, oldest first (chain order). */
