@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
@@ -6,6 +6,7 @@ import { settlementAssetsOn } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
 
 import { RECONCILIATION_CRON } from '../constants/reconciliation.constants';
+import { ClaimedWithdrawalBooker } from '../services/claimed-withdrawal-booker.service';
 import { ReconciliationService } from '../services/reconciliation.service';
 
 /**
@@ -37,6 +38,15 @@ import { ReconciliationService } from '../services/reconciliation.service';
  * ways: the shape of this file, the calls this job actually makes, and the
  * proof that removing one chain from `ENABLED_CHAINS` leaves the other chain's
  * call byte-identical.
+ *
+ * ## Claims are booked first
+ *
+ * Before the loop, `ClaimedWithdrawalBooker.book()` books every indexed claim
+ * not yet booked, so a claim the index already holds is never reported as a
+ * breach. Its own cron keeps running; when the two overlap the second writer
+ * hits `uq_ledger_entries_withdrawal`, which the booker treats as booked. A
+ * booker failure is logged and the pass goes on: a reconciler that stops
+ * because a write beside it failed is the silence this job exists to prevent.
  */
 @Injectable()
 export class ReconciliationJob {
@@ -45,10 +55,19 @@ export class ReconciliationJob {
   constructor(
     private readonly reconciliation: ReconciliationService,
     private readonly chains: ChainAdapterRegistry,
+    @Optional() private readonly booker: ClaimedWithdrawalBooker | null = null,
   ) {}
 
   @Cron(RECONCILIATION_CRON)
   async handleReconciliation(): Promise<void> {
+    try {
+      await this.booker?.book();
+    } catch (error) {
+      this.logger.error(
+        `Claimed withdrawals could not be booked before reconciling: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     for (const asset of this.assets()) {
       try {
         await this.reconciliation.reconcile(asset);

@@ -72,11 +72,12 @@ export interface EvmEscrowWithdrawalClient {
  * `escrow_withdrawal_events` (B7): the buyer's withdrawal history and the
  * withdrawals line of a statement.
  *
- * **Read-side bookkeeping, and nothing else.** No ledger entry is written: a
- * `WITHDRAWAL` entry lowers the ledger's `available`, which the reconciler
- * compares against the chain and which the spend path reads while the escrow
- * spend gate is off. The chain is the record of the balance; this table only
- * remembers when the buyer took money out. An audit row is written for each
+ * **No ledger entry is written here.** Each stored claim is booked as a
+ * `WITHDRAWAL` debit by `ClaimedWithdrawalBooker` (settlement), from this
+ * table, after the range commits: until it is, the reconciler compares a vault
+ * the claim already left against books that still owe it. The chain is the
+ * record of the balance; this table remembers when the buyer took money out
+ * and is what the books learn it from. An audit row is written for each
  * claim of a buyer this platform knows, in the transaction that stores it, so
  * a re-read range logs nothing twice. Requests and cancels sent through the
  * console are logged by `EscrowController` when they land.
@@ -89,8 +90,10 @@ export interface EvmEscrowWithdrawalClient {
  * `disputeUpgradeBlock`, else {@link EVM_ESCROW_WITHDRAWAL_INITIAL_LOOKBACK}
  * blocks back: withdrawals before that are not in the history. A reorg deeper
  * than the confirmation depth could leave a row for a log that no longer
- * exists; accepted, since the table is read-side history only and the escrow
- * read stays the authority on the balance and on a pending request.
+ * exists, and so a `WITHDRAWAL` debit for it; accepted, as for deposits read
+ * at the same depth: the reconciler would show it as `ESCROW_MIRROR_DRIFT`,
+ * and the escrow read stays the authority on the balance and on a pending
+ * request.
  *
  * A failed tick records `withdrawal_last_error` and alerts once per incident;
  * an indexed block older than an hour alerts as lag. Claim audit rows are

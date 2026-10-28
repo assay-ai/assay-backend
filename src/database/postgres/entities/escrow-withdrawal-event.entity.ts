@@ -13,10 +13,12 @@ export enum EscrowWithdrawalEventKind {
  * One `WithdrawRequested` or `EscrowWithdrawn` log of the escrow contract, as
  * `EvmEscrowWithdrawalIndexer` read it past the confirmation depth (B7).
  *
- * Read-side bookkeeping for the buyer's withdrawal history and statements.
- * Nothing that moves money, gates a call or reconciles reads it; the chain
- * stays the record of the balance. Platform data keyed by the buyer's address:
- * the organization is resolved through `buyer_escrows` when it is read.
+ * The buyer's withdrawal history and statements, and the source of each
+ * claim's `WITHDRAWAL` ledger debit (`ClaimedWithdrawalBooker`), which is how
+ * a claim reaches the books the reconciler compares with the chain. Nothing
+ * gates a call on it; the chain stays the record of the balance. Platform
+ * data keyed by the buyer's address: the organization is resolved through
+ * `buyer_escrows` when it is read.
  */
 @Entity('escrow_withdrawal_events')
 @Index('uq_escrow_withdrawal_events_log', ['chainId', 'transactionHash', 'logIndex'], {
