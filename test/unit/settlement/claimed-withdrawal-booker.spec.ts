@@ -93,6 +93,17 @@ describe('ClaimedWithdrawalBooker', () => {
     expect(append).toHaveBeenCalledTimes(3);
   });
 
+  it('resolves when an overlapping pass already booked every claim', async () => {
+    const duplicate = Object.assign(new Error('duplicate key'), { code: '23505' });
+    const { service } = booker(
+      [claim(), claim({ ref: withdrawalRef(TX, 1) })],
+      24_930_000n,
+      jest.fn().mockRejectedValue(duplicate),
+    );
+
+    await expect(service.book()).resolves.toBe(0);
+  });
+
   it('never throws out of the cron handler', async () => {
     const { service, listUnbookedClaims } = booker([], 0n);
     listUnbookedClaims.mockRejectedValueOnce(new Error('database down'));
