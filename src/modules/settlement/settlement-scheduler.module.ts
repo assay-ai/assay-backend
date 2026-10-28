@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 
 import { ChainsModule } from '@modules/chains/chains.module';
+import { LedgerModule } from '@modules/ledger/ledger.module';
 
 import { ReconciliationJob } from './jobs/reconciliation.job';
+import { ClaimedWithdrawalBooker } from './services/claimed-withdrawal-booker.service';
 import { SettlementModule } from './settlement.module';
 
 /**
@@ -23,9 +25,12 @@ import { SettlementModule } from './settlement.module';
  * `ChainsModule` from `SettlementModule` would hand the chain boundary to
  * every future importer of the settlement domain, which defeats the point of
  * keeping chain SDKs behind one boundary.
+ *
+ * `LedgerModule` for the same reason: `ClaimedWithdrawalBooker` writes each
+ * claim's `WITHDRAWAL` entry, once per deployment, beside the reconciler.
  */
 @Module({
-  imports: [SettlementModule, ChainsModule],
-  providers: [ReconciliationJob],
+  imports: [SettlementModule, ChainsModule, LedgerModule],
+  providers: [ReconciliationJob, ClaimedWithdrawalBooker],
 })
 export class SettlementSchedulerModule {}

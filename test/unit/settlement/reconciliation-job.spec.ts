@@ -2,6 +2,7 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AssetId, CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { ReconciliationJob } from '@modules/settlement/jobs/reconciliation.job';
+import { ClaimedWithdrawalBooker } from '@modules/settlement/services/claimed-withdrawal-booker.service';
 import { ReconciliationService } from '@modules/settlement/services/reconciliation.service';
 
 const SOLANA_DEVNET = CHAIN_IDS.SOLANA_DEVNET;
@@ -83,5 +84,38 @@ describe('ReconciliationJob across two namespaces', () => {
       [SOLANA_DEVNET, ROBINHOOD_TESTNET].map((chainId) => reconciledBy([chainId])),
     );
     expect(perChain.map((assets) => assets.length)).toEqual([0, 1]);
+  });
+});
+
+describe('ReconciliationJob books claimed withdrawals first', () => {
+  function run(book: jest.Mock) {
+    const order: string[] = [];
+    const reconcile = jest.fn().mockImplementation(async () => {
+      order.push('reconcile');
+    });
+    const job = new ReconciliationJob(
+      { reconcile } as unknown as ReconciliationService,
+      { enabledChains: () => [ROBINHOOD_TESTNET] } as unknown as ChainAdapterRegistry,
+      {
+        book: jest.fn().mockImplementation(async () => {
+          order.push('book');
+          return book();
+        }),
+      } as unknown as ClaimedWithdrawalBooker,
+    );
+    return job.handleReconciliation().then(() => ({ order, reconcile }));
+  }
+
+  it('books before any vault is read', async () => {
+    const { order } = await run(jest.fn().mockResolvedValue(1));
+
+    expect(order).toEqual(['book', 'reconcile']);
+  });
+
+  it('still reconciles when the booker fails', async () => {
+    const { order, reconcile } = await run(jest.fn().mockRejectedValue(new Error('db down')));
+
+    expect(order).toEqual(['book', 'reconcile']);
+    expect(reconcile).toHaveBeenCalledWith(USDG_46630);
   });
 });
