@@ -194,6 +194,13 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // five established buyers, totals cover complete days only, and only
   // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
+  // Protocol-wide aggregates for the public analytics page. One asset/window
+  // per read, no buyer/wallet/intent/transaction identifiers in the projection.
+  // Tool/day groups require five buyers under one consistent publication rule;
+  // private/unapproved tools are withheld. Redis TTL is two seconds, browser/CDN
+  // caching is disabled, and the public read rate limit still applies. A tenant-
+  // scoped version would answer a different question than protocol activity.
+  ['modules/protocol-analytics/controllers/protocol-analytics.controller.ts', 1],
   // The toolset catalogue (design spec §7.9): listed tool sets, one listed
   // tool set's page and versions, one version it serves (with a diff between
   // two served ones), a public name's profile, the categories, and the
