@@ -126,3 +126,18 @@ export function redactOAuthText(text: string): string {
       .replace(SECRET_QUERY_IN_TEXT, `$1${REDACTED}`),
   );
 }
+
+/**
+ * The call id in a public explorer call path (`/api/v1/public/explorer/calls/{id}`),
+ * under any prefix. Everything after `calls/` up to the query is replaced, so an
+ * extra segment or an encoded slash cannot carry the id past it.
+ */
+const PUBLIC_CALL_PATH = /(\/public\/explorer\/calls\/)[^?#]*/gi;
+
+/**
+ * A request URL for a log line: {@link redactOAuthUrl}, then the public call id
+ * becomes `:id`. That id is a bearer link to a receipt, so logs name the route only.
+ */
+export function redactLoggedUrl(url: string): string {
+  return redactOAuthUrl(url).replace(PUBLIC_CALL_PATH, '$1:id');
+}

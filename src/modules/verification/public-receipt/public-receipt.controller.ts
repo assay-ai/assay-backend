@@ -24,7 +24,7 @@ import { PublicReceiptService } from './public-receipt.service';
  */
 @ApiTags('Public')
 @UseInterceptors(PublicReadRateLimitInterceptor)
-@Controller('public/receipts')
+@Controller('public/explorer/calls')
 export class PublicReceiptsController {
   constructor(private readonly receipts: PublicReceiptService) {}
 
