@@ -55,10 +55,10 @@ SELECT
   (i.hold_released_at IS NOT NULL)           AS "holdReleased",
   (i.redemption_lapsed_at IS NOT NULL)       AS "lapsed",
   CASE
-    WHEN i.redemption_last_error LIKE $2 THEN 'FORFEITED'
-    WHEN i.redemption_last_error LIKE $3 THEN 'WRITTEN_OFF'
+    WHEN starts_with(i.redemption_last_error, $2) THEN 'FORFEITED'
+    WHEN starts_with(i.redemption_last_error, $3) THEN 'WRITTEN_OFF'
     WHEN i.redemption_last_error = $5 THEN 'VOIDED_REFUND'
-    WHEN i.redemption_last_error LIKE $4 THEN 'VOIDED_VOID'
+    WHEN starts_with(i.redemption_last_error, $4) THEN 'VOIDED_VOID'
   END                                        AS "collectionCause",
   i.created_at                               AS "createdAt",
   r.settled_at                               AS "settledAt",
@@ -79,7 +79,7 @@ WHERE i.id = $1
 LIMIT 1`;
 
 /**
- * Cross-tenant read behind `GET /public/receipts/:id`.
+ * Cross-tenant read behind `GET /public/explorer/calls/:id`.
  *
  * Deliberately a single fixed SQL statement, not a repository over the entities:
  * it never loads a `PaymentIntentEntity` or `VerificationRecordEntity`, so a column
@@ -94,9 +94,10 @@ export class PublicReceiptReadRepository {
   async findPublicReceiptRow(intentId: string): Promise<PublicReceiptRow | null> {
     const rows: PublicReceiptRow[] = await this.dataSource.query(PUBLIC_RECEIPT_SQL, [
       intentId,
-      `${PROVIDER_FORFEIT_PREFIX}%`,
-      `${UNCOLLECTED_PREFIX}%`,
-      `${DEBT_VOIDED_PREFIX}%`,
+      // Bare prefixes for starts_with(): no LIKE, so a `%` or `_` in a prefix is never a wildcard.
+      PROVIDER_FORFEIT_PREFIX,
+      UNCOLLECTED_PREFIX,
+      DEBT_VOIDED_PREFIX,
       `${DEBT_VOIDED_PREFIX}REFUND`,
     ]);
     return rows[0] ?? null;
