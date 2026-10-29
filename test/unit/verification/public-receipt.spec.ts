@@ -9,6 +9,7 @@ import {
 import { NotChargedReason } from '@modules/catalogue/domain/not-charged-reason';
 import { collectionStateOf } from '@modules/payment/domain/collection';
 import { ReceiptPrivacyController } from '@modules/account/controllers/receipt-privacy.controller';
+import { ReceiptPrivacyService } from '@modules/account/services/receipt-privacy.service';
 import { ReceiptsController } from '@modules/verification/controllers/receipts.controller';
 import { StageStatus, VerificationStage } from '@modules/verification/domain/stage';
 import { VerificationErrors } from '@modules/verification/errors/verification.errors';
@@ -130,6 +131,50 @@ describe('public receipt: the mapper', () => {
     expect(r.tool?.name).toBe('toolname');
   });
 
+  it('a hash- or address-like name, or one empty after cleaning, nulls that object only', () => {
+    const cases = [
+      `0x${'a'.repeat(40)}`,
+      'f'.repeat(64),
+      '4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T',
+      '\u200b\u2066\u061c\u180e  ',
+    ];
+    for (const bad of cases) {
+      const r = toPublicReceipt(row(), {
+        providerNames: new Map([[PROVIDER, bad]]),
+        toolNames: new Map([[TOOL, 'check_token_risk']]),
+      });
+      expect(r.provider).toBeNull();
+      expect(r.tool).toEqual({ id: TOOL, name: 'check_token_risk' });
+      expect(() => assertPublicReceiptShape(r)).not.toThrow();
+    }
+    const badTool = toPublicReceipt(row(), {
+      providerNames: names.providerNames,
+      toolNames: new Map([[TOOL, 'b'.repeat(40)]]),
+    });
+    expect(badTool.tool).toBeNull();
+    expect(badTool.provider).toEqual({ id: PROVIDER, name: 'Chainlook' });
+  });
+
+  it('strips the isolate, Arabic-letter and Mongolian marks too', () => {
+    for (const mark of ['\u2066', '\u2067', '\u2068', '\u2069', '\u061c', '\u180e']) {
+      expect(cleanName(`Chain${mark}look`)).toBe('Chainlook');
+    }
+  });
+
+  it('truncates by code point, never splitting a surrogate pair', () => {
+    const emoji = '\u{1F600}';
+    const out = cleanName(`a${emoji.repeat(100)}`);
+    expect(Array.from(out)).toHaveLength(80);
+    expect(out).toBe(`a${emoji.repeat(79)}`);
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    const r = toPublicReceipt(row(), {
+      providerNames: new Map([[PROVIDER, emoji.repeat(100)]]),
+      toolNames: names.toolNames,
+    });
+    expect(Array.from(r.provider?.name ?? '')).toHaveLength(80);
+    expect(() => assertPublicReceiptShape(r)).not.toThrow();
+  });
+
   it('rounds down to the minute in UTC', () => {
     expect(roundedToMinute(new Date('2026-10-29T14:51:59.999Z'))).toBe('2026-10-29T14:51:00.000Z');
   });
@@ -228,6 +273,105 @@ describe('public receipt: the fence', () => {
     expect(() => assertPublicReceiptShape(missing)).toThrow(/key is missing/);
   });
 
+  it('the guard cannot be bypassed through prototype keys, symbols, getters or class instances', () => {
+    const ok = toPublicReceipt(row(), names);
+    // `constructor` and `hasOwnProperty` would pass an `in` test against the spec object.
+    expect(() => assertPublicReceiptShape({ ...ok, constructor: 'x' })).toThrow(
+      /key is not allowed/,
+    );
+    expect(() => assertPublicReceiptShape({ ...ok, hasOwnProperty: () => true })).toThrow(
+      /key is not allowed/,
+    );
+    const viaJson: unknown = JSON.parse(
+      JSON.stringify(ok).replace('{', '{"__proto__":{"leak":"x"},'),
+    );
+    expect(Object.prototype.hasOwnProperty.call(viaJson, '__proto__')).toBe(true);
+    expect(() => assertPublicReceiptShape(viaJson)).toThrow(/__proto__: key is not allowed/);
+    // Nested: an own prototype-named key, and a nested object whose fields are only inherited.
+    expect(() =>
+      assertPublicReceiptShape({ ...ok, listedPrice: { ...ok.listedPrice, toString: 'x' } }),
+    ).toThrow(/\.listedPrice\.toString: key is not allowed/);
+    expect(() =>
+      assertPublicReceiptShape({
+        ...ok,
+        stages: ok.stages.map((st, i) => (i === 0 ? { ...st, valueOf: 'x' } : st)),
+      }),
+    ).toThrow(/\.stages\[0\]\.valueOf/);
+    expect(() =>
+      assertPublicReceiptShape({ ...ok, provider: Object.create({ id: PROVIDER, name: 'x' }) }),
+    ).toThrow(/\.provider: not a plain object/);
+    // A symbol key, enumerable or not.
+    expect(() => assertPublicReceiptShape({ ...ok, [Symbol('leak')]: 'x' })).toThrow(/symbol key/);
+    const hidden = { ...ok };
+    Object.defineProperty(hidden, Symbol('leak'), { value: 'x', enumerable: false });
+    expect(() => assertPublicReceiptShape(hidden)).toThrow(/symbol key/);
+    // A class instance, even with exactly the right fields.
+    class Receipt {}
+    const instance = Object.assign(new Receipt(), ok);
+    expect(() => assertPublicReceiptShape(instance)).toThrow(/not a plain object/);
+    // A getter could answer the guard one value and JSON.stringify another.
+    const getter = { ...ok };
+    Object.defineProperty(getter, 'sampling', { get: () => null, enumerable: true });
+    expect(() => assertPublicReceiptShape(getter)).toThrow(/not a data property/);
+    // An array with an extra property, or not a plain array.
+    const stages = ok.stages.slice();
+    Object.defineProperty(stages, 'extra', { value: 'x', enumerable: false });
+    expect(() => assertPublicReceiptShape({ ...ok, stages })).toThrow(/\.stages\.extra/);
+    class Stages extends Array {}
+    expect(() => assertPublicReceiptShape({ ...ok, stages: Stages.from(ok.stages) })).toThrow(
+      /not a plain array/,
+    );
+    // A null-prototype object with the right fields is still plain data.
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare.amount = '1';
+    bare.asset = ASSET;
+    bare.decimals = 6;
+    expect(() => assertPublicReceiptShape({ ...ok, listedPrice: bare })).not.toThrow();
+  });
+
+  it('every field without free text is held to its exact shape', () => {
+    const ok = toPublicReceipt(row({ status: 'REFUNDED' }), names);
+    expect(() => assertPublicReceiptShape(ok)).not.toThrow();
+    const bad: Array<[string, unknown]> = [
+      ['tool', { id: 'not-a-uuid', name: 'x' }],
+      ['provider', { id: `${PROVIDER}x`, name: 'x' }],
+      ['stages', ok.stages.map((st) => ({ ...st, label: 'passed!' }))],
+      ['notCharged', { reason: NotChargedReason.FAILED_CHECK, text: 'Some other sentence.' }],
+      ['createdAt', '2026-10-29T14:51:37.000Z'],
+      ['createdAt', '2026-10-29T14:51:00.912Z'],
+      ['settledAt', '2026-10-29 14:51'],
+      ['listedPrice', { ...ok.listedPrice, amount: '-1' }],
+      ['listedPrice', { ...ok.listedPrice, asset: `eip155:4663/erc20:0x${'a'.repeat(64)}` }],
+      ['listedPrice', { ...ok.listedPrice, asset: `eip155:4663/erc20:${'a'.repeat(41)}` }],
+    ];
+    for (const [key, value] of bad) {
+      expect(() => assertPublicReceiptShape({ ...ok, [key]: value })).toThrow(
+        new RegExp(`^\\$?\\.${key}`),
+      );
+    }
+    // A 40-hex token address is fine.
+    expect(() =>
+      assertPublicReceiptShape({
+        ...ok,
+        listedPrice: { ...ok.listedPrice, asset: `eip155:4663/erc20:0x${'a'.repeat(40)}` },
+      }),
+    ).not.toThrow();
+  });
+
+  it('free text refuses 0x-hex, a long bare hex run and a long base58 run', () => {
+    const ok = toPublicReceipt(row(), names);
+    for (const bad of [
+      `token 0x${'a'.repeat(40)}`,
+      `id ${'0123456789abcdef'.repeat(2)}`,
+      `key 4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T`,
+    ]) {
+      expect(() =>
+        assertPublicReceiptShape({ ...ok, provider: { id: PROVIDER, name: bad } }),
+      ).toThrow(/address or a hash/);
+      expect(() => assertPublicReceiptShape({ ...ok, sampling: bad })).toThrow(/address or a hash/);
+    }
+  });
+
   it('the SQL selects a fixed column list: no wildcard, no request or response, no wallet or signature columns', () => {
     const sql = PUBLIC_RECEIPT_SQL;
     expect(sql).not.toMatch(/\bSELECT\s+\*/i);
@@ -314,6 +458,23 @@ describe('public receipt: the service', () => {
   });
 });
 
+describe('receipt privacy: the owner switch', () => {
+  it('refuses an organization that does not exist and writes no audit entry', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const record = jest.fn();
+    const dataSource = {
+      transaction: (work: (manager: unknown) => Promise<unknown>) => work({ query }),
+    };
+    const svc = new ReceiptPrivacyService(dataSource as never, { record } as never);
+    const error = await svc
+      .set('44444444-4444-4444-8444-444444444444', false, { type: 'user', id: 'u' } as never)
+      .catch((e: unknown) => e);
+    expect((error as { statusCode: number }).statusCode).toBe(404);
+    expect(query).toHaveBeenCalledTimes(1); // the locked read only: no UPDATE
+    expect(record).not.toHaveBeenCalled();
+  });
+});
+
 describe('public receipt: the routes', () => {
   it('the public route has its own short cache, no robots index and no referrer, and a rate limit', () => {
     const handler = PublicReceiptsController.prototype.get;
@@ -339,7 +500,7 @@ describe('public receipt: the routes', () => {
       PublicReceiptsController,
     ) as unknown[];
     expect(interceptors).toContain(PublicReadRateLimitInterceptor);
-    expect(Reflect.getMetadata('path', PublicReceiptsController)).toBe('public/receipts');
+    expect(Reflect.getMetadata('path', PublicReceiptsController)).toBe('public/explorer/calls');
   });
 
   it("the owner's receipt route is never stored by a shared cache", () => {

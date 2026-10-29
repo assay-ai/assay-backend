@@ -307,6 +307,16 @@ describe('AllExceptionsFilter', () => {
       expect(logged).not.toContain(RID);
     });
 
+    it('logs a public explorer call id as :id, on a 4xx and a 5xx', () => {
+      const CALL = '33333333-3333-4333-8333-333333333333';
+      const url = `/api/v1/public/explorer/calls/${CALL}`;
+      for (const exception of [new NotFoundException(), new Error('boom')]) {
+        const { logged } = captureWithLog(exception, url);
+        expect(logged).toContain('/api/v1/public/explorer/calls/:id');
+        expect(logged).not.toContain(CALL);
+      }
+    });
+
     it('redacts the rid in the 5xx error line too', () => {
       const { body, logged } = captureWithLog(new Error('boom'), `/api/v1/oauth/requests/${RID}`);
       expect(body.error.statusCode).toBe(500);

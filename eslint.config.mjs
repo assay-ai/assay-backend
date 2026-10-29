@@ -228,6 +228,87 @@ const HAND_ENCODED_INSTRUCTION_BAN = [
   },
 ];
 
+/**
+ * The public receipt fence (see the last block below). Every shortcut that copies "whatever is
+ * there" from one value into another is banned in those files, so a value reaches the public
+ * response only because it is written out field by field.
+ */
+const PUBLIC_RECEIPT_FILES = [
+  'src/modules/verification/public-receipt/**/*.ts',
+  'src/database/postgres/repositories/public-receipt-read.repository.ts',
+];
+const PUBLIC_RECEIPT_GUARD_FILE = 'src/modules/verification/public-receipt/public-receipt.guard.ts';
+
+const PUBLIC_RECEIPT_COPY_BAN = [
+  {
+    selector: 'SpreadElement',
+    message: 'No spread in the public receipt: write each field out, so nothing is public by accident.',
+  },
+  {
+    selector: 'RestElement',
+    message: 'No rest destructuring in the public receipt: "everything else" is not a field list.',
+  },
+  {
+    selector: "CallExpression[callee.object.name='Object'][callee.property.name=/^(assign|fromEntries)$/]",
+    message: 'No Object.assign / Object.fromEntries in the public receipt: write each field out.',
+  },
+  {
+    selector: "CallExpression[callee.name='structuredClone']",
+    message: 'No structuredClone in the public receipt: a clone copies every field.',
+  },
+  {
+    selector: "CallExpression[callee.object.name='JSON'][callee.property.name='parse']",
+    message: 'No JSON.parse in the public receipt: parsed data carries whatever keys it had.',
+  },
+  {
+    selector: "TSTypeReference[typeName.name=/^(Omit|Partial)$/]",
+    message: 'No Omit / Partial in the public receipt types: a type that is "everything except" grows by itself.',
+  },
+];
+
+/** Key iteration copies unknown fields along. Only the shape guard needs it (to visit every own key). */
+const PUBLIC_RECEIPT_KEY_ITERATION_BAN = [
+  {
+    selector:
+      "CallExpression[callee.object.name='Object'][callee.property.name=/^(entries|keys|values|getOwnPropertyNames|getOwnPropertySymbols|getOwnPropertyDescriptors)$/]",
+    message: 'No Object.entries / keys / values in the public receipt: name each field.',
+  },
+  {
+    selector: "CallExpression[callee.object.name='Reflect'][callee.property.name='ownKeys']",
+    message: 'No Reflect.ownKeys in the public receipt: name each field.',
+  },
+  {
+    selector: 'ForInStatement',
+    message: 'No for...in in the public receipt: name each field.',
+  },
+];
+
+const PUBLIC_RECEIPT_IMPORTS = [
+  'error',
+  {
+    patterns: [
+      CHAIN_SDK_BAN,
+      HTTP_CLIENT_BAN,
+      {
+        group: ['**/entities/*', '@database/postgres/entities/*'],
+        message:
+          'The public receipt reads a fixed column list and never an entity: a column added to the entity would be read along.',
+      },
+      {
+        group: [
+          '@database/postgres/repositories/*',
+          '!@database/postgres/repositories/public-receipt-read.repository',
+          '**/repositories/*',
+          '!**/repositories/public-receipt-read.repository',
+        ],
+        message:
+          'The public receipt reads through public-receipt-read.repository only: any other repository loads entities.',
+      },
+    ],
+    paths: [WS_PACKAGE_BAN],
+  },
+];
+
 export default tseslint.config(
   {
     ignores: [
@@ -326,46 +407,32 @@ export default tseslint.config(
   {
     // The public receipt is a privacy fence (docs: e2e/backlog/SPEC-public-receipts). Nothing reaches
     // its response unless it is written out field by field, so the shortcuts that copy "whatever
-    // is there" are banned in these files, and so is importing an entity (a new column would be
-    // read along). Flat config takes the LAST matching block's value, so this restates the bans
-    // of the block above.
-    files: [
-      'src/modules/verification/public-receipt/**/*.ts',
-      'src/database/postgres/repositories/public-receipt-read.repository.ts',
-    ],
+    // is there" are banned in these files, and so is importing an entity or any repository but its
+    // own (a new column would be read along). Flat config takes the LAST matching block's value, so
+    // this restates the bans of the block above.
+    files: PUBLIC_RECEIPT_FILES,
     rules: {
       'no-restricted-imports': 'off',
-      '@typescript-eslint/no-restricted-imports': [
-        'error',
-        {
-          patterns: [
-            CHAIN_SDK_BAN,
-            HTTP_CLIENT_BAN,
-            {
-              group: ['**/entities/*', '@database/postgres/entities/*'],
-              message:
-                'The public receipt reads a fixed column list and never an entity: a column added to the entity would be read along.',
-            },
-          ],
-          paths: [WS_PACKAGE_BAN],
-        },
-      ],
+      '@typescript-eslint/no-restricted-imports': PUBLIC_RECEIPT_IMPORTS,
       'no-restricted-syntax': [
         'error',
         ...INDIRECT_HTTP_BAN,
         ...HAND_ENCODED_INSTRUCTION_BAN,
-        {
-          selector: 'SpreadElement',
-          message: 'No spread in the public receipt: write each field out, so nothing is public by accident.',
-        },
-        {
-          selector: "CallExpression[callee.object.name='Object'][callee.property.name=/^(assign|fromEntries)$/]",
-          message: 'No Object.assign / Object.fromEntries in the public receipt: write each field out.',
-        },
-        {
-          selector: "TSTypeReference[typeName.name=/^(Omit|Partial)$/]",
-          message: 'No Omit / Partial in the public receipt types: a type that is "everything except" grows by itself.',
-        },
+        ...PUBLIC_RECEIPT_COPY_BAN,
+        ...PUBLIC_RECEIPT_KEY_ITERATION_BAN,
+      ],
+    },
+  },
+  {
+    // The shape guard is the one file that must visit every own key of a value (to refuse the
+    // unknown ones), so only the key-iteration bans are lifted here; every copy ban stays.
+    files: [PUBLIC_RECEIPT_GUARD_FILE],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...INDIRECT_HTTP_BAN,
+        ...HAND_ENCODED_INSTRUCTION_BAN,
+        ...PUBLIC_RECEIPT_COPY_BAN,
       ],
     },
   },
