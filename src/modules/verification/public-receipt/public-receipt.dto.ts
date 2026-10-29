@@ -5,7 +5,7 @@ import { NotChargedReason } from '@modules/catalogue/domain/not-charged-reason';
 import { StageStatus, VerificationStage } from '../domain/stage';
 
 /**
- * The wire shape of `GET /public/receipts/:id`: **the complete list of what
+ * The wire shape of `GET /public/explorer/calls/:id`: **the complete list of what
  * the public may see of one call**. It is written on its own, not derived from
  * `GetReceiptResponseDto` or an entity, so nothing is public unless it is named here.
  * `public-receipt.guard.ts` checks every response against this shape, and

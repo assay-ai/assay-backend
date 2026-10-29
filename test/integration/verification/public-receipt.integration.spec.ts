@@ -199,6 +199,10 @@ describe('public receipt: real Postgres', () => {
       ['voided:DISPUTE_UPHELD', 'VOIDED_VOID'],
       ['voided:VOID', 'VOIDED_VOID'],
       [`${CANARY}-something-else`, null],
+      // starts_with, not LIKE: `_` and `%` are plain characters, never wildcards.
+      ['providerXforfeit:STAKE_BELOW_MINIMUM', null],
+      ['uncollected%', null],
+      ['xvoided:REFUND', null],
       [null, null],
     ];
     for (const [lastError, label] of cases) {
@@ -253,5 +257,19 @@ describe('public receipt: real Postgres', () => {
       { before: { receipts_public: true }, after: { receipts_public: false } },
       { before: { receipts_public: false }, after: { receipts_public: true } },
     ]);
+  });
+
+  it('setting the switch for an organization that does not exist is a 404 and writes nothing', async () => {
+    const ghost = randomUUID();
+    const privacy = new ReceiptPrivacyService(ds, new AuditLogWriter(ds));
+    const error = await privacy
+      .set(ghost, false, { type: 'user' as const, id: 'tester' })
+      .catch((e: unknown) => e);
+    expect((error as { statusCode: number }).statusCode).toBe(404);
+    const entries: unknown[] = await ds.query(
+      `SELECT 1 FROM audit_log_entries WHERE organization_id = $1`,
+      [ghost],
+    );
+    expect(entries).toHaveLength(0);
   });
 });

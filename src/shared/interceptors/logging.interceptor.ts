@@ -16,7 +16,7 @@ import { SESSION_REQUEST_KEY } from '@shared/auth/session-request.key';
 import {
   RequestContext,
   RequestContextStore,
-  redactOAuthUrl,
+  redactLoggedUrl,
   requestIdFromHeader,
 } from '@shared/observability';
 
@@ -76,8 +76,9 @@ export class LoggingInterceptor implements NestInterceptor {
     const response = context.switchToHttp().getResponse<Response>();
     const { method, ip } = request;
     // The same field `AllExceptionsFilter` reads: `url` is stripped under a
-    // path-mounted router, `originalUrl` never is.
-    const url = redactOAuthUrl(request.originalUrl ?? request.url);
+    // path-mounted router, `originalUrl` never is. A public explorer call id
+    // is logged as `:id` (it is a bearer link to that call's receipt).
+    const url = redactLoggedUrl(request.originalUrl ?? request.url);
     const userAgent = request.get('user-agent') || '';
     const now = Date.now();
     const store = buildRequestContextStore(request);

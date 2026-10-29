@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import type { ReceiptPrivacyDto } from '../dto/receipt-privacy.dto';
+import { AccountErrors } from '../errors/account.errors';
 
 /**
  * The per-organization switch behind the public receipt page
@@ -27,7 +28,10 @@ export class ReceiptPrivacyService {
     return { receiptsPublic: rows[0]?.receipts_public ?? true };
   }
 
-  /** Sets the switch and writes the audit entry in the same transaction: no change without its entry. */
+  /**
+   * Sets the switch and writes the audit entry in the same transaction: no change without its entry.
+   * An organization that does not exist is a 404, with nothing written.
+   */
   async set(
     organizationId: string,
     receiptsPublic: boolean,
@@ -38,7 +42,9 @@ export class ReceiptPrivacyService {
         'SELECT receipts_public FROM organizations WHERE id = $1 FOR UPDATE',
         [organizationId],
       );
-      const before = rows[0]?.receipts_public ?? true;
+      // No organization row: refuse, so no audit entry is written for a change that never happened.
+      if (rows.length === 0) throw AccountErrors.organizationNotFound();
+      const before = rows[0].receipts_public;
       if (before === receiptsPublic) return;
       await manager.query('UPDATE organizations SET receipts_public = $2 WHERE id = $1', [
         organizationId,

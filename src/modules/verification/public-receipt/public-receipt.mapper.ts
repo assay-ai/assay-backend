@@ -10,14 +10,11 @@ import {
   UNCOLLECTED_PREFIX,
 } from '@modules/payment/constants/voucher-redemption.constants';
 
-import {
-  STAGE_STATUS_LABEL,
-  StageStatus,
-  VERIFICATION_PIPELINE,
-  VerificationStage,
-} from '../domain/stage';
+import { STAGE_STATUS_LABEL, StageStatus, VERIFICATION_PIPELINE } from '../domain/stage';
+import { isPublicNamed, STAGE_STATUS_VALUES, STAGE_VALUES } from './public-receipt.guard';
 import type {
   PublicReceiptMoneyDto,
+  PublicReceiptNamedDto,
   PublicReceiptResponseDto,
   PublicReceiptStatus,
   PublicReceiptStageDto,
@@ -38,8 +35,8 @@ const STATUSES_IN_PROGRESS: ReadonlySet<string> = new Set([
   'PROVIDER_EXECUTING',
   'VERIFYING',
 ]);
-const STAGE_BY_NAME: ReadonlySet<string> = new Set(Object.values(VerificationStage));
-const STAGE_STATUSES: ReadonlySet<string> = new Set(Object.values(StageStatus));
+const STAGE_BY_NAME: ReadonlySet<string> = new Set(STAGE_VALUES);
+const STAGE_STATUSES: ReadonlySet<string> = new Set(STAGE_STATUS_VALUES);
 /** The published sampling sentence ("1 in 125 calls at this price"): plain words and numbers only. */
 const SAMPLING_SHAPE = /^[A-Za-z0-9 ,.%'-]{1,120}$/;
 
@@ -59,9 +56,12 @@ export interface PublicNames {
 const INVISIBLE_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x0000, 0x001f],
   [0x007f, 0x009f],
+  [0x061c, 0x061c],
+  [0x180e, 0x180e],
   [0x200b, 0x200f],
   [0x202a, 0x202e],
   [0x2060, 0x2064],
+  [0x2066, 0x2069],
   [0xfeff, 0xfeff],
 ];
 const INVISIBLE = new RegExp(
@@ -74,10 +74,22 @@ export function roundedToMinute(date: Date): string {
   return new Date(Math.floor(date.getTime() / MINUTE_MS) * MINUTE_MS).toISOString();
 }
 
-/** A name written by a provider: text only, no control or invisible characters, capped. */
+/** A name written by a provider: text only, no control or invisible characters, capped in code points. */
 export function cleanName(value: string): string {
-  const stripped = value.replace(INVISIBLE, '');
-  return stripped.trim().slice(0, NAME_MAX);
+  const stripped = value.replace(INVISIBLE, '').trim();
+  // By code point, so a cut never splits a surrogate pair.
+  return Array.from(stripped).slice(0, NAME_MAX).join('').trim();
+}
+
+/**
+ * A tool or provider as the public sees it, or `null` when its cleaned name is empty
+ * or would fail the guard (an address- or hash-like name): that one object is
+ * dropped instead of failing the whole receipt.
+ */
+function named(id: string | null, rawName: string | undefined): PublicReceiptNamedDto | null {
+  if (id === null || id === '' || rawName === undefined) return null;
+  const candidate = { id, name: cleanName(rawName) };
+  return isPublicNamed(candidate) ? candidate : null;
 }
 
 function money(amount: string, row: PublicReceiptRow): PublicReceiptMoneyDto {
@@ -157,12 +169,8 @@ export function toPublicReceipt(
 
   return {
     status,
-    tool:
-      toolName !== undefined && row.toolId ? { id: row.toolId, name: cleanName(toolName) } : null,
-    provider:
-      providerName !== undefined && row.providerId !== null
-        ? { id: row.providerId, name: cleanName(providerName) }
-        : null,
+    tool: named(row.toolId, toolName),
+    provider: named(row.providerId, providerName),
     listedPrice: money(row.priceAmount, row),
     chargedPrice: money(charged ? row.priceAmount : '0', row),
     notCharged,

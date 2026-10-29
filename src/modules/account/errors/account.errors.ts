@@ -12,6 +12,7 @@ export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',
   ACCOUNT_CREDENTIAL_NOT_FOUND = 'ACCOUNT_CREDENTIAL_NOT_FOUND',
   ACCOUNT_AGENT_NOT_FOUND = 'ACCOUNT_AGENT_NOT_FOUND',
+  ACCOUNT_ORGANIZATION_NOT_FOUND = 'ACCOUNT_ORGANIZATION_NOT_FOUND',
   // ── Agent payment delegation: binding a credential to its delegate key ──
   ACCOUNT_DELEGATE_BINDING_AGENT_ONLY = 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY',
   ACCOUNT_DELEGATE_BINDING_UNSUPPORTED = 'ACCOUNT_DELEGATE_BINDING_UNSUPPORTED',
@@ -55,6 +56,12 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Agent not found${context?.agentId ? ` with id: ${context.agentId}` : ''}`,
+  },
+  /** The session's organization row does not exist: nothing was changed. */
+  organizationNotFound: {
+    code: AccountErrorCode.ACCOUNT_ORGANIZATION_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Organization not found; nothing was changed',
   },
   /**
    * Binding a delegate key is the AGENT's act, with its own credential: the

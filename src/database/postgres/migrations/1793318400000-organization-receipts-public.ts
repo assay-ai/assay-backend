@@ -2,7 +2,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * `organizations.receipts_public`: whether the public receipt page
- * (`GET /public/receipts/:id`) may answer for this organization's calls.
+ * (`GET /public/explorer/calls/:id`) may answer for this organization's calls.
  *
  * Public by default (owner decision 2026-10-29): `DEFAULT true` also covers the
  * rows that exist today. A buyer can turn it off in Settings; a hidden receipt
