@@ -194,6 +194,13 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // five established buyers, totals cover complete days only, and only
   // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
+  // One paid call's receipt by its random v4 id, for anyone with the link. It
+  // reads a fixed column list (never the entity, never request or response),
+  // maps field by field, and a shape guard refuses any unlisted key before
+  // sending: no wallet, transaction, buyer, agent or verifier text. Hidden
+  // organizations, free calls and unknown ids are one 404. No list or search.
+  // Own 30 s cache; the owner route is no-store. See SPEC-public-receipts.
+  ['modules/verification/public-receipt/public-receipt.controller.ts', 1],
   // Protocol-wide aggregates for the public analytics page. One asset/window
   // per read, no buyer/wallet/intent/transaction identifiers in the projection.
   // Tool/day groups require five buyers under one consistent publication rule;

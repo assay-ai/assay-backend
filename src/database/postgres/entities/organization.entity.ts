@@ -46,6 +46,14 @@ export class OrganizationEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'name', type: 'varchar', length: 160 })
   name: string;
 
+  /**
+   * Whether the public receipt page may show this organization's calls to
+   * anyone who has a call's id. On by default; the owner can turn it off
+   * (a hidden receipt answers 404). Read by `PublicReceiptReadRepository`.
+   */
+  @Column({ name: 'receipts_public', type: 'boolean', default: true })
+  receiptsPublic: boolean;
+
   /** `ACTIVE` | `SUSPENDED`. Enforced by a CHECK constraint, not a TypeScript enum alone. */
   @Column({ name: 'status', type: 'varchar', length: 16, default: 'ACTIVE' })
   status: string;
