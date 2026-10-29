@@ -59,6 +59,32 @@ describe('LoggingInterceptor redaction', () => {
     }
   });
 
+  it.each([
+    [
+      '/api/v1/public/explorer/calls/33333333-3333-4333-8333-333333333333',
+      '/api/v1/public/explorer/calls/:id',
+    ],
+    ['/public/explorer/calls/33333333-3333-4333-8333-333333333333', '/public/explorer/calls/:id'],
+    [
+      '/api/v1/PUBLIC/Explorer/calls/33333333-3333-4333-8333-333333333333/extra',
+      '/api/v1/PUBLIC/Explorer/calls/:id',
+    ],
+    [
+      '/api/v1/public/explorer/calls/33333333-3333-4333-8333-333333333333?limit=5',
+      '/api/v1/public/explorer/calls/:id?limit=5',
+    ],
+  ])(
+    'logs the public explorer call %s with its id redacted, on success and on error',
+    async (url, expected) => {
+      for (const fail of [false, true]) {
+        const calls = await logged(url, fail);
+        expect(calls).toHaveLength(1);
+        expect((calls[0][0] as { url: string }).url).toBe(expected);
+        expect(JSON.stringify(calls)).not.toContain('33333333-3333-4333-8333-333333333333');
+      }
+    },
+  );
+
   it('logs originalUrl, the same field the filter reads (M6)', async () => {
     const context = {
       switchToHttp: () => ({

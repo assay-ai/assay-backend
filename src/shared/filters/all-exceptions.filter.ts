@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AppError } from '@shared/errors/app-errors';
-import { redactOAuthText, redactOAuthUrl } from '@shared/observability';
+import { redactLoggedUrl, redactOAuthText, redactOAuthUrl } from '@shared/observability';
 import {
   edgeSafeStatus,
   ErrorResponse,
@@ -65,7 +65,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // So is the message: Nest builds some from the request itself (see
     // `safeMessage`).
     const message = safeMessage(described.message, request.method, path);
-    const line = `[${statusCode}] ${code} - ${message} | ${request.method} ${path}`;
+    // The log line also hides a public explorer call id (`:id`); the echoed `path` keeps it.
+    const loggedPath = redactLoggedUrl(request.originalUrl ?? request.url);
+    const line = `[${statusCode}] ${code} - ${safeMessage(described.message, request.method, loggedPath)} | ${request.method} ${loggedPath}`;
 
     // 5xx is our bug and must reach whoever is on call; 4xx is the caller's
     // and would only bury the former in noise.
