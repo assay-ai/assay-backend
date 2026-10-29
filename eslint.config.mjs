@@ -323,4 +323,50 @@ export default tseslint.config(
       'no-implied-eval': 'error',
     },
   },
+  {
+    // The public receipt is a privacy fence (docs: e2e/backlog/SPEC-public-receipts). Nothing reaches
+    // its response unless it is written out field by field, so the shortcuts that copy "whatever
+    // is there" are banned in these files, and so is importing an entity (a new column would be
+    // read along). Flat config takes the LAST matching block's value, so this restates the bans
+    // of the block above.
+    files: [
+      'src/modules/verification/public-receipt/**/*.ts',
+      'src/database/postgres/repositories/public-receipt-read.repository.ts',
+    ],
+    rules: {
+      'no-restricted-imports': 'off',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            CHAIN_SDK_BAN,
+            HTTP_CLIENT_BAN,
+            {
+              group: ['**/entities/*', '@database/postgres/entities/*'],
+              message:
+                'The public receipt reads a fixed column list and never an entity: a column added to the entity would be read along.',
+            },
+          ],
+          paths: [WS_PACKAGE_BAN],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        ...INDIRECT_HTTP_BAN,
+        ...HAND_ENCODED_INSTRUCTION_BAN,
+        {
+          selector: 'SpreadElement',
+          message: 'No spread in the public receipt: write each field out, so nothing is public by accident.',
+        },
+        {
+          selector: "CallExpression[callee.object.name='Object'][callee.property.name=/^(assign|fromEntries)$/]",
+          message: 'No Object.assign / Object.fromEntries in the public receipt: write each field out.',
+        },
+        {
+          selector: "TSTypeReference[typeName.name=/^(Omit|Partial)$/]",
+          message: 'No Omit / Partial in the public receipt types: a type that is "everything except" grows by itself.',
+        },
+      ],
+    },
+  },
 );

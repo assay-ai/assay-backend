@@ -33,6 +33,7 @@ import { ProviderModule } from '@modules/provider/provider.module';
 import { ProviderApiModule } from '@modules/provider/provider-api.module';
 import { ProviderToolModule } from '@modules/provider-tool/provider-tool.module';
 import { VerificationModule } from '@modules/verification/verification.module';
+import { PublicReceiptsApiModule } from '@modules/verification/public-receipts-api.module';
 import { VerificationApiModule } from '@modules/verification/verification-api.module';
 import { SettlementModule } from '@modules/settlement/settlement.module';
 import { McpApiModule, isPublicDemoConfigured } from '@modules/mcp/mcp-api.module';
@@ -141,6 +142,7 @@ import { NetworkModule } from '@shared/network/network.module';
     ProviderToolModule,
     VerificationModule,
     VerificationApiModule,
+    PublicReceiptsApiModule,
     SettlementModule,
     // `GET /escrow` and the buyer-signed intent builders. Core, so
     // unconditional: an escrow route that disappears with a feature flag is a

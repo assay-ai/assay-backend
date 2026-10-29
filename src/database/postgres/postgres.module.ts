@@ -40,6 +40,7 @@ import { VerificationPolicyRepository } from './repositories/verification-policy
 import { EvidenceBodyRepository } from './repositories/evidence-body.repository';
 import { EvidencePackRepository } from './repositories/evidence-pack.repository';
 import { VerificationRecordRepository } from './repositories/verification-record.repository';
+import { PublicReceiptReadRepository } from './repositories/public-receipt-read.repository';
 import { SpendPolicyRepository } from './repositories/spend-policy.repository';
 import { NotificationRepository } from './repositories/notification.repository';
 import { AuditLogEntryRepository } from './repositories/audit-log-entry.repository';
@@ -220,6 +221,7 @@ export const repositories = [
   EvidencePackRepository,
   EvidenceBodyRepository,
   VerificationRecordRepository,
+  PublicReceiptReadRepository,
   SpendPolicyRepository,
   NotificationRepository,
   AuditLogEntryRepository,

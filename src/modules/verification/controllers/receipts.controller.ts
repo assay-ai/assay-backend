@@ -13,6 +13,7 @@ import {
 } from '../dto/get-receipts-summary.dto';
 import { ReceiptSummaryService } from '../services/receipt-summary.service';
 import { ReceiptService } from '../services/receipt.service';
+import { NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { TenantCache } from '@shared/decorators/tenant-cache.decorator';
 
 /**
@@ -66,6 +67,8 @@ export class ReceiptsController {
   }
 
   @Get(':intentId')
+  // The owner's receipt is never stored by a shared cache (the public one is a different route).
+  @NoCacheHeader()
   @ApiOperation({ summary: 'One call, fully — money and verification evidence joined' })
   @ApiResponse({ status: 200, description: 'The receipt', type: GetReceiptResponseDto })
   @ApiResponse({ status: 404, description: 'No such intent in this organization' })
