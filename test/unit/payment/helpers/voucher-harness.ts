@@ -4,6 +4,7 @@ import { getBase58Decoder } from '@solana/kit';
 
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
+import { RedeemerFloatGate } from '@modules/chains/evm/evm-redeemer-float.gate';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -311,6 +312,7 @@ export class InMemoryIntentWriter {
 
 export function createVoucherHarness(
   blocklist: AccountBlocklistService = noBlocks(),
+  redeemerFloat?: Pick<RedeemerFloatGate, 'isPaused'>,
 ): VoucherHarness {
   const keyPair = generateKeyPairSync('ed25519');
   const rawPublicKey = keyPair.publicKey.export({ format: 'der', type: 'spki' }).subarray(12);
@@ -336,6 +338,8 @@ export function createVoucherHarness(
     registry,
     seqs as unknown as EscrowSeqService,
     blocklist,
+    undefined,
+    redeemerFloat as RedeemerFloatGate | undefined,
   );
 
   const organizationId = randomUUID();

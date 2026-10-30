@@ -1,4 +1,5 @@
 import { OutstandingDebt } from '@database/postgres/repositories/payment-intent.repository';
+import { RedeemerFloatGate } from '@modules/chains/evm/evm-redeemer-float.gate';
 import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
 import { FreeBindingDials, freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
@@ -815,6 +816,8 @@ export interface McpHarnessOptions {
    */
   readonly idempotencyRedis?: FakeIdempotencyRedis;
   readonly idempotencyConfig?: Partial<McpIdempotencyConfig>;
+  /** The paid-call pause on a dry EVM redeemer; absent, nothing is paused. */
+  readonly redeemerFloat?: Pick<RedeemerFloatGate, 'isPaused'>;
 }
 
 export interface McpHarness {
@@ -877,6 +880,8 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     voucherOnlyRegistry(CHAIN_ID),
     seqs as unknown as EscrowSeqService,
     noBlocks(),
+    undefined,
+    options.redeemerFloat as RedeemerFloatGate | undefined,
   );
 
   const idempotencyRedis = options.idempotencyRedis ?? new FakeIdempotencyRedis();
