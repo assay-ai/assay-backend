@@ -16,22 +16,19 @@ import { implementationFor } from './namespace-dispatch';
  * a redemption is a transaction on the payer's chain whatever the provider's
  * payout account happens to be.
  *
- * ## `maxBatchSize` is the MINIMUM across implementations, and that has a cost
+ * ## `maxBatchSize` is the MINIMUM across implementations; `maxBatchSizeFor` is not
  *
- * `VoucherRedemptionService` reads this number and forms a batch **before** it
- * knows which chain the rows are on, so the batch has to be safe on the least
- * capable implementation. Solana's answer is `1` (measured: one
- * `redeem_voucher` plus its ed25519 precompile is 1,187 of a legacy
- * transaction's 1,232 bytes), so on a deployment serving both chains this is `1`
- * and the service takes its per-row path.
+ * `maxBatchSize` has to be safe on the least capable implementation. Solana's
+ * answer is `1` (measured: one `redeem_voucher` plus its ed25519 precompile is
+ * 1,187 of a legacy transaction's 1,232 bytes), so on a deployment wiring both
+ * chains it is `1`.
  *
- * **The consequence is that EVM batching is inert while Solana is
- * enabled.** Single redemptions still route to the EVM implementation and still
- * work; what is off is putting 64 of them in one transaction. Making it live
- * needs `VoucherRedemptionService` to group its pending rows by chain and ask
- * per chain — which is a redemption pass per chain, not a bigger batch — and
- * that is not done yet rather than approximated here. Reporting
- * `64` instead would hand Solana a batch it cannot send.
+ * `VoucherRedemptionService` asks `maxBatchSizeFor(asset)` instead. A pass
+ * covers one asset, so every row in it is on that asset's chain, and the
+ * chain's own answer is safe: `64` on `eip155`, `1` on Solana. Reading only
+ * the minimum left EVM batching inert whenever the Solana redeemer was wired —
+ * which is always, enabled or not — and every voucher paid a transaction of
+ * its own.
  *
  * ## A batch spanning two namespaces is refused by name
  *
@@ -39,9 +36,9 @@ import { implementationFor } from './namespace-dispatch';
  * here would silently return outcomes from two transactions under one call, and
  * `VoucherRedemptionService` matches a hold to an outcome **by index and by
  * nothing else** — so a split that reordered anything would retire the wrong
- * hold and pay the wrong provider. Unreachable through the service today
- * (`maxBatchSize` is 1); present because the port is public and the rule is a
- * property of the chain rather than of the current wiring.
+ * hold and pay the wrong provider. Unreachable through the service, which
+ * batches one asset per pass; present because the port is public and the rule
+ * is a property of the chain rather than of the current wiring.
  */
 export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
   readonly maxBatchSize: number;
@@ -51,6 +48,11 @@ export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
     // `1` for an empty map rather than `Infinity`: a deployment with no redeemer
     // wired must not advertise an unbounded batch on its way to failing.
     this.maxBatchSize = sizes.length > 0 ? Math.min(...sizes) : 1;
+  }
+
+  /** The chain's own answer, not the minimum across chains. */
+  maxBatchSizeFor(id: ChainId | AccountId | AssetId): number {
+    return implementationFor(this.byNamespace, id).maxBatchSize;
   }
 
   /** The chain's own answer; `true` (the safe one) when its redeemer gives none. */

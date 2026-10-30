@@ -126,6 +126,16 @@ export interface VoucherRedeemerPort {
   readonly maxBatchSize: number;
 
   /**
+   * {@link maxBatchSize} for the chain `id` names (a CAIP-2 chain, CAIP-10
+   * account or CAIP-19 asset). A redemption pass covers one asset, so it is on
+   * one chain and may take that chain's own answer rather than the least
+   * capable chain's.
+   *
+   * Optional: absent is {@link maxBatchSize}.
+   */
+  maxBatchSizeFor?(id: ChainId | AccountId | AssetId): number;
+
+  /**
    * Whether this chain's replay rule makes a payer's vouchers ORDER-sensitive,
    * for the chain `id` names (a CAIP-2 chain, CAIP-10 account or CAIP-19 asset).
    *
