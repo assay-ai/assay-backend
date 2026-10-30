@@ -358,6 +358,7 @@ describe('Protocol analytics SQL against PostgreSQL', () => {
       retryStrategy: () => null,
     });
     await redis.connect();
+    const cacheWrite = jest.spyOn(redis, 'set');
     const config = new ConfigService();
     const module = await Test.createTestingModule({
       controllers: [ProtocolAnalyticsController],
@@ -382,7 +383,7 @@ describe('Protocol analytics SQL against PostgreSQL', () => {
       const before = await request(app.getHttpServer()).get(route).expect(200);
       expect(before.headers['cache-control']).toContain('no-store');
       expect(before.headers['cdn-cache-control']).toBe('no-store');
-      expect(before.body.data.cacheTtlMs).toBe(2000);
+      expect(before.body.data.cacheTtlMs).toBe(300000);
       await request(app.getHttpServer()).get('/public/analytics?range=invalid').expect(400);
       await request(app.getHttpServer()).get('/public/analytics?asset=disabled').expect(400);
       await call({
@@ -391,7 +392,11 @@ describe('Protocol analytics SQL against PostgreSQL', () => {
       });
       const cached = await request(app.getHttpServer()).get(route).expect(200);
       expect(cached.body.data.generatedAt).toBe(before.body.data.generatedAt);
-      await new Promise((resolve) => setTimeout(resolve, 2100));
+      // Expire only this suite's Redis snapshot; do not sleep for the five-minute TTL.
+      const cacheKey = String(cacheWrite.mock.calls[0][0]);
+      expect(await redis.pttl(cacheKey)).toBeGreaterThan(290000);
+      await redis.pexpire(cacheKey, 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
       const fresh = await request(app.getHttpServer()).get(route).expect(200);
       expect(fresh.body.data.totals.paidCalls).toBe(before.body.data.totals.paidCalls + 1);
       expect(BigInt(fresh.body.data.totals.revenue) - BigInt(before.body.data.totals.revenue)).toBe(

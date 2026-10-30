@@ -1,6 +1,6 @@
 import { AnalyticsRange } from '../dto/protocol-analytics.dto';
 
-export const ANALYTICS_CACHE_MS = 2_000;
+export const ANALYTICS_CACHE_MS = 5 * 60_000;
 export const DAY_MS = 86_400_000;
 
 /** Includes the partial current UTC day. Previous is the same elapsed length. */

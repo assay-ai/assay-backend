@@ -16,7 +16,7 @@ indexes. Existing call/payment/ledger writers are unchanged.
 
 ## Freshness
 
-- Redis snapshot lifetime: **2,000 ms**, measured from snapshot generation,
+- Redis snapshot lifetime: **300,000 ms (5 minutes)**, measured from snapshot generation,
   including database latency. Old timestamps are rejected even if an old Redis
   entry reappears. No extra in-memory result cache or stale-if-error fallback.
 - Concurrent reads of one asset/range share the in-flight load within a process.
@@ -24,7 +24,7 @@ indexes. Existing call/payment/ledger writers are unchanged.
   database failure remains an HTTP error, never a successful response of zeros.
 - Browser and CDN responses use `no-store`. The public per-address read limiter
   still applies. PostgreSQL reads have a 5-second statement deadline.
-- The portal polls every 3 seconds while visible, refetches on focus, and has a
+- The portal polls every 5 minutes while visible, refetches stale data on focus, and has a
   manual Refresh button. Errors hide cached figures; refresh can be retried.
 - This is a snapshot of database records, not a direct RPC or proof of balance.
 
@@ -37,6 +37,8 @@ current UTC day. The previous period has equal elapsed duration. `all` has no
 comparison, and its chart is limited to the latest 90 days while totals cover
 all recorded history. Charts use UTC dates regardless of the database session
 zone. Adoption counts distinct payer wallets, not distinct humans or customers.
+The portal plots only UTC days with funded paid activity; empty days are omitted
+from charts, while API daily rows and cohort totals remain unchanged.
 
 Payments are grouped by **call creation time**, with their currently recorded
 outcome. Consequently historical cohorts may change as pending calls finish.
