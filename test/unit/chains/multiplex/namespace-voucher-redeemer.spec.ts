@@ -43,3 +43,27 @@ describe('NamespaceVoucherRedeemer — optional doors', () => {
     await expect(redeemer.usedSeqRecord(solanaRequest)).rejects.toBeDefined();
   });
 });
+
+describe('NamespaceVoucherRedeemer — batch size', () => {
+  const redeemer = new NamespaceVoucherRedeemer(
+    new Map([
+      [
+        ChainNamespace.EIP155,
+        { maxBatchSize: 64, redeem: jest.fn(), redeemBatch: jest.fn() } as never,
+      ],
+      [
+        ChainNamespace.SOLANA,
+        { maxBatchSize: 1, redeem: jest.fn(), redeemBatch: jest.fn() } as never,
+      ],
+    ]),
+  );
+
+  it('maxBatchSize stays the minimum across chains', () => {
+    expect(redeemer.maxBatchSize).toBe(1);
+  });
+
+  it('maxBatchSizeFor answers with the named chain’s own size', () => {
+    expect(redeemer.maxBatchSizeFor(CHAIN_IDS.ROBINHOOD_TESTNET)).toBe(64);
+    expect(redeemer.maxBatchSizeFor(CHAIN_IDS.SOLANA_DEVNET)).toBe(1);
+  });
+});

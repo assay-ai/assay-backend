@@ -75,7 +75,15 @@ class FakeRedeemer {
   /** `undefined` leaves the port's method absent (the safe default, `true`). */
   ascending: boolean | undefined = undefined;
 
+  /** `undefined` leaves `maxBatchSizeFor` absent, so the pass reads `maxBatchSize`. */
+  perChain: number | undefined = undefined;
+
   constructor(readonly maxBatchSize: number) {}
+
+  get maxBatchSizeFor(): (() => number) | undefined {
+    const perChain = this.perChain;
+    return perChain === undefined ? undefined : () => perChain;
+  }
 
   get requiresAscendingSeq(): (() => boolean) | undefined {
     const ascending = this.ascending;
@@ -322,6 +330,32 @@ describe('VoucherRedemptionService — a chain that redeems any seq order', () =
 
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6', '9']]);
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(3);
+  });
+
+  it('batches at the asset chain’s size even when another chain wired caps maxBatchSize at 1', async () => {
+    // The multiplexer's `maxBatchSize` is the minimum across chains, `1` while
+    // the Solana redeemer is wired; an eip155 pass must still batch.
+    const { service, redeemer, intents } = anyOrder(
+      [pending(5, ALICE), pending(6, ALICE), pending(9, BOB)],
+      1,
+    );
+    redeemer.perChain = 64;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles).toEqual([]);
+    expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6', '9']]);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(3);
+  });
+
+  it('a chain whose own answer is 1 stays on the per-row path', async () => {
+    const { service, redeemer } = build([pending(1, ALICE), pending(2, BOB)], 64);
+    redeemer.perChain = 1;
+
+    await service.run(USDC);
+
+    expect(redeemer.batches).toEqual([]);
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['1', '2']);
   });
 
   it('never puts the same (payer, seq) twice in one batch', async () => {
