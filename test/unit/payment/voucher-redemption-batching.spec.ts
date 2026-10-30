@@ -95,8 +95,12 @@ class FakeRedeemer {
     return this.outcomeFor(request);
   }
 
+  /** Set to make `redeemBatch` throw before anything is broadcast. */
+  batchThrows = false;
+
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
     this.batches.push([...requests]);
+    if (this.batchThrows) throw new Error('node error before broadcast');
     return requests.map((request) => this.outcomeFor(request));
   }
 
@@ -131,6 +135,7 @@ function build(
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
+    findRedemptionTxRefs: jest.fn().mockResolvedValue([]),
     lapseRedemption: jest.fn().mockResolvedValue(undefined),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
     recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
@@ -347,6 +352,28 @@ describe('VoucherRedemptionService — a chain that redeems any seq order', () =
     expect(redeemer.singles).toEqual([]);
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6', '9']]);
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(3);
+  });
+
+  it('a batch that throws before broadcast falls back to singles, not a stalled pass', async () => {
+    const { service, redeemer, intents } = anyOrder([pending(5, ALICE), pending(9, BOB)], 64);
+    redeemer.batchThrows = true;
+
+    await service.run(USDC);
+
+    expect(redeemer.batches).toHaveLength(1);
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5', '9']);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(2);
+  });
+
+  it('a batch that throws after a ref was recorded is not retried singly this pass', async () => {
+    const { service, redeemer, intents, payments } = anyOrder([pending(5, ALICE)], 64);
+    redeemer.batchThrows = true;
+    payments.findRedemptionTxRefs.mockResolvedValue(['0xref']);
+
+    await service.run(USDC);
+
+    expect(redeemer.singles).toEqual([]);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });
 
   it('a chain whose own answer is 1 stays on the per-row path', async () => {

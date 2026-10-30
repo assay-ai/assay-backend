@@ -589,6 +589,11 @@ export interface RedeemableIntent {
   readonly platformFee: string;
   /** See `PaymentIntentEntity.redemptionLastError`. */
   readonly redemptionLastError: string | null;
+  /**
+   * How many transaction refs were recorded when the row was read (a ref is
+   * written before each broadcast). Optional: absent is 0.
+   */
+  readonly redemptionTxRefCount?: number;
 }
 
 /** One buyer debt that refuses paid calls — see {@link PaymentIntentRepository.findOutstandingDebts}. */
@@ -1160,6 +1165,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
+      .addSelect('COALESCE(cardinality(intent.redemption_tx_refs), 0)::int', 'redemptionTxRefCount')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail })

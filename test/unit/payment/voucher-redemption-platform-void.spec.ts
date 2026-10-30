@@ -35,6 +35,8 @@ const NOW = 1_800_000_000;
 const ORG = 'org-buyer';
 const BUYER = `${CHAIN_IDS.SOLANA_DEVNET}:9B2yKCsMTQNbMjJU3wvwhKxjvtpA6TmmbeLtPV4Totpo`;
 const PAYEE = `${CHAIN_IDS.SOLANA_DEVNET}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`;
+/** An eip155 payer: only there does the chain keep a per-seq record to ask. */
+const EVM_BUYER = `${CHAIN_IDS.ROBINHOOD_TESTNET}:0x0000000000000000000000000000000000000001`;
 /** Past `expiresAt + skew + grace + LANDING_SETTLE_SECONDS` for a voucher issued at NOW. */
 const EXPIRED_AT = new Date((NOW - 3 * 3600) * 1000);
 
@@ -59,6 +61,8 @@ function row(overrides: Partial<RedeemableIntent> = {}): RedeemableIntent {
     providerAmount: '800000',
     platformFee: '200000',
     redemptionLastError: null,
+    // The platform tried to send it: a ref is written before each broadcast.
+    redemptionTxRefCount: 1,
     ...overrides,
   };
 }
@@ -144,9 +148,14 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
       return EXPIRED;
     });
 
-    // While the redeemer cannot send: nothing is recorded, nothing is closed.
+    // While the redeemer cannot send: the platform's failure is recorded,
+    // nothing is closed.
     await service.run(USDC);
-    expect(payments.recordRedemptionError).not.toHaveBeenCalled();
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'PlatformSendFailed',
+    );
     expect(intents.voidUnredeemed).not.toHaveBeenCalled();
     expect(payments.lapseRedemption).not.toHaveBeenCalled();
 
@@ -160,7 +169,7 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
   });
 
   it('voids only once the chain says the seq was never used', async () => {
-    const expired = row();
+    const expired = row({ agentAccount: EVM_BUYER });
     const { service, intents, payments, redeemer } = build([expired], undefined, {
       usedSeq: async () => 'NONE',
     });
@@ -168,11 +177,15 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
     await service.run(USDC);
 
     expect(redeemer.usedSeqRecord).toHaveBeenCalledTimes(1);
-    expectVoided(intents, payments, 'voided:PLATFORM_UNREDEEMED', expired.holdId);
+    expect(intents.voidUnredeemed).toHaveBeenCalledWith(
+      { organizationId: ORG, id: 'intent-1', payer: EVM_BUYER, holdId: expired.holdId },
+      'voided:PLATFORM_UNREDEEMED',
+    );
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
   });
 
   it('never voids a seq the chain shows as used: it goes the VoucherSeqUsed way', async () => {
-    const expired = row();
+    const expired = row({ agentAccount: EVM_BUYER });
     const { service, intents, payments } = build([expired], undefined, {
       usedSeq: async () => 'MISMATCH',
     });
@@ -185,7 +198,7 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
   });
 
   it('keeps the hold open when the chain record cannot be read', async () => {
-    const expired = row();
+    const expired = row({ agentAccount: EVM_BUYER });
     const { service, intents, payments } = build([expired], undefined, {
       usedSeq: async () => {
         throw new Error('rpc down');
@@ -197,6 +210,41 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
     expect(intents.voidUnredeemed).not.toHaveBeenCalled();
     expect(payments.lapseRedemption).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  it('a voucher the queue never reached (no ref, no cause) stays buyer debt, not free', async () => {
+    // Otherwise a buyer who outruns the redemption queue would turn the
+    // overflow into free calls.
+    const never = row({ redemptionTxRefCount: 0 });
+    const { service, intents, payments } = build([never]);
+
+    await service.run(USDC);
+
+    expect(intents.voidUnredeemed).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledTimes(1);
+  });
+
+  it('a PlatformSendFailed cause voids even without a ref', async () => {
+    const failed = row({ redemptionTxRefCount: 0, redemptionLastError: 'PlatformSendFailed' });
+    const { service, intents, payments } = build([failed]);
+
+    await service.run(USDC);
+
+    expectVoided(intents, payments, 'voided:PLATFORM_SEND_FAILED', failed.holdId);
+  });
+
+  it('does not ask a Solana chain for a per-seq record before voiding', async () => {
+    const expired = row();
+    const { service, intents, payments, redeemer } = build([expired], undefined, {
+      usedSeq: async () => {
+        throw new Error('unsupported on solana');
+      },
+    });
+
+    await service.run(USDC);
+
+    expect(redeemer.usedSeqRecord).not.toHaveBeenCalled();
+    expectVoided(intents, payments, 'voided:PLATFORM_UNREDEEMED', expired.holdId);
   });
 
   it('UNKNOWN_REVERT:none recorded on the retries voids', async () => {

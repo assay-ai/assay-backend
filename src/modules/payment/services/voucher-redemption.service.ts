@@ -20,6 +20,7 @@ import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   DEBT_VOIDED_PREFIX,
   FEE_SPIKE_DEFERRED,
+  PLATFORM_SEND_FAILED,
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
   maxVoucherRedeemableLifeSeconds,
@@ -188,8 +189,14 @@ const UNKNOWN_REVERT_PREFIX = 'UNKNOWN_REVERT:';
  * outage cannot reach the debt default. An unlisted cause is logged as
  * unclassified so it can be added to one side.
  */
-function platformVoidTag(cause: string | null): string | null {
-  if (cause === null || cause === 'VoucherExpired') return 'UNREDEEMED';
+function platformVoidTag(cause: string | null, attempted: boolean): string | null {
+  // No recorded cause: voided only if the platform ever tried to send it (a
+  // transaction ref is written before every broadcast). A voucher the queue
+  // never reached is not proof of a platform failure — a buyer who outruns
+  // the queue on purpose would otherwise turn the overflow into free calls —
+  // so it stays buyer debt, as before.
+  if (cause === null || cause === 'VoucherExpired') return attempted ? 'UNREDEEMED' : null;
+  if (cause === PLATFORM_SEND_FAILED) return 'SEND_FAILED';
   if (cause.startsWith(UNKNOWN_REVERT_PREFIX)) return 'UNKNOWN_REVERT';
   if (cause === FEE_SPIKE_DEFERRED) return 'FEE_SPIKE_DEFERRED';
   return null;
@@ -420,6 +427,7 @@ export class VoucherRedemptionService {
         // One hold's failure must not cost the rest of the pass. The row keeps
         // its open hold and the next tick finds it again.
         blocked.add(row.agentAccount);
+        await this.recordSendFailure(row);
         this.logger.error(
           `Redemption of intent ${row.id} (seq ${row.voucherSeq}) threw past its own ` +
             `handling: ${describe(error)}`,
@@ -428,6 +436,23 @@ export class VoucherRedemptionService {
       if (stop) {
         return;
       }
+    }
+  }
+
+  /**
+   * Marks a row whose redemption threw before the chain answered with
+   * {@link PLATFORM_SEND_FAILED}, so that if it expires the platform's failure
+   * is on record (voided, not buyer debt). Never over a recorded cause. Best
+   * effort: a failure here is logged and the pass goes on.
+   */
+  private async recordSendFailure(row: RedeemableIntent): Promise<void> {
+    if (row.redemptionLastError !== null) return;
+    try {
+      await this.payments.recordRedemptionError(row.organizationId, row.id, PLATFORM_SEND_FAILED);
+    } catch (error) {
+      this.logger.warn(
+        `Could not record ${PLATFORM_SEND_FAILED} on intent ${row.id}: ${describe(error)}`,
+      );
     }
   }
 
@@ -527,16 +552,51 @@ export class VoucherRedemptionService {
       try {
         outcomes = await this.redeemer.redeemBatch(batch.map((entry) => entry.request));
       } catch (error) {
-        // One batch's failure must not cost the rest of the pass, and this
-        // process does not know whether the transaction reached the chain — so
-        // every payer in it is blocked and their holds stay open.
-        for (const entry of batch) {
-          blocked.add(entry.row.agentAccount);
-        }
         this.logger.error(
           `A redemption batch of ${batch.length} threw past its own handling: ${describe(error)}`,
         );
-        return;
+        // Broadcast or not? A transaction ref is written before every
+        // broadcast. With none on any of its rows the batch never reached the
+        // chain, so each item is tried on its own: one row that keeps throwing
+        // must not hold the whole asset back until every voucher expires.
+        // Otherwise this process does not know whether the transaction reached
+        // the chain — so every payer in it is blocked, their holds stay open,
+        // and the next pass reads the chain first.
+        let broadcast = false;
+        try {
+          for (const entry of batch) {
+            const refs = await this.payments.findRedemptionTxRefs(
+              entry.row.organizationId,
+              entry.row.id,
+            );
+            if (refs.length > (entry.row.redemptionTxRefCount ?? 0)) broadcast = true;
+          }
+        } catch {
+          // Cannot tell: assume it may have reached the chain.
+          broadcast = true;
+        }
+        if (broadcast) {
+          for (const entry of batch) {
+            blocked.add(entry.row.agentAccount);
+          }
+          return;
+        }
+        for (const entry of batch) {
+          try {
+            const landed = await this.redeemOne(entry.row);
+            if (!landed.settled) blocked.add(entry.row.agentAccount);
+            if (landed.stop) return;
+          } catch (single) {
+            blocked.add(entry.row.agentAccount);
+            await this.recordSendFailure(entry.row);
+            this.logger.error(
+              `Redemption of intent ${entry.row.id} (seq ${entry.row.voucherSeq}) threw past ` +
+                `its own handling: ${describe(single)}`,
+            );
+          }
+        }
+        queue = carried;
+        continue;
       }
 
       // Positional, and matched by index alone: a redemption carries no id the
@@ -1403,7 +1463,10 @@ export class VoucherRedemptionService {
     request: RedeemVoucherRequest,
     cause: string | null,
   ): Promise<{ stop: boolean; settled: boolean }> {
-    const tag = platformVoidTag(cause);
+    // Read with the row: this pass broadcast nothing for it (the chain refused
+    // it before any send), so the count is current.
+    const attempted = (row.redemptionTxRefCount ?? 0) > 0;
+    const tag = platformVoidTag(cause, attempted);
     if (tag !== null) {
       // A void RELEASES the hold, so it must be certain the chain never took
       // this voucher: `findLanding` only sees our own recorded transactions,
@@ -1411,7 +1474,9 @@ export class VoucherRedemptionService {
       // looked at. The chain's own `held(payer, seq)` record decides — a used
       // seq goes the `VoucherSeqUsed` way (committed, or held for a human),
       // and an unreadable record keeps the hold open for the next pass.
-      if (this.redeemer.usedSeqRecord) {
+      // eip155 only: the per-seq record exists there (D-23). Solana has none,
+      // and `findLanding` above already settled whether ours landed.
+      if (this.redeemer.usedSeqRecord && request.payer.startsWith('eip155:')) {
         let record: UsedSeqRecord;
         try {
           record = await this.redeemer.usedSeqRecord(request);

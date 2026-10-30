@@ -54,6 +54,8 @@ function row(overrides: Partial<RedeemableIntent> = {}): RedeemableIntent {
     providerAmount: '800000',
     platformFee: '200000',
     redemptionLastError: null,
+    // The platform tried to send it: a ref is written before each broadcast.
+    redemptionTxRefCount: 1,
     ...overrides,
   };
 }
