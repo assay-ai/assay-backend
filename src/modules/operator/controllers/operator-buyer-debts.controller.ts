@@ -23,7 +23,9 @@ import { OperatorBuyerDebtService } from '../services/operator-buyer-debt.servic
  * two operators together may void debts the platform caused. The void route
  * always answers 202: a second operator approves it through
  * `POST /operator/approvals/:approvalId/approve`, whose `result` is the
- * per-id outcome (`BuyerDebtVoidResultDto`).
+ * per-id outcome (`BuyerDebtVoidResultDto`). The same outcome, with the skipped
+ * side, is kept on the approval (`result`, `BuyerDebtVoidRecordDto`) for
+ * `GET /operator/approvals/:id` and the lists.
  */
 @ApiTags('Operator')
 @ApiBearerAuth()
@@ -32,8 +34,13 @@ import { OperatorBuyerDebtService } from '../services/operator-buyer-debt.servic
 export class OperatorBuyerDebtsController {
   constructor(private readonly debts: OperatorBuyerDebtService) {}
 
+  /**
+   * Only the two roles that may request and approve a void (review 2026-10-30):
+   * the list names every buyer's payer wallet across every organization, and
+   * the roles that cannot act on it have no need to read it.
+   */
   @Get()
-  @RequireRoles(OperatorRole.TRE, OperatorRole.ADJL, OperatorRole.ADJ, OperatorRole.SRE)
+  @RequireRoles(OperatorRole.TRE, OperatorRole.ADJL)
   @ApiOperation({
     summary: 'Open buyer debts, newest lapse first, with totals of everything the filters match',
   })
@@ -61,7 +68,7 @@ export class OperatorBuyerDebtsController {
     status: 400,
     description:
       'OPERATOR_DEBT_VOID_INVALID: an id is not an open buyer debt (`intentIds` names them), ' +
-      'the ids span more than one asset, or more than 500 ids',
+      'the ids span more than one asset, or more than 100 ids',
   })
   @ApiResponse({ status: 403, description: 'OPERATOR_ROLE_REQUIRED / OPERATOR_AUTHORITY_EXCEEDED' })
   async requestVoid(

@@ -25,12 +25,15 @@ import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment, MULTICALL3_ADDRESS } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
+  backgroundSendCharge,
+  backgroundSendVerdict,
+  EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM,
   EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
   estimateL1Gas,
-  exceedsCostCap,
   EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
   paddedL1Gas,
 } from './evm-l1-gas';
+import { EvmRedeemerAdmission, EvmRedeemerHourlyBudget } from './evm-redeemer-hourly-budget';
 import {
   freeBondedStake,
   PrevalidationDelegation,
@@ -86,8 +89,10 @@ const UNPLANNED_SLASH_ANSWER_TTL_MS = 30_000;
  * This is the **execution** budget. On a Nitro chain the limit sent also carries
  * the L1 posting cost in L2 gas, read per send and padded 20 % (`evm-l1-gas.ts`);
  * a send whose whole limit would cost more than
- * `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM` per voucher is not sent, and every
- * voucher it carries is a `RETRY` with `programError = FeeSpikeDeferred`.
+ * `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM` per voucher (or, near a deadline,
+ * more than the hard ceiling of 5× that), or that would take the redeemer past
+ * its hourly spend budget (`evm-redeemer-hourly-budget.ts`), is not sent, and
+ * every voucher it carries is a `RETRY` with `programError = FeeSpikeDeferred`.
  */
 export const EVM_REDEEM_BATCH_BASE_GAS = 200_000n;
 export const EVM_REDEEM_PER_VOUCHER_GAS = 120_000n;
@@ -303,6 +308,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
      * Absent, sends are not sized (the relayer's own pre-send check remains).
      */
     private readonly float: EvmSendFloat | null = null,
+    /**
+     * The redeemer's hourly spend budget, shared with held moves (review
+     * 2026-10-30 I-1). Absent: not checked.
+     */
+    private readonly hourly: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'> | null = null,
   ) {}
 
   private readonly unplannedAnswers = new Map<string, { at: number; short: boolean }>();
@@ -325,14 +335,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // costs an `eth_call` and never a mined revert (review S2-2).
     const args = [voucher, this.signatureOf(request)] as const;
     const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'redeemVoucher', args });
-    const gasLimit = await this.gasLimit(
-      chainId,
-      data,
-      1,
-      nearDeadline([voucher], state.nowSeconds),
-    );
-    if (gasLimit === null) return FEE_SPIKE_DEFERRED_OUTCOME;
-    const budget = await this.float?.budget(chainId, nearDeadline([voucher], state.nowSeconds));
+    const urgent = nearDeadline([voucher], state.nowSeconds);
+    const sized = await this.gasLimit(chainId, data, 1, urgent);
+    if (sized === null) return FEE_SPIKE_DEFERRED_OUTCOME;
+    const { gasLimit, l2BaseFee } = sized;
+    const budget = await this.float?.budget(chainId, urgent);
     if (budget && fitCount(1, gasLimit, budget) === 0) {
       throw this.floatTooLow(chainId, 1, gasLimit, budget);
     }
@@ -341,16 +348,34 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return this.decided(chainId, simulated, voucher, state);
     }
 
-    const result = await this.sendTracked(chainId, gasLimit, budget ?? null, {
+    // The hourly spend budget, last before the send: a send refused above costs it nothing.
+    const fee = l2BaseFee ?? budget?.maxFeePerGas ?? null;
+    const admission = await this.admit(
       chainId,
-      to: this.escrowAccount(chainId),
-      data,
       gasLimit,
-      purpose: `redeemVoucher seq=${request.seq}`,
-      beforeBroadcast: async (hash) => {
-        await request.recordAttempt?.(hash);
+      fee,
+      1,
+      urgent,
+      `redeemVoucher seq=${request.seq}`,
+    );
+    if (admission === null) return FEE_SPIKE_DEFERRED_OUTCOME;
+
+    const result = await this.sendTracked(
+      chainId,
+      gasLimit,
+      budget ?? null,
+      { admission, fee },
+      {
+        chainId,
+        to: this.escrowAccount(chainId),
+        data,
+        gasLimit,
+        purpose: `redeemVoucher seq=${request.seq}`,
+        beforeBroadcast: async (hash) => {
+          await request.recordAttempt?.(hash);
+        },
       },
-    });
+    );
 
     if (result.status === 'SUCCESS') {
       return { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null };
@@ -555,13 +580,14 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const { chainId, requests, vouchers, signatures, outcomes } = batch;
     let indexes = group;
     let { data, args } = this.batchCall(vouchers, signatures, indexes);
-    let gasLimit = await this.gasLimit(chainId, data, indexes.length, urgent);
-    if (gasLimit === null) {
+    let sized = await this.gasLimit(chainId, data, indexes.length, urgent);
+    if (sized === null) {
       // Not sent, and not split: singles would meet the same fees. Every
       // admissible item waits for the next pass; the rest are what they are.
       for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
       return true;
     }
+    let { gasLimit } = sized;
 
     // SIZED TO THE FLOAT. The node refuses a send whose gasLimit × maxFeePerGas
     // is above the balance, so a batch the float cannot pay is cut here, before
@@ -582,11 +608,12 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         );
         indexes = indexes.slice(0, fit);
         ({ data, args } = this.batchCall(vouchers, signatures, indexes));
-        gasLimit = await this.gasLimit(chainId, data, indexes.length, urgent);
-        if (gasLimit === null) {
+        sized = await this.gasLimit(chainId, data, indexes.length, urgent);
+        if (sized === null) {
           for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
           return false;
         }
+        ({ gasLimit } = sized);
       }
     }
 
@@ -602,21 +629,43 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return this.redeemSingles(batch, indexes);
     }
 
+    // The hourly spend budget, last before the send. Refused: the whole group
+    // waits like a fee spike (not split — singles would be charged the same).
+    const fee = sized.l2BaseFee ?? budget?.maxFeePerGas ?? null;
+    const admission = await this.admit(
+      chainId,
+      gasLimit,
+      fee,
+      indexes.length,
+      urgent,
+      `redeemVoucherBatch n=${indexes.length}`,
+    );
+    if (admission === null) {
+      for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
+      return true;
+    }
+
     let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
     try {
-      result = await this.sendTracked(chainId, gasLimit, budget, {
+      result = await this.sendTracked(
         chainId,
-        to: this.escrowAccount(chainId),
-        data,
         gasLimit,
-        purpose: `redeemVoucherBatch n=${indexes.length}`,
-        // One hash, recorded on every voucher it carries.
-        beforeBroadcast: async (hash) => {
-          for (const index of indexes) {
-            await requests[index].recordAttempt?.(hash);
-          }
+        budget,
+        { admission, fee },
+        {
+          chainId,
+          to: this.escrowAccount(chainId),
+          data,
+          gasLimit,
+          purpose: `redeemVoucherBatch n=${indexes.length}`,
+          // One hash, recorded on every voucher it carries.
+          beforeBroadcast: async (hash) => {
+            for (const index of indexes) {
+              await requests[index].recordAttempt?.(hash);
+            }
+          },
         },
-      });
+      );
     } catch (error) {
       // The node refused it: not broadcast. With earlier outcomes in hand the
       // rest is left empty rather than thrown away with them.
@@ -690,22 +739,49 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
   /**
    * `sendCall`, keeping the float's books: the worst cost comes off the cached
-   * balance after a send, and a refusal for funds empties it.
+   * balance after a send, and a refusal for funds empties it. Once the receipt
+   * is in, the hourly budget's charge becomes `gasUsed × fee` (the fee it was
+   * charged at); a send that threw keeps its estimate charged, since it may
+   * still have been broadcast.
    */
   private async sendTracked(
     chainId: ChainId,
     gasLimit: bigint,
     budget: EvmSendBudget | null,
+    charge: { admission: EvmRedeemerAdmission; fee: bigint | null },
     call: Parameters<EvmRelayerPort['sendCall']>[0],
   ): Promise<Awaited<ReturnType<EvmRelayerPort['sendCall']>>> {
+    let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
     try {
-      const result = await this.redeemer.sendCall(call);
+      result = await this.redeemer.sendCall(call);
       if (budget) this.float?.spent(chainId, gasLimit * budget.maxFeePerGas);
-      return result;
     } catch (error) {
       if (isInsufficientFunds(error)) this.float?.drained(chainId);
       throw error;
     }
+    if (charge.fee !== null && typeof result.gasUsed === 'bigint') {
+      await this.hourly?.settle(charge.admission, result.gasUsed * charge.fee);
+    }
+    return result;
+  }
+
+  /**
+   * Charges a send to the redeemer's hourly spend budget
+   * ({@link EvmRedeemerHourlyBudget}): its estimate, `gasLimit × fee` (the per-
+   * item cap × `items` when no fee is known). `null`: over budget, deferred.
+   * Without a budget every send is admitted, uncounted.
+   */
+  private async admit(
+    chainId: ChainId,
+    gasLimit: bigint,
+    fee: bigint | null,
+    items: number,
+    urgent: boolean,
+    purpose: string,
+  ): Promise<EvmRedeemerAdmission | null> {
+    if (!this.hourly) return { ticket: null };
+    const wei = backgroundSendCharge(gasLimit, fee, null, items);
+    return this.hourly.take(chainId, wei, urgent, purpose);
   }
 
   /** The refusal, and its log line, for a float that cannot pay one redemption. */
@@ -796,38 +872,50 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   // ── Internals ────────────────────────────────────────────────────────────
 
   /**
-   * The limit a redemption of `vouchers` is sent with: the execution budget
-   * plus the L1 part padded 20 %. `null` when that limit at the L2 basefee would
-   * cost more than {@link EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM} per voucher —
-   * nothing is simulated or sent, and the caller defers. Never `null` when
-   * `urgent` (a voucher within {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its
-   * deadline): deferring it any further would lose the payment, not the gas.
+   * The limit a redemption of `vouchers` is sent with — the execution budget
+   * plus the L1 part padded 20 % — and the L2 basefee it was priced at. `null`
+   * when that limit at the basefee would cost more than
+   * {@link EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM} per voucher: nothing is
+   * simulated or sent, and the caller defers. When `urgent` (a voucher within
+   * {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its deadline) the cap is waived
+   * up to the hard ceiling, {@link EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM}
+   * per voucher; above it even an urgent send is deferred, and a voucher that
+   * reaches its deadline that way lapses into buyer debt (`evm-l1-gas.ts`).
    */
   private async gasLimit(
     chainId: ChainId,
     data: `0x${string}`,
     vouchers: number,
     urgent: boolean,
-  ): Promise<bigint | null> {
+  ): Promise<{ gasLimit: bigint; l2BaseFee: bigint | null } | null> {
     const to = getAddress(this.deployment(chainId).escrow);
     const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), { to, data });
     const gasLimit = gasFor(vouchers) + paddedL1Gas(l1Gas);
     const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(vouchers);
-    if (urgent && exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
-      this.logger.warn(
-        `A redemption of ${vouchers} on ${chainId} is above the ${maxWei} wei cap ` +
-          `(${gasLimit} gas, L1 ${l1Gas}) but a voucher in it is near its deadline: sending anyway`,
-      );
-      return gasLimit;
+    const ceilingWei = EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM * BigInt(vouchers);
+    switch (backgroundSendVerdict(gasLimit, l2BaseFee, vouchers, urgent)) {
+      case 'SEND':
+        return { gasLimit, l2BaseFee };
+      case 'SEND_WAIVED':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} is above the ${maxWei} wei cap ` +
+            `(${gasLimit} gas, L1 ${l1Gas}) but a voucher in it is near its deadline: sending anyway`,
+        );
+        return { gasLimit, l2BaseFee };
+      case 'DEFER_CEILING':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
+            `at ${l2BaseFee} wei is above the ${ceilingWei} wei hard ceiling` +
+            `${urgent ? ', which the deadline waiver does not lift' : ''}; nothing was sent`,
+        );
+        return null;
+      case 'DEFER':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
+            `at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
+        );
+        return null;
     }
-    if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
-      this.logger.warn(
-        `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
-          `at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
-      );
-      return null;
-    }
-    return gasLimit;
   }
 
   /**

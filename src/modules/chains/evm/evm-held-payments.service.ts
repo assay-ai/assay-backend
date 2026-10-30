@@ -25,12 +25,15 @@ import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
+  backgroundSendCharge,
+  backgroundSendVerdict,
+  EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM,
   EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
   EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
   estimateL1Gas,
-  exceedsCostCap,
   paddedL1Gas,
 } from './evm-l1-gas';
+import { EvmRedeemerHourlyBudget } from './evm-redeemer-hourly-budget';
 import { EvmSendFloat, fitsBudget } from './evm-send-float';
 import { EvmSendRejectedError, isInsufficientFunds } from './evm-send-rejected.error';
 import { isRevert } from './evm-voucher-authority';
@@ -129,7 +132,9 @@ export class HeldSendRefusedError extends Error {
 /**
  * A held move NOT sent because the network's fees are briefly too high: the
  * limit at the L2 basefee is above `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM`
- * per record. Its message starts with {@link FEE_SPIKE_DEFERRED}, the reason the
+ * per record (above the hard ceiling of 5× that when a record is near its hold
+ * timeout), or the send would take the redeemer past its hourly spend budget
+ * (`evm-redeemer-hourly-budget.ts`). Its message starts with {@link FEE_SPIKE_DEFERRED}, the reason the
  * row backs off with; the next pass tries again.
  */
 export class HeldSendDeferredError extends Error {
@@ -160,6 +165,11 @@ export class EvmHeldPayments implements HeldPaymentsPort {
      */
     private readonly float: EvmSendFloat | null = null,
     private readonly now: () => number = () => Date.now(),
+    /**
+     * The redeemer's hourly spend budget, shared with redemption (review
+     * 2026-10-30 I-1): the same key sends both. Absent: not checked.
+     */
+    private readonly hourly: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'> | null = null,
   ) {}
 
   /** Chains whose escrow answered `totalHeld()`: the hold is there, for good. */
@@ -373,7 +383,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
     // Read only when a cap would stop the send: one `held()` per key.
     const urgent = once(() => this.nearTimeout(asset, keys));
-    const { gasLimit, estimate } = await this.gasFor(
+    const { gasLimit, estimate, l2BaseFee } = await this.gasFor(
       chainId,
       keys.length,
       data,
@@ -414,6 +424,22 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       }
       throw error;
     }
+    // The hourly spend budget, last before the send: a move refused above costs
+    // it nothing. Over it, the move waits like a fee spike.
+    const fee = l2BaseFee ?? maxFeePerGas;
+    const admission = this.hourly
+      ? await this.hourly.take(
+          chainId,
+          backgroundSendCharge(gasLimit, fee, null, keys.length),
+          urgent,
+          `${functionName} n=${keys.length}`,
+        )
+      : { ticket: null };
+    if (admission === null) {
+      throw new HeldSendDeferredError(
+        `the redeemer's hourly spend budget on ${chainId} is spent; nothing was sent`,
+      );
+    }
     let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
     try {
       result = await this.redeemer.sendCall({
@@ -431,6 +457,9 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       throw error;
     }
     if (maxFeePerGas !== null) this.float?.spent(chainId, gasLimit * maxFeePerGas);
+    if (fee !== null && typeof result.gasUsed === 'bigint') {
+      await this.hourly?.settle(admission, result.gasUsed * fee);
+    }
     if (result.status !== 'SUCCESS') {
       throw ChainErrors.payloadMalformed({
         reason: `${single} reverted: ${result.revertReason ?? 'unknown'} (${result.hash})`,
@@ -441,9 +470,11 @@ export class EvmHeldPayments implements HeldPaymentsPort {
 
   /**
    * Execution (`eth_estimateGas` less the L1 part) x 1.25, capped — the fixed
-   * fallback when the estimate fails — plus the L1 part x 1.2. Throws
-   * {@link HeldSendDeferredError}, before any simulation or send, when that
-   * limit would cost more than the per-record cap.
+   * fallback when the estimate fails — plus the L1 part x 1.2, and the L2
+   * basefee it was priced at. Throws {@link HeldSendDeferredError}, before any
+   * simulation or send, when that limit would cost more than the per-record cap
+   * — or, for a record near its hold timeout, more than the hard ceiling, which
+   * the waiver does not lift.
    */
   private async gasFor(
     chainId: ChainId,
@@ -451,7 +482,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     data: `0x${string}`,
     call: Parameters<EstimateClient['estimateContractGas']>[0],
     urgent: () => Promise<boolean>,
-  ): Promise<{ gasLimit: bigint; estimate: bigint | null }> {
+  ): Promise<{ gasLimit: bigint; estimate: bigint | null; l2BaseFee: bigint | null }> {
     const extra = BigInt(count - 1);
     const client = this.client(chainId) as unknown as Partial<EstimateClient>;
     let estimate: bigint | null = null;
@@ -482,7 +513,16 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     }
     const gasLimit = execution + paddedL1Gas(l1Gas);
     const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(count);
-    if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
+    const ceilingWei = EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM * BigInt(count);
+    // The ceiling first and without reading urgency: above it nothing is sent.
+    const verdict = backgroundSendVerdict(gasLimit, l2BaseFee, count, false);
+    if (verdict === 'DEFER_CEILING') {
+      throw new HeldSendDeferredError(
+        `${gasLimit} gas (L1 ${l1Gas}) at ${l2BaseFee} wei is above the ${ceilingWei} wei hard ` +
+          `ceiling, which no deadline lifts; nothing was sent`,
+      );
+    }
+    if (verdict === 'DEFER') {
       if (await urgent()) {
         // Near the hold's timeout: after it a refund can no longer be sent, so
         // waiting for fees to fall would cost the payment, not the gas.
@@ -490,13 +530,13 @@ export class EvmHeldPayments implements HeldPaymentsPort {
           `${call.functionName} of ${count} on ${chainId} is above the ${maxWei} wei cap ` +
             `(${gasLimit} gas, L1 ${l1Gas}) but a record in it is near its hold timeout: sending anyway`,
         );
-        return { gasLimit, estimate };
+        return { gasLimit, estimate, l2BaseFee };
       }
       throw new HeldSendDeferredError(
         `${gasLimit} gas (L1 ${l1Gas}) at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
       );
     }
-    return { gasLimit, estimate };
+    return { gasLimit, estimate, l2BaseFee };
   }
 
   /**

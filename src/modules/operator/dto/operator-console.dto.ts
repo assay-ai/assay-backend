@@ -27,6 +27,7 @@ import { ListQueryDto } from '@shared/api/dto/list-query.dto';
 import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 
 import { ApprovalMode, OperatorRole, OverrideFamily } from '../domain/override-register';
+import { BuyerDebtVoidOutcomeDto } from './operator-buyer-debts.dto';
 
 /** Who is holding the token, as the console renders them. */
 export class OperatorDto {
@@ -249,6 +250,16 @@ export class OverrideLogEntryDto {
 
   @ApiProperty()
   breakGlass: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: () => BuyerDebtVoidOutcomeDto,
+    description:
+      'A bulk buyer-debt void (`buyer_debt_void`, M-1) only: what it did, from its ' +
+      "approval's persisted result (`voidedCount`, `skippedCount` and the amounts). `null` " +
+      'while it runs, on an entry that names no approval, and on every other entry',
+  })
+  outcome?: BuyerDebtVoidOutcomeDto | null;
 }
 
 export class ListOverrideLogQueryDto extends ListQueryDto {

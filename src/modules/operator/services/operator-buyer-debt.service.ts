@@ -13,7 +13,6 @@ import {
   UNCOLLECTED_PREFIX,
 } from '@modules/payment/constants/voucher-redemption.constants';
 import {
-  FEE_SPIKE_DEFERRED,
   RedeemVoucherRequest,
   VOUCHER_REDEEMER,
   VoucherRedeemerPort,
@@ -25,6 +24,8 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
   BuyerDebtVoidItemDto,
+  BuyerDebtVoidOutcomeDto,
+  BuyerDebtVoidRecordDto,
   BuyerDebtVoidResultDto,
   DEBT_VOID_MAX_IDS,
   DebtVoidSkipReason,
@@ -63,6 +64,7 @@ export interface DebtVoidRequest {
 
 /**
  * The cause recorded on a debt suggests the PLATFORM failed to redeem it —
+ * `VoucherExpired` or `UNKNOWN_REVERT:*`, `uncollected:` looked through;
  * the same test as `OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL`. A label for the
  * operator, never a decision.
  */
@@ -71,11 +73,9 @@ export function suggestsPlatformCause(lastError: string | null): boolean {
   const cause = lastError.startsWith(UNCOLLECTED_PREFIX)
     ? lastError.slice(UNCOLLECTED_PREFIX.length)
     : lastError;
-  return (
-    cause === 'VoucherExpired' ||
-    cause === FEE_SPIKE_DEFERRED ||
-    cause.startsWith('UNKNOWN_REVERT:')
-  );
+  // Not `FeeSpikeDeferred`: a deferral is never written to a row (review
+  // 2026-10-30 M-1), so a voucher that lapsed during a spike reads `VoucherExpired`.
+  return cause === 'VoucherExpired' || cause.startsWith('UNKNOWN_REVERT:');
 }
 
 /**
@@ -150,7 +150,13 @@ export class OperatorBuyerDebtService {
    */
   async requestVoid(request: DebtVoidRequest): Promise<ApprovalQueuedDto> {
     const ids = [...new Set(request.intentIds)].sort();
-    if (ids.length === 0 || ids.length > DEBT_VOID_MAX_IDS) {
+    // The raw list too, not only the distinct ids: the DTO's bound is on what
+    // was sent, and a caller that skips the DTO must meet the same one.
+    if (
+      ids.length === 0 ||
+      ids.length > DEBT_VOID_MAX_IDS ||
+      request.intentIds.length > DEBT_VOID_MAX_IDS
+    ) {
       throw OperatorErrors.debtVoidInvalid({
         detail: `between 1 and ${DEBT_VOID_MAX_IDS} intent ids per request`,
       });
@@ -203,6 +209,14 @@ export class OperatorBuyerDebtService {
   /**
    * The approved request: the register entry and the approval commit first,
    * then each pinned id is voided or skipped with its reason.
+   *
+   * The outcome is then kept WITH THE APPROVAL (`operator_approvals.result`,
+   * review 2026-10-30 I-3), so it outlives the HTTP response: a console that
+   * lost the response reads it back from `GET /operator/approvals/:id`, and the
+   * activity feed shows its counts. Written in the loop's `finally`, so a run
+   * that stops part-way still records what it did, with the ids it never
+   * reached as `NOT_ATTEMPTED` and `complete: false`. Nothing here depends on
+   * the client still listening: the loop and the write run to the end either way.
    */
   private async execute(
     requester: OperatorSession,
@@ -235,7 +249,14 @@ export class OperatorBuyerDebtService {
       async () => ({
         value: null,
         before: { ...pinned, state: 'OPEN_BUYER_DEBT' },
-        after: { ...pinned, state: 'APPROVED_FOR_VOID', outcome: OPERATOR_DEBT_VOID_OUTCOME },
+        // `approvalId` names the approval whose `result` holds what the void
+        // did: the register is append-only, so the outcome cannot be added here.
+        after: {
+          ...pinned,
+          state: 'APPROVED_FOR_VOID',
+          outcome: OPERATOR_DEBT_VOID_OUTCOME,
+          ...(approver ? { approvalId: approver.approvalId } : {}),
+        },
       }),
     );
 
@@ -243,10 +264,16 @@ export class OperatorBuyerDebtService {
     const approvalId = (approver as OperatorApprover).approvalId;
     const items: BuyerDebtVoidItemDto[] = [];
     let voidedAmount = 0n;
-    for (const id of ids) {
-      const { skipReason, amount } = await this.voidOne(id, payload.assetId);
-      items.push({ intentId: id, result: skipReason ? 'SKIPPED' : 'VOIDED', skipReason });
-      if (!skipReason) voidedAmount += amount;
+    let complete = false;
+    try {
+      for (const id of ids) {
+        const { skipReason, amount } = await this.voidOne(id, payload.assetId);
+        items.push({ intentId: id, result: skipReason ? 'SKIPPED' : 'VOIDED', skipReason });
+        if (!skipReason) voidedAmount += amount;
+      }
+      complete = true;
+    } finally {
+      await this.recordOutcome(approvalId, payload, items, voidedAmount, complete);
     }
     const voidedCount = items.filter((item) => item.result === 'VOIDED').length;
     this.logger.warn(
@@ -264,6 +291,41 @@ export class OperatorBuyerDebtService {
       voidedAmount: voidedAmount.toString(),
       items,
     };
+  }
+
+  /**
+   * Keeps the outcome with the approval. Never throws: the voids are done, and
+   * losing their summary must not hide the result the caller is about to get.
+   */
+  private async recordOutcome(
+    approvalId: string,
+    payload: DebtVoidPayload,
+    processed: readonly BuyerDebtVoidItemDto[],
+    voidedAmount: bigint,
+    complete: boolean,
+  ): Promise<void> {
+    const reached = new Set(processed.map((item) => item.intentId));
+    const items: BuyerDebtVoidItemDto[] = [
+      ...processed,
+      ...payload.intentIds
+        .filter((id) => !reached.has(id))
+        .map((id) => ({
+          intentId: id,
+          result: 'SKIPPED' as const,
+          skipReason: 'NOT_ATTEMPTED' as const,
+        })),
+    ];
+    const record = debtVoidRecord(approvalId, payload, items, voidedAmount, complete, new Date());
+    const stored = await this.approvals.recordResult(
+      approvalId,
+      record as unknown as Record<string, unknown>,
+    );
+    if (!stored) {
+      this.logger.error(
+        `M-1 approval ${approvalId}: the outcome (voided ${record.voidedCount}, skipped ` +
+          `${record.skippedCount}${complete ? '' : ', incomplete'}) could not be kept with the approval`,
+      );
+    }
   }
 
   /** One id: `null` skip reason when voided. Never throws. */
@@ -383,6 +445,61 @@ function toRedeemRequest(row: PaymentIntentEntity): RedeemVoucherRequest | null 
     expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
     signature: row.voucherSignature,
     delegate: (row.voucherDelegate as AccountId | null) ?? null,
+  };
+}
+
+/** The persisted record of a bulk void: the approve result plus the skipped side. */
+export function debtVoidRecord(
+  approvalId: string,
+  payload: DebtVoidPayload,
+  items: readonly BuyerDebtVoidItemDto[],
+  voidedAmount: bigint,
+  complete: boolean,
+  now: Date,
+): BuyerDebtVoidRecordDto {
+  const voidedCount = items.filter((item) => item.result === 'VOIDED').length;
+  const requested = BigInt(payload.totalAmount);
+  return {
+    approvalId,
+    assetId: payload.assetId,
+    decimals: payload.decimals,
+    requestedCount: payload.intentIds.length,
+    requestedAmount: payload.totalAmount,
+    voidedCount,
+    voidedAmount: voidedAmount.toString(),
+    skippedCount: payload.intentIds.length - voidedCount,
+    skippedAmount: (requested > voidedAmount ? requested - voidedAmount : 0n).toString(),
+    complete,
+    recordedAt: now.toISOString(),
+    items: [...items],
+  };
+}
+
+/**
+ * The counts and amounts of a persisted record, for the activity feed. `null`
+ * when `result` is not one (still running, or another action's).
+ */
+export function debtVoidOutcome(result: unknown): BuyerDebtVoidOutcomeDto | null {
+  const record = result as Partial<BuyerDebtVoidRecordDto> | null | undefined;
+  if (
+    !record ||
+    typeof record.approvalId !== 'string' ||
+    typeof record.voidedCount !== 'number' ||
+    typeof record.skippedCount !== 'number'
+  ) {
+    return null;
+  }
+  return {
+    approvalId: record.approvalId,
+    assetId: String(record.assetId),
+    decimals: Number(record.decimals),
+    requestedCount: Number(record.requestedCount),
+    requestedAmount: String(record.requestedAmount),
+    voidedCount: record.voidedCount,
+    voidedAmount: String(record.voidedAmount),
+    skippedCount: record.skippedCount,
+    skippedAmount: String(record.skippedAmount),
+    complete: record.complete === true,
   };
 }
 

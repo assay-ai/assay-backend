@@ -12,14 +12,21 @@ import {
   OperatorRole,
 } from '@modules/operator/domain/override-register';
 import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+
 import {
+  BuyerDebtVoidRecordDto,
   BuyerDebtVoidResultDto,
+  DEBT_VOID_MAX_IDS,
   ListOperatorBuyerDebtsQueryDto,
+  RequestBuyerDebtVoidBodyDto,
 } from '@modules/operator/dto/operator-buyer-debts.dto';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
 import {
   DEBT_VOID_APPROVAL_ACTION,
+  debtVoidOutcome,
   OperatorBuyerDebtService,
   suggestsPlatformCause,
 } from '@modules/operator/services/operator-buyer-debt.service';
@@ -129,6 +136,13 @@ function build(options: {
       expireStale: async () => 0,
       findOneBy: async ({ id }: { id: string }) => stored.get(id) ?? null,
       find: async () => [],
+      // The fake keeps no status, so it stores on any row it holds.
+      recordResult: jest.fn(async (id: string, result: Record<string, unknown>) => {
+        const row = stored.get(id);
+        if (!row) return false;
+        row.result = result;
+        return true;
+      }),
     } as never,
     { findById: async (id: string) => ({ subject: `${id}@` }) } as never,
     {
@@ -263,7 +277,9 @@ describe('OperatorBuyerDebtService.list', () => {
   it.each([
     ['VoucherExpired', true],
     ['UNKNOWN_REVERT:0xdeadbeef', true],
-    ['FeeSpikeDeferred', true],
+    // Never written to a row (review 2026-10-30 M-1): not a platform cause here.
+    ['FeeSpikeDeferred', false],
+    ['uncollected:UNKNOWN_REVERT:none', true],
     ['uncollected:VoucherExpired', true],
     ['EscrowInsufficient', false],
     ['DelegateIsRevoked', false],
@@ -303,6 +319,9 @@ describe('PaymentIntentRepository.operatorDebtsQuery', () => {
       `("intent"."hold_released_at" IS NULL OR "intent"."redemption_last_error" LIKE 'uncollected:%')`,
     );
     expect(sql).toContain("LIKE 'UNKNOWN\\_REVERT:%'");
+    // M-1 (review 2026-10-30): a deferral is never recorded, so it is not in the label.
+    expect(sql).toContain("= 'VoucherExpired'");
+    expect(sql).not.toContain('FeeSpikeDeferred');
     expect(params).toEqual(
       expect.arrayContaining([
         'eip155:42161',
@@ -520,5 +539,164 @@ describe('OperatorBuyerDebtService — on approval', () => {
 
     expect(redeemer.usedSeqRecord).not.toHaveBeenCalled();
     expect(intents.voidDebt).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OperatorBuyerDebtService — at most 100 ids per request (review 2026-10-30 I-3)', () => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
+
+  it('is 100', () => {
+    expect(DEBT_VOID_MAX_IDS).toBe(100);
+  });
+
+  it('the DTO refuses 101 ids and accepts 100', async () => {
+    const body = (n: number) =>
+      plainToInstance(RequestBuyerDebtVoidBodyDto, {
+        intentIds: Array.from({ length: n }, (_, i) => uuid(i + 1)),
+        reason: REASON,
+      });
+    expect((await validate(body(101))).map((e) => e.property)).toContain('intentIds');
+    expect(await validate(body(100))).toEqual([]);
+  });
+
+  it('the service refuses 101 ids, and 101 entries that are 100 distinct ids, before any read', async () => {
+    const { service, payments, stored } = build({ debts: [] });
+    const hundred = Array.from({ length: 100 }, (_, i) => uuid(i + 1));
+
+    for (const intentIds of [
+      [...hundred, uuid(101)],
+      [...hundred, hundred[0]],
+    ]) {
+      await expectErrorCodeAsync(
+        () => service.requestVoid({ operator: TRE, intentIds, reason: REASON }),
+        'OPERATOR_DEBT_VOID_INVALID',
+      );
+    }
+    expect(payments.findOperatorDebts).not.toHaveBeenCalled();
+    expect(stored.size).toBe(0);
+  });
+});
+
+describe('OperatorBuyerDebtService — the outcome is kept with the approval (review 2026-10-30 I-3)', () => {
+  async function approvedRun(voidDebt?: (org: string, id: string) => boolean) {
+    const built = build({
+      debts: [debt(ids.a, { voucherSeq: '1' }), debt(ids.b, { voucherSeq: '2' }), debt(ids.c)],
+      records: { '2': 'HELD' },
+      voidDebt,
+    });
+    const queued = await built.service.requestVoid({
+      operator: TRE,
+      intentIds: [ids.a, ids.b, ids.c],
+      reason: REASON,
+    });
+    return { ...built, queued };
+  }
+
+  it('persists every item, the counts and the amounts; GET answers it; the response is unchanged', async () => {
+    const { approvals, queued } = await approvedRun();
+
+    const decision = await approvals.approve(queued.approvalId, approverOf(LEAD), null);
+
+    // The approve response keeps its shape: no skipped fields, no record fields.
+    expect(Object.keys(decision.result as object).sort()).toEqual(
+      [
+        'approvalId',
+        'assetId',
+        'decimals',
+        'requestedCount',
+        'requestedAmount',
+        'voidedCount',
+        'voidedAmount',
+        'items',
+      ].sort(),
+    );
+
+    const record = (await approvals.get(queued.approvalId))
+      .result as unknown as BuyerDebtVoidRecordDto;
+    expect(record).toEqual({
+      approvalId: queued.approvalId,
+      assetId: EVM_USDC,
+      decimals: 6,
+      requestedCount: 3,
+      requestedAmount: '3000000',
+      voidedCount: 2,
+      voidedAmount: '2000000',
+      skippedCount: 1,
+      skippedAmount: '1000000',
+      complete: true,
+      recordedAt: expect.any(String),
+      items: [
+        { intentId: ids.a, result: 'VOIDED', skipReason: null },
+        { intentId: ids.b, result: 'SKIPPED', skipReason: 'SEQ_USED_ON_CHAIN' },
+        { intentId: ids.c, result: 'VOIDED', skipReason: null },
+      ],
+    });
+  });
+
+  it('records 0 voided as 0 voided (the console once said "voided 1")', async () => {
+    const { approvals, queued } = await approvedRun(() => false);
+
+    await approvals.approve(queued.approvalId, approverOf(LEAD), null);
+
+    expect(debtVoidOutcome((await approvals.get(queued.approvalId)).result)).toMatchObject({
+      voidedCount: 0,
+      skippedCount: 3,
+      voidedAmount: '0',
+      skippedAmount: '3000000',
+    });
+  });
+
+  it('names its approval in the register entry, so the activity feed can find the outcome', async () => {
+    const { approvals, queued, entries } = await approvedRun();
+
+    await approvals.approve(queued.approvalId, approverOf(LEAD), null);
+
+    expect(entries[0].after).toMatchObject({ approvalId: queued.approvalId, count: 3 });
+  });
+
+  it('a run that stops part-way still records what it did, the rest NOT_ATTEMPTED', async () => {
+    const { service, approvals, queued } = await approvedRun();
+    const voidOne = (service as unknown as { voidOne: (id: string) => Promise<unknown> }).voidOne;
+    let calls = 0;
+    jest
+      .spyOn(service as unknown as { voidOne: () => Promise<unknown> }, 'voidOne')
+      .mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        calls += 1;
+        if (calls === 2) throw new Error('connection reset');
+        return (voidOne as (...a: unknown[]) => Promise<unknown>).apply(service, args);
+      });
+
+    await expect(approvals.approve(queued.approvalId, approverOf(LEAD), null)).rejects.toThrow(
+      'connection reset',
+    );
+
+    const record = (await approvals.get(queued.approvalId))
+      .result as unknown as BuyerDebtVoidRecordDto;
+    expect(record).toMatchObject({
+      complete: false,
+      voidedCount: 1,
+      skippedCount: 2,
+      items: [
+        { intentId: ids.a, result: 'VOIDED', skipReason: null },
+        { intentId: ids.b, result: 'SKIPPED', skipReason: 'NOT_ATTEMPTED' },
+        { intentId: ids.c, result: 'SKIPPED', skipReason: 'NOT_ATTEMPTED' },
+      ],
+    });
+  });
+
+  it('a result that cannot be stored never fails the approval', async () => {
+    const { approvals, queued } = await approvedRun();
+    jest.spyOn(approvals, 'recordResult').mockImplementation(async () => false);
+
+    const decision = await approvals.approve(queued.approvalId, approverOf(LEAD), null);
+
+    expect((decision.result as BuyerDebtVoidResultDto).voidedCount).toBe(2);
+  });
+});
+
+describe('debtVoidOutcome', () => {
+  it('is null for anything that is not a void record', () => {
+    expect(debtVoidOutcome(null)).toBeNull();
+    expect(debtVoidOutcome({ some: 'other result' })).toBeNull();
   });
 });

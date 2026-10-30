@@ -568,13 +568,20 @@ describe('EvmGasGrantService', () => {
 
   describe('the relayer’s global hourly budget', () => {
     it('refuses RELAYER_FLOAT_LOW when it is spent, sends nothing, and releases the reservation', async () => {
-      const take = jest.fn().mockResolvedValue(false);
+      const take = jest.fn().mockResolvedValue(null);
       service = build({ take });
 
       const outcome = await service.grantWithdrawGas(ORGANIZATION, BUYER);
 
       expect(outcome).toEqual({ kind: 'REFUSED', reason: 'RELAYER_FLOAT_LOW' });
-      expect(take).toHaveBeenCalledWith(CHAIN, 'withdraw gas grant');
+      // Charged in wei — the grant plus its own transfer — on the reserved lane:
+      // a matured withdrawal means the account holds escrow.
+      const wei = (ESTIMATED_GAS * feePerGas * 12n) / 10n;
+      expect(take).toHaveBeenCalledWith(CHAIN, {
+        wei: wei + 21_000n * feePerGas,
+        purpose: 'withdraw gas grant',
+        funded: true,
+      });
       expect(sendValue).not.toHaveBeenCalled();
       expect(grants.reservations.size).toBe(0);
     });

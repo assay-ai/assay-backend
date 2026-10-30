@@ -306,7 +306,7 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(EVM_GAS_GRANT_CONFIG) private readonly config: EvmGasGrantConfig,
     /**
-     * The relayer's global hourly send budget, shared with relayed requests.
+     * The relayer's global hourly spend budget, shared with relayed requests.
      * Absent: not checked.
      */
     @Optional()
@@ -492,10 +492,20 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
       );
     }
 
-    // 7b. The relayer's global hourly budget, across every buyer. Taken only
-    //     once this grant holds the reservation, so a grant refused above
-    //     costs it nothing. Spent: the float cannot cover it right now.
-    if (this.hourly && !(await this.hourly.take(chainId, 'withdraw gas grant'))) {
+    // 7b. The relayer's global hourly spend budget, across every buyer. Taken
+    //     only once this grant holds the reservation, so a grant refused above
+    //     costs it nothing. Charged the grant's value plus its own 21 000-gas
+    //     transfer at the quoted fee. A grant is only ever for a buyer whose
+    //     withdrawal has matured, so the account always holds escrow and may
+    //     use the reserved lane. Spent: the float cannot cover it right now.
+    if (
+      this.hourly &&
+      !(await this.hourly.take(chainId, {
+        wei: wei + VALUE_TRANSFER_GAS * fees.maxFeePerGas,
+        purpose: 'withdraw gas grant',
+        funded: true,
+      }))
+    ) {
       await this.release(account);
       return refuse(GasGrantRefusal.RELAYER_FLOAT_LOW);
     }
@@ -673,6 +683,9 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
     return client;
   }
 }
+
+/** The gas of a plain value transfer, which a grant itself costs the relayer. */
+const VALUE_TRANSFER_GAS = 21_000n;
 
 function refuse(reason: GasGrantRefusal): GasGrantOutcome {
   return { kind: 'REFUSED', reason };

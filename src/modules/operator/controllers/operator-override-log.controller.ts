@@ -2,6 +2,7 @@ import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { OverrideLogEntryEntity } from '@database/postgres/entities/override-log-entry.entity';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { ApiCursorPage, CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
@@ -10,6 +11,7 @@ import { OperatorAuthGuard, OperatorRolesGuard } from '@shared/auth';
 import { lookupOverride, OverrideFamily } from '../domain/override-register';
 import { ListOverrideLogQueryDto, OverrideLogEntryDto } from '../dto/operator-console.dto';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
+import { debtVoidOutcome, DEBT_VOID_TARGET } from '../services/operator-buyer-debt.service';
 
 /**
  * The register, read.
@@ -40,6 +42,7 @@ export class OperatorOverrideLogController {
   constructor(
     private readonly entries: OverrideLogEntryRepository,
     private readonly operators: OperatorRepository,
+    private readonly approvals: OperatorApprovalRepository,
   ) {}
 
   @Get()
@@ -60,6 +63,7 @@ export class OperatorOverrideLogController {
     );
 
     const subjects = await this.resolveSubjects(page.items);
+    const outcomes = await this.debtVoidOutcomes(page.items);
 
     const items: OverrideLogEntryDto[] = page.items.map((row) => ({
       id: row.id,
@@ -85,9 +89,37 @@ export class OperatorOverrideLogController {
       after: row.after,
       ticketRef: row.ticketRef,
       breakGlass: row.breakGlass,
+      ...(row.targetType === DEBT_VOID_TARGET
+        ? { outcome: outcomes.get(approvalIdOf(row)) ?? null }
+        : {}),
     }));
 
     return new CursorPageDto(items, page.pageInfo.nextCursor);
+  }
+
+  /**
+   * A bulk buyer-debt void's entry is written BEFORE the voids run (the
+   * register is append-only), so its `after` carries only what was pinned and
+   * the approval's id. What the void did is kept with that approval
+   * (`operator_approvals.result`); it is read here, in one query per page, so
+   * the feed can say "voided N, skipped M" rather than repeat the request.
+   */
+  private async debtVoidOutcomes(
+    rows: readonly OverrideLogEntryEntity[],
+  ): Promise<Map<string, ReturnType<typeof debtVoidOutcome>>> {
+    const ids = [
+      ...new Set(
+        rows
+          .filter((row) => row.targetType === DEBT_VOID_TARGET)
+          .map(approvalIdOf)
+          .filter((id) => id !== ''),
+      ),
+    ];
+    const found = new Map<string, ReturnType<typeof debtVoidOutcome>>();
+    for (const approval of await this.approvals.findManyById(ids)) {
+      found.set(approval.id, debtVoidOutcome(approval.result));
+    }
+    return found;
   }
 
   private async resolveSubjects(
@@ -106,6 +138,12 @@ export class OperatorOverrideLogController {
     }
     return map;
   }
+}
+
+/** The approval a bulk void's entry names in `after.approvalId`; `''` when it names none. */
+function approvalIdOf(row: OverrideLogEntryEntity): string {
+  const id = (row.after as { approvalId?: unknown } | null)?.approvalId;
+  return typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) ? id : '';
 }
 
 /**

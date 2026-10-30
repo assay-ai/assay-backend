@@ -18,10 +18,11 @@ import { HeldStatus } from '@modules/payment/ports/held-payments.port';
 import { FEE_SPIKE_DEFERRED } from '@modules/payment/ports/voucher-redeemer.port';
 
 import { EvmSendFloat } from '@modules/chains/evm/evm-send-float';
+import { EvmRedeemerHourlyBudget } from '@modules/chains/evm/evm-redeemer-hourly-budget';
 import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import { HELD_TIMEOUT_SECONDS } from '@modules/payment/ports/held-payments.port';
 
-import { fakeNodeInterface } from './helpers/fake-node-interface';
+import { L2_BASE_FEE, fakeNodeInterface } from './helpers/fake-node-interface';
 
 const CHAIN = 'eip155:46630' as ChainId;
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3` as AssetId;
@@ -41,6 +42,7 @@ function build(
     nodeInterface?: jest.Mock;
     float?: EvmSendFloat;
     now?: number;
+    hourly?: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'>;
   } = {},
 ) {
   const reads: Array<{
@@ -95,6 +97,7 @@ function build(
     options.live ? new Set([CHAIN]) : new Set(),
     options.float ?? null,
     () => options.now ?? Date.now(),
+    options.hourly ?? null,
   );
   return { service, reads, sent, estimates };
 }
@@ -495,9 +498,10 @@ describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
   }
 
   it('waives the cost cap for a record within the waiver window of its hold timeout', async () => {
+    // 250k execution + 1.2M L1 at 0.02 gwei is 2.9e-5 ETH: over the cap, under the ceiling.
     const { service, sent } = build(heldRecord(600), {
-      estimate: 12_000_000n,
-      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+      estimate: 1_200_000n,
+      nodeInterface: fakeNodeInterface({ l1Gas: 1_000_000n }),
       now: NOW_MS,
     });
 
@@ -506,11 +510,62 @@ describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
     expect(sent).toHaveLength(1);
   });
 
+  it('defers even a record near its timeout above the hard ceiling: the waiver is bounded', async () => {
+    const { service, sent, reads } = build(heldRecord(600), {
+      estimate: 12_000_000n,
+      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+      now: NOW_MS,
+    });
+
+    const error = await service.refund(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(HeldSendDeferredError);
+    expect((error as Error).message).toMatch(/hard ceiling/);
+    expect(sent).toEqual([]);
+    expect(reads.filter((read) => read.account)).toEqual([]);
+  });
+
+  it('defers a move the hourly budget refuses, after the simulation and before the send', async () => {
+    const hourly = { take: jest.fn(async () => null), settle: jest.fn(async () => undefined) };
+    const { service, sent, reads } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+
+    const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(HeldSendDeferredError);
+    expect((error as Error).message.startsWith(`${FEE_SPIKE_DEFERRED}: `)).toBe(true);
+    expect(reads.filter((read) => read.account)).toHaveLength(1);
+    expect(sent).toEqual([]);
+    // Charged gasLimit x basefee; urgency is passed lazily.
+    const [, wei, urgent] = hourly.take.mock.calls[0] as unknown as [unknown, bigint, unknown];
+    expect(wei).toBe(125_000n * L2_BASE_FEE);
+    expect(typeof urgent).toBe('function');
+  });
+
+  it('sends a move the hourly budget admits', async () => {
+    const hourly = {
+      take: jest.fn(async () => ({ ticket: null })),
+      settle: jest.fn(async () => undefined),
+    };
+    const { service, sent } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+
+    await service.collect(ASSET, one);
+
+    expect(sent).toHaveLength(1);
+  });
+
   it('still defers a record far from its timeout, and one already past it', async () => {
     for (const secondsLeft of [86_400, -60]) {
       const { service, sent } = build(heldRecord(secondsLeft), {
-        estimate: 12_000_000n,
-        nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+        estimate: 1_200_000n,
+        nodeInterface: fakeNodeInterface({ l1Gas: 1_000_000n }),
         now: NOW_MS,
       });
 

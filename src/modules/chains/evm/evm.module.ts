@@ -50,7 +50,21 @@ import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EVM_RELAYER_FLOAT_CRITICAL_WEI } from './evm-relayer-float.constants';
-import { EVM_RELAYER_HOURLY_BUDGET, EvmRelayerHourlyBudget } from './evm-relayer-hourly-budget';
+import {
+  DEFAULT_EVM_RELAYER_HOURLY_SPEND_WEI,
+  DEFAULT_EVM_RELAYER_RESERVED_LANE_WEI,
+  EVM_RELAYER_HOURLY_BUDGET,
+  EVM_RELAYER_HOURLY_SPEND_WEI_ENV,
+  EVM_RELAYER_RESERVED_LANE_WEI_ENV,
+  EvmRelayerHourlyBudget,
+} from './evm-relayer-hourly-budget';
+import {
+  DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
+  EVM_REDEEMER_HOURLY_BUDGET,
+  EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
+  EvmRedeemerHourlyBudget,
+} from './evm-redeemer-hourly-budget';
+import { readWeiBudget } from './evm-hourly-wei-budget';
 import { EVM_REDEEMER_SEND_FLOAT, EvmSendFloat, parseSendReserveWei } from './evm-send-float';
 import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { loadChainParamsFallback } from './chain-params-fallback';
@@ -367,6 +381,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         redeemer: never,
         config: ConfigService,
         float: EvmSendFloat,
+        hourly: EvmRedeemerHourlyBudget | null,
       ) =>
         new EvmHeldPayments(
           clients,
@@ -374,6 +389,8 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           redeemer,
           parseHoldLiveChains(config.get<string>('EVM_HOLD_LIVE_CHAINS')),
           float,
+          () => Date.now(),
+          hourly,
         ),
       inject: [
         EVM_RPC_CLIENTS,
@@ -381,6 +398,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         EVM_REDEEMER,
         ConfigService,
         EVM_REDEEMER_SEND_FLOAT,
+        EVM_REDEEMER_HOURLY_BUDGET,
       ],
     },
     {
@@ -408,11 +426,48 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       inject: [{ token: CacheService, optional: true }, ALERT_PORT],
     },
     {
-      /** The relayer's global hourly send budget (relayed requests and gas grants). */
+      /**
+       * The relayer's global hourly spend budget in wei (relayed requests and
+       * gas grants), with its reserved lane for accounts holding escrow.
+       */
       provide: EVM_RELAYER_HOURLY_BUDGET,
-      useFactory: (cache: CacheService | undefined) =>
-        cache ? new EvmRelayerHourlyBudget(cache) : null,
-      inject: [{ token: CacheService, optional: true }],
+      useFactory: (cache: CacheService | undefined, config: ConfigService) =>
+        cache
+          ? new EvmRelayerHourlyBudget(
+              cache,
+              readWeiBudget(
+                config.get<string>(EVM_RELAYER_HOURLY_SPEND_WEI_ENV),
+                DEFAULT_EVM_RELAYER_HOURLY_SPEND_WEI,
+                EVM_RELAYER_HOURLY_SPEND_WEI_ENV,
+              ),
+              readWeiBudget(
+                config.get<string>(EVM_RELAYER_RESERVED_LANE_WEI_ENV),
+                DEFAULT_EVM_RELAYER_RESERVED_LANE_WEI,
+                EVM_RELAYER_RESERVED_LANE_WEI_ENV,
+              ),
+            )
+          : null,
+      inject: [{ token: CacheService, optional: true }, ConfigService],
+    },
+    {
+      /**
+       * The REDEEMER's hourly spend budget in wei, shared by redemptions and
+       * held moves (one key sends both). `null` without Redis: not checked.
+       */
+      provide: EVM_REDEEMER_HOURLY_BUDGET,
+      useFactory: (cache: CacheService | undefined, config: ConfigService, alerts: AlertPort) =>
+        cache
+          ? new EvmRedeemerHourlyBudget(
+              cache,
+              alerts,
+              readWeiBudget(
+                config.get<string>(EVM_REDEEMER_HOURLY_SPEND_WEI_ENV),
+                DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
+                EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
+              ),
+            )
+          : null,
+      inject: [{ token: CacheService, optional: true }, ConfigService, ALERT_PORT],
     },
     {
       // A2: the reconciler names a deposit no intent credited. Read-only.
@@ -435,6 +490,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         tightenDelay: EvmTightenDelayProbe,
         slashRecords: EvmSlashRecordRepository | undefined,
         float: EvmSendFloat,
+        hourly: EvmRedeemerHourlyBudget | null,
       ) =>
         new EvmVoucherRedeemer(
           clients,
@@ -445,6 +501,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           tightenDelay,
           slashRecords ?? null,
           float,
+          hourly,
         ),
       // The REDEEMER, not the relayer: `redeemVoucher[Batch]` accepts only
       // `Config.params().redeemer` as sender.
@@ -457,6 +514,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         // Review 2026-10-24 wave 2 M-2: who caused a provider's stake shortfall.
         { token: EvmSlashRecordRepository, optional: true },
         EVM_REDEEMER_SEND_FLOAT,
+        EVM_REDEEMER_HOURLY_BUDGET,
       ],
     },
     {
