@@ -127,6 +127,7 @@ function build(
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     releaseHold: jest.fn().mockResolvedValue(true),
+    voidUnredeemed: jest.fn().mockResolvedValue(true),
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),

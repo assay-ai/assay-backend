@@ -1405,6 +1405,59 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * Records a PAYER-side block (`cause`, e.g. `PayerBlocked`) on every rail-B
+   * voucher of `assetId` still awaiting redemption whose payer organization,
+   * payer account or delegate is blocked — on the platform blocklist
+   * (`organizationIds`, `walletKeys`) or on chain (`chainAccounts`). The queue
+   * leaves such rows out, so nothing else records why they are frozen; a
+   * voucher that expires while its payer is blocked must close as buyer debt,
+   * not as a platform failure (whose close records no cause at all).
+   *
+   * Never overwrites a cause in `keep` (provider-caused ones: the provider
+   * still forfeits), a closed outcome, or the same cause. A no-op when nothing
+   * is blocked.
+   */
+  async recordPayerBlocks(
+    assetId: string,
+    blocked: RedemptionExclusions,
+    cause: string,
+    keep: readonly string[],
+  ): Promise<void> {
+    if (!hasExclusions(blocked)) return;
+    const key = (column: string) =>
+      `(split_part("${column}", ':', 1) || ':' || CASE WHEN split_part("${column}", ':', 1) = 'eip155' ` +
+      `THEN lower(split_part("${column}", ':', 3)) ELSE split_part("${column}", ':', 3) END)`;
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = $2
+        WHERE "organization_id" IS NOT NULL
+          AND "asset_id" = $1
+          AND "rail" = 'RAIL_B_VOUCHER'
+          AND "status" = 'SETTLED'
+          AND "hold_id" IS NOT NULL
+          AND "hold_released_at" IS NULL
+          AND ("redemption_lapsed_at" IS NULL OR "redemption_replaced_at" IS NOT NULL)
+          AND ("redemption_last_error" IS NULL OR NOT (
+                "redemption_last_error" = $2
+                OR "redemption_last_error" = ANY($3::text[])
+                OR ${CLOSED_OUTCOME_SQL('"payment_intents"')}))
+          AND ("organization_id"::text = ANY($4::text[])
+               OR ${key('agent_account')} = ANY($5::text[])
+               OR ("voucher_delegate" IS NOT NULL AND ${key('voucher_delegate')} = ANY($5::text[]))
+               OR lower("agent_account") = ANY($6::text[])
+               OR lower("voucher_delegate") = ANY($6::text[]))`,
+      [
+        assetId,
+        cause,
+        [...keep],
+        [...blocked.organizationIds],
+        [...blocked.walletKeys],
+        blocked.chainAccounts.map((account) => account.toLowerCase()),
+      ],
+    );
+  }
+
+  /**
    * Turns a served rail-B call into BUYER DEBT: its voucher can no longer be
    * redeemed for a reason that is not the provider's. The hold stays OPEN, so
    * the amount stays out of the buyer's spendable balance, and nobody is
@@ -1556,6 +1609,39 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           AND "redemption_lapsed_at" IS NOT NULL
           AND "redemption_replaced_at" IS NULL
           AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%')
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, target.holdId, reason],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Closes a served rail-B call whose voucher the PLATFORM failed to redeem
+   * (incident 2026-10-29): VOIDED, never buyer debt. Inside the ledger
+   * transaction that releases the hold, under the payer's admission lock, in
+   * one statement — the lapse and the `voided:` mark land together with the
+   * release, so the row never matches {@link DEBT_REFUSING_SQL} in between.
+   * `redemption_lapsed_at` is set as on the hand-voided rows of that incident.
+   * Only a row still awaiting redemption: the same hold, still open. `false`
+   * (nothing to release) when it changed underneath.
+   */
+  async markUnredeemedVoided(
+    runner: QueryRunner,
+    target: DebtCloseTarget,
+    reason: string,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "redemption_lapsed_at" = COALESCE("redemption_lapsed_at", now()),
+              "redemption_replaced_at" = NULL,
+              "redemption_last_error" = $5,
+              "hold_released_at" = now()
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
+          AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
+          AND "hold_released_at" IS NULL
         RETURNING "id"`,
       [target.organizationId, target.id, target.payer, target.holdId, reason],
     )) as [unknown[], number] | unknown[];
