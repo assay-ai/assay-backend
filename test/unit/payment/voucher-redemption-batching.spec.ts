@@ -8,6 +8,7 @@ import {
   RedeemOutcomeKind,
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
+import { VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS } from '@modules/payment/constants/voucher-redemption.constants';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import { Alert } from '@shared/alerting';
@@ -570,5 +571,65 @@ describe('VoucherRedemptionService — the on-chain pause and blocklist (D-19)',
     const sent = [...redeemer.batches.flat(), ...redeemer.singles].map((r) => r.seq);
     expect(sent).toEqual(['5']);
     expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Review 2026-10-30 I-1 and M-4. Closing a voucher past its on-chain deadline
+ * reads the chain for seconds; ahead of live ones (prod 2026-10-30) a backlog
+ * spent whole passes on them while the live ones expired too.
+ */
+describe('VoucherRedemptionService — live before expired, and a cap on expired closes', () => {
+  // Solana's grace is 1,800 s: these are an hour past their deadline.
+  const expired = (seq: number) =>
+    pending(seq, `${CHAIN_IDS.SOLANA_DEVNET}:payer${seq}`, {
+      expiresAt: new Date((NOW_SECONDS - 3_600) * 1000),
+    });
+  const live = (seq: number) => pending(seq, `${CHAIN_IDS.SOLANA_DEVNET}:live${seq}`);
+  const backlog = (n: number) => Array.from({ length: n }, (_, i) => expired(100 + i));
+
+  it('sends live vouchers first and closes at most 20 expired ones per pass', async () => {
+    expect(VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS).toBe(20);
+    const { service, redeemer } = build([...backlog(25), live(1), live(2)], 64);
+    redeemer.ascending = false;
+
+    await service.run(USDC);
+
+    const sent = redeemer.batches.flat().map((r) => r.seq);
+    expect(sent.slice(0, 2)).toEqual(['1', '2']);
+    expect(sent).toHaveLength(2 + 20);
+    expect(sent).not.toContain('120');
+  });
+
+  it('with no live voucher left, still closes the expired ones (never starved)', async () => {
+    const { service, redeemer } = build(backlog(5), 64);
+    redeemer.ascending = false;
+
+    await service.run(USDC);
+
+    expect(redeemer.batches.flat()).toHaveLength(5);
+  });
+
+  it('caps the one-voucher-per-send loop the same way', async () => {
+    const { service, redeemer } = build([...backlog(22), live(1)], 1);
+    redeemer.ascending = false;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles[0].seq).toBe('1');
+    expect(redeemer.singles).toHaveLength(21);
+  });
+
+  it('M-4: never reorders or caps where the chain requires ascending seq', async () => {
+    const rows = [...backlog(22), live(1)];
+    for (const batchSize of [64, 1]) {
+      const { service, redeemer } = build(rows, batchSize);
+      redeemer.ascending = true;
+
+      await service.run(USDC);
+
+      const sent = (batchSize === 1 ? redeemer.singles : redeemer.batches.flat()).map((r) => r.seq);
+      expect(sent).toEqual(rows.map((row) => row.voucherSeq));
+    }
   });
 });

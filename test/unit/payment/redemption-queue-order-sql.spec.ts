@@ -146,10 +146,14 @@ describe('PaymentIntentRepository.findAwaitingRedemption — a chain that redeem
   it('fills the batch round-robin by payer and by provider, never-refused rows first', async () => {
     const { sql, params } = await rendered(undefined, { orderedBySeq: false });
     const flat = sql.replace(/\s+/g, ' ');
-    expect(flat).toContain('row_number() OVER (PARTITION BY queue."agentAccount"');
-    expect(flat).toContain('row_number() OVER (PARTITION BY queue."providerAccount"');
+    expect(flat).toContain(
+      'row_number() OVER (PARTITION BY flagged."pastDeadline", flagged."agentAccount"',
+    );
+    expect(flat).toContain(
+      'row_number() OVER (PARTITION BY flagged."pastDeadline", flagged."providerAccount"',
+    );
     expect(flat).toMatch(
-      /ORDER BY GREATEST\(ranked\."payerRound", ranked\."providerRound"\) ASC, \(ranked\."redemptionLastError" IS NOT NULL\) ASC, ranked\."expiresAt" ASC/,
+      /GREATEST\(ranked\."payerRound", ranked\."providerRound"\) ASC, \(ranked\."redemptionLastError" IS NOT NULL\) ASC, ranked\."expiresAt" ASC/,
     );
     // The batch size is the last parameter, after the inner query's own.
     const values = Object.values(params);
@@ -157,10 +161,50 @@ describe('PaymentIntentRepository.findAwaitingRedemption — a chain that redeem
     expect(values[values.length - 1]).toBe(100);
   });
 
-  it('keeps Solana’s queue as it was: seq order, no back-off', async () => {
+  /**
+   * Review 2026-10-30 I-1 (prod 2026-10-30): ordered by deadline alone, more
+   * than a page of rows past their on-chain deadline filled the LIMIT, so no
+   * live voucher was fetched and they expired too. Live rows now come first.
+   */
+  it('orders rows past their on-chain deadline after every live row, ahead of the rounds', async () => {
+    const { sql, params } = await rendered(undefined, { orderedBySeq: false });
+    const flat = sql.replace(/\s+/g, ' ');
+    const values = Object.values(params);
+    // The grace is this asset's chain's, passed as a parameter before the limit.
+    expect(values[values.length - 2]).toBe(7_200);
+    expect(flat).toContain(
+      `(queue."expiresAt" + make_interval(secs => $${values.length - 1}::int) < now()) AS "pastDeadline"`,
+    );
+    expect(flat).toMatch(
+      /ORDER BY ranked\."pastDeadline" ASC, GREATEST\(ranked\."payerRound", ranked\."providerRound"\) ASC/,
+    );
+  });
+
+  it('does not hand the flag or the rounds back with the rows', async () => {
+    const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
+    await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+    const repo = new PaymentIntentRepository(dataSource);
+    jest
+      .spyOn(repo.manager, 'query')
+      .mockResolvedValue([
+        { id: 'a', payerRound: 1, providerRound: 1, pastDeadline: false },
+      ] as never);
+    const rows = await repo.findAwaitingRedemption(
+      'eip155:46630/erc20:0xabc',
+      'SETTLED',
+      'RAIL_B_VOUCHER',
+      100,
+      undefined,
+      { orderedBySeq: false },
+    );
+    expect(rows).toEqual([{ id: 'a' }]);
+  });
+
+  it('keeps Solana’s queue as it was: seq order, no back-off, no live-first order (M-4)', async () => {
     const { sql } = await rendered();
     expect(sql).not.toMatch(/redemption_retry_at/);
     expect(sql).not.toMatch(/row_number/);
+    expect(sql).not.toMatch(/pastDeadline/);
   });
 });
 
