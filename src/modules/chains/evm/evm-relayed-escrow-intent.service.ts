@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { encodeFunctionData, getAddress, isAddress } from 'viem';
 
 import { SettlementErrors } from '@modules/settlement/errors/settlement.errors';
@@ -17,6 +17,9 @@ import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EvmL1GasClient, estimateL1Gas, exceedsCostCap } from './evm-l1-gas';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.gate';
+import { EVM_RELAYER_HOURLY_BUDGET, EvmRelayerHourlyBudget } from './evm-relayer-hourly-budget';
+import { isSendRejected } from './evm-send-rejected.error';
 
 /**
  * Two read calls, and **no send**.
@@ -132,6 +135,18 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
     private readonly clients: ReadonlyMap<ChainId, EvmRelayedIntentClient>,
     @Inject(EVM_DEPLOYMENTS) private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     @Inject(EVM_RELAYER) private readonly relayer: EvmRelayerPort,
+    /**
+     * The relayer's float flag (`RedeemerFloatGate`, relayer half). While it
+     * reads critical, a relayed request is a 503 "try again shortly" and the
+     * float left is kept for slash sends. Absent: not checked.
+     */
+    @Optional()
+    @Inject(EVM_RELAYER_FLOAT_GATE)
+    private readonly floatGate: Pick<RedeemerFloatGate, 'isRelayerCritical'> | null = null,
+    /** The relayer's global hourly send budget. Absent: not checked. */
+    @Optional()
+    @Inject(EVM_RELAYER_HOURLY_BUDGET)
+    private readonly hourly: Pick<EvmRelayerHourlyBudget, 'take'> | null = null,
   ) {}
 
   async submit(intent: RelayedEscrowIntent): Promise<RelayedEscrowSubmission> {
@@ -140,21 +155,44 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
     const to = getAddress(deployment.escrow);
 
     const data = this.encode(intent, buyer);
+
+    // First and free: a relayer whose float is critical takes no buyer request.
+    if (await this.floatGate?.isRelayerCritical(chainId)) {
+      throw SettlementErrors.relayedIntentUnavailable({ relayerBusy: true });
+    }
+
     const relayer = parseAccountId(await this.relayer.address(chainId)).address as `0x${string}`;
 
     const gasLimit = await this.preflight(chainId, relayer, to, data);
 
-    const result = await this.relayer.sendCall({
-      chainId,
-      to: toAccountId(chainId, to),
-      data,
-      gasLimit,
-      purpose: `${intent.kind} bySig nonce=${intent.nonce}`,
-      // A relayed tightening keeps the payer's voucher admission paused until
-      // its outcome is known, so the time it may wait behind other sends is
-      // bounded (BUG-D1-07 review): past it, it is given up unsent.
-      boundQueueWait: true,
-    });
+    // Last, immediately before the send: a request any check above refused
+    // costs the global budget nothing.
+    if (this.hourly && !(await this.hourly.take(chainId, `relayed ${intent.kind}`))) {
+      throw SettlementErrors.relayedIntentUnavailable({ relayerBusy: true });
+    }
+
+    let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
+    try {
+      result = await this.relayer.sendCall({
+        chainId,
+        to: toAccountId(chainId, to),
+        data,
+        gasLimit,
+        purpose: `${intent.kind} bySig nonce=${intent.nonce}`,
+        // A relayed tightening keeps the payer's voucher admission paused until
+        // its outcome is known, so the time it may wait behind other sends is
+        // bounded (BUG-D1-07 review): past it, it is given up unsent.
+        boundQueueWait: true,
+      });
+    } catch (error) {
+      // The node refused it (no ETH, a nonce race): definitely not broadcast,
+      // so the signature is untouched and a retry is the right answer.
+      if (isSendRejected(error)) {
+        this.logger.warn(`a relayed ${intent.kind} on ${chainId} was refused: ${error.message}`);
+        throw SettlementErrors.relayedIntentUnavailable({ relayerBusy: true });
+      }
+      throw error;
+    }
 
     if (result.status !== 'SUCCESS') {
       // The pre-flight passed and the send still reverted, so state moved between

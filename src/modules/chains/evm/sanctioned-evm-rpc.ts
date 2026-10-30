@@ -2,6 +2,8 @@ import { Chain, createPublicClient, custom } from 'viem';
 
 import { EgressHttpClient, INTERNAL_EGRESS_POLICY } from '@shared/network/egress';
 
+import { EvmSendAnswer, classifySendMessage } from './evm-send-rejected.error';
+
 /**
  * `createPublicClient`, with its requests issued through the egress client.
  *
@@ -63,11 +65,23 @@ export class EvmRpcError extends Error {
    */
   readonly data?: `0x${string}`;
 
-  constructor(message: string, details: { code: number; data: `0x${string}` | null }) {
+  /**
+   * For `eth_sendRawTransaction` only: the node's refusal, as a tag from our
+   * own vocabulary (`evm-send-rejected.error.ts`), never the node's words.
+   * Every send refusal shares code -32000, so the code alone cannot tell
+   * "insufficient funds" (not broadcast) from "already known" (broadcast).
+   */
+  readonly sendAnswer?: EvmSendAnswer;
+
+  constructor(
+    message: string,
+    details: { code: number; data: `0x${string}` | null; sendAnswer?: EvmSendAnswer | null },
+  ) {
     super(message);
     this.name = 'EvmRpcError';
     this.code = details.code;
     if (details.data !== null) this.data = details.data;
+    if (details.sendAnswer) this.sendAnswer = details.sendAnswer;
   }
 }
 
@@ -160,10 +174,25 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
             // message (so no formatter can print it by accident) and is
             // length-bounded, so an `Error(string)` revert cannot smuggle a
             // page of text into a log.
-            throw new EvmRpcError(`EVM RPC ${method} failed: code ${reply.error.code}`, {
-              code: reply.error.code,
-              data: boundedRevertData(reply.error.data),
-            });
+            //
+            // A second, equally narrow exception: a refused
+            // `eth_sendRawTransaction` keeps WHICH refusal it was, as a tag
+            // from a fixed list. The prose is still dropped.
+            const sendAnswer =
+              method === 'eth_sendRawTransaction'
+                ? classifySendMessage(
+                    typeof reply.error.message === 'string' ? reply.error.message : null,
+                  )
+                : null;
+            throw new EvmRpcError(
+              `EVM RPC ${method} failed: code ${reply.error.code}` +
+                (sendAnswer ? ` (${sendAnswer})` : ''),
+              {
+                code: reply.error.code,
+                data: boundedRevertData(reply.error.data),
+                sendAnswer,
+              },
+            );
           }
           return reply.result;
         },

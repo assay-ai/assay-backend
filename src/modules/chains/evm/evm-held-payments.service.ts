@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { decodeEventLog, encodeFunctionData, getAddress } from 'viem';
 
 import {
@@ -7,6 +7,7 @@ import {
   HeldRecord,
   HeldStatus,
   HeldTxResult,
+  HELD_TIMEOUT_SECONDS,
   MAX_HELD_BATCH,
   RedemptionClass,
 } from '@modules/payment/ports/held-payments.port';
@@ -25,10 +26,13 @@ import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
   EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
+  EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
   estimateL1Gas,
   exceedsCostCap,
   paddedL1Gas,
 } from './evm-l1-gas';
+import { EvmSendFloat, fitsBudget } from './evm-send-float';
+import { EvmSendRejectedError, isInsufficientFunds } from './evm-send-rejected.error';
 import { isRevert } from './evm-voucher-authority';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
 
@@ -143,11 +147,19 @@ export class HeldSendDeferredError extends Error {
  */
 @Injectable()
 export class EvmHeldPayments implements HeldPaymentsPort {
+  private readonly logger = new Logger(EvmHeldPayments.name);
+
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmReaderClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort,
     private readonly liveChains: ReadonlySet<string> = new Set(),
+    /**
+     * The redeemer's float, shared with redemption. A held move it cannot pay
+     * is refused before anything is signed. Absent: not checked.
+     */
+    private readonly float: EvmSendFloat | null = null,
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   /** Chains whose escrow answered `totalHeld()`: the hold is there, for good. */
@@ -359,13 +371,22 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const args = keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs];
     const escrow = getAddress(this.deployment(chainId).escrow);
     const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
-    const { gasLimit, estimate } = await this.gasFor(chainId, keys.length, data, {
-      address: escrow,
-      abi: ASSAY_ESCROW_HOLD_ABI,
-      functionName,
-      args,
-      account: sender,
-    });
+    // Read only when a cap would stop the send: one `held()` per key.
+    const urgent = once(() => this.nearTimeout(asset, keys));
+    const { gasLimit, estimate } = await this.gasFor(
+      chainId,
+      keys.length,
+      data,
+      {
+        address: escrow,
+        abi: ASSAY_ESCROW_HOLD_ABI,
+        functionName,
+        args,
+        account: sender,
+      },
+      urgent,
+    );
+    const maxFeePerGas = await this.assertFloatCovers(chainId, gasLimit, functionName, urgent);
     // `eth_call` first, as the redeemer, with the gas it will be sent with: a
     // refusal (pause, blocklist, wrong status, timing) costs nothing.
     try {
@@ -393,16 +414,23 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       }
       throw error;
     }
-    const result = await this.redeemer.sendCall({
-      chainId,
-      to: toAccountId(chainId, escrow),
-      data,
-      gasLimit,
-      purpose: `${functionName} n=${keys.length}`,
-      // Never queue long behind the redemptions on the shared redeemer key:
-      // give the send up, unsent, and let the next pass retry it.
-      boundQueueWait: true,
-    });
+    let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
+    try {
+      result = await this.redeemer.sendCall({
+        chainId,
+        to: toAccountId(chainId, escrow),
+        data,
+        gasLimit,
+        purpose: `${functionName} n=${keys.length}`,
+        // Never queue long behind the redemptions on the shared redeemer key:
+        // give the send up, unsent, and let the next pass retry it.
+        boundQueueWait: true,
+      });
+    } catch (error) {
+      if (isInsufficientFunds(error)) this.float?.drained(chainId);
+      throw error;
+    }
+    if (maxFeePerGas !== null) this.float?.spent(chainId, gasLimit * maxFeePerGas);
     if (result.status !== 'SUCCESS') {
       throw ChainErrors.payloadMalformed({
         reason: `${single} reverted: ${result.revertReason ?? 'unknown'} (${result.hash})`,
@@ -422,6 +450,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     count: number,
     data: `0x${string}`,
     call: Parameters<EstimateClient['estimateContractGas']>[0],
+    urgent: () => Promise<boolean>,
   ): Promise<{ gasLimit: bigint; estimate: bigint | null }> {
     const extra = BigInt(count - 1);
     const client = this.client(chainId) as unknown as Partial<EstimateClient>;
@@ -454,11 +483,71 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const gasLimit = execution + paddedL1Gas(l1Gas);
     const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(count);
     if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
+      if (await urgent()) {
+        // Near the hold's timeout: after it a refund can no longer be sent, so
+        // waiting for fees to fall would cost the payment, not the gas.
+        this.logger.warn(
+          `${call.functionName} of ${count} on ${chainId} is above the ${maxWei} wei cap ` +
+            `(${gasLimit} gas, L1 ${l1Gas}) but a record in it is near its hold timeout: sending anyway`,
+        );
+        return { gasLimit, estimate };
+      }
       throw new HeldSendDeferredError(
         `${gasLimit} gas (L1 ${l1Gas}) at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
       );
     }
     return { gasLimit, estimate };
+  }
+
+  /**
+   * Refuses, before anything is signed, a held move the redeemer's float cannot
+   * pay (`gasLimit × maxFeePerGas` above the balance less the reserve; the
+   * reserve is waived near the hold's timeout). The refusal is
+   * `EvmSendRejectedError` (`INSUFFICIENT_FUNDS`, no hash): nothing was
+   * broadcast, and the collection pass backs the row off. Returns the fee the
+   * check used, or `null` when there is no float to check against.
+   */
+  private async assertFloatCovers(
+    chainId: ChainId,
+    gasLimit: bigint,
+    functionName: string,
+    urgent: () => Promise<boolean>,
+  ): Promise<bigint | null> {
+    if (!this.float) return null;
+    const budget = await this.float.budget(chainId, false);
+    if (budget === null || fitsBudget(gasLimit, budget)) return budget?.maxFeePerGas ?? null;
+    if (await urgent()) {
+      const all = await this.float.budget(chainId, true);
+      if (all === null || fitsBudget(gasLimit, all)) return all?.maxFeePerGas ?? null;
+    }
+    const detail =
+      `the redeemer float on ${chainId} (${budget.balanceWei} wei, ${budget.reserveWei} wei ` +
+      `reserved) cannot pay ${functionName} at ${gasLimit} gas × ${budget.maxFeePerGas} wei; ` +
+      `nothing was sent`;
+    this.logger.error(detail);
+    throw new EvmSendRejectedError('INSUFFICIENT_FUNDS', null, detail);
+  }
+
+  /**
+   * Whether any of `keys` is within {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of
+   * its hold timeout (`collectableAt + HELD_TIMEOUT_SECONDS`) and not past it.
+   * Past it a refund is closed and a collect is open to anyone, so neither is
+   * urgent any more. A read that fails counts as not urgent.
+   */
+  private async nearTimeout(asset: AssetId, keys: readonly HeldKey[]): Promise<boolean> {
+    const now = this.now();
+    const window = EVM_FEE_CAP_WAIVED_WITHIN_SECONDS * 1000;
+    for (const key of keys) {
+      try {
+        const record = await this.readHeld(asset, key);
+        if (!record || record.status !== HeldStatus.HELD) continue;
+        const timeoutAt = record.collectableAt.getTime() + HELD_TIMEOUT_SECONDS * 1000;
+        if (timeoutAt > now && timeoutAt - now <= window) return true;
+      } catch {
+        // Unknown: not urgent.
+      }
+    }
+    return false;
   }
 
   private client(chainId: ChainId): EvmReaderClient {
@@ -472,4 +561,10 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     if (!deployment) throw ChainErrors.unsupportedChain({ chainId });
     return deployment;
   }
+}
+
+/** `fn`, run at most once; later calls share the first answer. */
+function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let answer: Promise<T> | null = null;
+  return () => (answer ??= fn());
 }

@@ -4,6 +4,7 @@ import { hashSetLimits } from '@modules/chains/evm/eip712/escrow-control';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { SettlementErrors } from '@modules/settlement/errors/settlement.errors';
 import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
 import { RelayedEscrowIntentFields } from '@modules/settlement/ports/relayed-escrow-intent.port';
 import {
@@ -249,6 +250,39 @@ describe('the order of the three controls', () => {
 
     expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_RATE_LIMITED');
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a fee spike', { feeSpike: true }],
+    ['a busy relayer', { relayerBusy: true }],
+  ])('gives the attempt back when %s makes the submission a 503', async (_why, context) => {
+    const release = jest.fn(async () => undefined);
+    const unavailable = SettlementErrors.relayedIntentUnavailable(context);
+    const { service } = build({
+      admit: jest.fn(async () => ({ release })),
+      submit: jest.fn().mockRejectedValue(unavailable),
+    });
+
+    const error = await submitAs(service, ALICE.account, ALICE.address, signSetLimits(ALICE)).catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toBe(unavailable);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the attempt counted when the chain refused the request', async () => {
+    const release = jest.fn(async () => undefined);
+    const { service } = build({
+      admit: jest.fn(async () => ({ release })),
+      submit: jest
+        .fn()
+        .mockRejectedValue(SettlementErrors.relayedIntentRefused({ reason: 'BadNonce' })),
+    });
+
+    await submitAs(service, ALICE.account, ALICE.address, signSetLimits(ALICE)).catch(() => null);
+
+    expect(release).not.toHaveBeenCalled();
   });
 
   /**

@@ -66,6 +66,14 @@ import { readConfigTerms } from './evm-config-terms';
 import { EvmSlashRecord, readSlashRecord } from './evm-slash-record';
 import { cancelReasonFromEvm, slashStatusFromEvm } from './evm-slash-status';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
+import {
+  EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
+  estimateL1Gas,
+  exceedsCostCap,
+  paddedL1Gas,
+} from './evm-l1-gas';
+import { isSendRejected } from './evm-send-rejected.error';
+import { FEE_SPIKE_DEFERRED } from '@modules/payment/ports/voucher-redeemer.port';
 import { EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
@@ -160,13 +168,27 @@ const RECEIPT_ATTEMPTS = 3;
 export const DEFAULT_EVM_SLASH_BATCH_SIZE = 20;
 
 /**
- * Gas headroom over `eth_estimateGas`, and the ceiling no slash transaction
- * may exceed. The estimate already includes Arbitrum's L1 component; 1.3× is
- * the margin, and 10M is a third of `maxTxGasLimit` (32M) on 46630.
+ * Gas headroom over the EXECUTION part of `eth_estimateGas`, and the ceiling
+ * that part may not exceed. On Nitro the estimate also carries the L1 data fee
+ * in L2 gas (`evm-l1-gas.ts`). That part is read on its own and added padded
+ * 20 %, outside the ceiling: it is a fee that spikes, not a property of the
+ * call. 1.3× is the margin, and 10M is a third of `maxTxGasLimit` (32M) on 46630.
  */
 const GAS_HEADROOM_NUMERATOR = 13n;
 const GAS_HEADROOM_DENOMINATOR = 10n;
 export const EVM_SLASH_MAX_GAS = 10_000_000n;
+
+/**
+ * The most wei one slash send may cost per request it carries, at the L2
+ * basefee: 0.00005 ETH, the background sends' cap. An `executeSlash` costs about
+ * 3e-6 ETH at 0.02 gwei, so only an extreme L1 spike is deferred. The send is
+ * then refused unnamed (`FeeSpikeDeferred: …`) and the case is retried on a
+ * later tick. Waived when an execution is within
+ * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS` of its deadline (`executableAt` + the
+ * 7-day grace), after which anyone may expire the record and the harmed agent
+ * is never paid.
+ */
+export const EVM_SLASH_SEND_MAX_COST_WEI_PER_ITEM = 50_000_000_000_000n;
 
 /** How long a signed attestation stays valid, and how far back `issuedAt` is put. */
 const ATTESTATION_VALIDITY_SECONDS = 600n;
@@ -457,8 +479,11 @@ export class EvmSlashExecutor
     return this.batch<SlashExecutionRequest, SlashExecutionResult>(requests, {
       single: (request, knownHash) => this.executeOne(request, knownHash),
       prepare: async (request) => {
-        await this.assertExecutable(request);
-        return { callData: this.executeCallData(request.requestId) };
+        const record = await this.assertExecutable(request);
+        return {
+          callData: this.executeCallData(request.requestId),
+          urgent: this.executionNearDeadline(record),
+        };
       },
       confirm: async (request, receipt, hash) =>
         this.executionResultFromReceipt(request, receipt, hash),
@@ -912,13 +937,14 @@ export class EvmSlashExecutor
         if (result) return result;
       }
     }
-    await this.assertExecutable(request);
+    const record = await this.assertExecutable(request);
     const stake = this.deployment(request.chainId).stake;
     const { hash, receipt } = await this.simulateAndSend(
       request.chainId,
       stake,
       this.executeCallData(request.requestId),
       'executeSlash',
+      this.executionNearDeadline(record),
     );
     const result = receipt ? await this.executionResultFromReceipt(request, receipt, hash) : null;
     if (!result) {
@@ -942,7 +968,9 @@ export class EvmSlashExecutor
     steps: {
       /** The single door. `knownHash`: a batch tx that may already have done it. */
       single: (request: Request, knownHash: `0x${string}` | null) => Promise<Result>;
-      prepare: (request: Request) => Promise<{ done: Result } | { callData: `0x${string}` }>;
+      prepare: (
+        request: Request,
+      ) => Promise<{ done: Result } | { callData: `0x${string}`; urgent?: boolean }>;
       confirm: (request: Request, receipt: Receipt, hash: `0x${string}`) => Promise<Result | null>;
       instruction: string;
     },
@@ -964,12 +992,12 @@ export class EvmSlashExecutor
       }
 
       // Prepare: adopt what is already done, sign the rest.
-      const ready: { index: number; callData: `0x${string}` }[] = [];
+      const ready: { index: number; callData: `0x${string}`; urgent?: boolean }[] = [];
       for (const index of indexes) {
         try {
           const step = await steps.prepare(requests[index]);
           if ('done' in step) outcomes[index] = { ok: true, result: step.done };
-          else ready.push({ index, callData: step.callData });
+          else ready.push({ index, callData: step.callData, urgent: step.urgent });
         } catch (error) {
           outcomes[index] = { ok: false, error };
         }
@@ -1005,11 +1033,13 @@ export class EvmSlashExecutor
         try {
           sent = await this.sendBatch(chainId, multicall, stake, live, steps.instruction);
         } catch (error) {
-          // Unless the chain itself refused the batch (a mined revert), it may
-          // still be mined later carrying these requests.
+          // Unless the chain itself refused the batch (a mined revert, a fee
+          // deferral before signing) or the node refused it (never broadcast),
+          // it may still be mined later carrying these requests.
           inFlight = !(
-            error instanceof Error &&
-            (error as { errorCode?: string }).errorCode === 'CHAIN_TRANSACTION_FAILED'
+            isSendRejected(error) ||
+            (error instanceof Error &&
+              (error as { errorCode?: string }).errorCode === 'CHAIN_TRANSACTION_FAILED')
           );
           // It may have landed. The single door reads first and adopts.
           this.logger.warn(
@@ -1107,11 +1137,15 @@ export class EvmSlashExecutor
     chainId: ChainId,
     multicall: `0x${string}`,
     stake: `0x${string}`,
-    live: readonly { callData: `0x${string}` }[],
+    live: readonly { callData: `0x${string}`; urgent?: boolean }[],
     instruction: string,
   ): Promise<{ hash: `0x${string}`; receipt: Receipt | null }> {
     const data = aggregate3(stake, live);
-    const gasLimit = await this.gasFor(chainId, multicall, data);
+    const gasLimit = await this.gasFor(chainId, multicall, data, {
+      items: live.length,
+      urgent: live.some((row) => row.urgent === true),
+      instruction: `aggregate3(${instruction})`,
+    });
     const sent = await this.relayer.sendCall({
       chainId,
       to: toAccountId(chainId, multicall),
@@ -1169,6 +1203,7 @@ export class EvmSlashExecutor
     to: `0x${string}`,
     data: `0x${string}`,
     instruction: string,
+    urgent = false,
   ): Promise<{ hash: `0x${string}`; receipt: Receipt | null }> {
     const account = await this.relayerAddress(chainId);
     try {
@@ -1179,7 +1214,7 @@ export class EvmSlashExecutor
       throw revertError(instruction, evmErrorName(revert), null);
     }
 
-    const gasLimit = await this.gasFor(chainId, to, data);
+    const gasLimit = await this.gasFor(chainId, to, data, { items: 1, urgent, instruction });
     const sent = await this.relayer.sendCall({
       chainId,
       to: toAccountId(chainId, to),
@@ -1198,20 +1233,64 @@ export class EvmSlashExecutor
     return { hash, receipt };
   }
 
-  private async gasFor(chainId: ChainId, to: `0x${string}`, data: `0x${string}`): Promise<bigint> {
-    const estimate = await this.client(chainId).estimateGas({
-      account: await this.relayerAddress(chainId),
-      to,
-      data,
-    });
-    const limit = (estimate * GAS_HEADROOM_NUMERATOR) / GAS_HEADROOM_DENOMINATOR;
-    if (limit > EVM_SLASH_MAX_GAS) {
+  /**
+   * The execution part of the estimate × 1.3 (capped at {@link EVM_SLASH_MAX_GAS})
+   * plus the L1 part × 1.2. Refused, before anything is signed, when that limit
+   * at the L2 basefee would cost more than
+   * {@link EVM_SLASH_SEND_MAX_COST_WEI_PER_ITEM} per request, unless `urgent`.
+   */
+  private async gasFor(
+    chainId: ChainId,
+    to: `0x${string}`,
+    data: `0x${string}`,
+    send: { items: number; urgent: boolean; instruction: string },
+  ): Promise<bigint> {
+    const account = await this.relayerAddress(chainId);
+    const estimate = await this.client(chainId).estimateGas({ account, to, data });
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), { account, to, data });
+    // The reads are a moment apart: an L1 part at or above the whole estimate
+    // leaves the split unknown, and the whole estimate is budgeted as execution.
+    const split = estimate > l1Gas;
+    const execution = split ? estimate - l1Gas : estimate;
+    const executionLimit = (execution * GAS_HEADROOM_NUMERATOR) / GAS_HEADROOM_DENOMINATOR;
+    if (executionLimit > EVM_SLASH_MAX_GAS) {
       throw ChainErrors.transactionFailed({
-        reason: `estimated ${estimate} gas, above the ${EVM_SLASH_MAX_GAS} ceiling`,
+        reason: `estimated ${execution} gas of execution, above the ${EVM_SLASH_MAX_GAS} ceiling`,
+        customErrorCode: null,
+      });
+    }
+    const limit = executionLimit + (split ? paddedL1Gas(l1Gas) : 0n);
+    const maxWei = EVM_SLASH_SEND_MAX_COST_WEI_PER_ITEM * BigInt(send.items);
+    if (exceedsCostCap(limit, l2BaseFee, maxWei)) {
+      if (send.urgent) {
+        this.logger.warn(
+          `${send.instruction} on ${chainId} is above the ${maxWei} wei cap (${limit} gas, ` +
+            `L1 ${l1Gas}) but an execution in it is near its deadline: sending anyway`,
+        );
+        return limit;
+      }
+      // Unnamed, so the case is retried on a later tick: nothing was signed.
+      throw ChainErrors.transactionFailed({
+        instruction: send.instruction,
+        reason:
+          `${FEE_SPIKE_DEFERRED}: ${limit} gas (L1 ${l1Gas}) at ${l2BaseFee} wei is above the ` +
+          `${maxWei} wei cap; nothing was sent`,
         customErrorCode: null,
       });
     }
     return limit;
+  }
+
+  /**
+   * Whether a PENDING record's execution deadline (`executableAt` + the 7-day
+   * grace, after which `expireSlash` may release it) is within
+   * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS`.
+   */
+  private executionNearDeadline(record: EvmSlashRecord): boolean {
+    if (slashStatusFromEvm(Number(record.status)) !== 'PENDING') return false;
+    const nowSeconds = BigInt(Math.floor(this.config.now() / 1000));
+    const deadline = BigInt(record.executableAt) + RECORD_EXECUTION_GRACE_SECONDS;
+    return deadline - nowSeconds <= BigInt(EVM_FEE_CAP_WAIVED_WITHIN_SECONDS);
   }
 
   // ── Internals: attestations and records ─────────────────────────────────
@@ -1391,7 +1470,7 @@ export class EvmSlashExecutor
    * different provider or beneficiary than the case does — `beneficiary` is
    * passed precisely so it cannot be substituted.
    */
-  private async assertExecutable(request: SlashExecutionRequest): Promise<void> {
+  private async assertExecutable(request: SlashExecutionRequest): Promise<EvmSlashRecord> {
     const record = await this.fetchRecord(request.chainId, request.requestId);
     if (!record) throw ChainErrors.slashRecordNotFound({ requestId: request.requestId });
     this.assertRecordProvider(record, request.provider, request.requestId);
@@ -1400,6 +1479,7 @@ export class EvmSlashExecutor
         reason: `slash record ${request.requestId} pays a different beneficiary than the case`,
       });
     }
+    return record;
   }
 
   private executeCallData(requestId: string): `0x${string}` {

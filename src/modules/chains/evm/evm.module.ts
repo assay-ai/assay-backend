@@ -47,6 +47,11 @@ import {
   parseDepositLookbackBlocks,
 } from './evm-escrow-deposit-logs.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.gate';
+import { EVM_RELAYER_FLOAT_CRITICAL_WEI } from './evm-relayer-float.constants';
+import { EVM_RELAYER_HOURLY_BUDGET, EvmRelayerHourlyBudget } from './evm-relayer-hourly-budget';
+import { EVM_REDEEMER_SEND_FLOAT, EvmSendFloat, parseSendReserveWei } from './evm-send-float';
 import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { loadChainParamsFallback } from './chain-params-fallback';
 import { EvmChainParamsCache } from './evm-chain-params.service';
@@ -356,14 +361,58 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       // "Redeem into hold" (G3.B1): collect and refund the escrow's held
       // payments with the REDEEMER key.
       provide: EvmHeldPayments,
-      useFactory: (clients: never, deployments: never, redeemer: never, config: ConfigService) =>
+      useFactory: (
+        clients: never,
+        deployments: never,
+        redeemer: never,
+        config: ConfigService,
+        float: EvmSendFloat,
+      ) =>
         new EvmHeldPayments(
           clients,
           deployments,
           redeemer,
           parseHoldLiveChains(config.get<string>('EVM_HOLD_LIVE_CHAINS')),
+          float,
         ),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ConfigService],
+      inject: [
+        EVM_RPC_CLIENTS,
+        EVM_DEPLOYMENTS,
+        EVM_REDEEMER,
+        ConfigService,
+        EVM_REDEEMER_SEND_FLOAT,
+      ],
+    },
+    {
+      /**
+       * The REDEEMER's float, read before a redemption or a held move so the
+       * send is sized to it. One instance, shared, so both see what the other
+       * spent. The reserve is the monitor's critical mark.
+       */
+      provide: EVM_REDEEMER_SEND_FLOAT,
+      useFactory: (redeemer: EvmRelayer, config: ConfigService) =>
+        new EvmSendFloat(
+          redeemer,
+          parseSendReserveWei(config.get<string>(EVM_RELAYER_FLOAT_CRITICAL_WEI)),
+        ),
+      inject: [EVM_REDEEMER, ConfigService],
+    },
+    {
+      /**
+       * The relayer half of the float gate, read by the relayed-request path.
+       * `null` where no Redis client is wired (a test harness): not checked.
+       */
+      provide: EVM_RELAYER_FLOAT_GATE,
+      useFactory: (cache: CacheService | undefined, alerts: AlertPort) =>
+        cache ? new RedeemerFloatGate(cache, alerts) : null,
+      inject: [{ token: CacheService, optional: true }, ALERT_PORT],
+    },
+    {
+      /** The relayer's global hourly send budget (relayed requests and gas grants). */
+      provide: EVM_RELAYER_HOURLY_BUDGET,
+      useFactory: (cache: CacheService | undefined) =>
+        cache ? new EvmRelayerHourlyBudget(cache) : null,
+      inject: [{ token: CacheService, optional: true }],
     },
     {
       // A2: the reconciler names a deposit no intent credited. Read-only.
@@ -385,6 +434,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         alerts: never,
         tightenDelay: EvmTightenDelayProbe,
         slashRecords: EvmSlashRecordRepository | undefined,
+        float: EvmSendFloat,
       ) =>
         new EvmVoucherRedeemer(
           clients,
@@ -394,6 +444,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           { now: () => Date.now() },
           tightenDelay,
           slashRecords ?? null,
+          float,
         ),
       // The REDEEMER, not the relayer: `redeemVoucher[Batch]` accepts only
       // `Config.params().redeemer` as sender.
@@ -405,6 +456,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         EvmTightenDelayProbe,
         // Review 2026-10-24 wave 2 M-2: who caused a provider's stake shortfall.
         { token: EvmSlashRecordRepository, optional: true },
+        EVM_REDEEMER_SEND_FLOAT,
       ],
     },
     {
