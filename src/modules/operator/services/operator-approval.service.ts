@@ -9,6 +9,7 @@ import { OperatorRepository } from '@database/postgres/repositories/operator.rep
 import { asInstant, CursorPageDto, ListSpec, paginate } from '@shared/api';
 import { BaseError } from '@shared/errors/base.error';
 
+import { BUYER_DEBT_BULK_VOID_ACTION, mayReadDebtVoidResult } from '../domain/debt-void-visibility';
 import { approverRolesSatisfy, lookupOverride, OperatorRole } from '../domain/override-register';
 import {
   ApprovalDecisionDto,
@@ -189,7 +190,10 @@ export class OperatorApprovalService {
    * deciding. So what is listed, and what can be
    * acted on, is what it was when each read ran the sweep itself.
    */
-  async list(query: ListOperatorApprovalsQueryDto): Promise<CursorPageDto<OperatorApprovalDto>> {
+  async list(
+    query: ListOperatorApprovalsQueryDto,
+    viewer?: Pick<OperatorSession, 'roles'>,
+  ): Promise<CursorPageDto<OperatorApprovalDto>> {
     const now = new Date();
     const qb = this.approvals.createQueryBuilder('approval');
     if (query.status === 'PENDING') {
@@ -204,12 +208,12 @@ export class OperatorApprovalService {
     }
     if (query.action) qb.andWhere('approval.action = :action', { action: query.action });
     const page = await paginate(qb, query, APPROVAL_LIST);
-    return new CursorPageDto(await this.toDtos(page.items, now), page.pageInfo.nextCursor);
+    return new CursorPageDto(await this.toDtos(page.items, now, viewer), page.pageInfo.nextCursor);
   }
 
-  async get(id: string): Promise<OperatorApprovalDto> {
+  async get(id: string, viewer?: Pick<OperatorSession, 'roles'>): Promise<OperatorApprovalDto> {
     const now = new Date();
-    return (await this.toDtos([await this.require(id)], now))[0];
+    return (await this.toDtos([await this.require(id)], now, viewer))[0];
   }
 
   /**
@@ -270,7 +274,10 @@ export class OperatorApprovalService {
       requestId,
     );
 
-    return { approval: (await this.toDtos([await this.require(id)]))[0], result };
+    return {
+      approval: (await this.toDtos([await this.require(id)], undefined, approver))[0],
+      result,
+    };
   }
 
   /**
@@ -290,7 +297,7 @@ export class OperatorApprovalService {
       const now = await this.require(id);
       throw OperatorErrors.approvalNotPending({ status: now.status });
     }
-    return { approval: (await this.toDtos([await this.require(id)]))[0] };
+    return { approval: (await this.toDtos([await this.require(id)], undefined, operator))[0] };
   }
 
   /**
@@ -337,11 +344,18 @@ export class OperatorApprovalService {
    * `now` given: a stored `PENDING` row already past `expires_at` is shown as
    * the `EXPIRED` row `expireStale(now)` would have made of it, `decidedAt`
    * included: both put it at `expires_at`, so every read answers the same.
+   *
+   * `viewer` given: a bulk buyer-debt void's `result` (intent ids, amounts) is
+   * `null` unless the viewer holds a role that may read it (review 2026-10-30
+   * M-5, `mayReadDebtVoidResult`). Without a viewer (an internal read) it is
+   * shown.
    */
   private async toDtos(
     rows: readonly OperatorApprovalEntity[],
     now?: Date,
+    viewer?: Pick<OperatorSession, 'roles'>,
   ): Promise<OperatorApprovalDto[]> {
+    const redactVoid = viewer !== undefined && !mayReadDebtVoidResult(viewer.roles);
     const subjects = new Map<string, string>();
     const subjectOf = async (operatorId: string | null): Promise<string | null> => {
       if (!operatorId) return null;
@@ -369,7 +383,8 @@ export class OperatorApprovalService {
         createdAt: row.createdAt,
         decidedAt: lapsed ? row.expiresAt : row.decidedAt,
         expiresAt: row.expiresAt,
-        result: row.result ?? null,
+        result:
+          redactVoid && row.action === BUYER_DEBT_BULK_VOID_ACTION ? null : (row.result ?? null),
       });
     }
     return out;

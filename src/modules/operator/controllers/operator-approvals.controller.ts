@@ -47,16 +47,21 @@ export class OperatorApprovalsController {
   @ApiOperation({ summary: 'Queued two-person actions, newest first' })
   @ApiCursorPage(OperatorApprovalDto)
   async list(
+    @CurrentOperator() operator: OperatorSession,
     @Query() query: ListOperatorApprovalsQueryDto,
   ): Promise<CursorPageDto<OperatorApprovalDto>> {
-    return this.approvals.list(query);
+    // A bulk debt void's result is shown to TRE and ADJL only (review 2026-10-30 M-5).
+    return this.approvals.list(query, operator);
   }
 
   @Get(':approvalId')
   @ApiOperation({ summary: 'One queued action' })
   @ApiResponse({ status: 200, type: OperatorApprovalDto })
-  async get(@Param('approvalId', ParseUUIDPipe) approvalId: string): Promise<OperatorApprovalDto> {
-    return this.approvals.get(approvalId);
+  async get(
+    @CurrentOperator() operator: OperatorSession,
+    @Param('approvalId', ParseUUIDPipe) approvalId: string,
+  ): Promise<OperatorApprovalDto> {
+    return this.approvals.get(approvalId, operator);
   }
 
   @Post(':approvalId/approve')

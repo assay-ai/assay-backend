@@ -3,6 +3,7 @@ import { OperatorBuyerDebtsController } from '@modules/operator/controllers/oper
 import { OperatorOverrideLogController } from '@modules/operator/controllers/operator-override-log.controller';
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { ListOverrideLogQueryDto } from '@modules/operator/dto/operator-console.dto';
+import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { REQUIRE_ROLES_METADATA } from '@shared/auth/require-roles.decorator';
 
 import { fakeQueryBuilder } from '../provider/helpers/fake-query-builder';
@@ -60,6 +61,7 @@ describe('GET /operator/override-log — a bulk void carries its outcome', () =>
   }
 
   const query = () => Object.assign(new ListOverrideLogQueryDto(), { limit: 25 });
+  const TRE = { roles: [OperatorRole.TRE] } as unknown as OperatorSession;
 
   it('exposes voidedCount, skippedCount and the amounts from the approval result', async () => {
     const { built, findManyById } = controller(
@@ -80,7 +82,7 @@ describe('GET /operator/override-log — a bulk void carries its outcome', () =>
       },
     );
 
-    const page = await built.list(query());
+    const page = await built.list(TRE, query());
 
     expect(page.items[0].outcome).toEqual({
       approvalId: APPROVAL,
@@ -102,10 +104,39 @@ describe('GET /operator/override-log — a bulk void carries its outcome', () =>
 
   it('is null while the void runs, and on an entry that names no approval', async () => {
     const running = controller([entry({})], null);
-    expect((await running.built.list(query())).items[0].outcome).toBeNull();
+    expect((await running.built.list(TRE, query())).items[0].outcome).toBeNull();
 
     const older = controller([entry({ after: { count: 2 } })], null);
-    expect((await older.built.list(query())).items[0].outcome).toBeNull();
+    expect((await older.built.list(TRE, query())).items[0].outcome).toBeNull();
     expect(older.findManyById).toHaveBeenCalledWith([]);
+  });
+
+  /**
+   * Review 2026-10-30 M-5: the outcome (counts and amounts of a void) is for
+   * TRE and ADJL only. Every other operator reads `outcome: null`, and the
+   * rest of the entry unchanged.
+   */
+  it('redacts the outcome for a role that may not read it, and keeps the rest of the entry', async () => {
+    const result = {
+      approvalId: APPROVAL,
+      assetId: 'asset',
+      decimals: 6,
+      voidedCount: 1,
+      skippedCount: 0,
+      items: [{ intentId: 'i-1', result: 'VOIDED' }],
+    };
+    const shown = controller([entry({})], result);
+    const hidden = controller([entry({})], result);
+    const sre = { roles: [OperatorRole.SRE, OperatorRole.ADJ] } as unknown as OperatorSession;
+    const adjl = { roles: [OperatorRole.ADJL] } as unknown as OperatorSession;
+
+    const forAdjl = (await shown.built.list(adjl, query())).items[0];
+    const forSre = (await hidden.built.list(sre, query())).items[0];
+
+    expect(forAdjl.outcome).toMatchObject({ voidedCount: 1 });
+    expect(forSre.outcome).toBeNull();
+    // Not even read for them.
+    expect(hidden.findManyById).not.toHaveBeenCalled();
+    expect({ ...forSre, outcome: 'x' }).toEqual({ ...forAdjl, outcome: 'x' });
   });
 });
