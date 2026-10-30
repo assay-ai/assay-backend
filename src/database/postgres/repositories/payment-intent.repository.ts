@@ -1507,6 +1507,35 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * How many buyer debts each asset gained since `since`, still open
+   * ({@link DEBT_REFUSING_SQL}): the input of the buyer-debt spike alert
+   * (`BuyerDebtSpikeMonitor`). Read from the table rather than counted in
+   * memory, so a restart loses nothing. `assetId` narrows it to one asset.
+   *
+   * Cheap at any table size: the predicate is `idx_payment_intents_open_debt`'s
+   * own, so only the open debts (hundreds, thousands) are visited.
+   * **Deliberately cross-organization**: a spike is a platform incident,
+   * counted over every buyer organization.
+   */
+  async countDebtsLapsedSince(
+    since: Date,
+    assetId?: string,
+  ): Promise<Array<{ assetId: string; count: number }>> {
+    const rows = (await this.manager.query(
+      `SELECT "asset_id" AS "assetId", COUNT(*)::int AS "count"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND ${DEBT_REFUSING_SQL}
+          AND "rail" = 'RAIL_B_VOUCHER'
+          AND "redemption_lapsed_at" >= $1
+          AND ($2::text IS NULL OR "asset_id" = $2)
+        GROUP BY "asset_id"`,
+      [since, assetId ?? null],
+    )) as Array<{ assetId: string; count: number | string }>;
+    return rows.map((row) => ({ assetId: row.assetId, count: Number(row.count) }));
+  }
+
+  /**
    * One debt of `payer` by id, whatever its age or how many others there are
    * (review-buyer-debt L5): `null` unless it still refuses paid calls.
    */

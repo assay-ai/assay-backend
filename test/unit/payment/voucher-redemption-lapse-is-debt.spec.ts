@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { RedeemableIntent } from '@database/postgres/repositories/payment-intent.repository';
+import { DataSource } from 'typeorm';
+
+import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
+import {
+  DEBT_REFUSING_SQL,
+  PaymentIntentRepository,
+  RedeemableIntent,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
@@ -14,8 +21,12 @@ import {
   RedeemOutcomeKind,
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
+import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
+import { BuyerDebtSpikeMonitor } from '@modules/payment/services/buyer-debt-spike.monitor';
+import { PaymentIntentExpiryService } from '@modules/payment/services/payment-intent-expiry.service';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
-import { Alert, AlertAggregation, AlertSeverity } from '@shared/alerting';
+import { Alert, AlertAggregation, AlertSeverity, SuppressingAlertSink } from '@shared/alerting';
+import { MoneyUtil } from '@shared/utils/money.util';
 
 import { noBlocks } from '../helpers/blocklist';
 
@@ -25,7 +36,8 @@ import { noBlocks } from '../helpers/blocklist';
  * Nothing is voided automatically — the cases the reverted auto-void used to
  * void (an attempted send that never landed, an unnamed revert, a fee-spike
  * deferral) are debt, and an operator voids platform-caused debts in bulk
- * with a second operator (`M-1`). A burst of debts pages once per window.
+ * with a second operator (`M-1`). A burst of debts, counted from the table
+ * wherever debt is made, pages once per asset per window.
  */
 
 const USDC = ASSET_IDS.USDC_SOLANA_DEVNET;
@@ -70,6 +82,7 @@ function build(
 ) {
   const clock = { ms: NOW * 1000 };
   const emitted: Alert[] = [];
+  const debtSpike = { check: jest.fn().mockResolvedValue(undefined) };
   const redeemer = {
     maxBatchSize: 1,
     async redeem(_request: RedeemVoucherRequest): Promise<RedeemOutcome> {
@@ -100,8 +113,9 @@ function build(
     noBlocks(),
     () => clock.ms,
     null,
+    debtSpike as never,
   );
-  return { service, intents, payments, emitted, clock };
+  return { service, intents, payments, emitted, clock, debtSpike };
 }
 
 const EXPIRED = { kind: RedeemOutcomeKind.UNREDEEMABLE, programError: 'VoucherExpired' };
@@ -156,58 +170,197 @@ describe('VoucherRedemptionService — a lapse is buyer debt, never an automatic
   });
 });
 
-describe('VoucherRedemptionService — the buyer-debt spike alert', () => {
-  const lapsing = (count: number, from = 0) =>
-    Array.from({ length: count }, (_, i) =>
-      row({ id: `intent-${from + i}`, agentAccount: buyer(from + i) }),
+describe('VoucherRedemptionService — the buyer-debt spike check', () => {
+  const lapsing = (count: number) =>
+    Array.from({ length: count }, (_, i) => row({ id: `intent-${i}`, agentAccount: buyer(i) }));
+
+  it('checks once per pass that made debt, for that asset, however many debts it made', async () => {
+    const { service, debtSpike, payments } = build(() => lapsing(12), EXPIRED);
+
+    await service.run(USDC);
+
+    expect(payments.lapseRedemption).toHaveBeenCalledTimes(12);
+    expect(debtSpike.check).toHaveBeenCalledTimes(1);
+    expect(debtSpike.check).toHaveBeenCalledWith(new Date(NOW * 1000), USDC);
+  });
+
+  it('does not check after a pass that made no debt', async () => {
+    const { service, debtSpike } = build(() => [row()], {
+      kind: RedeemOutcomeKind.REDEEMED,
+      programError: null,
+    });
+
+    await service.run(USDC);
+
+    expect(debtSpike.check).not.toHaveBeenCalled();
+  });
+});
+
+describe('BuyerDebtSpikeMonitor', () => {
+  const NOW_DATE = new Date('2026-10-30T12:00:00Z');
+
+  function monitorWith(counts: Array<{ assetId: string; count: number }> | Error) {
+    const emitted: Alert[] = [];
+    const payments = {
+      countDebtsLapsedSince: jest.fn(async () => {
+        if (counts instanceof Error) throw counts;
+        return counts;
+      }),
+    };
+    const monitor = new BuyerDebtSpikeMonitor(payments as never, {
+      emit: async (alert: Alert) => void emitted.push(alert),
+    });
+    return { monitor, payments, emitted };
+  }
+
+  it('counts from the table over the window, so a restart loses nothing', async () => {
+    const { monitor, payments } = monitorWith([]);
+
+    await monitor.check(NOW_DATE, USDC);
+
+    expect(payments.countDebtsLapsedSince).toHaveBeenCalledWith(
+      new Date(NOW_DATE.getTime() - DEBT_SPIKE_WINDOW_SECONDS * 1000),
+      USDC,
     );
-  const spikes = (emitted: Alert[]) =>
-    emitted.filter((alert) => alert.name === VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE);
+  });
 
   it('stays quiet at the threshold', async () => {
-    const { service, payments, emitted } = build(() => lapsing(DEBT_SPIKE_THRESHOLD), EXPIRED);
-
-    await service.run(USDC);
-
-    expect(payments.lapseRedemption).toHaveBeenCalledTimes(DEBT_SPIKE_THRESHOLD);
-    expect(spikes(emitted)).toEqual([]);
+    const { monitor, emitted } = monitorWith([{ assetId: USDC, count: DEBT_SPIKE_THRESHOLD }]);
+    await monitor.check(NOW_DATE);
+    expect(emitted).toEqual([]);
   });
 
-  it('fires one aggregated CRITICAL alert per asset per window, then again in the next', async () => {
-    let batch = lapsing(DEBT_SPIKE_THRESHOLD + 1);
-    const { service, emitted, clock } = build(() => batch, EXPIRED);
+  it('pages one aggregated CRITICAL alert per asset over the threshold, deduplicated per window', async () => {
+    const OTHER = 'eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831';
+    const { monitor, emitted } = monitorWith([
+      { assetId: USDC, count: DEBT_SPIKE_THRESHOLD + 1 },
+      { assetId: OTHER, count: 3 },
+    ]);
 
-    await service.run(USDC);
-    expect(spikes(emitted)).toHaveLength(1);
-    const [alert] = spikes(emitted);
-    expect(alert.severity).toBe(AlertSeverity.CRITICAL);
-    expect(alert.aggregation).toBe(AlertAggregation.ONCE_PER_INCIDENT);
-    expect(alert.dedupeKey).toBe(USDC);
-    expect(alert.suppressionWindowSeconds).toBe(DEBT_SPIKE_WINDOW_SECONDS);
-    expect(alert.details).toMatchObject({ asset: USDC, debts: DEBT_SPIKE_THRESHOLD + 1 });
+    await monitor.check(NOW_DATE);
 
-    // More debts in the same window: no second page.
-    batch = lapsing(5, 100);
-    clock.ms += 60_000;
-    await service.run(USDC);
-    expect(spikes(emitted)).toHaveLength(1);
-
-    // A new burst after the window has passed pages again.
-    batch = lapsing(DEBT_SPIKE_THRESHOLD + 1, 200);
-    clock.ms += DEBT_SPIKE_WINDOW_SECONDS * 1000;
-    await service.run(USDC);
-    expect(spikes(emitted)).toHaveLength(2);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      name: VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE,
+      severity: AlertSeverity.CRITICAL,
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: USDC,
+      suppressionWindowSeconds: DEBT_SPIKE_WINDOW_SECONDS,
+      details: { asset: USDC, debts: DEBT_SPIKE_THRESHOLD + 1 },
+    });
   });
 
-  it('does not count debts that fell out of the sliding window', async () => {
-    let batch = lapsing(DEBT_SPIKE_THRESHOLD);
-    const { service, emitted, clock } = build(() => batch, EXPIRED);
+  it('fires once per window through the suppressing sink, however often it is checked', async () => {
+    const keys = new Set<string>();
+    const redis = {
+      set: jest.fn(async (key: string) => (keys.has(key) ? null : (keys.add(key), 'OK'))),
+    };
+    const delivered: Alert[] = [];
+    const sink = new SuppressingAlertSink(
+      { emit: async (alert: Alert) => void delivered.push(alert) },
+      redis as never,
+    );
+    const payments = {
+      countDebtsLapsedSince: jest.fn(async () => [
+        { assetId: USDC, count: DEBT_SPIKE_THRESHOLD + 5 },
+      ]),
+    };
+    // Two monitors: a restart between checks keeps the sink's window.
+    await new BuyerDebtSpikeMonitor(payments as never, sink).check(NOW_DATE);
+    await new BuyerDebtSpikeMonitor(payments as never, sink).check(NOW_DATE);
 
-    await service.run(USDC);
-    batch = lapsing(1, 50);
-    clock.ms += DEBT_SPIKE_WINDOW_SECONDS * 1000;
-    await service.run(USDC);
+    expect(delivered).toHaveLength(1);
+    expect(redis.set).toHaveBeenCalledWith(
+      expect.stringContaining(`${VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE}:${USDC}`),
+      '1',
+      'EX',
+      DEBT_SPIKE_WINDOW_SECONDS,
+      'NX',
+    );
+  });
 
-    expect(spikes(emitted)).toEqual([]);
+  it('never throws when the count cannot be read', async () => {
+    const { monitor, emitted } = monitorWith(new Error('db down'));
+    await expect(monitor.check(NOW_DATE)).resolves.toBeUndefined();
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe('PaymentIntentExpiryService — verdict-deadline debts count toward the spike', () => {
+  const NOW_DATE = new Date('2026-10-30T12:00:00Z');
+
+  function sweepWith(expiresAt: Date) {
+    let status = PaymentIntentStatus.VERIFYING;
+    const repo = {
+      findDueForExpiry: jest.fn().mockResolvedValue([]),
+      findDueForHoldBackstop: jest.fn().mockResolvedValue([]),
+      findTerminalWithUnreleasedHold: jest.fn().mockResolvedValue([]),
+      findDueForVerdictDeadline: jest.fn(async () =>
+        status === PaymentIntentStatus.VERIFYING
+          ? [{ organizationId: ORG, id: 'late-1', status, holdId: 'hold-1' }]
+          : [],
+      ),
+      findDueForWriteOff: jest.fn().mockResolvedValue([]),
+      findClosedWithOpenHold: jest.fn().mockResolvedValue([]),
+    };
+    const intents = {
+      findById: jest.fn(async () => ({
+        id: 'late-1',
+        status,
+        price: MoneyUtil.of(1_000_000n, USDC, 6),
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        chainId: CHAIN_IDS.SOLANA_DEVNET,
+        expiresAt,
+      })),
+      resolve: jest.fn(async () => {
+        status = PaymentIntentStatus.SETTLED;
+        return { id: 'late-1', status };
+      }),
+      transition: jest.fn(),
+      releaseHold: jest.fn(),
+    };
+    const debtSpike = { check: jest.fn().mockResolvedValue(undefined) };
+    const service = new PaymentIntentExpiryService(
+      repo as never,
+      intents as never,
+      { emit: jest.fn().mockResolvedValue(undefined) },
+      null,
+      debtSpike as never,
+    );
+    return { service, debtSpike };
+  }
+
+  it('checks every asset after the sweep settled a call as buyer debt', async () => {
+    const { service, debtSpike } = sweepWith(new Date(NOW_DATE.getTime() - 24 * 3600 * 1000));
+    await service.sweep(NOW_DATE);
+    expect(debtSpike.check).toHaveBeenCalledWith(NOW_DATE);
+  });
+
+  it('does not check when the settled call is still redeemable (not debt)', async () => {
+    const { service, debtSpike } = sweepWith(new Date(NOW_DATE.getTime() + 3600 * 1000));
+    await service.sweep(NOW_DATE);
+    expect(debtSpike.check).not.toHaveBeenCalled();
+  });
+});
+
+describe('PaymentIntentRepository.countDebtsLapsedSince', () => {
+  it('counts open rail-B debts lapsed in the window, on the open-debt index predicate', async () => {
+    const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
+    await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+    const repo = new PaymentIntentRepository(dataSource);
+    const query = jest
+      .spyOn(repo.manager, 'query')
+      .mockResolvedValue([{ assetId: USDC, count: '12' }] as never);
+    const since = new Date('2026-10-30T11:45:00Z');
+
+    await expect(repo.countDebtsLapsedSince(since, USDC)).resolves.toEqual([
+      { assetId: USDC, count: 12 },
+    ]);
+
+    const [sql, params] = query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain(DEBT_REFUSING_SQL);
+    expect(sql).toContain(`"rail" = 'RAIL_B_VOUCHER'`);
+    expect(sql).toContain(`"redemption_lapsed_at" >= $1`);
+    expect(params).toEqual([since, USDC]);
   });
 });

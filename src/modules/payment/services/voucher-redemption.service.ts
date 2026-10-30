@@ -18,8 +18,6 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
-  DEBT_SPIKE_THRESHOLD,
-  DEBT_SPIKE_WINDOW_SECONDS,
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
   maxVoucherRedeemableLifeSeconds,
@@ -39,6 +37,7 @@ import {
   VOUCHER_REDEEMER,
   VoucherRedeemerPort,
 } from '../ports/voucher-redeemer.port';
+import { BuyerDebtSpikeMonitor } from './buyer-debt-spike.monitor';
 import { PaymentIntentService } from './payment-intent.service';
 
 // Re-exported: callers and specs have always imported it from here.
@@ -245,12 +244,13 @@ export class VoucherRedemptionService {
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
+    // The buyer-debt spike alert, checked once after a pass that lapsed any.
+    // Optional: a spec that does not test it need not build one.
+    @Optional() private readonly debtSpike: BuyerDebtSpikeMonitor | null = null,
   ) {}
 
-  /** Lapse times per asset, for {@link noteDebtCreated}. */
-  private readonly debtTimes = new Map<string, number[]>();
-  /** Per asset: no new spike page before this time. */
-  private readonly debtSpikeSilencedUntil = new Map<string, number>();
+  /** Assets whose current pass made at least one buyer debt. */
+  private readonly lapsedAssets = new Set<string>();
 
   /**
    * One pass over the passed-but-unredeemed holds of `asset`.
@@ -260,6 +260,18 @@ export class VoucherRedemptionService {
    * with nothing saying why.
    */
   async run(asset: AssetId): Promise<void> {
+    this.lapsedAssets.delete(asset);
+    try {
+      await this.pass(asset);
+    } finally {
+      // Once per pass, not per debt: the count is read from the table.
+      if (this.lapsedAssets.delete(asset)) {
+        await this.debtSpike?.check(new Date(this.now()), asset);
+      }
+    }
+  }
+
+  private async pass(asset: AssetId): Promise<void> {
     // The blocked parties are left out IN the query, before its LIMIT: held
     // after it, 100 rows of one blocked payer at the head of the queue would
     // fill every pass and starve every other buyer (audit E-1). The per-row
@@ -370,18 +382,6 @@ export class VoucherRedemptionService {
 
     const outcome = await this.redeemer.redeem(request.request);
     return this.applyOutcome(row, request.issuedAt, outcome, request.request);
-  }
-
-  /**
-   * Called by the batch fallback when one row's own redemption threw before
-   * the chain answered. Records NOTHING on the row: a lapse is buyer debt
-   * whatever left it unredeemed (owner decision 2026-10-30), and any
-   * `redemption_last_error` on a row still awaiting redemption costs the
-   * buyer the dispute refund guarantee (`refundGuaranteedIfReported`). The
-   * caller logs the error; an operator voids platform-caused debts by hand.
-   */
-  private async recordSendFailure(_row: RedeemableIntent): Promise<void> {
-    // Intentionally nothing.
   }
 
   /**
@@ -498,7 +498,6 @@ export class VoucherRedemptionService {
             if (landed.stop) return;
           } catch (single) {
             blocked.add(entry.row.agentAccount);
-            await this.recordSendFailure(entry.row);
             this.logger.error(
               `Redemption of intent ${entry.row.id} (seq ${entry.row.voucherSeq}) threw past ` +
                 `its own handling: ${describe(single)}`,
@@ -1387,47 +1386,7 @@ export class VoucherRedemptionService {
       },
       aggregation: AlertAggregation.PER_EVENT,
     });
-    await this.noteDebtCreated(row.assetId);
-  }
-
-  /**
-   * Counts a new buyer debt of `asset` and pages ONCE when more than
-   * {@link DEBT_SPIKE_THRESHOLD} were created within
-   * {@link DEBT_SPIKE_WINDOW_SECONDS} ({@link VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE}).
-   * A burst is what a platform failure to redeem looks like; an operator
-   * reviews it and voids in bulk if warranted. Nothing is voided here.
-   *
-   * Counted in this process (the redemption job is the one place a lapse is
-   * made), and silenced locally until the window that fired has passed, on
-   * top of the sink's own `ONCE_PER_INCIDENT` silence across processes.
-   */
-  private async noteDebtCreated(asset: string): Promise<void> {
-    const now = this.now();
-    const windowMs = DEBT_SPIKE_WINDOW_SECONDS * 1000;
-    const recent = (this.debtTimes.get(asset) ?? []).filter((at) => now - at < windowMs);
-    recent.push(now);
-    this.debtTimes.set(asset, recent);
-    if (recent.length <= DEBT_SPIKE_THRESHOLD) return;
-    const silencedUntil = this.debtSpikeSilencedUntil.get(asset) ?? 0;
-    if (now < silencedUntil) return;
-    this.debtSpikeSilencedUntil.set(asset, now + windowMs);
-    await this.alerts.emit({
-      severity: AlertSeverity.CRITICAL,
-      name: VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE,
-      summary:
-        `${recent.length} served calls of ${asset} became buyer debt within ` +
-        `${DEBT_SPIKE_WINDOW_SECONDS / 60} minutes — check the redeemer (float, RPC, pause). ` +
-        `If the platform caused it, void the debts in bulk from the operator debt page`,
-      details: {
-        asset,
-        debts: recent.length,
-        threshold: DEBT_SPIKE_THRESHOLD,
-        windowSeconds: DEBT_SPIKE_WINDOW_SECONDS,
-      },
-      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-      dedupeKey: asset,
-      suppressionWindowSeconds: DEBT_SPIKE_WINDOW_SECONDS,
-    });
+    this.lapsedAssets.add(row.assetId);
   }
 
   /**
