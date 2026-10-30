@@ -292,6 +292,13 @@ export class VoucherRedemptionService {
   }
 
   private async pass(asset: AssetId): Promise<void> {
+    // The blocked parties are left out IN the query, before its LIMIT: held
+    // after it, 100 rows of one blocked payer at the head of the queue would
+    // fill every pass and starve every other buyer (audit E-1). The per-row
+    // check below stays as a second line for a block that lands mid-pass.
+    // Read before the gathering check, which leaves out the same rows (review
+    // 2026-10-30 M-2): an old voucher the pass holds must not count as waiting.
+    const exclusions = await this.exclusions(asset);
     const gathered = await redemptionPassReady({
       policy: this.gathering,
       payments: this.payments,
@@ -300,6 +307,7 @@ export class VoucherRedemptionService {
       rail: PaymentRail.RAIL_B_VOUCHER,
       batchSize: this.redeemer.maxBatchSizeFor?.(asset) ?? this.redeemer.maxBatchSize,
       orderedBySeq: this.redeemer.requiresAscendingSeq?.(asset) ?? true,
+      exclude: exclusions,
       graceSeconds: redeemGraceSeconds(asset),
       urgentWithinSeconds: EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
       nowMs: this.now(),
@@ -310,11 +318,6 @@ export class VoucherRedemptionService {
     });
     if (!gathered) return;
 
-    // The blocked parties are left out IN the query, before its LIMIT: held
-    // after it, 100 rows of one blocked payer at the head of the queue would
-    // fill every pass and starve every other buyer (audit E-1). The per-row
-    // check below stays as a second line for a block that lands mid-pass.
-    const exclusions = await this.exclusions(asset);
     await this.recordProviderBlocks(asset, exclusions);
     // Asked of the chain, once per pass: see the class comment.
     const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;

@@ -681,14 +681,16 @@ export interface OperatorDebtFilter {
 /**
  * The informational label of the operator's debt list: the recorded cause
  * suggests the PLATFORM failed to redeem — `VoucherExpired` with no other
- * recorded refusal, a revert with no name (`UNKNOWN_REVERT:*`), or a fee-spike
- * deferral (`FeeSpikeDeferred`); `uncollected:` is looked through. Never acted
- * on: a person decides (`M-1`). `OperatorBuyerDebtService.suggestsPlatformCause`
- * is the same test in code.
+ * recorded refusal, or a revert with no name (`UNKNOWN_REVERT:*`);
+ * `uncollected:` is looked through. Never acted on: a person decides (`M-1`).
+ * `OperatorBuyerDebtService.suggestsPlatformCause` is the same test in code.
+ *
+ * Not `FeeSpikeDeferred`: a deferral is never recorded on a row (nothing was
+ * sent, and it says nothing about the voucher), so a voucher that lapsed while
+ * fees stayed high reads `VoucherExpired` and is labelled by that.
  */
 export const OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL =
-  `(regexp_replace(intent.redemption_last_error, '^uncollected:', '') IN ` +
-  `('VoucherExpired', 'FeeSpikeDeferred') ` +
+  `(regexp_replace(intent.redemption_last_error, '^uncollected:', '') = 'VoucherExpired' ` +
   `OR regexp_replace(intent.redemption_last_error, '^uncollected:', '') LIKE 'UNKNOWN\\_REVERT:%')`;
 
 /** One asset's share of the operator's buyer-debt list. */
@@ -1261,42 +1263,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       );
     }
 
-    if (
-      exclude.organizationIds.length > 0 ||
-      exclude.walletKeys.length > 0 ||
-      exclude.chainAccounts.length > 0
-    ) {
-      // A row is left out when it, or an EARLIER seq of the same payer in this
-      // queue, has a blocked party. Leaving out only the blocked row would let
-      // the payer's later seqs through, and redeeming one of those advances
-      // `seq_high` past the held one and kills it. Done in the query, BEFORE
-      // the LIMIT, so held rows can never fill the pass (audit E-1). On a
-      // chain that admits any order (D-23) only the row's OWN parties count.
-      //
-      // Payer-side parties only — the payer's organization, the payer and the
-      // delegate. A blocked provider or payee is NOT left out: the pass makes
-      // that provider forfeit the voucher at once (`VoucherRedemptionService`),
-      // which closes the row, so it can neither wait nor fill a pass.
-      query.andWhere(
-        `NOT EXISTS (
-           SELECT 1 FROM payment_intents held
-            WHERE held.organization_id IS NOT NULL
-              AND held.agent_account = intent.agent_account
-              AND held.asset_id = intent.asset_id
-              AND held.rail = :rail
-              AND held.status = :settledStatus
-              AND held.hold_id IS NOT NULL
-              AND held.hold_released_at IS NULL
-              AND held.held_at IS NULL
-              AND held.voucher_seq IS NOT NULL
-              AND held.voucher_signature IS NOT NULL
-              AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
-              AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
-              AND (${blockedPartySql('held')})
-         )`,
-        blockedPartyParams(exclude),
-      );
-    }
+    excludeBlockedPayers(query, exclude, orderedBySeq);
 
     if (orderedBySeq) {
       return query
@@ -1344,16 +1311,26 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * wait loads no rows.
    *
    * The base filters of {@link findAwaitingRedemption}, kept in step with it by
-   * hand, without its seq-order hold-back and its blocked-party exclusions: it
-   * may count a row the pass then leaves out, which only makes a pass run
-   * sooner — never later. On a chain that admits any seq order a row in its
-   * retry back-off is left out, as the pass leaves it out.
+   * hand, and its blocked-party exclusions (the same SQL, `excludeBlockedPayers`):
+   * a row of a blocked payer, delegate or payer organization — and, on a chain
+   * that requires ascending seq, every later seq of that payer — is held by the
+   * pass and is not counted, so one old blocked voucher cannot keep the oldest
+   * age past `REDEEM_MAX_WAIT_SECONDS` and run a pass every tick (review
+   * 2026-10-30 M-2). A blocked PROVIDER is not left out, as the pass does not
+   * leave it out: the pass forfeits that voucher at once, which closes it.
+   * Without the seq-order hold-back: it may count a row the pass then leaves
+   * out, which only makes a pass run sooner — never later. On a chain that
+   * admits any seq order a row in its retry back-off is left out, as the pass
+   * leaves it out.
    */
   async summarizeAwaitingRedemption(
     assetId: string,
     settledStatus: string,
     rail: string,
-    options: { readonly orderedBySeq?: boolean } = {},
+    options: {
+      readonly orderedBySeq?: boolean;
+      readonly exclude?: RedemptionExclusions;
+    } = {},
   ): Promise<{ count: number; oldestIssuedAt: Date | null; earliestExpiresAt: Date | null }> {
     const query = this.createQueryBuilder('intent')
       .select('COUNT(*)::int', 'count')
@@ -1373,6 +1350,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     if (options.orderedBySeq === false) {
       query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
     }
+    excludeBlockedPayers(
+      query,
+      options.exclude ?? NO_REDEMPTION_EXCLUSIONS,
+      options.orderedBySeq ?? true,
+    );
     const row = await query.getRawOne<{
       count: number | string;
       oldestIssuedAt: string | null;
@@ -3666,6 +3648,50 @@ function blockedPartyParams(exclude: RedemptionExclusions): Record<string, strin
     blockedWalletKeys: [...exclude.walletKeys],
     blockedChainAccounts: exclude.chainAccounts.map((account) => account.toLowerCase()),
   };
+}
+
+/**
+ * The pass's blocked-party hold-back, shared by {@link
+ * PaymentIntentRepository.findAwaitingRedemption} and its gathering count
+ * (`summarizeAwaitingRedemption`), so the two cannot disagree on which rows
+ * are waiting (review 2026-10-30 M-2).
+ */
+function excludeBlockedPayers(
+  query: SelectQueryBuilder<PaymentIntentEntity>,
+  exclude: RedemptionExclusions,
+  orderedBySeq: boolean,
+): void {
+  if (!hasExclusions(exclude)) return;
+  // A row is left out when it, or an EARLIER seq of the same payer in this
+  // queue, has a blocked party. Leaving out only the blocked row would let
+  // the payer's later seqs through, and redeeming one of those advances
+  // `seq_high` past the held one and kills it. Done in the query, BEFORE
+  // the LIMIT, so held rows can never fill the pass (audit E-1). On a
+  // chain that admits any order (D-23) only the row's OWN parties count.
+  //
+  // Payer-side parties only — the payer's organization, the payer and the
+  // delegate. A blocked provider or payee is NOT left out: the pass makes
+  // that provider forfeit the voucher at once (`VoucherRedemptionService`),
+  // which closes the row, so it can neither wait nor fill a pass.
+  query.andWhere(
+    `NOT EXISTS (
+         SELECT 1 FROM payment_intents held
+          WHERE held.organization_id IS NOT NULL
+            AND held.agent_account = intent.agent_account
+            AND held.asset_id = intent.asset_id
+            AND held.rail = :rail
+            AND held.status = :settledStatus
+            AND held.hold_id IS NOT NULL
+            AND held.hold_released_at IS NULL
+            AND held.held_at IS NULL
+            AND held.voucher_seq IS NOT NULL
+            AND held.voucher_signature IS NOT NULL
+            AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
+            AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
+            AND (${blockedPartySql('held')})
+       )`,
+    blockedPartyParams(exclude),
+  );
 }
 
 function hasExclusions(exclude: RedemptionExclusions): boolean {

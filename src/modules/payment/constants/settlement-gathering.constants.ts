@@ -1,3 +1,5 @@
+import type { RedemptionExclusions } from '@database/postgres/repositories/payment-intent.repository';
+
 import { MAX_HELD_BATCH } from '../ports/held-payments.port';
 import { VOUCHER_REDEMPTION_BATCH } from './voucher-redemption.constants';
 
@@ -165,7 +167,7 @@ export interface AwaitingRedemptionSummarySource {
     assetId: string,
     settledStatus: string,
     rail: string,
-    options?: { readonly orderedBySeq?: boolean },
+    options?: { readonly orderedBySeq?: boolean; readonly exclude?: RedemptionExclusions },
   ): Promise<{ count: number; oldestIssuedAt: Date | null; earliestExpiresAt: Date | null }>;
 }
 
@@ -175,7 +177,9 @@ export interface AwaitingRedemptionSummarySource {
  * costs the same whenever it goes. The deadline is the chain's own
  * (`expiresAt` + `graceSeconds`), and `urgentWithinSeconds` is the window in
  * which the redeemer already waives its fee cap
- * (`EVM_FEE_CAP_WAIVED_WITHIN_SECONDS`). A failed count runs the pass.
+ * (`EVM_FEE_CAP_WAIVED_WITHIN_SECONDS`). `exclude` is the pass's own
+ * blocked-party set, so a voucher the pass would hold is not counted either
+ * (review 2026-10-30 M-2). A failed count runs the pass.
  */
 export async function redemptionPassReady(input: {
   readonly policy: GatheringPolicy;
@@ -185,6 +189,7 @@ export async function redemptionPassReady(input: {
   readonly rail: string;
   readonly batchSize: number;
   readonly orderedBySeq: boolean;
+  readonly exclude?: RedemptionExclusions;
   readonly graceSeconds: number;
   readonly urgentWithinSeconds: number;
   readonly nowMs: number;
@@ -196,7 +201,7 @@ export async function redemptionPassReady(input: {
       input.asset,
       input.settledStatus,
       input.rail,
-      { orderedBySeq: input.orderedBySeq },
+      { orderedBySeq: input.orderedBySeq, exclude: input.exclude },
     );
     return gatheringReady(
       input.policy,

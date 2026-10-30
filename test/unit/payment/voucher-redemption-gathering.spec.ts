@@ -16,7 +16,9 @@ import {
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
-import { noBlocks } from '../helpers/blocklist';
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * Redemption gathering (owner decision 2026-10-30): on a chain that batches,
@@ -66,6 +68,7 @@ function build(options: {
   batchSize?: number;
   policy?: GatheringPolicy;
   rows?: number;
+  blocklist?: ReturnType<typeof noBlocks>;
 }) {
   const rows = Array.from({ length: options.rows ?? 3 }, (_, index) => pending(index + 1));
   const batches: RedeemVoucherRequest[][] = [];
@@ -117,8 +120,9 @@ function build(options: {
     intents as never,
     redeemer as never,
     { emit: async () => undefined } as never,
-    noBlocks(),
+    options.blocklist ?? noBlocks(),
     () => NOW_MS,
+    null,
     null,
     options.policy ?? GATHER,
   );
@@ -142,10 +146,28 @@ describe('VoucherRedemptionService — gathering', () => {
       ASSET,
       'SETTLED',
       'RAIL_B_VOUCHER',
-      { orderedBySeq: false },
+      { orderedBySeq: false, exclude: { organizationIds: [], walletKeys: [], chainAccounts: [] } },
     );
     expect(payments.findAwaitingRedemption).not.toHaveBeenCalled();
     expect(batches).toEqual([]);
+  });
+
+  it('counts with the same blocked-party exclusions the pass then applies (review 2026-10-30 M-2)', async () => {
+    const blocklist = blocklistOf({
+      kind: BlockSubjectKind.ORGANIZATION,
+      subject: '11111111-1111-4111-8111-111111111111',
+    });
+    const { service, payments } = build({ blocklist, rows: 25 });
+
+    await service.run(ASSET);
+
+    const counted = (payments.summarizeAwaitingRedemption.mock.calls[0] as unknown[])[3] as {
+      exclude: { organizationIds: string[] };
+    };
+    expect(counted.exclude.organizationIds).toHaveLength(1);
+    // The pass reads its queue with the very same set.
+    const queued = (payments.findAwaitingRedemption.mock.calls[0] as unknown[])[4];
+    expect(queued).toBe(counted.exclude);
   });
 
   it('runs at the count threshold', async () => {
