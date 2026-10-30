@@ -171,7 +171,6 @@ describe('PaymentIntentService — the guarded write-off and void', () => {
     const repo = {
       markWrittenOff: jest.fn(async () => marked),
       markDebtVoided: jest.fn(async () => marked),
-      markUnredeemedVoided: jest.fn(async () => marked),
       findOneBy: jest.fn(async () => ({
         id: 'debt-1',
         organizationId: 'org-1',
@@ -221,23 +220,6 @@ describe('PaymentIntentService — the guarded write-off and void', () => {
     const { service, repo, runner } = serviceBuild(true);
     await expect(service.voidDebt('org-1', 'debt-1', 'REFUND')).resolves.toBe(true);
     expect(repo.markDebtVoided).toHaveBeenCalledWith(runner, target, 'voided:REFUND');
-  });
-
-  it('a platform failure voids the unredeemed call in the same guarded release (2026-10-29)', async () => {
-    const { service, ledger, repo, runner } = serviceBuild(true);
-    await expect(service.voidUnredeemed(target, 'voided:PLATFORM_UNREDEEMED')).resolves.toBe(true);
-    expect(ledger.releaseHoldIf).toHaveBeenCalledWith('org-1', 'hold-debt-1', expect.any(Function));
-    expect(repo.markUnredeemedVoided).toHaveBeenCalledWith(
-      runner,
-      target,
-      'voided:PLATFORM_UNREDEEMED',
-    );
-    expect(ledger.releaseHold).not.toHaveBeenCalled();
-  });
-
-  it('a platform void of a row that changed releases nothing', async () => {
-    const { service } = serviceBuild(false);
-    await expect(service.voidUnredeemed(target, 'voided:PLATFORM_UNREDEEMED')).resolves.toBe(false);
   });
 });
 
@@ -368,39 +350,6 @@ describe('PaymentIntentRepository — the debt SQL', () => {
     expect(queries[1].sql).toMatch(
       /\("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%'\)/,
     );
-  });
-
-  it('a platform void lapses, marks and releases in one statement under the payer lock', async () => {
-    const { repo } = await repository();
-    const { runner, queries } = recordingRunner();
-    await expect(
-      repo.markUnredeemedVoided(runner as never, target, 'voided:PLATFORM_UNREDEEMED'),
-    ).resolves.toBe(true);
-    expect(queries[0]).toEqual({
-      sql: 'SELECT pg_advisory_xact_lock(hashtext($1))',
-      params: [`voucher-admission:${PAYER}`],
-    });
-    const update = queries[1].sql;
-    expect(update).toMatch(/"redemption_lapsed_at" = COALESCE\("redemption_lapsed_at", now\(\)\)/);
-    expect(update).toMatch(/"redemption_last_error" = \$5/);
-    expect(update).toMatch(/"hold_released_at" = now\(\)/);
-    expect(update).toMatch(/"hold_id" = \$4/);
-    expect(update).toMatch(/AND "hold_released_at" IS NULL/);
-    expect(queries[1].params).toEqual([
-      'org-1',
-      'debt-1',
-      PAYER,
-      'hold-debt-1',
-      'voided:PLATFORM_UNREDEEMED',
-    ]);
-    // Released in the same write, so it never matches the refusing predicate.
-    expect(
-      collectionStateOf({
-        redemptionLastError: 'voided:PLATFORM_UNREDEEMED',
-        redemptionLapsedAt: NOW,
-        holdReleasedAt: NOW,
-      }),
-    ).toBe(CollectionState.VOIDED);
   });
 
   it('H1: a written-off debt keeps refusing paid calls; a voided or collected one does not', () => {

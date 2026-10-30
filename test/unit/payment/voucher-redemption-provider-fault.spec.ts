@@ -54,8 +54,6 @@ function row(overrides: Partial<RedeemableIntent> = {}): RedeemableIntent {
     providerAmount: '800000',
     platformFee: '200000',
     redemptionLastError: null,
-    // The platform tried to send it: a ref is written before each broadcast.
-    redemptionTxRefCount: 1,
     ...overrides,
   };
 }
@@ -104,7 +102,6 @@ function build(rows: RedeemableIntent[], options: Options = {}) {
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     releaseHold: jest.fn().mockResolvedValue(true),
-    voidUnredeemed: jest.fn().mockResolvedValue(true),
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
@@ -272,7 +269,7 @@ describe('VoucherRedemptionService — provider fault is read live at close time
     expect(payments.lapseRedemption).not.toHaveBeenCalled();
   });
 
-  it('L4: a stake read still failing past the landing window is neutral — decided by its cause', async () => {
+  it('L4: a stake read still failing past the landing window is neutral — buyer debt', async () => {
     // Past `expiresAt + skew + grace + LANDING_SETTLE_SECONDS`.
     const { service, intents, payments } = build(
       [row({ expiresAt: new Date((NOW - 3 * 3600) * 1000) })],
@@ -285,17 +282,12 @@ describe('VoucherRedemptionService — provider fault is read live at close time
 
     await service.run(USDC);
 
-    // No recorded refusal: the platform never got it redeemed, so it is voided.
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    expect(payments.lapseRedemption).not.toHaveBeenCalled();
-    expect(intents.voidUnredeemed).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: ORG, id: 'intent-1' }),
-      'voided:PLATFORM_UNREDEEMED',
-    );
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
   });
 
-  it('N3: VoucherExpired with no recorded cause and a clean provider is voided, not debt', async () => {
-    // An outage: nothing ever refused the voucher, the platform just never landed it.
+  it('N3: VoucherExpired with no recorded cause and a clean provider is buyer debt', async () => {
+    // A late verdict, an outage or a payer block lifted after the deadline.
     const { service, intents, payments } = build([row()], {
       outcome: RedeemOutcomeKind.UNREDEEMABLE,
       programError: 'VoucherExpired',
@@ -305,11 +297,7 @@ describe('VoucherRedemptionService — provider fault is read live at close time
     await service.run(USDC);
 
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    expect(payments.lapseRedemption).not.toHaveBeenCalled();
-    expect(intents.voidUnredeemed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'intent-1' }),
-      'voided:PLATFORM_UNREDEEMED',
-    );
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
   });
 
   it('N1/M1: a recorded ProviderBelowMinimumStake forfeits whatever the closing refusal is', async () => {
@@ -499,13 +487,8 @@ describe('VoucherRedemptionService — a shortfall from unplanned slash records 
 
     await service.run(USDC);
 
-    // Not the provider's forfeit; with no recorded refusal it is a platform void.
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    expect(payments.lapseRedemption).not.toHaveBeenCalled();
-    expect(intents.voidUnredeemed).toHaveBeenCalledWith(
-      expect.anything(),
-      'voided:PLATFORM_UNREDEEMED',
-    );
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
   });
 
   it('a buyer-caused close DURING the shortfall is buyer debt, not the provider’s forfeit (N-2)', async () => {
