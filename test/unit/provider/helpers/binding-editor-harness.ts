@@ -6,6 +6,7 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
+import { PaidPriceFloor } from '@modules/payment/domain/paid-price-floor';
 import {
   ChainEnrolment,
   ChainEnrolmentPort,
@@ -55,6 +56,8 @@ export interface BindingEditorHarnessOptions {
   }[];
   /** `stakeKey(providerId, chainId)` → raw minor units. Absent means "no known stake". */
   readonly stakes: Readonly<Record<string, string>>;
+  /** The paid-call minimum; absent, the suite's env value (off, `test/setup-env.ts`). */
+  readonly priceFloor?: PaidPriceFloor;
 }
 
 export interface BindingEditorHarness {
@@ -196,6 +199,7 @@ export function buildBindingEditorHarness(
     minimumStakeByChain(options.enabledChains),
     null,
     { list: async () => [], pruneExcept: async () => [] } as never,
+    options.priceFloor,
   );
 
   const validBody = {

@@ -39,6 +39,13 @@ import {
 } from '../ports/voucher-redeemer.port';
 import { BuyerDebtSpikeMonitor } from './buyer-debt-spike.monitor';
 import { PaymentIntentService } from './payment-intent.service';
+import { EVM_FEE_CAP_WAIVED_WITHIN_SECONDS } from '@modules/chains/evm/evm-l1-gas';
+import {
+  GatheringPolicy,
+  REDEEM_GATHERING,
+  REDEEM_GATHERING_FROM_ENV,
+  redemptionPassReady,
+} from '../constants/settlement-gathering.constants';
 
 // Re-exported: callers and specs have always imported it from here.
 export { PROVIDER_FORFEIT_PREFIX };
@@ -247,6 +254,10 @@ export class VoucherRedemptionService {
     // The buyer-debt spike alert, checked once after a pass that lapsed any.
     // Optional: a spec that does not test it need not build one.
     @Optional() private readonly debtSpike: BuyerDebtSpikeMonitor | null = null,
+    // `REDEEM_MIN_BATCH` / `REDEEM_MAX_WAIT_SECONDS`: see `run`.
+    @Optional()
+    @Inject(REDEEM_GATHERING)
+    private readonly gathering: GatheringPolicy = REDEEM_GATHERING_FROM_ENV,
   ) {}
 
   /** Assets whose current pass made at least one buyer debt. */
@@ -254,6 +265,14 @@ export class VoucherRedemptionService {
 
   /**
    * One pass over the passed-but-unredeemed holds of `asset`.
+   *
+   * **Gathering** (`settlement-gathering.constants.ts`, owner decision
+   * 2026-10-30): on a chain that batches, the pass waits — and touches nothing —
+   * until `REDEEM_MIN_BATCH` vouchers await, the oldest was issued
+   * `REDEEM_MAX_WAIT_SECONDS` ago, or one is within
+   * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS` of its on-chain deadline. A dispute
+   * filed while a voucher waits is guaranteed as before: the voucher is
+   * redeemed into the hold and its full window starts then.
    *
    * Never throws: a redemption pass that rejects is logged by Nest and then
    * forgotten, and the holds it did not reach would sit until the next tick
@@ -272,6 +291,24 @@ export class VoucherRedemptionService {
   }
 
   private async pass(asset: AssetId): Promise<void> {
+    const gathered = await redemptionPassReady({
+      policy: this.gathering,
+      payments: this.payments,
+      asset,
+      settledStatus: PaymentIntentStatus.SETTLED,
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      batchSize: this.redeemer.maxBatchSizeFor?.(asset) ?? this.redeemer.maxBatchSize,
+      orderedBySeq: this.redeemer.requiresAscendingSeq?.(asset) ?? true,
+      graceSeconds: redeemGraceSeconds(asset),
+      urgentWithinSeconds: EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
+      nowMs: this.now(),
+      onError: (error) =>
+        this.logger.warn(
+          `Gathering check for ${asset} failed; running the pass: ${describe(error)}`,
+        ),
+    });
+    if (!gathered) return;
+
     // The blocked parties are left out IN the query, before its LIMIT: held
     // after it, 100 rows of one blocked payer at the head of the queue would
     // fill every pass and starve every other buyer (audit E-1). The per-row

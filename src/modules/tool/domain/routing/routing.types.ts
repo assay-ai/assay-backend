@@ -386,6 +386,15 @@ export interface RoutingContext {
    */
   readonly onlyProviderId?: string;
   /**
+   * Rail B's paid-call minimum (`paid-price-floor.ts`), as a predicate: true
+   * for a chargeable binding priced below it whose provider is not exempt.
+   * Read only by `offer()`, which draws among the other bindings while any of
+   * them can serve, and falls back to the whole pool only when none can — so
+   * the caller refuses `PAYMENT_PRICE_BELOW_MINIMUM` only when every candidate
+   * is below the minimum. A predicate, so routing stays free of payment policy.
+   */
+  readonly belowPaidPriceFloor?: (binding: ToolBinding) => boolean;
+  /**
    * Whether this call is charged, and so which bindings may serve it.
    *
    * - `PAID`: only `PAID` and `FREEMIUM` bindings. A `FREE` binding is exempt

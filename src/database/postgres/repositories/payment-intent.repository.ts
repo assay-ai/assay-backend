@@ -1338,6 +1338,61 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * How many vouchers of `assetId` await redemption, when the oldest was issued
+   * and the earliest `expires_at` — one aggregate row, for the redemption job's
+   * gathering check (`settlement-gathering.constants.ts`), so a pass that will
+   * wait loads no rows.
+   *
+   * The base filters of {@link findAwaitingRedemption}, kept in step with it by
+   * hand, without its seq-order hold-back and its blocked-party exclusions: it
+   * may count a row the pass then leaves out, which only makes a pass run
+   * sooner — never later. On a chain that admits any seq order a row in its
+   * retry back-off is left out, as the pass leaves it out.
+   */
+  async summarizeAwaitingRedemption(
+    assetId: string,
+    settledStatus: string,
+    rail: string,
+    options: { readonly orderedBySeq?: boolean } = {},
+  ): Promise<{ count: number; oldestIssuedAt: Date | null; earliestExpiresAt: Date | null }> {
+    const query = this.createQueryBuilder('intent')
+      .select('COUNT(*)::int', 'count')
+      .addSelect('MIN(intent.voucherIssuedAt)', 'oldestIssuedAt')
+      .addSelect('MIN(intent.expiresAt)', 'earliestExpiresAt')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere('intent.status = :settledStatus', { settledStatus })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('intent.voucherSeq IS NOT NULL')
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      .andWhere('(intent.redemptionLapsedAt IS NULL OR intent.redemptionReplacedAt IS NOT NULL)')
+      .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
+      .andWhere('intent.heldAt IS NULL');
+    if (options.orderedBySeq === false) {
+      query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
+    }
+    const row = await query.getRawOne<{
+      count: number | string;
+      oldestIssuedAt: string | null;
+      earliestExpiresAt: Date | string | null;
+    }>();
+    return {
+      count: Number(row?.count ?? 0),
+      // `voucher_issued_at` is the voucher's own unix seconds (bigint).
+      oldestIssuedAt:
+        row?.oldestIssuedAt === null || row?.oldestIssuedAt === undefined
+          ? null
+          : new Date(Number(row.oldestIssuedAt) * 1000),
+      earliestExpiresAt:
+        row?.earliestExpiresAt === null || row?.earliestExpiresAt === undefined
+          ? null
+          : new Date(row.earliestExpiresAt),
+    };
+  }
+
+  /**
    * A retryable refusal of this voucher (review 2026-10-23 I-1): it is not
    * attempted again for 1, 2, 4, 8, then 10 minutes — but never past its last
    * pass, `REDEMPTION_DEADLINE_MARGIN_SECONDS` before its on-chain deadline
@@ -2107,6 +2162,46 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [rail],
     )) as { assetId: string }[];
     return rows.map((row) => row.assetId);
+  }
+
+  /**
+   * Per asset: how many held payments of `rail` the batched collect would take
+   * ({@link findCollectable}'s filters with `beforeSeconds`), and since when the
+   * oldest has been collectable — one aggregate row per asset, for the
+   * collection job's gathering check (`settlement-gathering.constants.ts`).
+   * Without the blocked-party exclusions: it may count a row the pass then
+   * leaves out, which only makes a pass run sooner — never later.
+   */
+  async summarizeCollectable(
+    rail: string,
+    beforeSeconds: number,
+  ): Promise<Map<string, { count: number; oldestCollectableAt: Date | null }>> {
+    const rows = (await this.manager.query(
+      `SELECT "asset_id" AS "assetId", COUNT(*)::int AS "count",
+              MIN("collectable_at") AS "oldestCollectableAt"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND "rail" = $1
+          AND "held_status" = 'HELD'
+          AND "collectable_at" <= now()
+          AND "collectable_at" > now() - make_interval(secs => $2)
+          AND ("dispute_outcome" IS NULL OR "dispute_outcome" = 'REJECTED')
+          AND "hold_id" IS NOT NULL
+          AND "hold_released_at" IS NULL
+          AND ("held_retry_at" IS NULL OR "held_retry_at" <= now())
+        GROUP BY "asset_id"`,
+      [rail, beforeSeconds],
+    )) as { assetId: string; count: number | string; oldestCollectableAt: Date | string | null }[];
+    return new Map(
+      rows.map((row) => [
+        row.assetId,
+        {
+          count: Number(row.count),
+          oldestCollectableAt:
+            row.oldestCollectableAt === null ? null : new Date(row.oldestCollectableAt),
+        },
+      ]),
+    );
   }
 
   /**

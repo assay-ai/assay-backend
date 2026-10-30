@@ -16,6 +16,10 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { platformAssetFrom } from '@modules/chains/platform-asset';
+import {
+  minPaidPriceFor,
+  PAID_PRICE_FLOOR_FROM_ENV,
+} from '@modules/payment/domain/paid-price-floor';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import {
   BindingAuthMode,
@@ -206,6 +210,13 @@ export class ProviderToolBindingsService {
         chainId: chainIdOf(metadata.assetId),
         symbol: metadata.symbol,
         decimals: metadata.decimals,
+        // The same function the editor and admission enforce, for this caller:
+        // an exempt provider is told `'0'`.
+        minPaidPrice: minPaidPriceFor(
+          PAID_PRICE_FLOOR_FROM_ENV,
+          organizationId ?? null,
+          metadata.decimals,
+        ).toString(),
       },
     };
   }

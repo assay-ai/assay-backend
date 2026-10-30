@@ -154,6 +154,8 @@ describe('ProviderToolBindingsService.getCatalogue — the settlement asset', ()
       chainId: chainIdOf(ASSET_IDS.USDC_SOLANA_MAINNET),
       symbol: 'USDC',
       decimals: 6,
+      // The paid-call minimum is off in this suite (`test/setup-env.ts`).
+      minPaidPrice: '0',
     });
   });
 
@@ -167,6 +169,8 @@ describe('ProviderToolBindingsService.getCatalogue — the settlement asset', ()
       chainId: chainIdOf(ASSET_IDS.USDC_SOLANA_DEVNET),
       symbol: 'USDC',
       decimals: 6,
+      // The paid-call minimum is off in this suite (`test/setup-env.ts`).
+      minPaidPrice: '0',
     });
   });
 

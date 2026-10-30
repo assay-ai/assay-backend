@@ -18,6 +18,10 @@ import {
 } from '@modules/payment/ports/held-payments.port';
 import { PaymentRail } from '@modules/payment/ports/payment.types';
 import {
+  GatheringPolicy,
+  NO_GATHERING,
+} from '@modules/payment/constants/settlement-gathering.constants';
+import {
   BLOCKED_HELD_UNREFUNDED_ALERT,
   HeldCollectionService,
 } from '@modules/payment/services/held-collection.service';
@@ -63,9 +67,11 @@ interface Repo {
   /** Runs when the blocked-provider query is read (a block changing mid-pass). */
   onBlockedQuery?: () => void;
   onCollectableQuery?: () => void;
+  /** Makes `summarizeCollectable` throw (the gathering check fails). */
+  summaryThrows?: boolean;
 }
 
-function setup(options: { chainBlocked?: string[] } = {}) {
+function setup(options: { chainBlocked?: string[]; gathering?: GatheringPolicy } = {}) {
   const repo: Repo = {
     collectable: [],
     timedOut: [],
@@ -89,6 +95,24 @@ function setup(options: { chainBlocked?: string[] } = {}) {
         );
       },
     ),
+    // What the batched collect would take, per asset — as the SQL counts it.
+    summarizeCollectable: jest.fn(async (rail: string, before: number) => {
+      if (repo.summaryThrows) throw new Error('database unavailable');
+      const summary = new Map<string, { count: number; oldestCollectableAt: Date | null }>();
+      for (const row of repo.collectable) {
+        const at = row.collectableAt as Date;
+        if (row.rail !== rail || at.getTime() + before * 1000 <= Date.now()) continue;
+        const entry = summary.get(row.assetId) ?? { count: 0, oldestCollectableAt: null };
+        summary.set(row.assetId, {
+          count: entry.count + 1,
+          oldestCollectableAt:
+            entry.oldestCollectableAt && entry.oldestCollectableAt <= at
+              ? entry.oldestCollectableAt
+              : at,
+        });
+      }
+      return summary;
+    }),
     findTimedOutCollectable: jest.fn(async () => repo.timedOut),
     findHeldPastTimeout: jest.fn(async () => repo.toSync),
     findHeldOfBlockedProviders: jest.fn(async (rail: string, exclude: RedemptionExclusions) => {
@@ -132,6 +156,7 @@ function setup(options: { chainBlocked?: string[] } = {}) {
     held,
     chainState,
     { notify: async (request: NotificationRequest) => void notified.push(request) } as never,
+    options.gathering,
   );
   return { service, repo, payments, intents, alerts, held, blocklist, notified };
 }
@@ -619,5 +644,81 @@ describe('HeldCollectionService — verification fixes', () => {
 
     expect(read).not.toHaveBeenCalled();
     expect(alerts.map((a) => a.dedupeKey)).toEqual([`${row.id}:near`]);
+  });
+});
+
+describe('HeldCollectionService — gathering (COLLECT_MIN_BATCH / COLLECT_MAX_WAIT_SECONDS)', () => {
+  const GATHER: GatheringPolicy = { minBatch: 20, maxWaitSeconds: 6 * 3600 };
+  const collected = (held: FakeHeldPayments) =>
+    held.sent.filter((s) => s.op === 'collect').flatMap((s) => s.keys);
+
+  it('waits below both thresholds: nothing is collected', async () => {
+    const { service, repo, held, intents, payments } = setup({ gathering: GATHER });
+    repo.collectable = [1, 2, 3].map(() => heldRow(held, { collectableAgoMs: HOUR }));
+
+    expect(await service.run()).toBe(0);
+
+    expect(held.sent).toEqual([]);
+    expect(intents.bookHeldCollected).not.toHaveBeenCalled();
+    // Not even loaded: the count said wait (rail A's read still runs).
+    const reads = (payments.findCollectable as jest.Mock).mock.calls.map((call) => call[0]);
+    expect(reads).toEqual([PaymentRail.RAIL_A_PER_CALL]);
+  });
+
+  it('collects once COLLECT_MIN_BATCH are collectable, in one batch', async () => {
+    const { service, repo, held } = setup({ gathering: GATHER });
+    repo.collectable = Array.from({ length: 20 }, () => heldRow(held, { collectableAgoMs: HOUR }));
+
+    expect(await service.run()).toBe(20);
+
+    expect(held.sent.map((s) => [s.op, s.keys.length])).toEqual([['collect', 20]]);
+  });
+
+  it('collects a small batch once the oldest has waited COLLECT_MAX_WAIT_SECONDS', async () => {
+    const { service, repo, held } = setup({ gathering: GATHER });
+    const old = heldRow(held, { collectableAgoMs: 6 * HOUR });
+    const young = heldRow(held, { collectableAgoMs: HOUR });
+    repo.collectable = [old, young];
+
+    expect(await service.run()).toBe(2);
+
+    expect(collected(held)).toEqual([keyOf(old), keyOf(young)]);
+  });
+
+  it('still collects past-timeout records singly and refunds a blocked provider every pass', async () => {
+    const { service, repo, held, blocklist } = setup({ gathering: GATHER });
+    repo.collectable = [heldRow(held, { collectableAgoMs: HOUR })];
+    const late = heldRow(held, { collectableAgoMs: TIMEOUT_MS + HOUR });
+    repo.timedOut = [late];
+    const provider = randomUUID();
+    const blocked = heldRow(held, { providerId: provider });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedHeld = [blocked];
+
+    await service.run();
+
+    expect(held.sent).toEqual([
+      { op: 'refund', keys: [keyOf(blocked)] },
+      { op: 'collect', keys: [keyOf(late)] },
+    ]);
+    expect(await statusOf(held, repo.collectable[0])).toBe(HeldStatus.HELD);
+  });
+
+  it('collects as before when the gathering check fails', async () => {
+    const { service, repo, held } = setup({ gathering: GATHER });
+    repo.collectable = [heldRow(held, { collectableAgoMs: HOUR })];
+    repo.summaryThrows = true;
+
+    expect(await service.run()).toBe(1);
+  });
+
+  it('a minimum batch of 1 turns gathering off', async () => {
+    const { service, repo, held, payments } = setup({ gathering: NO_GATHERING });
+    repo.collectable = [heldRow(held, { collectableAgoMs: HOUR })];
+
+    expect(await service.run()).toBe(1);
+    expect(
+      (payments as unknown as { summarizeCollectable: jest.Mock }).summarizeCollectable,
+    ).not.toHaveBeenCalled();
   });
 });
