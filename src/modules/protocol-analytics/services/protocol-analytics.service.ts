@@ -46,7 +46,7 @@ export class ProtocolAnalyticsService {
       }));
     const asset = query.asset ? assets.find((item) => item.id === query.asset) : assets[0];
     if (query.asset && !asset) throw new BadRequestException('Asset is not enabled for analytics');
-    const key = `protocol-analytics:v2:${this.configKey}:${range}:${asset?.id ?? 'none'}`;
+    const key = `protocol-analytics:v3:${this.configKey}:${range}:${asset?.id ?? 'none'}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
     const pending = this.load(key, range, assets, asset ?? null).finally(() =>
