@@ -8,10 +8,16 @@ import {
 import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 
 import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
-import { EvmHeldPayments } from '@modules/chains/evm/evm-held-payments.service';
+import {
+  EvmHeldPayments,
+  HeldSendDeferredError,
+} from '@modules/chains/evm/evm-held-payments.service';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { HeldStatus } from '@modules/payment/ports/held-payments.port';
+import { FEE_SPIKE_DEFERRED } from '@modules/payment/ports/voucher-redeemer.port';
+
+import { fakeNodeInterface } from './helpers/fake-node-interface';
 
 const CHAIN = 'eip155:46630' as ChainId;
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3` as AssetId;
@@ -28,6 +34,7 @@ function build(
     logs?: readonly unknown[];
     estimate?: bigint | Error;
     simulateError?: Error;
+    nodeInterface?: jest.Mock;
   } = {},
 ) {
   const reads: Array<{
@@ -66,6 +73,7 @@ function build(
     getTransactionReceipt: jest.fn(() => Promise.resolve(options.receipt ?? null)),
     getBlockNumber: jest.fn(() => Promise.resolve(100_000n)),
     getLogs: jest.fn(() => Promise.resolve(options.logs ?? [])),
+    ...(options.nodeInterface ? { call: options.nodeInterface } : {}),
   };
   const redeemer = {
     address: jest.fn(() => Promise.resolve(`${CHAIN}:0x5555555555555555555555555555555555555555`)),
@@ -227,6 +235,58 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
       const padded = build(null, { estimate: 167_287n });
       await padded.service.collect(ASSET, three);
       expect(padded.sent[0].gasLimit).toBe(209_109n);
+    });
+
+    describe('the L1 half (Nitro)', () => {
+      it('with an L1 part of 0, is exactly the estimate x 1.25', async () => {
+        const { service, sent } = build(null, {
+          estimate: 133_696n,
+          nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+        });
+        await service.collect(ASSET, one);
+        expect(sent[0].gasLimit).toBe(167_120n);
+      });
+
+      it('caps execution only: the prod 609758 estimate is no longer cut to 520000', async () => {
+        // Two moves (cap 520k), estimate 609,758 of which 480,000 is L1.
+        const nodeInterface = fakeNodeInterface({ l1Gas: 480_000n });
+        const { service, sent, reads } = build(null, { estimate: 609_758n, nodeInterface });
+        await service.collect(ASSET, three.slice(0, 2));
+        // (609758 - 480000) x 1.25 = 162198 (rounded up), + 480000 x 1.2.
+        expect(sent[0].gasLimit).toBe(162_198n + 576_000n);
+        expect(simulated(reads)).toEqual([162_198n + 576_000n]);
+        expect(nodeInterface.asked[0]).toEqual({ to: ESCROW, data: sent[0].data });
+      });
+
+      it('adds L1 to the fixed fallback when the estimate fails', async () => {
+        const { service, sent } = build(null, {
+          estimate: new Error('outage'),
+          nodeInterface: fakeNodeInterface({ l1Gas: 100_000n }),
+        });
+        await service.refund(ASSET, one);
+        expect(sent[0].gasLimit).toBe(180_000n + 120_000n);
+      });
+
+      it('defers above the cost cap: FeeSpikeDeferred, nothing simulated or sent', async () => {
+        const { service, sent, reads } = build(null, {
+          estimate: 12_000_000n,
+          nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+        });
+        const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(HeldSendDeferredError);
+        expect((error as Error).message.startsWith(`${FEE_SPIKE_DEFERRED}: `)).toBe(true);
+        expect(sent).toEqual([]);
+        expect(simulated(reads)).toEqual([]);
+      });
+
+      it('falls back to L1 = 0 when NodeInterface fails', async () => {
+        const { service, sent } = build(null, {
+          estimate: 133_696n,
+          nodeInterface: fakeNodeInterface(new Error('method not found')),
+        });
+        await service.collect(ASSET, one);
+        expect(sent[0].gasLimit).toBe(167_120n);
+      });
     });
 
     it('names an empty revert as out of gas, with the limit and the estimate', async () => {
