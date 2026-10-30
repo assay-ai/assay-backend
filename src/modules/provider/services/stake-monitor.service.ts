@@ -676,8 +676,13 @@ export class StakeMonitorService {
       return;
     }
 
+    // INFO, not WARN: nothing here is the operator's to act on — adding stake
+    // is the provider's, and the provider is told below. The operator is paged
+    // once the binding is actually under its floor (`provider_stake_grace_opened`,
+    // WARN) and when its grace runs out (`provider_stake_grace_expired`,
+    // CRITICAL).
     await this.alerts.emit({
-      severity: AlertSeverity.WARN,
+      severity: AlertSeverity.INFO,
       name: 'provider_stake_headroom_low',
       summary: `Binding ${binding.id} is within ${this.config.headroomWarningRatio * 100}% of its stake floor`,
       details: {
