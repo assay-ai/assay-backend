@@ -218,9 +218,9 @@ export const PLATFORM_VOID_OUTCOME_PREFIX = 'PLATFORM_';
  * The refusal the redemption job records when it DEFERS a send because L1
  * fees spiked: the platform chose not to send. Not about the voucher, so a
  * voucher that expires with it as its last refusal is voided, never buyer
- * debt. The literal is shared with the fee-spike guard.
+ * debt. Defined once, beside the redeemer port that returns it.
  */
-export const FEE_SPIKE_DEFERRED = 'FeeSpikeDeferred';
+export { FEE_SPIKE_DEFERRED } from '../ports/voucher-redeemer.port';
 
 /**
  * How close to a voucher's on-chain deadline (`expiresAt + redeemGraceSeconds`)
