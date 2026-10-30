@@ -7,6 +7,10 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
 import { sameAccountSpelling, sameAssetSpelling } from '@modules/chains/evm/eip55';
 import {
+  PAID_CALLS_PAUSED_RETRY_AFTER_SECONDS,
+  RedeemerFloatGate,
+} from '@modules/chains/evm/evm-redeemer-float.gate';
+import {
   AccountId,
   AssetId,
   ChainId,
@@ -129,6 +133,9 @@ export class VoucherService {
     // `payment_key.first_spend` (spec §7.10 item 6). Optional so a harness
     // that does not test notices need not build one.
     @Optional() private readonly firstSpend?: PaymentKeyFirstSpendService,
+    // The paid-call pause on a dry EVM redeemer. Optional for the same reason;
+    // absent, nothing is paused.
+    @Optional() private readonly redeemerFloat?: RedeemerFloatGate,
   ) {}
 
   /**
@@ -146,6 +153,17 @@ export class VoucherService {
   async redeem(input: RedeemVoucherInput): Promise<PaymentIntent> {
     const { voucher: signed, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
+
+    // Before anything else: every paid voucher call, MCP or SDK, comes through
+    // here, and a voucher admitted while the chain's redeemer cannot pay gas is
+    // a served call that lapses into buyer debt (2026-10-29). Free calls never
+    // reach `redeem`. Nothing is reserved and the seq stays unspent, so the
+    // retry signs nothing new. Fails open — see `RedeemerFloatGate`.
+    if (await this.redeemerFloat?.isPaused(input.chainId)) {
+      throw PaymentErrors.settlementGasPaused({
+        retryAfter: PAID_CALLS_PAUSED_RETRY_AFTER_SECONDS,
+      });
+    }
 
     this.assertWellFormed(signed);
     this.assertUnexpired(signed, now);

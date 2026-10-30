@@ -14,6 +14,7 @@ import {
   EVM_RELAYER_FLOAT_MARKS,
   parseFloatMarks,
 } from './evm-relayer-float.constants';
+import { RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
 import { EvmEscrowWithdrawalIndexer } from './evm-escrow-withdrawal.indexer';
@@ -109,6 +110,10 @@ function readConfirmations(raw: string | undefined): number {
       inject: [ConfigService, ENABLED_CHAINS],
     },
     EvmRelayerFloatMonitor,
+    // The writer half of the paid-call pause on a dry redeemer; `PaymentModule`
+    // provides the reader half. The state is in Redis (`CacheService` is
+    // global), so two instances of the class share it.
+    RedeemerFloatGate,
     // The pause/blocklist indexer (D-19) and the Config-lever alerts.
     {
       provide: EVM_CHAIN_STATE_INDEXER_CONFIG,

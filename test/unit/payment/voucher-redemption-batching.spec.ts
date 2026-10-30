@@ -9,6 +9,7 @@ import {
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import { Alert } from '@shared/alerting';
 import { noBlocks } from '../helpers/blocklist';
 
@@ -35,6 +36,7 @@ const PROVIDER_ORG = 'org-22222222-2222-4222-8222-222222222222';
 const PROVIDER_ACCOUNT = `${CHAIN_IDS.SOLANA_DEVNET}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`;
 const ALICE = `${CHAIN_IDS.SOLANA_DEVNET}:9B2yKCsMTQNbMjJU3wvwhKxjvtpA6TmmbeLtPV4Totpo`;
 const BOB = `${CHAIN_IDS.SOLANA_DEVNET}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`;
+const CAROL = `${CHAIN_IDS.SOLANA_DEVNET}:4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T`;
 
 const NOW_SECONDS = 1_800_000_000;
 
@@ -90,13 +92,27 @@ class FakeRedeemer {
     return ascending === undefined ? undefined : () => ascending;
   }
 
+  /** Set to make each single `redeem` throw too (a send that fails before the chain answers). */
+  singleThrows = false;
+  /** Set to make every single throw this. */
+  singleError: unknown = null;
+
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
     this.singles.push(request);
+    if (this.singleError) throw this.singleError;
+    if (this.singleThrows) throw new Error('redeemer has no gas');
     return this.outcomeFor(request);
   }
 
+  /** Set to make `redeemBatch` throw before anything is broadcast. */
+  batchThrows = false;
+  /** Set to make `redeemBatch` throw this instead. */
+  batchError: unknown = null;
+
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
     this.batches.push([...requests]);
+    if (this.batchError) throw this.batchError;
+    if (this.batchThrows) throw new Error('node error before broadcast');
     return requests.map((request) => this.outcomeFor(request));
   }
 
@@ -130,6 +146,7 @@ function build(
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
+    findRedemptionTxRefs: jest.fn().mockResolvedValue([]),
     lapseRedemption: jest.fn().mockResolvedValue(undefined),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
     recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
@@ -346,6 +363,90 @@ describe('VoucherRedemptionService — a chain that redeems any seq order', () =
     expect(redeemer.singles).toEqual([]);
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['5', '6', '9']]);
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(3);
+  });
+
+  it('a batch that throws before broadcast falls back to singles, not a stalled pass', async () => {
+    const { service, redeemer, intents } = anyOrder([pending(5, ALICE), pending(9, BOB)], 64);
+    redeemer.batchThrows = true;
+
+    await service.run(USDC);
+
+    expect(redeemer.batches).toHaveLength(1);
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5', '9']);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(2);
+  });
+
+  it('a single that throws in the fallback records nothing on the row (owner decision 2026-10-30)', async () => {
+    // A recorded error would cost the buyer the dispute refund guarantee, and
+    // the lapse is buyer debt whatever left it unredeemed.
+    const { service, redeemer, intents, payments } = anyOrder([pending(5, ALICE)], 64);
+    redeemer.batchThrows = true;
+    redeemer.singleThrows = true;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5']);
+    expect(payments.recordRedemptionError).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+  });
+
+  it('a batch that throws after a ref was recorded is not retried singly this pass', async () => {
+    const { service, redeemer, intents, payments } = anyOrder([pending(5, ALICE)], 64);
+    redeemer.batchThrows = true;
+    payments.findRedemptionTxRefs.mockResolvedValue(['0xref']);
+
+    await service.run(USDC);
+
+    expect(redeemer.singles).toEqual([]);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+  });
+
+  it('a batch the NODE refused is not broadcast, even with a ref recorded: singles follow', async () => {
+    const { service, redeemer, intents, payments } = anyOrder(
+      [pending(5, ALICE), pending(9, BOB)],
+      64,
+    );
+    redeemer.batchError = new EvmSendRejectedError('NONCE_TOO_LOW', '0xref');
+    // The hash was recorded before the node said no.
+    payments.findRedemptionTxRefs.mockResolvedValue(['0xref']);
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5', '9']);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(2);
+  });
+
+  it('a batch refused for insufficient funds stops the fallback and the pass', async () => {
+    const { service, redeemer, intents, payments } = anyOrder(
+      [pending(5, ALICE), pending(9, BOB), pending(11, CAROL)],
+      2,
+    );
+    redeemer.batchError = new EvmSendRejectedError('INSUFFICIENT_FUNDS', '0xref');
+    payments.findRedemptionTxRefs.mockResolvedValue(['0xref']);
+
+    await service.run(USDC);
+
+    // No singles, and no second batch for the row the first could not carry.
+    expect(redeemer.singles).toEqual([]);
+    expect(redeemer.batches).toHaveLength(1);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    // Marked as the platform's failure, as a throwing single would have been.
+    expect(payments.recordRedemptionError).not.toHaveBeenCalled();
+  });
+
+  it('a single refused for insufficient funds stops the rest of the fallback', async () => {
+    const { service, redeemer, payments } = anyOrder(
+      [pending(5, ALICE), pending(9, BOB), pending(11, CAROL)],
+      64,
+    );
+    redeemer.batchThrows = true;
+    redeemer.singleError = new EvmSendRejectedError('INSUFFICIENT_FUNDS', null);
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5']);
+    expect(payments.recordRedemptionError).not.toHaveBeenCalled();
   });
 
   it('a chain whose own answer is 1 stays on the per-row path', async () => {

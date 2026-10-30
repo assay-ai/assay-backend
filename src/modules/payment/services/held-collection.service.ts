@@ -25,6 +25,13 @@ import {
   MAX_HELD_BATCH,
 } from '../ports/held-payments.port';
 import { PaymentRail } from '../ports/payment.types';
+import { EVM_FEE_CAP_WAIVED_WITHIN_SECONDS } from '@modules/chains/evm/evm-l1-gas';
+import {
+  COLLECT_GATHERING,
+  COLLECT_GATHERING_FROM_ENV,
+  GatheringPolicy,
+  gatheringReady,
+} from '../constants/settlement-gathering.constants';
 import { PaymentIntentService } from './payment-intent.service';
 
 /** Rail-A held credits booked per pass. */
@@ -136,6 +143,10 @@ export class HeldCollectionService {
     @Optional()
     @Inject(NOTIFICATION_PORT)
     private readonly notifications: NotificationPort | null = null,
+    // `COLLECT_MIN_BATCH` / `COLLECT_MAX_WAIT_SECONDS`: see `collectableToGather`.
+    @Optional()
+    @Inject(COLLECT_GATHERING)
+    private readonly gathering: GatheringPolicy = COLLECT_GATHERING_FROM_ENV,
   ) {}
 
   /** One pass. Returns how many payments were booked as collected. */
@@ -174,16 +185,9 @@ export class HeldCollectionService {
       this.logger.error(`Refunding blocked providers' held payments threw: ${describe(error)}`);
     }
 
-    // Before the timeout (less the race margin): batched. After it: `passTimeout`.
-    booked += await this.collectRailB(
-      await this.payments.findCollectable(
-        PaymentRail.RAIL_B_VOUCHER,
-        MAX_HELD_BATCH * 4,
-        exclusions,
-        HELD_TIMEOUT_SECONDS - TIMEOUT_RACE_MARGIN_SECONDS,
-      ),
-      pass,
-    );
+    // Before the timeout (less the race margin): batched, once an asset has
+    // gathered enough. After it: `passTimeout`, every pass.
+    booked += await this.collectRailB(await this.collectableToGather(exclusions), pass);
     booked += await this.passTimeout(pass);
 
     try {
@@ -192,6 +196,68 @@ export class HeldCollectionService {
       this.logger.error(`Paging blocked providers' held payments threw: ${describe(error)}`);
     }
     return booked;
+  }
+
+  /**
+   * The rail-B payments the batched collect sends this pass: of each asset
+   * that has gathered enough (`settlement-gathering.constants.ts`, owner
+   * decision 2026-10-30) — at least `COLLECT_MIN_BATCH` collectable, the
+   * oldest collectable for `COLLECT_MAX_WAIT_SECONDS`, or one close to the
+   * 7-day timeout — and of no other.
+   *
+   * Only this path gathers. Blocked-provider refunds, the timeout queue and
+   * rail A run every pass; an upheld dispute's refund is not this job's (its
+   * `disputeOutcome` keeps the row out of collection). Waiting here starts
+   * only after `collectableAt`, when a new dispute is no longer guaranteed a
+   * refund, so it adds no refund right; it delays the provider's credit,
+   * which is booked only once the chain says `COLLECTED`. A failed count
+   * collects as before.
+   */
+  private async collectableToGather(
+    exclusions: RedemptionExclusions,
+  ): Promise<PaymentIntentEntity[]> {
+    const beforeSeconds = HELD_TIMEOUT_SECONDS - TIMEOUT_RACE_MARGIN_SECONDS;
+    let ready: ReadonlySet<string> | null = null;
+    if (this.gathering.minBatch > 1) {
+      try {
+        const summary = await this.payments.summarizeCollectable(
+          PaymentRail.RAIL_B_VOUCHER,
+          beforeSeconds,
+        );
+        const now = Date.now();
+        ready = new Set(
+          [...summary]
+            .filter(([, waiting]) =>
+              gatheringReady(
+                this.gathering,
+                {
+                  count: waiting.count,
+                  oldestAt: waiting.oldestCollectableAt,
+                  // Where the batched path hands the oldest to the timeout queue.
+                  earliestDeadlineAt: waiting.oldestCollectableAt
+                    ? new Date(waiting.oldestCollectableAt.getTime() + beforeSeconds * 1000)
+                    : null,
+                },
+                now,
+                EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
+              ),
+            )
+            .map(([asset]) => asset),
+        );
+        if (ready.size === 0) return [];
+      } catch (error) {
+        this.logger.warn(`Gathering check failed; collecting as before: ${describe(error)}`);
+        ready = null;
+      }
+    }
+    const rows = await this.payments.findCollectable(
+      PaymentRail.RAIL_B_VOUCHER,
+      MAX_HELD_BATCH * 4,
+      exclusions,
+      beforeSeconds,
+    );
+    const gate = ready;
+    return gate === null ? rows : rows.filter((row) => gate.has(row.assetId));
   }
 
   /**

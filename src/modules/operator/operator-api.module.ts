@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { DisputeModule } from '@modules/dispute/dispute.module';
+import { PaymentModule } from '@modules/payment/payment.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolModule } from '@modules/tool/tool.module';
@@ -13,6 +14,7 @@ import { VerificationModule } from '@modules/verification/verification.module';
 import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
+import { OperatorBuyerDebtsController } from './controllers/operator-buyer-debts.controller';
 import { OperatorModerationController } from './controllers/operator-moderation.controller';
 import { OperatorContractsController } from './controllers/operator-contracts.controller';
 import { OperatorOfficialToolsetsController } from './controllers/operator-official-toolsets.controller';
@@ -30,6 +32,7 @@ import { OperatorCaseBriefService } from './services/operator-case-brief.service
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorApprovalService } from './services/operator-approval.service';
 import { OperatorArbiterService } from './services/operator-arbiter.service';
+import { OperatorBuyerDebtService } from './services/operator-buyer-debt.service';
 import { OperatorCallDisputeService } from './services/operator-call-dispute.service';
 import { OperatorCaseListService } from './services/operator-case-list.service';
 import { OperatorCaseService } from './services/operator-case.service';
@@ -93,6 +96,10 @@ import { LastSeenModule } from '@shared/last-seen';
     ProviderToolModule,
     // `CallDisputeService`, which `OperatorCallDisputeService` decides through (G3.B1).
     DisputeModule,
+    // `PaymentIntentService.voidDebt`, which the bulk void of buyer debts
+    // (`M-1`) closes each debt through. `VOUCHER_REDEEMER` (its chain read)
+    // comes from `ChainsModule` above.
+    PaymentModule,
     // `DecisionPolicyService` and `PolicyEvidenceService`: the verification
     // policy routes (P-1/P-2/P-3) and the trial policy a publish (P-10) registers.
     VerificationModule,
@@ -101,6 +108,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorApprovalsController,
     OperatorArbiterController,
     OperatorBlocksController,
+    OperatorBuyerDebtsController,
     OperatorModerationController,
     OperatorContractsController,
     OperatorOfficialToolsetsController,
@@ -119,6 +127,7 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorAccountBlockService,
     OperatorApprovalService,
     OperatorArbiterService,
+    OperatorBuyerDebtService,
     OperatorCallDisputeService,
     OperatorCaseListService,
     OperatorCaseService,

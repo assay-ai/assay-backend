@@ -67,6 +67,7 @@ function harness(
     pending?: ReturnType<typeof usdc>;
     twoProviders?: boolean;
     depositCreditsOnSoftConfirmation?: boolean;
+    redeemerFloat?: { isPaused: (chainId: string) => Promise<boolean> };
   } = {},
 ) {
   const ids = options.twoProviders ? ['provider-a', 'provider-b'] : ['provider-a'];
@@ -80,6 +81,7 @@ function harness(
     balance: options.balance,
     pending: options.pending,
     depositCreditsOnSoftConfirmation: options.depositCreditsOnSoftConfirmation,
+    redeemerFloat: options.redeemerFloat,
   });
   return { ...built, invoker };
 }
@@ -680,8 +682,8 @@ describe('rail B over MCP', () => {
   });
 
   describe('on the wire, through the reference MCP client', () => {
-    async function connect() {
-      const h = harness();
+    async function connect(options: Parameters<typeof harness>[0] = {}) {
+      const h = harness(options);
       const server = h.servers.create(RAIL_B_SESSION);
       const client = new Client({ name: 'test-agent', version: '0.0.0' });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -735,6 +737,56 @@ describe('rail B over MCP', () => {
         retryable: true,
       });
       expect((stale.content as Array<{ text: string }>)[0].text).toContain('request a new seq');
+    });
+
+    /**
+     * 2026-10-29: the redeemer ran dry and paid calls kept being admitted, so
+     * their vouchers lapsed into buyer debt. While the flag is up the voucher
+     * is refused, retryable, with nothing reserved; once it clears the same
+     * call is admitted.
+     */
+    it('refuses a voucher with PAYMENT_SETTLEMENT_GAS_PAUSED while the redeemer float is critical', async () => {
+      let paused = true;
+      const isPaused = jest.fn(async () => paused);
+      const { client, intents, escrow } = await connect({ redeemerFloat: { isPaused } });
+      escrow.withdrawRequested = 0n;
+      const offer = async () =>
+        (
+          (await client.callTool({
+            name: TOOL_NAME,
+            arguments: ARGS,
+            _meta: { [ASSAY_RAIL]: 'B' },
+          })) as CallToolResult
+        )._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
+      const pay = async (requirement: VoucherRequirement) =>
+        (await client.callTool({
+          name: TOOL_NAME,
+          arguments: ARGS,
+          _meta: {
+            [ASSAY_VOUCHER]: {
+              voucher: voucherFor(requirement),
+              signature: fakeVoucherSignature(requirement.payer),
+              providerId: requirement.providerId,
+            },
+          },
+        })) as CallToolResult;
+
+      const refused = await pay(await offer());
+      expect(refused.isError).toBe(true);
+      expect(refused._meta?.[ASSAY_ERROR]).toMatchObject({
+        code: PaymentErrorCode.PAYMENT_SETTLEMENT_GAS_PAUSED,
+        retryable: true,
+        retryAfter: 60,
+      });
+      expect((refused.content as Array<{ text: string }>)[0].text).toContain(
+        'Paid calls are paused while the platform tops up its settlement gas; try again shortly.',
+      );
+      expect(isPaused).toHaveBeenCalledWith(CHAIN_ID);
+      expect(intents.rows.size).toBe(0);
+
+      paused = false;
+      expect((await pay(await offer())).isError).toBeFalsy();
+      expect(intents.rows.size).toBe(1);
     });
 
     it('marks PAYMENT_VOUCHER_ADMISSION_PAUSED retryable, with a retryAfter hint', async () => {

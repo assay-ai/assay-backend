@@ -237,13 +237,29 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
    * the counter is down, a buyer holding no ETH cannot start an exit. Nothing is
    * lost, it is delayed, and `withdraw()` — the transaction that actually moves
    * money — never passed through here at all.
+   *
+   * With `feeSpike`, the same 503 for a request the relayer would pay too much
+   * for right now (an L1 fee spike on a Nitro chain): transient, never a 502 or
+   * 504, which the CDN in front would mask.
+   *
+   * With `relayerBusy`, the same 503 while the relayer cannot take the request:
+   * its ETH float is critical, or the hourly budget it spends on buyers'
+   * requests across all accounts is used up.
+   *
+   * None of the three counts against the buyer's own relay budget: the
+   * attempt is given back (`RelayedIntentRateLimiter.release`).
    */
   relayedIntentUnavailable: {
     code: SettlementErrorCode.SETTLEMENT_RELAYED_INTENT_UNAVAILABLE,
     statusCode: 503,
-    message: () =>
-      `The relayed-submission budget could not be counted, so nothing was submitted. The ` +
-      `signature is still valid until its deadline; try again`,
+    message: (context?: Record<string, any>) =>
+      (context?.feeSpike
+        ? `Network fees are temporarily high, so nothing was submitted. The `
+        : context?.relayerBusy
+          ? `The platform cannot relay requests right now, so nothing was submitted. The `
+          : `The relayed-submission budget could not be counted, so nothing was submitted. The `) +
+      `signature is still valid until its deadline; try again` +
+      (context?.feeSpike || context?.relayerBusy ? ' shortly' : ''),
   },
 
   // ── Agent payment delegation ─────────────────────────────────────────────

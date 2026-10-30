@@ -589,6 +589,11 @@ export interface RedeemableIntent {
   readonly platformFee: string;
   /** See `PaymentIntentEntity.redemptionLastError`. */
   readonly redemptionLastError: string | null;
+  /**
+   * How many transaction refs were recorded when the row was read (a ref is
+   * written before each broadcast). Optional: absent is 0.
+   */
+  readonly redemptionTxRefCount?: number;
 }
 
 /** One buyer debt that refuses paid calls — see {@link PaymentIntentRepository.findOutstandingDebts}. */
@@ -648,6 +653,55 @@ export interface DuePaymentIntent {
 }
 
 /** The row a debt close (write-off, void) must still be — see `markWrittenOff`. */
+/**
+ * Read on a `SETTLED` rail-B intent: an open buyer debt an operator may void
+ * (`PaymentIntentService.voidDebt`, register row `M-1`) — lapsed, no
+ * replacement in flight, and its hold still open or written off (a written-off
+ * debt still refuses the payer's paid calls, `DEBT_REFUSING_SQL`). The same
+ * predicate `markDebtVoided` closes on.
+ */
+export const OPERATOR_VOIDABLE_DEBT_SQL =
+  `(intent.status = 'SETTLED' AND intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
+  `AND intent.redemption_lapsed_at IS NOT NULL AND intent.redemption_replaced_at IS NULL ` +
+  `AND (intent.hold_released_at IS NULL OR intent.redemption_last_error LIKE 'uncollected:%'))`;
+
+/** The filters of the operator's buyer-debt list. Every field optional. */
+export interface OperatorDebtFilter {
+  readonly chainId?: string;
+  readonly assetId?: string;
+  readonly payerAccount?: string;
+  readonly buyerOrganizationId?: string;
+  readonly providerId?: string;
+  /** The refusal the voucher lapsed on, exactly (`uncollected:` is looked through). */
+  readonly lastError?: string;
+  /** Only rows {@link OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL} labels. */
+  readonly suggestedOnly?: boolean;
+}
+
+/**
+ * The informational label of the operator's debt list: the recorded cause
+ * suggests the PLATFORM failed to redeem — `VoucherExpired` with no other
+ * recorded refusal, or a revert with no name (`UNKNOWN_REVERT:*`);
+ * `uncollected:` is looked through. Never acted on: a person decides (`M-1`).
+ * `OperatorBuyerDebtService.suggestsPlatformCause` is the same test in code.
+ *
+ * Not `FeeSpikeDeferred`: a deferral is never recorded on a row (nothing was
+ * sent, and it says nothing about the voucher), so a voucher that lapsed while
+ * fees stayed high reads `VoucherExpired` and is labelled by that.
+ */
+export const OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL =
+  `(regexp_replace(intent.redemption_last_error, '^uncollected:', '') = 'VoucherExpired' ` +
+  `OR regexp_replace(intent.redemption_last_error, '^uncollected:', '') LIKE 'UNKNOWN\\_REVERT:%')`;
+
+/** One asset's share of the operator's buyer-debt list. */
+export interface OperatorDebtTotal {
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly count: number;
+  /** Atomic units, as an exact decimal string. */
+  readonly amount: string;
+}
+
 export interface DebtCloseTarget {
   readonly organizationId: string;
   readonly id: string;
@@ -1160,6 +1214,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
+      .addSelect('COALESCE(cardinality(intent.redemption_tx_refs), 0)::int', 'redemptionTxRefCount')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail })
@@ -1208,42 +1263,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       );
     }
 
-    if (
-      exclude.organizationIds.length > 0 ||
-      exclude.walletKeys.length > 0 ||
-      exclude.chainAccounts.length > 0
-    ) {
-      // A row is left out when it, or an EARLIER seq of the same payer in this
-      // queue, has a blocked party. Leaving out only the blocked row would let
-      // the payer's later seqs through, and redeeming one of those advances
-      // `seq_high` past the held one and kills it. Done in the query, BEFORE
-      // the LIMIT, so held rows can never fill the pass (audit E-1). On a
-      // chain that admits any order (D-23) only the row's OWN parties count.
-      //
-      // Payer-side parties only — the payer's organization, the payer and the
-      // delegate. A blocked provider or payee is NOT left out: the pass makes
-      // that provider forfeit the voucher at once (`VoucherRedemptionService`),
-      // which closes the row, so it can neither wait nor fill a pass.
-      query.andWhere(
-        `NOT EXISTS (
-           SELECT 1 FROM payment_intents held
-            WHERE held.organization_id IS NOT NULL
-              AND held.agent_account = intent.agent_account
-              AND held.asset_id = intent.asset_id
-              AND held.rail = :rail
-              AND held.status = :settledStatus
-              AND held.hold_id IS NOT NULL
-              AND held.hold_released_at IS NULL
-              AND held.held_at IS NULL
-              AND held.voucher_seq IS NOT NULL
-              AND held.voucher_signature IS NOT NULL
-              AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
-              AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
-              AND (${blockedPartySql('held')})
-         )`,
-        blockedPartyParams(exclude),
-      );
-    }
+    excludeBlockedPayers(query, exclude, orderedBySeq);
 
     if (orderedBySeq) {
       return query
@@ -1282,6 +1302,76 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [...parameters, limit],
     )) as (RedeemableIntent & { payerRound?: unknown; providerRound?: unknown })[];
     return rows.map(({ payerRound: _payer, providerRound: _provider, ...row }) => row);
+  }
+
+  /**
+   * How many vouchers of `assetId` await redemption, when the oldest was issued
+   * and the earliest `expires_at` — one aggregate row, for the redemption job's
+   * gathering check (`settlement-gathering.constants.ts`), so a pass that will
+   * wait loads no rows.
+   *
+   * The base filters of {@link findAwaitingRedemption}, kept in step with it by
+   * hand, and its blocked-party exclusions (the same SQL, `excludeBlockedPayers`):
+   * a row of a blocked payer, delegate or payer organization — and, on a chain
+   * that requires ascending seq, every later seq of that payer — is held by the
+   * pass and is not counted, so one old blocked voucher cannot keep the oldest
+   * age past `REDEEM_MAX_WAIT_SECONDS` and run a pass every tick (review
+   * 2026-10-30 M-2). A blocked PROVIDER is not left out, as the pass does not
+   * leave it out: the pass forfeits that voucher at once, which closes it.
+   * Without the seq-order hold-back: it may count a row the pass then leaves
+   * out, which only makes a pass run sooner — never later. On a chain that
+   * admits any seq order a row in its retry back-off is left out, as the pass
+   * leaves it out.
+   */
+  async summarizeAwaitingRedemption(
+    assetId: string,
+    settledStatus: string,
+    rail: string,
+    options: {
+      readonly orderedBySeq?: boolean;
+      readonly exclude?: RedemptionExclusions;
+    } = {},
+  ): Promise<{ count: number; oldestIssuedAt: Date | null; earliestExpiresAt: Date | null }> {
+    const query = this.createQueryBuilder('intent')
+      .select('COUNT(*)::int', 'count')
+      .addSelect('MIN(intent.voucherIssuedAt)', 'oldestIssuedAt')
+      .addSelect('MIN(intent.expiresAt)', 'earliestExpiresAt')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere('intent.status = :settledStatus', { settledStatus })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('intent.voucherSeq IS NOT NULL')
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      .andWhere('(intent.redemptionLapsedAt IS NULL OR intent.redemptionReplacedAt IS NOT NULL)')
+      .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
+      .andWhere('intent.heldAt IS NULL');
+    if (options.orderedBySeq === false) {
+      query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
+    }
+    excludeBlockedPayers(
+      query,
+      options.exclude ?? NO_REDEMPTION_EXCLUSIONS,
+      options.orderedBySeq ?? true,
+    );
+    const row = await query.getRawOne<{
+      count: number | string;
+      oldestIssuedAt: string | null;
+      earliestExpiresAt: Date | string | null;
+    }>();
+    return {
+      count: Number(row?.count ?? 0),
+      // `voucher_issued_at` is the voucher's own unix seconds (bigint).
+      oldestIssuedAt:
+        row?.oldestIssuedAt === null || row?.oldestIssuedAt === undefined
+          ? null
+          : new Date(Number(row.oldestIssuedAt) * 1000),
+      earliestExpiresAt:
+        row?.earliestExpiresAt === null || row?.earliestExpiresAt === undefined
+          ? null
+          : new Date(row.earliestExpiresAt),
+    };
   }
 
   /**
@@ -1454,6 +1544,35 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * How many buyer debts each asset gained since `since`, still open
+   * ({@link DEBT_REFUSING_SQL}): the input of the buyer-debt spike alert
+   * (`BuyerDebtSpikeMonitor`). Read from the table rather than counted in
+   * memory, so a restart loses nothing. `assetId` narrows it to one asset.
+   *
+   * Cheap at any table size: the predicate is `idx_payment_intents_open_debt`'s
+   * own, so only the open debts (hundreds, thousands) are visited.
+   * **Deliberately cross-organization**: a spike is a platform incident,
+   * counted over every buyer organization.
+   */
+  async countDebtsLapsedSince(
+    since: Date,
+    assetId?: string,
+  ): Promise<Array<{ assetId: string; count: number }>> {
+    const rows = (await this.manager.query(
+      `SELECT "asset_id" AS "assetId", COUNT(*)::int AS "count"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND ${DEBT_REFUSING_SQL}
+          AND "rail" = 'RAIL_B_VOUCHER'
+          AND "redemption_lapsed_at" >= $1
+          AND ($2::text IS NULL OR "asset_id" = $2)
+        GROUP BY "asset_id"`,
+      [since, assetId ?? null],
+    )) as Array<{ assetId: string; count: number | string }>;
+    return rows.map((row) => ({ assetId: row.assetId, count: Number(row.count) }));
+  }
+
+  /**
    * One debt of `payer` by id, whatever its age or how many others there are
    * (review-buyer-debt L5): `null` unless it still refuses paid calls.
    */
@@ -1560,6 +1679,83 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [target.organizationId, target.id, target.payer, target.holdId, reason],
     )) as [unknown[], number] | unknown[];
     return affected(result) > 0;
+  }
+
+  /**
+   * The operator's buyer-debt list ({@link OPERATOR_VOIDABLE_DEBT_SQL}),
+   * filtered, unordered and unpaged: the caller pages it.
+   *
+   * **Deliberately cross-organization**: the operator console has no tenant
+   * of its own, and the list exists to find the debts one platform incident
+   * left across every buyer organization. `organizationId IS NOT NULL`
+   * satisfies the scoped repository's guard, as on `exportQueryBuilder`.
+   */
+  operatorDebtsQuery(filter: OperatorDebtFilter): SelectQueryBuilder<PaymentIntentEntity> {
+    const qb = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere(OPERATOR_VOIDABLE_DEBT_SQL);
+    if (filter.chainId) qb.andWhere('intent.chainId = :chainId', { chainId: filter.chainId });
+    if (filter.assetId) qb.andWhere('intent.assetId = :assetId', { assetId: filter.assetId });
+    if (filter.payerAccount) {
+      qb.andWhere('lower(intent.agentAccount) = lower(:payerAccount)', {
+        payerAccount: filter.payerAccount,
+      });
+    }
+    if (filter.buyerOrganizationId) {
+      qb.andWhere('intent.organizationId = :buyerOrganizationId', {
+        buyerOrganizationId: filter.buyerOrganizationId,
+      });
+    }
+    if (filter.providerId) {
+      qb.andWhere('intent.providerId = :providerId', { providerId: filter.providerId });
+    }
+    if (filter.lastError) {
+      qb.andWhere(
+        `(intent.redemption_last_error = :lastError ` +
+          `OR intent.redemption_last_error = ('uncollected:' || :lastError))`,
+        { lastError: filter.lastError },
+      );
+    }
+    if (filter.suggestedOnly) qb.andWhere(OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL);
+    return qb;
+  }
+
+  /** Count and amount per asset of {@link operatorDebtsQuery}'s rows (cross-organization, as it). */
+  async operatorDebtTotals(
+    qb: SelectQueryBuilder<PaymentIntentEntity>,
+  ): Promise<OperatorDebtTotal[]> {
+    const rows = await qb
+      .select('intent.assetId', 'assetId')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('COUNT(*)::int', 'count')
+      .addSelect('COALESCE(SUM(intent.priceAmount), 0)::text', 'amount')
+      .groupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .orderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        assetId: string;
+        decimals: number | string;
+        count: number | string;
+        amount: string;
+      }>();
+    return rows.map((row) => ({
+      assetId: row.assetId,
+      decimals: Number(row.decimals),
+      count: Number(row.count),
+      amount: String(row.amount),
+    }));
+  }
+
+  /**
+   * The open buyer debts among `ids` ({@link OPERATOR_VOIDABLE_DEBT_SQL}),
+   * read across organizations for the operator's bulk void (`M-1`); an id
+   * that is not one now is simply absent.
+   */
+  async findOperatorDebts(ids: readonly string[]): Promise<PaymentIntentEntity[]> {
+    if (ids.length === 0) return [];
+    return this.operatorDebtsQuery({})
+      .andWhere('intent.id IN (:...ids)', { ids: [...ids] })
+      .getMany();
   }
 
   /**
@@ -1948,6 +2144,46 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [rail],
     )) as { assetId: string }[];
     return rows.map((row) => row.assetId);
+  }
+
+  /**
+   * Per asset: how many held payments of `rail` the batched collect would take
+   * ({@link findCollectable}'s filters with `beforeSeconds`), and since when the
+   * oldest has been collectable — one aggregate row per asset, for the
+   * collection job's gathering check (`settlement-gathering.constants.ts`).
+   * Without the blocked-party exclusions: it may count a row the pass then
+   * leaves out, which only makes a pass run sooner — never later.
+   */
+  async summarizeCollectable(
+    rail: string,
+    beforeSeconds: number,
+  ): Promise<Map<string, { count: number; oldestCollectableAt: Date | null }>> {
+    const rows = (await this.manager.query(
+      `SELECT "asset_id" AS "assetId", COUNT(*)::int AS "count",
+              MIN("collectable_at") AS "oldestCollectableAt"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND "rail" = $1
+          AND "held_status" = 'HELD'
+          AND "collectable_at" <= now()
+          AND "collectable_at" > now() - make_interval(secs => $2)
+          AND ("dispute_outcome" IS NULL OR "dispute_outcome" = 'REJECTED')
+          AND "hold_id" IS NOT NULL
+          AND "hold_released_at" IS NULL
+          AND ("held_retry_at" IS NULL OR "held_retry_at" <= now())
+        GROUP BY "asset_id"`,
+      [rail, beforeSeconds],
+    )) as { assetId: string; count: number | string; oldestCollectableAt: Date | string | null }[];
+    return new Map(
+      rows.map((row) => [
+        row.assetId,
+        {
+          count: Number(row.count),
+          oldestCollectableAt:
+            row.oldestCollectableAt === null ? null : new Date(row.oldestCollectableAt),
+        },
+      ]),
+    );
   }
 
   /**
@@ -3412,6 +3648,50 @@ function blockedPartyParams(exclude: RedemptionExclusions): Record<string, strin
     blockedWalletKeys: [...exclude.walletKeys],
     blockedChainAccounts: exclude.chainAccounts.map((account) => account.toLowerCase()),
   };
+}
+
+/**
+ * The pass's blocked-party hold-back, shared by {@link
+ * PaymentIntentRepository.findAwaitingRedemption} and its gathering count
+ * (`summarizeAwaitingRedemption`), so the two cannot disagree on which rows
+ * are waiting (review 2026-10-30 M-2).
+ */
+function excludeBlockedPayers(
+  query: SelectQueryBuilder<PaymentIntentEntity>,
+  exclude: RedemptionExclusions,
+  orderedBySeq: boolean,
+): void {
+  if (!hasExclusions(exclude)) return;
+  // A row is left out when it, or an EARLIER seq of the same payer in this
+  // queue, has a blocked party. Leaving out only the blocked row would let
+  // the payer's later seqs through, and redeeming one of those advances
+  // `seq_high` past the held one and kills it. Done in the query, BEFORE
+  // the LIMIT, so held rows can never fill the pass (audit E-1). On a
+  // chain that admits any order (D-23) only the row's OWN parties count.
+  //
+  // Payer-side parties only — the payer's organization, the payer and the
+  // delegate. A blocked provider or payee is NOT left out: the pass makes
+  // that provider forfeit the voucher at once (`VoucherRedemptionService`),
+  // which closes the row, so it can neither wait nor fill a pass.
+  query.andWhere(
+    `NOT EXISTS (
+         SELECT 1 FROM payment_intents held
+          WHERE held.organization_id IS NOT NULL
+            AND held.agent_account = intent.agent_account
+            AND held.asset_id = intent.asset_id
+            AND held.rail = :rail
+            AND held.status = :settledStatus
+            AND held.hold_id IS NOT NULL
+            AND held.hold_released_at IS NULL
+            AND held.held_at IS NULL
+            AND held.voucher_seq IS NOT NULL
+            AND held.voucher_signature IS NOT NULL
+            AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
+            AND ${orderedBySeq ? 'held.voucher_seq <= intent.voucher_seq' : 'held.voucher_seq = intent.voucher_seq'}
+            AND (${blockedPartySql('held')})
+       )`,
+    blockedPartyParams(exclude),
+  );
 }
 
 function hasExclusions(exclude: RedemptionExclusions): boolean {

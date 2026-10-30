@@ -55,4 +55,13 @@ export class OperatorApprovalEntity {
 
   @Column({ name: 'expires_at', type: 'timestamptz' })
   expiresAt: Date;
+
+  /**
+   * What the approved action did, when it records it (`recordResult`): for a
+   * bulk buyer-debt void, every id VOIDED or SKIPPED with its reason, and the
+   * counts and amounts. Written after the action, so `NULL` while it runs and
+   * on every action that records nothing.
+   */
+  @Column({ name: 'result', type: 'jsonb', nullable: true })
+  result: Record<string, unknown> | null;
 }

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseAbi } from 'viem';
 
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
+import { sendAnswerOf } from '@modules/chains/evm/evm-send-rejected.error';
 import {
   EgressHttpClient,
   EgressRequest,
@@ -128,6 +129,46 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
     await expect(client.getChainId()).rejects.toThrow(/eth_chainId/);
     await expect(client.getChainId()).rejects.toThrow(/-32000/);
     await expect(client.getChainId()).rejects.not.toThrow(/SECRET/);
+  });
+
+  it('keeps WHICH refusal a sendRawTransaction met, as a tag, and still drops the prose', async () => {
+    const { client: egress } = fakeEgress(() => ({
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        error: {
+          code: -32_000,
+          message: 'insufficient funds for gas * price + value: address 0xSECRET have 1 want 2',
+        },
+      }),
+    }));
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never);
+
+    const error = await client
+      .sendRawTransaction({ serializedTransaction: '0x02' })
+      .catch((e: unknown) => e);
+
+    expect(sendAnswerOf(error)).toBe('INSUFFICIENT_FUNDS');
+    expect(String((error as Error).message)).not.toMatch(/SECRET/);
+  });
+
+  it('tags nothing on any other method, whatever the node says', async () => {
+    const { client: egress } = fakeEgress(() => ({
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32_000, message: 'nonce too low' },
+      }),
+    }));
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never);
+
+    const error = await client.getChainId().catch((e: unknown) => e);
+
+    let tagged = false;
+    for (let node: unknown = error; node; node = (node as { cause?: unknown }).cause) {
+      if ((node as { sendAnswer?: unknown }).sendAnswer !== undefined) tagged = true;
+    }
+    expect(tagged).toBe(false);
   });
 
   it('reports a revert with empty data as a revert, which an older contract answers with', async () => {

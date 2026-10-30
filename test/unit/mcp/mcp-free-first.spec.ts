@@ -52,7 +52,10 @@ describe('McpToolCallService — free first, then paid', () => {
     agentAccount: `${CHAIN_ID}:Agent1111111111111111111111111111111111111` as AccountId,
   };
 
-  function harness(freeAnswer: InvokerScript = async () => ok('free')) {
+  function harness(
+    freeAnswer: InvokerScript = async () => ok('free'),
+    redeemerFloat?: { isPaused: (chainId: string) => Promise<boolean> },
+  ) {
     const invoker = new ScriptedInvoker({
       [`binding-${FREE_PROVIDER}`]: freeAnswer,
       [`binding-${PAID_PROVIDER}`]: async () => ok('paid'),
@@ -70,6 +73,7 @@ describe('McpToolCallService — free first, then paid', () => {
       // Only the paid provider is staked.
       stakes: { [PAID_PROVIDER]: usdc(1000) },
       invoker,
+      redeemerFloat,
     });
     return { ...built, invoker };
   }
@@ -152,6 +156,22 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(outcome.receipt.providerId).toBe(FREE_PROVIDER);
     expect(outcome.receipt.charged.amount).toBe('0');
     expect(h.intents.rows.size).toBe(0);
+  });
+
+  it('still serves a free call while paid calls are paused on a dry redeemer', async () => {
+    const isPaused = jest.fn(async () => true);
+    const h = harness(undefined, { isPaused });
+
+    const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+    });
+
+    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
+    expect(outcome.receipt.providerId).toBe(FREE_PROVIDER);
+    expect(outcome.receipt.charged.amount).toBe('0');
+    // The pause is read only where a voucher is admitted, never on a free call.
+    expect(isPaused).not.toHaveBeenCalled();
   });
 
   it('still serves a free call while the payer has an open buyer debt', async () => {

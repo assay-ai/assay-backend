@@ -2,17 +2,20 @@ import { decodeFunctionData, encodeFunctionData, toFunctionSelector } from 'viem
 
 import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
+  EVM_RELAYED_INTENT_MAX_COST_WEI,
   EVM_RELAYED_INTENT_MAX_GAS,
   EvmRelayedEscrowIntentSubmitter,
   EvmRelayedIntentClient,
 } from '@modules/chains/evm/evm-relayed-escrow-intent.service';
 import { EvmRelayerPort, EvmRelayResult } from '@modules/chains/evm/ports/evm-relayer.port';
 import { EvmRpcError } from '@modules/chains/evm/sanctioned-evm-rpc';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import { CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
 import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
 import { RelayedEscrowIntent } from '@modules/settlement/ports/relayed-escrow-intent.port';
 
 import { deployment } from './evm-fixtures';
+import { L2_BASE_FEE, fakeNodeInterface } from './helpers/fake-node-interface';
 
 /**
  * `EvmRelayedEscrowIntentSubmitter` — the verb that makes the relayed doors
@@ -62,22 +65,34 @@ interface Harness {
   readonly sendValue: jest.Mock;
 }
 
-function build(options: { estimateGas?: jest.Mock; send?: Partial<EvmRelayResult> } = {}): Harness {
+function build(
+  options: {
+    estimateGas?: jest.Mock;
+    send?: Partial<EvmRelayResult>;
+    call?: jest.Mock;
+    sendError?: unknown;
+    relayerCritical?: boolean;
+    hourly?: { take: jest.Mock; settle?: jest.Mock };
+    escrow?: { read: jest.Mock };
+  } = {},
+): Harness {
   const estimateGas = options.estimateGas ?? jest.fn().mockResolvedValue(65_638n);
-  const sendCall = jest.fn(
-    async (): Promise<EvmRelayResult> => ({
+  const sendCall = jest.fn(async (): Promise<EvmRelayResult> => {
+    if (options.sendError) throw options.sendError;
+    return {
       hash: '0x1e23e27f81ba84a1a27b0b58b3f4dc5049dd54016c734e94549f4951ecc3f6c9',
       status: 'SUCCESS',
       revertReason: null,
       gasUsed: 65_536n,
       blockNumber: 101_847n,
       ...options.send,
-    }),
-  );
+    };
+  });
   const sendValue = jest.fn();
 
   const client: EvmRelayedIntentClient = {
     estimateGas: (args) => estimateGas(args) as Promise<bigint>,
+    ...(options.call ? { call: options.call } : {}),
   };
   const relayer: EvmRelayerPort = {
     name: 'test-relayer',
@@ -91,6 +106,11 @@ function build(options: { estimateGas?: jest.Mock; send?: Partial<EvmRelayResult
     new Map<ChainId, EvmRelayedIntentClient>([[TESTNET, client]]),
     new Map([[TESTNET, DEPLOYMENT]]),
     relayer,
+    options.relayerCritical === undefined
+      ? null
+      : { isRelayerCritical: jest.fn().mockResolvedValue(options.relayerCritical) },
+    options.hourly ? { settle: jest.fn().mockResolvedValue(undefined), ...options.hourly } : null,
+    options.escrow ?? null,
   );
   return { submitter, estimateGas, sendCall, sendValue };
 }
@@ -401,5 +421,229 @@ describe('what is refused before any RPC call at all', () => {
 
     expect(caught(error).code).toBe('CHAIN_INVALID_ADDRESS');
     expect(sendCall).not.toHaveBeenCalled();
+  });
+});
+
+describe('the L1 half of the estimate (Nitro)', () => {
+  // The 2026-10-29 spike: about 952k estimated, about 845k of it L1.
+  const SPIKE_TOTAL = 952_000n;
+  const SPIKE_L1 = 845_000n;
+
+  it('with an L1 part of 0, budgets exactly as before', async () => {
+    const call = fakeNodeInterface({ l1Gas: 0n });
+    const { submitter, sendCall } = build({ call });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe((65_638n * 12n) / 10n);
+    expect(call.asked).toEqual([{ to: DEPLOYMENT.escrow, data: sendCall.mock.calls[0][0].data }]);
+  });
+
+  it('keeps the ceiling on execution only, and sends a limit that covers L1', async () => {
+    // A total above the 300k execution ceiling, mostly L1, still under the
+    // 1e-5 ETH cost cap: 400k x 1.2 at 0.02 gwei is 9.6e-6 ETH.
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(400_000n),
+      call: fakeNodeInterface({ l1Gas: 300_000n }),
+    });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe((400_000n * 12n) / 10n);
+  });
+
+  it('defers the measured 952k spike (845k of it L1) now that the cap is 1e-5 ETH', async () => {
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(SPIKE_TOTAL),
+      call: fakeNodeInterface({ l1Gas: SPIKE_L1 }),
+    });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).status).toBe(503);
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('never sends without execution gas when the L1 part reads above the whole estimate', async () => {
+    // The two reads are a moment apart; an L1 part at or above the total leaves
+    // the split unknown, so the whole estimate is budgeted for execution.
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(100_000n),
+      call: fakeNodeInterface({ l1Gas: 120_000n }),
+    });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(((100_000n + 120_000n) * 12n) / 10n);
+  });
+
+  it('still refuses execution above the ceiling, whatever the L1 part', async () => {
+    const execution = (EVM_RELAYED_INTENT_MAX_GAS * 10n) / 12n + 1n;
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(execution + 10_000n),
+      call: fakeNodeInterface({ l1Gas: 10_000n }),
+    });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_REFUSED');
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('answers a cost above the cap with a 503 to retry shortly, sending nothing', async () => {
+    // 11.8M of L1 at 0.02 gwei is far above 0.00005 ETH.
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(11_900_000n),
+      call: fakeNodeInterface({ l1Gas: 11_800_000n }),
+    });
+
+    const error = await submitter.submit(requestWithdraw()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+    expect(caught(error).status).toBe(503);
+    expect(caught(error).message).toMatch(/fees are temporarily high/);
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('sends right up to the cost cap', async () => {
+    const atCap = EVM_RELAYED_INTENT_MAX_COST_WEI / L2_BASE_FEE; // the largest limit allowed
+    const total = (atCap * 10n) / 12n;
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(total),
+      call: fakeNodeInterface({ l1Gas: total - 100_000n }),
+    });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBeLessThanOrEqual(atCap);
+  });
+
+  it('falls back to L1 = 0 when NodeInterface fails: no cost cap, ceiling on the total', async () => {
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(SPIKE_TOTAL),
+      call: fakeNodeInterface(new Error('method not found')),
+    });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_REFUSED');
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+});
+
+describe('EvmRelayedEscrowIntentSubmitter, protecting the relayer float', () => {
+  it('answers a 503 "try again shortly" while the relayer float is critical, before any RPC', async () => {
+    const { submitter, estimateGas, sendCall } = build({ relayerCritical: true });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+    expect(caught(error).status).toBe(503);
+    expect(caught(error).message).toMatch(/cannot relay requests right now.*try again shortly/);
+    expect(estimateGas).not.toHaveBeenCalled();
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('relays as usual when the float is not critical', async () => {
+    const { submitter, sendCall } = build({ relayerCritical: false });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the global hourly budget only after the pre-flight passed, and 503s when it is spent', async () => {
+    const take = jest.fn().mockResolvedValue(null);
+    const { submitter, estimateGas, sendCall } = build({ hourly: { take } });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(estimateGas).toHaveBeenCalled();
+    expect(take).toHaveBeenCalledWith(
+      TESTNET,
+      expect.objectContaining({ purpose: expect.stringContaining('SET_LIMITS') }),
+    );
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('charges the budget gasLimit x basefee and settles it to gasUsed x basefee', async () => {
+    const ticket = { key: 'k', member: 'm', score: 1 };
+    const take = jest.fn().mockResolvedValue(ticket);
+    const settle = jest.fn().mockResolvedValue(undefined);
+    const { submitter, sendCall } = build({
+      hourly: { take, settle },
+      call: fakeNodeInterface({ l1Gas: 0n }),
+    });
+
+    await submitter.submit(setLimits());
+
+    const gasLimit = sendCall.mock.calls[0][0].gasLimit as bigint;
+    expect(take.mock.calls[0][1].wei).toBe(gasLimit * L2_BASE_FEE);
+    expect(settle).toHaveBeenCalledWith(ticket, 65_536n * L2_BASE_FEE);
+  });
+
+  it('charges the per-request cap when the basefee is unknown', async () => {
+    const take = jest.fn().mockResolvedValue({ key: 'k', member: 'm', score: 1 });
+    const { submitter } = build({ hourly: { take } });
+
+    await submitter.submit(setLimits());
+
+    expect(take.mock.calls[0][1].wei).toBe(EVM_RELAYED_INTENT_MAX_COST_WEI);
+  });
+
+  it('decides the reserved lane by the account escrow on chain: funded iff balance or pending withdrawal', async () => {
+    const cases: Array<[unknown, boolean]> = [
+      [null, false],
+      [{ balance: { amount: '0' }, withdrawRequested: 0n }, false],
+      [{ balance: { amount: '1' }, withdrawRequested: 0n }, true],
+      [{ balance: { amount: '0' }, withdrawRequested: 5n }, true],
+    ];
+    for (const [reading, funded] of cases) {
+      const take = jest.fn().mockResolvedValue({ key: 'k', member: 'm', score: 1 });
+      const read = jest.fn().mockResolvedValue(reading);
+      const { submitter } = build({ hourly: { take }, escrow: { read } });
+
+      await submitter.submit(setLimits());
+
+      const lazy = take.mock.calls[0][1].funded as () => Promise<boolean>;
+      // Lazy: nothing read until the budget asks.
+      expect(read).not.toHaveBeenCalled();
+      await expect(lazy()).resolves.toBe(funded);
+      expect(read.mock.calls[0][0]).toBe(BUYER_ACCOUNT);
+    }
+  });
+
+  it('caps one relayed request at 1e-5 ETH', () => {
+    expect(EVM_RELAYED_INTENT_MAX_COST_WEI).toBe(10_000_000_000_000n);
+  });
+
+  it('costs the hourly budget nothing when the chain refuses at the pre-flight', async () => {
+    const take = jest.fn().mockResolvedValue(true);
+    const { submitter } = build({
+      hourly: { take },
+      estimateGas: reverting('0x' + 'deadbeef'),
+    });
+
+    await submitter.submit(setLimits()).catch(() => null);
+
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  it('answers a send the node refused (not broadcast) with the same 503', async () => {
+    const { submitter } = build({
+      sendError: new EvmSendRejectedError('INSUFFICIENT_FUNDS', null),
+    });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+  });
+
+  it('lets any other send failure through untouched: its outcome is unknown', async () => {
+    const timeout = new Error('receipt timed out');
+    const { submitter } = build({ sendError: timeout });
+
+    await expect(submitter.submit(setLimits())).rejects.toBe(timeout);
   });
 });

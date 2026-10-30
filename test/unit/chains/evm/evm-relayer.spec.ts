@@ -1,4 +1,4 @@
-import { keccak256, parseTransaction } from 'viem';
+import { encodeAbiParameters, keccak256, parseTransaction } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
 import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -11,6 +11,9 @@ import {
   EvmSenderIdentity,
 } from '@modules/chains/evm/evm-relayer.service';
 import { EvmValueTransfer } from '@modules/chains/evm/ports/evm-relayer.port';
+import { NODE_INTERFACE_ADDRESS } from '@modules/chains/evm/evm-l1-gas';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
+import { EvmRpcError } from '@modules/chains/evm/sanctioned-evm-rpc';
 import {
   DEFAULT_EVM_RELAYER_RECEIPT_TIMEOUT_MS,
   EvmRelayerTiming,
@@ -191,7 +194,119 @@ describe('EvmRelayer', () => {
     expect(tx.value).toBe(1_000_000_000_000_000n);
     // Empty, not "the calldata of the last call" and not undefined-as-anything.
     expect(tx.data === undefined || tx.data === '0x').toBe(true);
-    expect(tx.gas).toBe(21_000n);
+    // No NodeInterface answered: 21 000 plus the fixed L1 margin, never a bare
+    // 21 000 that Nitro refuses as soon as L1 costs anything.
+    expect(tx.gas).toBe(21_000n + 200_000n);
+  });
+
+  it('gives a value transfer its L1 part, padded 20 %, when NodeInterface answers', async () => {
+    const { relayer, node } = build();
+    node.l1 = { gas: 50_000n, baseFee: 20_000_000n };
+
+    await relayer.sendValue({
+      chainId: TESTNET,
+      to: toAccountId(TESTNET, ESCROW),
+      wei: 1n,
+      purpose: 'gas grant',
+    });
+
+    expect(node.decoded()[0].gas).toBe(21_000n + 60_000n);
+  });
+
+  describe('a send the node refused (definitely not broadcast)', () => {
+    it.each([
+      ['insufficient funds for gas * price + value', 'INSUFFICIENT_FUNDS'],
+      ['nonce too low', 'NONCE_TOO_LOW'],
+      ['nonce too high', 'NONCE_TOO_HIGH'],
+      ['intrinsic gas too low', 'INTRINSIC_GAS_TOO_LOW'],
+      ['max fee per gas less than block base fee', 'FEE_CAP_TOO_LOW'],
+      ['replacement transaction underpriced', 'REPLACEMENT_UNDERPRICED'],
+    ])('"%s" is EvmSendRejectedError %s, carrying the recorded hash', async (message, reason) => {
+      const { relayer, node } = build();
+      node.sendError = new Error(message);
+      const recorded: string[] = [];
+
+      const error = await relayer
+        .sendCall({ ...call(), beforeBroadcast: async (hash) => void recorded.push(hash) })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(EvmSendRejectedError);
+      expect((error as EvmSendRejectedError).reason).toBe(reason);
+      expect((error as EvmSendRejectedError).broadcast).toBe(false);
+      // The hash the caller recorded is the one the error names.
+      expect((error as EvmSendRejectedError).hash).toBe(recorded[0]);
+      expect(node.receiptWaits).toHaveLength(0);
+    });
+
+    it('reads the tag the sanctioned transport sets, not only the message', async () => {
+      const { relayer, node } = build();
+      node.sendError = new EvmRpcError('EVM RPC eth_sendRawTransaction failed: code -32000', {
+        code: -32000,
+        data: null,
+        sendAnswer: 'INSUFFICIENT_FUNDS',
+      });
+
+      await expect(relayer.sendCall(call())).rejects.toMatchObject({
+        name: 'EvmSendRejectedError',
+        reason: 'INSUFFICIENT_FUNDS',
+      });
+    });
+
+    it('treats "already known" as broadcast, and waits for the receipt of the signed hash', async () => {
+      const { relayer, node } = build();
+      node.sendError = new Error('already known');
+      const recorded: string[] = [];
+
+      const result = await relayer.sendCall({
+        ...call(),
+        beforeBroadcast: async (hash) => void recorded.push(hash),
+      });
+
+      expect(result.status).toBe('SUCCESS');
+      expect(result.hash).toBe(recorded[0]);
+      expect(node.receiptWaits[0].hash).toBe(recorded[0]);
+    });
+
+    it('rethrows anything else untouched: the outcome is unknown', async () => {
+      const { relayer, node } = build();
+      const timeout = new Error('EVM RPC eth_sendRawTransaction failed: HTTP 504');
+      node.sendError = timeout;
+
+      await expect(relayer.sendCall(call())).rejects.toBe(timeout);
+    });
+  });
+
+  it('refuses, before signing or recording anything, a send the balance cannot cover', async () => {
+    const { relayer, node } = build();
+    // 250 000 gas × 1.5 gwei = 3.75e14 wei; one wei short.
+    node.balance = 250_000n * node.fees.maxFeePerGas - 1n;
+    let recorded = false;
+
+    const error = await relayer
+      .sendCall({ ...call(), beforeBroadcast: async () => void (recorded = true) })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(EvmSendRejectedError);
+    expect((error as EvmSendRejectedError).reason).toBe('INSUFFICIENT_FUNDS');
+    expect((error as EvmSendRejectedError).hash).toBeNull();
+    expect(recorded).toBe(false);
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it('counts the value in that check, and sends when the balance covers it exactly', async () => {
+    const { relayer, node } = build();
+    node.balance = 250_000n * node.fees.maxFeePerGas;
+
+    await expect(relayer.sendCall(call())).resolves.toMatchObject({ status: 'SUCCESS' });
+  });
+
+  it('leaves the check to the node when the balance cannot be read', async () => {
+    const { relayer, node } = build();
+    node.getBalance = async () => {
+      throw new Error('rpc down');
+    };
+
+    await expect(relayer.sendCall(call())).resolves.toMatchObject({ status: 'SUCCESS' });
   });
 
   it('sendValue has no way to carry calldata', () => {
@@ -418,7 +533,17 @@ class FakeNode implements EvmRelayClient {
     return this.fees;
   }
 
+  /** Set by a test: the node refuses the next send with this. */
+  sendError: unknown = null;
+  /** Set by a test: what `NodeInterface.gasEstimateL1Component` answers. */
+  l1: { gas: bigint; baseFee: bigint } | null = null;
+
   async sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`> {
+    if (this.sendError) {
+      const error = this.sendError;
+      this.sendError = null;
+      throw error;
+    }
     this.sent.push(args.serializedTransaction);
     this.pending += 1;
     return `0x${'ab'.repeat(32)}`;
@@ -438,7 +563,15 @@ class FakeNode implements EvmRelayClient {
     };
   }
 
-  async call(): Promise<unknown> {
+  async call(args?: { to?: string }): Promise<unknown> {
+    if (this.l1 && args?.to?.toLowerCase() === NODE_INTERFACE_ADDRESS.toLowerCase()) {
+      return {
+        data: encodeAbiParameters(
+          [{ type: 'uint64' }, { type: 'uint256' }, { type: 'uint256' }],
+          [this.l1.gas, this.l1.baseFee, 0n],
+        ),
+      };
+    }
     if (!this.reverting) {
       return '0x';
     }

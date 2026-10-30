@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { decodeEventLog, encodeFunctionData, getAddress, isAddress, zeroAddress } from 'viem';
 
 import {
+  FEE_SPIKE_DEFERRED,
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
@@ -24,6 +25,16 @@ import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment, MULTICALL3_ADDRESS } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import {
+  backgroundSendCharge,
+  backgroundSendVerdict,
+  EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM,
+  EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
+  estimateL1Gas,
+  EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
+  paddedL1Gas,
+} from './evm-l1-gas';
+import { EvmRedeemerAdmission, EvmRedeemerHourlyBudget } from './evm-redeemer-hourly-budget';
+import {
   freeBondedStake,
   PrevalidationDelegation,
   PrevalidationState,
@@ -33,6 +44,12 @@ import {
 import { isRevert } from './evm-voucher-authority';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EvmSendBudget, EvmSendFloat } from './evm-send-float';
+import {
+  EvmSendRejectedError,
+  isInsufficientFunds,
+  isSendRejected,
+} from './evm-send-rejected.error';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { slashStatusFromEvm } from './evm-slash-status';
 
@@ -68,9 +85,27 @@ const UNPLANNED_SLASH_ANSWER_TTL_MS = 30_000;
  * ERC-20. Real USDG is an upgradeable proxy with a blocklist and a
  * redemption performs two transfers, which is what the margin above is for;
  * it has not yet been re-measured against the real token on 46630.
+ *
+ * This is the **execution** budget. On a Nitro chain the limit sent also carries
+ * the L1 posting cost in L2 gas, read per send and padded 20 % (`evm-l1-gas.ts`);
+ * a send whose whole limit would cost more than
+ * `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM` per voucher (or, near a deadline,
+ * more than the hard ceiling of 5× that), or that would take the redeemer past
+ * its hourly spend budget (`evm-redeemer-hourly-budget.ts`), is not sent, and
+ * every voucher it carries is a `RETRY` with `programError = FeeSpikeDeferred`.
  */
 export const EVM_REDEEM_BATCH_BASE_GAS = 200_000n;
 export const EVM_REDEEM_PER_VOUCHER_GAS = 120_000n;
+
+/** A send deferred by {@link FEE_SPIKE_DEFERRED}: nothing signed, nothing broadcast. */
+const FEE_SPIKE_DEFERRED_OUTCOME: RedeemOutcome = {
+  kind: RedeemOutcomeKind.RETRY,
+  signature: null,
+  programError: FEE_SPIKE_DEFERRED,
+};
+
+/** The fixed tag on the log line of a redemption the redeemer's float cannot pay. */
+export const EVM_REDEEMER_FLOAT_SHORT_LOG_TAG = '[redeemer-float-short]';
 
 /** The alert a refusal nobody can name raises. */
 export const EVM_REDEEM_UNKNOWN_REVERT_ALERT = 'evm_redeem_unknown_revert';
@@ -268,6 +303,16 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
      * is the provider's own (the behaviour before review 2026-10-24 wave 2 M-2).
      */
     private readonly slashRecords: UnplannedSlashRecords | null = null,
+    /**
+     * The redeemer's float, read before a send so the send is sized to it.
+     * Absent, sends are not sized (the relayer's own pre-send check remains).
+     */
+    private readonly float: EvmSendFloat | null = null,
+    /**
+     * The redeemer's hourly spend budget, shared with held moves (review
+     * 2026-10-30 I-1). Absent: not checked.
+     */
+    private readonly hourly: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'> | null = null,
   ) {}
 
   private readonly unplannedAnswers = new Map<string, { at: number; short: boolean }>();
@@ -289,25 +334,48 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // so a refusal pre-validation cannot see — the signature, a wallet's answer —
     // costs an `eth_call` and never a mined revert (review S2-2).
     const args = [voucher, this.signatureOf(request)] as const;
-    const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasFor(1));
+    const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'redeemVoucher', args });
+    const urgent = nearDeadline([voucher], state.nowSeconds);
+    const sized = await this.gasLimit(chainId, data, 1, urgent);
+    if (sized === null) return FEE_SPIKE_DEFERRED_OUTCOME;
+    const { gasLimit, l2BaseFee } = sized;
+    const budget = await this.float?.budget(chainId, urgent);
+    if (budget && fitCount(1, gasLimit, budget) === 0) {
+      throw this.floatTooLow(chainId, 1, gasLimit, budget);
+    }
+    const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasLimit);
     if (simulated !== null) {
       return this.decided(chainId, simulated, voucher, state);
     }
 
-    const result = await this.redeemer.sendCall({
+    // The hourly spend budget, last before the send: a send refused above costs it nothing.
+    const fee = l2BaseFee ?? budget?.maxFeePerGas ?? null;
+    const admission = await this.admit(
       chainId,
-      to: this.escrowAccount(chainId),
-      data: encodeFunctionData({
-        abi: ASSAY_ESCROW_ABI,
-        functionName: 'redeemVoucher',
-        args,
-      }),
-      gasLimit: gasFor(1),
-      purpose: `redeemVoucher seq=${request.seq}`,
-      beforeBroadcast: async (hash) => {
-        await request.recordAttempt?.(hash);
+      gasLimit,
+      fee,
+      1,
+      urgent,
+      `redeemVoucher seq=${request.seq}`,
+    );
+    if (admission === null) return FEE_SPIKE_DEFERRED_OUTCOME;
+
+    const result = await this.sendTracked(
+      chainId,
+      gasLimit,
+      budget ?? null,
+      { admission, fee },
+      {
+        chainId,
+        to: this.escrowAccount(chainId),
+        data,
+        gasLimit,
+        purpose: `redeemVoucher seq=${request.seq}`,
+        beforeBroadcast: async (hash) => {
+          await request.recordAttempt?.(hash);
+        },
       },
-    });
+    );
 
     if (result.status === 'SUCCESS') {
       return { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null };
@@ -466,57 +534,156 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return refusals.map((name, i) => this.decided(chainId, name, vouchers[i], states[i]));
     }
 
+    // Every refused item is decided now; every admissible one is filled in by
+    // its group below, or left EMPTY when the float could not pay for it. An
+    // empty slot means "not attempted": `VoucherRedemptionService` blocks that
+    // payer for the pass and assumes nothing.
+    const outcomes: (RedeemOutcome | undefined)[] = refusals.map((name, i) =>
+      name === null ? undefined : this.decided(chainId, name, vouchers[i], states[i]),
+    );
+
+    // URGENT items (a voucher within EVM_FEE_CAP_WAIVED_WITHIN_SECONDS of its
+    // deadline) go first, as their own batch: their waiver of the fee cap and
+    // of the float reserve must not carry the rest of the batch with it, and
+    // when the float is short they are the ones it pays for.
+    const urgent = admissible.filter((i) => nearDeadline([vouchers[i]], states[i].nowSeconds));
+    const ordinary = admissible.filter((i) => !urgent.includes(i));
+    const groups = [
+      { indexes: urgent, urgent: true },
+      { indexes: ordinary, urgent: false },
+    ].filter((group) => group.indexes.length > 0);
+
+    const batch: BatchContext = { chainId, requests, vouchers, signatures, outcomes, admissible };
+    for (const group of groups) {
+      const more = await this.redeemGroup(batch, group.indexes, group.urgent);
+      if (!more) break;
+    }
+    return outcomes as RedeemOutcome[];
+  }
+
+  /**
+   * One redemption transaction for `indexes` (all urgent, or none), cut to what
+   * the float can pay. Fills `batch.outcomes` for what it attempted. Returns
+   * `false` when the float is spent, so no further group is tried.
+   *
+   * When the float cannot pay for even one item and nothing in this call has
+   * an outcome yet, it throws `EvmSendRejectedError` (`INSUFFICIENT_FUNDS`, no
+   * hash): nothing was signed or broadcast, and the redemption pass reads that
+   * as the end of the pass. Once an earlier group has outcomes, the rest is
+   * left empty instead, so those outcomes are not lost to a throw.
+   */
+  private async redeemGroup(
+    batch: BatchContext,
+    group: readonly number[],
+    urgent: boolean,
+  ): Promise<boolean> {
+    const { chainId, requests, vouchers, signatures, outcomes } = batch;
+    let indexes = group;
+    let { data, args } = this.batchCall(vouchers, signatures, indexes);
+    let sized = await this.gasLimit(chainId, data, indexes.length, urgent);
+    if (sized === null) {
+      // Not sent, and not split: singles would meet the same fees. Every
+      // admissible item waits for the next pass; the rest are what they are.
+      for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
+      return true;
+    }
+    let { gasLimit } = sized;
+
+    // SIZED TO THE FLOAT. The node refuses a send whose gasLimit × maxFeePerGas
+    // is above the balance, so a batch the float cannot pay is cut here, before
+    // anything is signed, rather than refused after its hash was recorded.
+    const budget = (await this.float?.budget(chainId, urgent)) ?? null;
+    if (budget) {
+      const fit = fitCount(indexes.length, gasLimit, budget);
+      if (fit < indexes.length) {
+        if (fit === 0) {
+          const error = this.floatTooLow(chainId, indexes.length, gasLimit, budget);
+          if (!this.anyAttempted(batch)) throw error;
+          return false;
+        }
+        this.logger.warn(
+          `The redeemer float on ${chainId} pays ${fit} of ${indexes.length} redemptions ` +
+            `(${budget.spendableWei} wei spendable over a ${budget.reserveWei} wei reserve); ` +
+            `the other ${indexes.length - fit} wait for a top-up`,
+        );
+        indexes = indexes.slice(0, fit);
+        ({ data, args } = this.batchCall(vouchers, signatures, indexes));
+        sized = await this.gasLimit(chainId, data, indexes.length, urgent);
+        if (sized === null) {
+          for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
+          return false;
+        }
+        ({ gasLimit } = sized);
+      }
+    }
+
     // SIMULATE the batch first, with the gas it will be sent with. A batch the
     // chain would refuse is never broadcast: it goes straight to the singles,
     // each of which simulates again (review S2-2).
-    const batchArgs = [
-      admissible.map((i) => vouchers[i]),
-      admissible.map((i) => signatures[i]),
-    ] as const;
-    const simulated = await this.simulate(
-      chainId,
-      'redeemVoucherBatch',
-      batchArgs,
-      gasFor(admissible.length),
-    );
+    const simulated = await this.simulate(chainId, 'redeemVoucherBatch', args, gasLimit);
     if (simulated !== null) {
       this.logger.warn(
-        `A redemption batch of ${admissible.length} would revert with ${simulated}; ` +
+        `A redemption batch of ${indexes.length} would revert with ${simulated}; ` +
           `nothing was broadcast — redeeming the items singly`,
       );
-      const outcomes: RedeemOutcome[] = refusals.map((name, i) =>
-        this.decided(chainId, name, vouchers[i], states[i]),
-      );
-      for (const index of admissible) {
-        outcomes[index] = await this.redeem(requests[index]);
-      }
-      return outcomes;
+      return this.redeemSingles(batch, indexes);
     }
 
-    const result = await this.redeemer.sendCall({
+    // The hourly spend budget, last before the send. Refused: the whole group
+    // waits like a fee spike (not split — singles would be charged the same).
+    const fee = sized.l2BaseFee ?? budget?.maxFeePerGas ?? null;
+    const admission = await this.admit(
       chainId,
-      to: this.escrowAccount(chainId),
-      data: encodeFunctionData({
-        abi: ASSAY_ESCROW_ABI,
-        functionName: 'redeemVoucherBatch',
-        args: [admissible.map((i) => vouchers[i]), admissible.map((i) => signatures[i])],
-      }),
-      gasLimit: gasFor(admissible.length),
-      purpose: `redeemVoucherBatch n=${admissible.length}`,
-      // One hash, recorded on every voucher it carries.
-      beforeBroadcast: async (hash) => {
-        for (const index of admissible) {
-          await requests[index].recordAttempt?.(hash);
-        }
-      },
-    });
+      gasLimit,
+      fee,
+      indexes.length,
+      urgent,
+      `redeemVoucherBatch n=${indexes.length}`,
+    );
+    if (admission === null) {
+      for (const index of indexes) outcomes[index] = FEE_SPIKE_DEFERRED_OUTCOME;
+      return true;
+    }
+
+    let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
+    try {
+      result = await this.sendTracked(
+        chainId,
+        gasLimit,
+        budget,
+        { admission, fee },
+        {
+          chainId,
+          to: this.escrowAccount(chainId),
+          data,
+          gasLimit,
+          purpose: `redeemVoucherBatch n=${indexes.length}`,
+          // One hash, recorded on every voucher it carries.
+          beforeBroadcast: async (hash) => {
+            for (const index of indexes) {
+              await requests[index].recordAttempt?.(hash);
+            }
+          },
+        },
+      );
+    } catch (error) {
+      // The node refused it: not broadcast. With earlier outcomes in hand the
+      // rest is left empty rather than thrown away with them.
+      if (isSendRejected(error) && this.anyAttempted(batch)) {
+        return !isInsufficientFunds(error);
+      }
+      throw error;
+    }
 
     if (result.status === 'SUCCESS') {
-      return refusals.map((name, index) =>
-        refusals[index] === null
-          ? { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null }
-          : this.decided(chainId, name, vouchers[index], states[index]),
-      );
+      for (const index of indexes) {
+        outcomes[index] = {
+          kind: RedeemOutcomeKind.REDEEMED,
+          signature: result.hash,
+          programError: null,
+        };
+      }
+      return true;
     }
 
     // RETRY SINGLY. The batch reverted, so we do not know WHICH item did it:
@@ -525,17 +692,111 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // batch would fail identically, for ever. One transaction each is slower and
     // it is the only thing that makes progress.
     this.logger.warn(
-      `A redemption batch of ${admissible.length} reverted with ` +
+      `A redemption batch of ${indexes.length} reverted with ` +
         `${result.revertReason ?? 'an unreadable reason'}; retrying the items singly`,
     );
+    return this.redeemSingles(batch, indexes);
+  }
 
-    const outcomes: RedeemOutcome[] = refusals.map((name, i) =>
-      this.decided(chainId, name, vouchers[i], states[i]),
-    );
-    for (const index of admissible) {
-      outcomes[index] = await this.redeem(requests[index]);
+  /**
+   * Each of `indexes` on its own. A single the node refused was not broadcast
+   * and is left empty; one refused for funds ends the run (every later one
+   * would be refused the same way) and returns `false`. Any other throw is
+   * rethrown, as it always was.
+   */
+  private async redeemSingles(batch: BatchContext, indexes: readonly number[]): Promise<boolean> {
+    for (const index of indexes) {
+      try {
+        batch.outcomes[index] = await this.redeem(batch.requests[index]);
+      } catch (error) {
+        if (!isSendRejected(error)) throw error;
+        if (isInsufficientFunds(error)) {
+          if (!this.anyAttempted(batch)) throw error;
+          return false;
+        }
+      }
     }
-    return outcomes;
+    return true;
+  }
+
+  /** `redeemVoucherBatch` for `indexes`: its calldata and its arguments. */
+  private batchCall(
+    vouchers: readonly EvmVoucher[],
+    signatures: readonly `0x${string}`[],
+    indexes: readonly number[],
+  ): { data: `0x${string}`; args: readonly unknown[] } {
+    const args = [indexes.map((i) => vouchers[i]), indexes.map((i) => signatures[i])] as const;
+    return {
+      data: encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'redeemVoucherBatch', args }),
+      args,
+    };
+  }
+
+  /** Whether an admissible item of this call already has an outcome (deferred, sent or single). */
+  private anyAttempted(batch: BatchContext): boolean {
+    return batch.admissible.some((index) => batch.outcomes[index] !== undefined);
+  }
+
+  /**
+   * `sendCall`, keeping the float's books: the worst cost comes off the cached
+   * balance after a send, and a refusal for funds empties it. Once the receipt
+   * is in, the hourly budget's charge becomes `gasUsed × fee` (the fee it was
+   * charged at); a send that threw keeps its estimate charged, since it may
+   * still have been broadcast.
+   */
+  private async sendTracked(
+    chainId: ChainId,
+    gasLimit: bigint,
+    budget: EvmSendBudget | null,
+    charge: { admission: EvmRedeemerAdmission; fee: bigint | null },
+    call: Parameters<EvmRelayerPort['sendCall']>[0],
+  ): Promise<Awaited<ReturnType<EvmRelayerPort['sendCall']>>> {
+    let result: Awaited<ReturnType<EvmRelayerPort['sendCall']>>;
+    try {
+      result = await this.redeemer.sendCall(call);
+      if (budget) this.float?.spent(chainId, gasLimit * budget.maxFeePerGas);
+    } catch (error) {
+      if (isInsufficientFunds(error)) this.float?.drained(chainId);
+      throw error;
+    }
+    if (charge.fee !== null && typeof result.gasUsed === 'bigint') {
+      await this.hourly?.settle(charge.admission, result.gasUsed * charge.fee);
+    }
+    return result;
+  }
+
+  /**
+   * Charges a send to the redeemer's hourly spend budget
+   * ({@link EvmRedeemerHourlyBudget}): its estimate, `gasLimit × fee` (the per-
+   * item cap × `items` when no fee is known). `null`: over budget, deferred.
+   * Without a budget every send is admitted, uncounted.
+   */
+  private async admit(
+    chainId: ChainId,
+    gasLimit: bigint,
+    fee: bigint | null,
+    items: number,
+    urgent: boolean,
+    purpose: string,
+  ): Promise<EvmRedeemerAdmission | null> {
+    if (!this.hourly) return { ticket: null };
+    const wei = backgroundSendCharge(gasLimit, fee, null, items);
+    return this.hourly.take(chainId, wei, urgent, purpose);
+  }
+
+  /** The refusal, and its log line, for a float that cannot pay one redemption. */
+  private floatTooLow(
+    chainId: ChainId,
+    items: number,
+    gasLimit: bigint,
+    budget: EvmSendBudget,
+  ): EvmSendRejectedError {
+    const detail =
+      `the redeemer float on ${chainId} (${budget.balanceWei} wei, ${budget.reserveWei} wei ` +
+      `reserved) cannot pay one redemption of ${items} at ${budget.maxFeePerGas} wei per gas ` +
+      `(${gasLimit} gas for ${items}); nothing was broadcast and the pass ends`;
+    this.logger.error(`${EVM_REDEEMER_FLOAT_SHORT_LOG_TAG} ${detail}`);
+    return new EvmSendRejectedError('INSUFFICIENT_FUNDS', null, detail);
   }
 
   /**
@@ -609,6 +870,53 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * The limit a redemption of `vouchers` is sent with — the execution budget
+   * plus the L1 part padded 20 % — and the L2 basefee it was priced at. `null`
+   * when that limit at the basefee would cost more than
+   * {@link EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM} per voucher: nothing is
+   * simulated or sent, and the caller defers. When `urgent` (a voucher within
+   * {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its deadline) the cap is waived
+   * up to the hard ceiling, {@link EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM}
+   * per voucher; above it even an urgent send is deferred, and a voucher that
+   * reaches its deadline that way lapses into buyer debt (`evm-l1-gas.ts`).
+   */
+  private async gasLimit(
+    chainId: ChainId,
+    data: `0x${string}`,
+    vouchers: number,
+    urgent: boolean,
+  ): Promise<{ gasLimit: bigint; l2BaseFee: bigint | null } | null> {
+    const to = getAddress(this.deployment(chainId).escrow);
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), { to, data });
+    const gasLimit = gasFor(vouchers) + paddedL1Gas(l1Gas);
+    const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(vouchers);
+    const ceilingWei = EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM * BigInt(vouchers);
+    switch (backgroundSendVerdict(gasLimit, l2BaseFee, vouchers, urgent)) {
+      case 'SEND':
+        return { gasLimit, l2BaseFee };
+      case 'SEND_WAIVED':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} is above the ${maxWei} wei cap ` +
+            `(${gasLimit} gas, L1 ${l1Gas}) but a voucher in it is near its deadline: sending anyway`,
+        );
+        return { gasLimit, l2BaseFee };
+      case 'DEFER_CEILING':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
+            `at ${l2BaseFee} wei is above the ${ceilingWei} wei hard ceiling` +
+            `${urgent ? ', which the deadline waiver does not lift' : ''}; nothing was sent`,
+        );
+        return null;
+      case 'DEFER':
+        this.logger.warn(
+          `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
+            `at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
+        );
+        return null;
+    }
+  }
 
   /**
    * `eth_call` of the exact redemption, FROM the redeemer and WITH the gas it
@@ -1104,8 +1412,46 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
+/** Whether any of `vouchers` is within {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its on-chain deadline. */
+function nearDeadline(vouchers: readonly EvmVoucher[], nowSeconds: number): boolean {
+  const window = BigInt(EVM_FEE_CAP_WAIVED_WITHIN_SECONDS);
+  return vouchers.some(
+    (voucher) =>
+      voucher.expiresAt + BigInt(EVM_CONSTANTS.REDEEM_GRACE_SECONDS) - BigInt(nowSeconds) <= window,
+  );
+}
+
 function gasFor(vouchers: number): bigint {
   return EVM_REDEEM_BATCH_BASE_GAS + EVM_REDEEM_PER_VOUCHER_GAS * BigInt(vouchers);
+}
+
+/**
+ * How many of `items` a send fits in the budget: the largest `k` whose limit,
+ * `gasFor(k)` plus the L1 part scaled to `k` (calldata grows with the items),
+ * at the budget's fee is within what it may spend. The send itself is then
+ * sized exactly; the relayer refuses anything this estimate got wrong before
+ * signing it.
+ */
+function fitCount(items: number, gasLimit: bigint, budget: EvmSendBudget): number {
+  const n = BigInt(items);
+  const l1 = gasLimit > gasFor(items) ? gasLimit - gasFor(items) : 0n;
+  for (let k = items; k > 0; k -= 1) {
+    const kk = BigInt(k);
+    const limit = gasFor(k) + (l1 * kk + n - 1n) / n;
+    if (limit * budget.maxFeePerGas <= budget.spendableWei) return k;
+  }
+  return 0;
+}
+
+/** The arguments one redemption batch is assembled from. */
+interface BatchContext {
+  readonly chainId: ChainId;
+  readonly requests: readonly RedeemVoucherRequest[];
+  readonly vouchers: readonly EvmVoucher[];
+  readonly signatures: readonly `0x${string}`[];
+  readonly outcomes: (RedeemOutcome | undefined)[];
+  /** The items that passed pre-validation; the rest are decided from the start. */
+  readonly admissible: readonly number[];
 }
 
 function messageOf(error: unknown): string {

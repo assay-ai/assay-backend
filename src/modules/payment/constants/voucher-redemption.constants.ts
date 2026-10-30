@@ -166,7 +166,36 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    * somebody else's voucher.
    */
   SEQ_USED_ANOMALY: 'voucher_seq_used_anomaly',
+  /**
+   * More than {@link DEBT_SPIKE_THRESHOLD} served calls of one asset became
+   * buyer debt within {@link DEBT_SPIKE_WINDOW_SECONDS}. One debt is a buyer's
+   * problem; a burst is what a platform-side failure to redeem looks like (an
+   * unfunded redeemer, an RPC outage, a pause that outlived the vouchers).
+   * CRITICAL and aggregated per asset (`ONCE_PER_INCIDENT`): an operator
+   * reviews the burst and, if the platform caused it, voids the debts in bulk
+   * through the two-person operator flow. Nothing is voided automatically.
+   */
+  DEBT_SPIKE: 'voucher_debt_spike',
 } as const;
+
+/**
+ * The buyer-debt spike alert ({@link VOUCHER_REDEMPTION_ALERTS.DEBT_SPIKE})
+ * fires when MORE than this many debts of one asset are created within
+ * {@link DEBT_SPIKE_WINDOW_SECONDS}. Overridable with `DEBT_SPIKE_THRESHOLD`.
+ */
+export const DEBT_SPIKE_THRESHOLD = positiveIntFromEnv('DEBT_SPIKE_THRESHOLD', 10);
+
+/**
+ * The sliding window of {@link DEBT_SPIKE_THRESHOLD}, in seconds, and the
+ * alert's suppression window: one page per asset per window. Overridable with
+ * `DEBT_SPIKE_WINDOW_SECONDS`.
+ */
+export const DEBT_SPIKE_WINDOW_SECONDS = positiveIntFromEnv('DEBT_SPIKE_WINDOW_SECONDS', 15 * 60);
+
+function positiveIntFromEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isInteger(raw) && raw > 0 ? raw : fallback;
+}
 
 /**
  * What `redemption_last_error` carries once the provider forfeited the
@@ -192,6 +221,14 @@ export const UNCOLLECTED_PREFIX = 'uncollected:';
  * same literal.
  */
 export const DEBT_VOIDED_PREFIX = 'voided:';
+
+/**
+ * The outcome (after {@link DEBT_VOIDED_PREFIX}) of a buyer debt voided by an
+ * operator in bulk, with a second operator's approval
+ * (`OperatorDebtVoidService`): `voided:OPERATOR_PLATFORM_FAULT`. The free-text
+ * reason lives in the audit log, not on the row.
+ */
+export const OPERATOR_DEBT_VOID_OUTCOME = 'OPERATOR_PLATFORM_FAULT';
 
 /**
  * How close to a voucher's on-chain deadline (`expiresAt + redeemGraceSeconds`)

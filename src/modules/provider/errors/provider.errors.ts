@@ -232,6 +232,8 @@ export enum ProviderErrorCode {
   PROVIDER_BINDING_CHAIN_NOT_ENABLED = 'PROVIDER_BINDING_CHAIN_NOT_ENABLED',
   /** A non-FREE binding priced at zero. 400. */
   PROVIDER_BINDING_PRICE_NOT_POSITIVE = 'PROVIDER_BINDING_PRICE_NOT_POSITIVE',
+  /** A PAID or FREEMIUM binding priced below the paid-call minimum (`MIN_PAID_PRICE_USD`). 400. */
+  PROVIDER_BINDING_PRICE_BELOW_MINIMUM = 'PROVIDER_BINDING_PRICE_BELOW_MINIMUM',
   /** `GET /providers/me/sla-windows/:windowId/evidence` — `windowId` does not decode to a window. */
   PROVIDER_SLA_WINDOW_NOT_FOUND = 'PROVIDER_SLA_WINDOW_NOT_FOUND',
   /** `from` is not strictly before `to` on a report endpoint (traffic, quality, earnings). */
@@ -740,6 +742,21 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `A ${context?.pricingMode ?? 'priced'} binding needs a price above zero. ` +
+      `Use pricingMode FREE for a binding that costs nothing.`,
+  },
+
+  /**
+   * Below the paid-call minimum: every paid call costs the platform on-chain
+   * gas its 10 % fee must cover (`paid-price-floor.ts`). The context carries the
+   * minimum in atomic units (`minimumAmount`) and in dollars (`minimumUsd`).
+   */
+  bindingPriceBelowMinimum: {
+    code: ProviderErrorCode.PROVIDER_BINDING_PRICE_BELOW_MINIMUM,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `A ${context?.pricingMode ?? 'paid'} binding must charge at least ` +
+      `${context?.minimumUsd ?? 'the minimum'} per paid call ` +
+      `(priceAmount ${context?.minimumAmount ?? '?'} at ${context?.decimals ?? '?'} decimals). ` +
       `Use pricingMode FREE for a binding that costs nothing.`,
   },
 

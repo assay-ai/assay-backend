@@ -13,6 +13,7 @@ import {
 import { BlockedRole, BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { isInsufficientFunds, isSendRejected } from '@modules/chains/evm/evm-send-rejected.error';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -29,6 +30,7 @@ import {
 } from '../constants/voucher-redemption.constants';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
 import {
+  FEE_SPIKE_DEFERRED,
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
@@ -36,7 +38,15 @@ import {
   VOUCHER_REDEEMER,
   VoucherRedeemerPort,
 } from '../ports/voucher-redeemer.port';
+import { BuyerDebtSpikeMonitor } from './buyer-debt-spike.monitor';
 import { PaymentIntentService } from './payment-intent.service';
+import { EVM_FEE_CAP_WAIVED_WITHIN_SECONDS } from '@modules/chains/evm/evm-l1-gas';
+import {
+  GatheringPolicy,
+  REDEEM_GATHERING,
+  REDEEM_GATHERING_FROM_ENV,
+  redemptionPassReady,
+} from '../constants/settlement-gathering.constants';
 
 // Re-exported: callers and specs have always imported it from here.
 export { PROVIDER_FORFEIT_PREFIX };
@@ -242,21 +252,72 @@ export class VoucherRedemptionService {
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
+    // The buyer-debt spike alert, checked once after a pass that lapsed any.
+    // Optional: a spec that does not test it need not build one.
+    @Optional() private readonly debtSpike: BuyerDebtSpikeMonitor | null = null,
+    // `REDEEM_MIN_BATCH` / `REDEEM_MAX_WAIT_SECONDS`: see `run`.
+    @Optional()
+    @Inject(REDEEM_GATHERING)
+    private readonly gathering: GatheringPolicy = REDEEM_GATHERING_FROM_ENV,
   ) {}
+
+  /** Assets whose current pass made at least one buyer debt. */
+  private readonly lapsedAssets = new Set<string>();
 
   /**
    * One pass over the passed-but-unredeemed holds of `asset`.
+   *
+   * **Gathering** (`settlement-gathering.constants.ts`, owner decision
+   * 2026-10-30): on a chain that batches, the pass waits — and touches nothing —
+   * until `REDEEM_MIN_BATCH` vouchers await, the oldest was issued
+   * `REDEEM_MAX_WAIT_SECONDS` ago, or one is within
+   * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS` of its on-chain deadline. A dispute
+   * filed while a voucher waits is guaranteed as before: the voucher is
+   * redeemed into the hold and its full window starts then.
    *
    * Never throws: a redemption pass that rejects is logged by Nest and then
    * forgotten, and the holds it did not reach would sit until the next tick
    * with nothing saying why.
    */
   async run(asset: AssetId): Promise<void> {
+    this.lapsedAssets.delete(asset);
+    try {
+      await this.pass(asset);
+    } finally {
+      // Once per pass, not per debt: the count is read from the table.
+      if (this.lapsedAssets.delete(asset)) {
+        await this.debtSpike?.check(new Date(this.now()), asset);
+      }
+    }
+  }
+
+  private async pass(asset: AssetId): Promise<void> {
     // The blocked parties are left out IN the query, before its LIMIT: held
     // after it, 100 rows of one blocked payer at the head of the queue would
     // fill every pass and starve every other buyer (audit E-1). The per-row
     // check below stays as a second line for a block that lands mid-pass.
+    // Read before the gathering check, which leaves out the same rows (review
+    // 2026-10-30 M-2): an old voucher the pass holds must not count as waiting.
     const exclusions = await this.exclusions(asset);
+    const gathered = await redemptionPassReady({
+      policy: this.gathering,
+      payments: this.payments,
+      asset,
+      settledStatus: PaymentIntentStatus.SETTLED,
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      batchSize: this.redeemer.maxBatchSizeFor?.(asset) ?? this.redeemer.maxBatchSize,
+      orderedBySeq: this.redeemer.requiresAscendingSeq?.(asset) ?? true,
+      exclude: exclusions,
+      graceSeconds: redeemGraceSeconds(asset),
+      urgentWithinSeconds: EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
+      nowMs: this.now(),
+      onError: (error) =>
+        this.logger.warn(
+          `Gathering check for ${asset} failed; running the pass: ${describe(error)}`,
+        ),
+    });
+    if (!gathered) return;
+
     await this.recordProviderBlocks(asset, exclusions);
     // Asked of the chain, once per pass: see the class comment.
     const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;
@@ -442,16 +503,64 @@ export class VoucherRedemptionService {
       try {
         outcomes = await this.redeemer.redeemBatch(batch.map((entry) => entry.request));
       } catch (error) {
-        // One batch's failure must not cost the rest of the pass, and this
-        // process does not know whether the transaction reached the chain — so
-        // every payer in it is blocked and their holds stay open.
-        for (const entry of batch) {
-          blocked.add(entry.row.agentAccount);
-        }
         this.logger.error(
           `A redemption batch of ${batch.length} threw past its own handling: ${describe(error)}`,
         );
-        return;
+        // Broadcast or not? A transaction ref is written before every
+        // broadcast. With none on any of its rows the batch never reached the
+        // chain, so each item is tried on its own: one row that keeps throwing
+        // must not hold the whole asset back until every voucher expires.
+        // Otherwise this process does not know whether the transaction reached
+        // the chain — so every payer in it is blocked, their holds stay open,
+        // and the next pass reads the chain first.
+        let broadcast = false;
+        try {
+          for (const entry of batch) {
+            const refs = await this.payments.findRedemptionTxRefs(
+              entry.row.organizationId,
+              entry.row.id,
+            );
+            if (refs.length > (entry.row.redemptionTxRefCount ?? 0)) broadcast = true;
+          }
+        } catch {
+          // Cannot tell: assume it may have reached the chain.
+          broadcast = true;
+        }
+        // The node REFUSED the transaction: the ref recorded before the send
+        // was never broadcast, whatever the count says.
+        if (isSendRejected(error)) broadcast = false;
+        if (broadcast) {
+          for (const entry of batch) {
+            blocked.add(entry.row.agentAccount);
+          }
+          return;
+        }
+        // Refused for lack of ETH: every single would be refused the same way,
+        // so the fallback, and the pass, stop here. Nothing is written on the
+        // rows: a voucher that expires this way becomes buyer debt, which an
+        // operator voids (two-person) when the platform was at fault.
+        if (isInsufficientFunds(error)) {
+          for (const entry of batch) {
+            blocked.add(entry.row.agentAccount);
+          }
+          return;
+        }
+        for (const entry of batch) {
+          try {
+            const landed = await this.redeemOne(entry.row);
+            if (!landed.settled) blocked.add(entry.row.agentAccount);
+            if (landed.stop) return;
+          } catch (single) {
+            blocked.add(entry.row.agentAccount);
+            this.logger.error(
+              `Redemption of intent ${entry.row.id} (seq ${entry.row.voucherSeq}) threw past ` +
+                `its own handling: ${describe(single)}`,
+            );
+            if (isInsufficientFunds(single)) return;
+          }
+        }
+        queue = carried;
+        continue;
       }
 
       // Positional, and matched by index alone: a redemption carries no id the
@@ -814,8 +923,13 @@ export class VoucherRedemptionService {
         // one: once the provider has been seen at fault for this voucher, a
         // later refusal from elsewhere must not turn its forfeit into buyer
         // debt (review 2026-10-15, M3).
+        //
+        // A fee-spike deferral is not recorded either: nothing was sent, it
+        // says nothing about the voucher, and a recorded error would cost the
+        // buyer the dispute refund guarantee for a transient platform choice.
         if (
           outcome.programError !== null &&
+          outcome.programError !== FEE_SPIKE_DEFERRED &&
           recordedProviderCause(row.redemptionLastError) === null
         ) {
           // Below the minimum only because of records the provider did not
@@ -1327,6 +1441,7 @@ export class VoucherRedemptionService {
       },
       aggregation: AlertAggregation.PER_EVENT,
     });
+    this.lapsedAssets.add(row.assetId);
   }
 
   /**

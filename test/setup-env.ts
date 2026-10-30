@@ -18,3 +18,10 @@ import '../src/load-env';
 // The Robinhood testnet settlement token has no default in the registry; the
 // suite pins a fixture address so it never depends on a local `.env`.
 process.env.ROBINHOOD_TESTNET_USDG_ADDRESS = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
+
+// The paid-price floor and settlement gathering (2026-10-30) are off for the
+// suites that predate them, so their fixtures keep their prices and their
+// one-voucher passes; the specs of both inject their own policies.
+process.env.MIN_PAID_PRICE_USD = '0';
+process.env.REDEEM_MIN_BATCH = '1';
+process.env.COLLECT_MIN_BATCH = '1';

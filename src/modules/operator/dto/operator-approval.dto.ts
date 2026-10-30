@@ -76,6 +76,16 @@ export class OperatorApprovalDto {
 
   @ApiProperty()
   expiresAt: Date;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: Object,
+    description:
+      'What the approved action did, kept with the approval; `null` while it runs and for ' +
+      'actions that record nothing. For `buyer_debt.bulk_void`: a `BuyerDebtVoidRecordDto` ' +
+      '(every id VOIDED or SKIPPED with its reason, the counts and the amounts)',
+  })
+  result: Record<string, unknown> | null;
 }
 
 export class ApprovalDecisionDto {

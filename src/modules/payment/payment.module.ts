@@ -4,8 +4,10 @@ import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { LedgerModule } from '@modules/ledger/ledger.module';
 import { NotificationModule } from '@modules/notification/notification.module';
+import { RedeemerFloatGate } from '@modules/chains/evm/evm-redeemer-float.gate';
 import { AuditLogModule } from '@shared/audit';
 
+import { BuyerDebtSpikeMonitor } from './services/buyer-debt-spike.monitor';
 import { BuyerDebtSchemaCheck } from './services/buyer-debt-schema-check.service';
 import { DepositFinalityService } from './services/deposit-finality.service';
 import { EscrowSeqService } from './services/escrow-seq.service';
@@ -63,6 +65,12 @@ import { VoucherService } from './services/voucher.service';
     // `payment_key.first_spend`, raised by `VoucherService.redeem`.
     PaymentKeyFirstSpendService,
     VoucherService,
+    // The buyer-debt spike alert, shared by the redemption job and the
+    // verdict-deadline sweep (both make buyer debt).
+    BuyerDebtSpikeMonitor,
+    // Read by `VoucherService.redeem`: new paid calls are refused while the
+    // scheduler reports the chain's EVM redeemer float as critical.
+    RedeemerFloatGate,
     // The durable `seq` allocator behind `GET /escrow/next-seq`. The
     // repository is global (`PostgresModule`); `ALERT_PORT` comes from the
     // global `AlertingModule`, the same way every other alert emitter reaches
@@ -76,6 +84,7 @@ import { VoucherService } from './services/voucher.service';
   ],
   exports: [
     PaymentIntentService,
+    BuyerDebtSpikeMonitor,
     HeldCollectionService,
     PaymentIntentExpiryService,
     VoucherService,

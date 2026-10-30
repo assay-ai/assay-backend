@@ -16,6 +16,7 @@ import {
   EvmSendingKey,
   floatDedupeKey,
 } from './evm-relayer-float.constants';
+import { RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EVM_REDEEMER_KEYS_ENV, EVM_RELAYER_KEYS_ENV } from './evm-relayer-key-source';
 import { EVM_REDEEMER, EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 
@@ -109,6 +110,16 @@ export interface FloatCheckOptions {
  * is read after the relayer on each chain, against the same marks, with the
  * same alert names and `details.key: 'redeemer'`, and its own dedupe key
  * (`floatDedupeKey`), so one key running dry never silences the other's page.
+ *
+ * ## The redeemer's reading closes paid-call admission
+ *
+ * A page alone did not stop the 2026-10-29 incident: the redeemer sat dry for
+ * ten hours while the API admitted calls whose vouchers then lapsed into buyer
+ * debt. So each redeemer reading is also handed to {@link RedeemerFloatGate},
+ * which the api and mcp processes read before admitting a voucher — CRITICAL
+ * pauses new paid calls on that chain, OK or LOW resumes them. The relayer's
+ * reading is handed over the same way and closes RELAYED requests while it is
+ * critical, so the float left is kept for slash sends.
  */
 @Injectable()
 export class EvmRelayerFloatMonitor {
@@ -127,6 +138,8 @@ export class EvmRelayerFloatMonitor {
     @Inject(EVM_RELAYER_FLOAT_MARKS) private readonly marks: EvmRelayerFloatMarks | null,
     /** Optional so a test (or a process without the redeemer wired) reads the relayer alone. */
     @Optional() @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort | null = null,
+    /** Optional for the same reason: a test of the readings alone need not build one. */
+    @Optional() private readonly gate: RedeemerFloatGate | null = null,
   ) {}
 
   /**
@@ -197,9 +210,16 @@ export class EvmRelayerFloatMonitor {
     // scheduler's rather than the enabled list's, and the test that proves this
     // never sums the chains reads that order.
     for (const chainId of chains) {
-      readings.push(await this.readOne(this.relayer, 'relayer', chainId, marks));
+      const relayerReading = await this.readOne(this.relayer, 'relayer', chainId, marks);
+      readings.push(relayerReading);
+      // CRITICAL closes relayed requests on that chain (the 503 "try again
+      // shortly"), keeping what is left for slash sends.
+      await this.gate?.publish(chainId, relayerReading.level, 'relayer');
       if (this.redeemer) {
-        readings.push(await this.readOne(this.redeemer, 'redeemer', chainId, marks));
+        const reading = await this.readOne(this.redeemer, 'redeemer', chainId, marks);
+        readings.push(reading);
+        // After the float alert, so the page that says why comes first.
+        await this.gate?.publish(chainId, reading.level);
       }
     }
     return readings;

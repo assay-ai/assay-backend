@@ -101,6 +101,17 @@ export interface EvmRelayerPort {
   readonly name: string;
   address(chainId: ChainId): Promise<AccountId>;
   balanceWei(chainId: ChainId): Promise<bigint>;
+  /**
+   * The fees a send would be signed with now. Optional, so a fake port need not
+   * have it; without it a caller cannot size a send to the float and leaves
+   * the check to the send itself.
+   */
+  feesPerGas?(chainId: ChainId): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
+  /**
+   * Rejects with `EvmSendRejectedError` (`evm-send-rejected.error.ts`) when the
+   * node refused the transaction, so it was definitely not broadcast. The hash
+   * may already have been handed to `beforeBroadcast`.
+   */
   sendCall(call: EvmRelayedCall): Promise<EvmRelayResult>;
   sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult>;
 }

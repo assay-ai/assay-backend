@@ -105,7 +105,8 @@ const RELAYED_RATE_LIMITED_DESCRIPTION =
 
 const RELAYED_UNAVAILABLE_DESCRIPTION =
   'SETTLEMENT_RELAYED_INTENT_UNAVAILABLE — the submission budget could not be counted, so ' +
-  'nothing was submitted. The signature is still valid until its deadline.';
+  'nothing was submitted, or network fees are temporarily high. The signature is still valid ' +
+  'until its deadline; try again shortly.';
 
 @ApiTags('Escrow')
 @ApiBearerAuth()

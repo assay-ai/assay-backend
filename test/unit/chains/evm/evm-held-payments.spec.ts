@@ -8,10 +8,21 @@ import {
 import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 
 import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
-import { EvmHeldPayments } from '@modules/chains/evm/evm-held-payments.service';
+import {
+  EvmHeldPayments,
+  HeldSendDeferredError,
+} from '@modules/chains/evm/evm-held-payments.service';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { HeldStatus } from '@modules/payment/ports/held-payments.port';
+import { FEE_SPIKE_DEFERRED } from '@modules/payment/ports/voucher-redeemer.port';
+
+import { EvmSendFloat } from '@modules/chains/evm/evm-send-float';
+import { EvmRedeemerHourlyBudget } from '@modules/chains/evm/evm-redeemer-hourly-budget';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
+import { HELD_TIMEOUT_SECONDS } from '@modules/payment/ports/held-payments.port';
+
+import { L2_BASE_FEE, fakeNodeInterface } from './helpers/fake-node-interface';
 
 const CHAIN = 'eip155:46630' as ChainId;
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3` as AssetId;
@@ -28,6 +39,10 @@ function build(
     logs?: readonly unknown[];
     estimate?: bigint | Error;
     simulateError?: Error;
+    nodeInterface?: jest.Mock;
+    float?: EvmSendFloat;
+    now?: number;
+    hourly?: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'>;
   } = {},
 ) {
   const reads: Array<{
@@ -66,6 +81,7 @@ function build(
     getTransactionReceipt: jest.fn(() => Promise.resolve(options.receipt ?? null)),
     getBlockNumber: jest.fn(() => Promise.resolve(100_000n)),
     getLogs: jest.fn(() => Promise.resolve(options.logs ?? [])),
+    ...(options.nodeInterface ? { call: options.nodeInterface } : {}),
   };
   const redeemer = {
     address: jest.fn(() => Promise.resolve(`${CHAIN}:0x5555555555555555555555555555555555555555`)),
@@ -79,6 +95,9 @@ function build(
     new Map([[CHAIN, { escrow: ESCROW, config: CONFIG } as unknown as EvmDeployment]]),
     redeemer as never,
     options.live ? new Set([CHAIN]) : new Set(),
+    options.float ?? null,
+    () => options.now ?? Date.now(),
+    options.hourly ?? null,
   );
   return { service, reads, sent, estimates };
 }
@@ -227,6 +246,58 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
       const padded = build(null, { estimate: 167_287n });
       await padded.service.collect(ASSET, three);
       expect(padded.sent[0].gasLimit).toBe(209_109n);
+    });
+
+    describe('the L1 half (Nitro)', () => {
+      it('with an L1 part of 0, is exactly the estimate x 1.25', async () => {
+        const { service, sent } = build(null, {
+          estimate: 133_696n,
+          nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+        });
+        await service.collect(ASSET, one);
+        expect(sent[0].gasLimit).toBe(167_120n);
+      });
+
+      it('caps execution only: the prod 609758 estimate is no longer cut to 520000', async () => {
+        // Two moves (cap 520k), estimate 609,758 of which 480,000 is L1.
+        const nodeInterface = fakeNodeInterface({ l1Gas: 480_000n });
+        const { service, sent, reads } = build(null, { estimate: 609_758n, nodeInterface });
+        await service.collect(ASSET, three.slice(0, 2));
+        // (609758 - 480000) x 1.25 = 162198 (rounded up), + 480000 x 1.2.
+        expect(sent[0].gasLimit).toBe(162_198n + 576_000n);
+        expect(simulated(reads)).toEqual([162_198n + 576_000n]);
+        expect(nodeInterface.asked[0]).toEqual({ to: ESCROW, data: sent[0].data });
+      });
+
+      it('adds L1 to the fixed fallback when the estimate fails', async () => {
+        const { service, sent } = build(null, {
+          estimate: new Error('outage'),
+          nodeInterface: fakeNodeInterface({ l1Gas: 100_000n }),
+        });
+        await service.refund(ASSET, one);
+        expect(sent[0].gasLimit).toBe(180_000n + 120_000n);
+      });
+
+      it('defers above the cost cap: FeeSpikeDeferred, nothing simulated or sent', async () => {
+        const { service, sent, reads } = build(null, {
+          estimate: 12_000_000n,
+          nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+        });
+        const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(HeldSendDeferredError);
+        expect((error as Error).message.startsWith(`${FEE_SPIKE_DEFERRED}: `)).toBe(true);
+        expect(sent).toEqual([]);
+        expect(simulated(reads)).toEqual([]);
+      });
+
+      it('falls back to L1 = 0 when NodeInterface fails', async () => {
+        const { service, sent } = build(null, {
+          estimate: 133_696n,
+          nodeInterface: fakeNodeInterface(new Error('method not found')),
+        });
+        await service.collect(ASSET, one);
+        expect(sent[0].gasLimit).toBe(167_120n);
+      });
     });
 
     it('names an empty revert as out of gas, with the limit and the estimate', async () => {
@@ -397,5 +468,146 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
       });
       await expect(build(revert).service.holdLive(ASSET)).resolves.toBe(false);
     });
+  });
+});
+
+describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
+  const one = [{ payer: PAYER, seq: '7' }];
+  const NOW_MS = 1_900_000_000_000;
+  const GWEI = 1_000_000_000n;
+
+  /** A HELD record whose timeout is `secondsLeft` from NOW_MS. */
+  function heldRecord(secondsLeft: number) {
+    return {
+      provider: '0x4444444444444444444444444444444444444444',
+      amount: 1_000_000n,
+      takeRateBps: 1000,
+      status: 1,
+      collectableAt: BigInt(NOW_MS / 1000 + secondsLeft - HELD_TIMEOUT_SECONDS),
+    };
+  }
+
+  function float(balanceWei: bigint, reserve: bigint) {
+    return new EvmSendFloat(
+      {
+        balanceWei: async () => balanceWei,
+        feesPerGas: async () => ({ maxFeePerGas: GWEI, maxPriorityFeePerGas: 0n }),
+      },
+      reserve,
+    );
+  }
+
+  it('waives the cost cap for a record within the waiver window of its hold timeout', async () => {
+    // 250k execution + 1.2M L1 at 0.02 gwei is 2.9e-5 ETH: over the cap, under the ceiling.
+    const { service, sent } = build(heldRecord(600), {
+      estimate: 1_200_000n,
+      nodeInterface: fakeNodeInterface({ l1Gas: 1_000_000n }),
+      now: NOW_MS,
+    });
+
+    await service.refund(ASSET, one);
+
+    expect(sent).toHaveLength(1);
+  });
+
+  it('defers even a record near its timeout above the hard ceiling: the waiver is bounded', async () => {
+    const { service, sent, reads } = build(heldRecord(600), {
+      estimate: 12_000_000n,
+      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+      now: NOW_MS,
+    });
+
+    const error = await service.refund(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(HeldSendDeferredError);
+    expect((error as Error).message).toMatch(/hard ceiling/);
+    expect(sent).toEqual([]);
+    expect(reads.filter((read) => read.account)).toEqual([]);
+  });
+
+  it('defers a move the hourly budget refuses, after the simulation and before the send', async () => {
+    const hourly = { take: jest.fn(async () => null), settle: jest.fn(async () => undefined) };
+    const { service, sent, reads } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+
+    const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(HeldSendDeferredError);
+    expect((error as Error).message.startsWith(`${FEE_SPIKE_DEFERRED}: `)).toBe(true);
+    expect(reads.filter((read) => read.account)).toHaveLength(1);
+    expect(sent).toEqual([]);
+    // Charged gasLimit x basefee; urgency is passed lazily.
+    const [, wei, urgent] = hourly.take.mock.calls[0] as unknown as [unknown, bigint, unknown];
+    expect(wei).toBe(125_000n * L2_BASE_FEE);
+    expect(typeof urgent).toBe('function');
+  });
+
+  it('sends a move the hourly budget admits', async () => {
+    const hourly = {
+      take: jest.fn(async () => ({ ticket: null })),
+      settle: jest.fn(async () => undefined),
+    };
+    const { service, sent } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+
+    await service.collect(ASSET, one);
+
+    expect(sent).toHaveLength(1);
+  });
+
+  it('still defers a record far from its timeout, and one already past it', async () => {
+    for (const secondsLeft of [86_400, -60]) {
+      const { service, sent } = build(heldRecord(secondsLeft), {
+        estimate: 1_200_000n,
+        nodeInterface: fakeNodeInterface({ l1Gas: 1_000_000n }),
+        now: NOW_MS,
+      });
+
+      await expect(service.refund(ASSET, one)).rejects.toBeInstanceOf(HeldSendDeferredError);
+      expect(sent).toEqual([]);
+    }
+  });
+
+  it('refuses, before simulating or sending, a move the float cannot pay over its reserve', async () => {
+    // 100k estimate x 1.25 = 125k gas at 1 gwei; the float holds one wei less over the reserve.
+    const { service, sent, reads } = build(heldRecord(86_400), {
+      float: float(125_000n * GWEI + 1_000n - 1n, 1_000n),
+      now: NOW_MS,
+    });
+
+    const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(EvmSendRejectedError);
+    expect((error as EvmSendRejectedError).reason).toBe('INSUFFICIENT_FUNDS');
+    expect(sent).toEqual([]);
+    expect(reads.filter((read) => read.account !== undefined)).toEqual([]);
+  });
+
+  it('lets a move near its timeout spend the reserve', async () => {
+    const { service, sent } = build(heldRecord(600), {
+      float: float(125_000n * GWEI, 10n ** 18n),
+      now: NOW_MS,
+    });
+
+    await service.refund(ASSET, one);
+
+    expect(sent).toHaveLength(1);
+  });
+
+  it('sends when the float covers the move over its reserve', async () => {
+    const { service, sent } = build(heldRecord(86_400), {
+      float: float(125_000n * GWEI + 1_000n, 1_000n),
+      now: NOW_MS,
+    });
+
+    await service.collect(ASSET, one);
+
+    expect(sent).toHaveLength(1);
   });
 });

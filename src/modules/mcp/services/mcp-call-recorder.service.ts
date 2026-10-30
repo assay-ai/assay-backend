@@ -38,6 +38,7 @@ const REFUSAL_LAYER: Readonly<Record<string, RefusalLayer>> = Object.freeze({
   [ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING]: RefusalLayer.SERVER,
   [ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD]: RefusalLayer.SERVER,
   [PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN]: RefusalLayer.SERVER,
+  [PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM]: RefusalLayer.SERVER,
 });
 
 /** The same refusal this many times within {@link REPEAT_WINDOW_SECONDS} alerts the owner. */
@@ -235,6 +236,7 @@ const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   PAYMENT_INSUFFICIENT_FUNDS: 'the balance is too low',
   PAYMENT_WITHDRAWAL_PENDING: 'a withdrawal is pending',
   PAYMENT_DEBT_OUTSTANDING: 'an unpaid call must be settled first',
+  PAYMENT_PRICE_BELOW_MINIMUM: "the provider's price is below the paid-call minimum",
   PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED: "its payment key's limit was reached",
   PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED: 'the account ceiling was reached',
   PAYMENT_VOUCHER_DELEGATE_NOT_BOUND: 'it has no payment key yet',

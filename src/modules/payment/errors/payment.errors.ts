@@ -48,6 +48,9 @@ export enum PaymentErrorCode {
   // ── The buyer's money is on the wrong CHAIN, not short.
   PAYMENT_NO_SETTLEABLE_CHAIN = 'PAYMENT_NO_SETTLEABLE_CHAIN',
 
+  // ── The provider's price is below the platform's paid-call minimum.
+  PAYMENT_PRICE_BELOW_MINIMUM = 'PAYMENT_PRICE_BELOW_MINIMUM',
+
   // ── The buyer's own on-chain escrow replaces the pooled vault.
   PAYMENT_ESCROW_NOT_OPEN = 'PAYMENT_ESCROW_NOT_OPEN',
   PAYMENT_ESCROW_ACCOUNT_CLAIMED = 'PAYMENT_ESCROW_ACCOUNT_CLAIMED',
@@ -71,6 +74,8 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED',
   /** The payer is tightening its caps right now; retry shortly (BUG-D1-07). */
   PAYMENT_VOUCHER_ADMISSION_PAUSED = 'PAYMENT_VOUCHER_ADMISSION_PAUSED',
+  /** The platform's EVM redeemer is out of gas; new paid calls wait for the top-up. */
+  PAYMENT_SETTLEMENT_GAS_PAUSED = 'PAYMENT_SETTLEMENT_GAS_PAUSED',
 
   // ── Buyer debt: a served call whose voucher lapsed and that the buyer still
   //    owes (no-platform-debt design, steps 9 and 10).
@@ -260,6 +265,22 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `that none is accepted under the old limits` +
       `${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
       `nothing was charged`,
+  },
+  /**
+   * The chain's EVM redeemer float is at or below its critical mark
+   * (`RedeemerFloatGate`): a voucher admitted now could not be redeemed before
+   * it expires, and would lapse into buyer debt for a call that was served.
+   * Retryable, with `retryAfter` (seconds) as on `voucherAdmissionPaused`;
+   * 503 rather than 502/504, which the edge replaces with its own page.
+   */
+  settlementGasPaused: {
+    code: PaymentErrorCode.PAYMENT_SETTLEMENT_GAS_PAUSED,
+    statusCode: 503,
+    // `retryAfter` is a platform constant, safe on a REST error body too.
+    publicContext: ['retryAfter'],
+    message: (_context?: Record<string, any>) =>
+      'Paid calls are paused while the platform tops up its settlement gas; try again shortly. ' +
+      'Nothing was charged.',
   },
   /**
    * The voucher was signed by an authorised delegate that is not the delegate
@@ -490,6 +511,20 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `The provider is paused on ${context?.chainId ?? 'this chain'} while its outstanding ` +
       'penalties cannot be collected (slash hold); no payment to it can be created there now',
+  },
+  /**
+   * A paid (rail-B) call to a binding priced below the paid-call minimum
+   * (`MIN_PAID_PRICE_USD`, `paid-price-floor.ts`). Refused before any seq,
+   * voucher or hold: nothing is charged. Not retryable — only the provider can
+   * fix it, by raising its price.
+   */
+  priceBelowMinimum: {
+    code: PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.tool ?? 'This tool'}'s provider charges ${context?.priceUsd ?? '?'} per paid ` +
+      `call, below the platform minimum of ${context?.minimumUsd ?? '?'}. The provider must ` +
+      `raise its price before paid calls to it are accepted. Nothing was charged.`,
   },
   noSettleableChain: {
     code: PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN,

@@ -255,3 +255,63 @@ describe('PaymentIntentRepository.unsettledVouchers — the per-chain grace', ()
     });
   });
 });
+
+/**
+ * Review 2026-10-30 M-2: the gathering count left out none of the rows the pass
+ * holds, so one old voucher of a blocked payer kept the oldest age past the
+ * maximum wait and ran a pass every tick. It now applies the pass's own clause.
+ */
+describe('PaymentIntentRepository.summarizeAwaitingRedemption — the pass exclusions', () => {
+  async function summarized(
+    options: Parameters<PaymentIntentRepository['summarizeAwaitingRedemption']>[3],
+  ): Promise<{ sql: string; params: Record<string, unknown> }> {
+    const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
+    await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+    const repo = new PaymentIntentRepository(dataSource);
+    let captured = { sql: '', params: {} as Record<string, unknown> };
+    jest.spyOn(repo, 'createQueryBuilder').mockImplementation(((alias: string) => {
+      const qb = dataSource.createQueryBuilder(PaymentIntentEntity, alias) as any;
+      qb.getRawOne = async function () {
+        captured = { sql: this.getQuery(), params: this.getParameters() };
+        return { count: 0, oldestIssuedAt: null, earliestExpiresAt: null };
+      };
+      return qb;
+    }) as never);
+    await repo.summarizeAwaitingRedemption(
+      'eip155:46630/erc20:0xabc',
+      'SETTLED',
+      'RAIL_B_VOUCHER',
+      options,
+    );
+    return captured;
+  }
+
+  const exclude = {
+    organizationIds: ['11111111-1111-4111-8111-111111111111'],
+    walletKeys: ['eip155:0xbad'],
+    chainAccounts: ['eip155:46630:0xBAD'],
+  };
+
+  it('leaves out a blocked payer row, by the same clause as the queue (own seq on any-order chains)', async () => {
+    const { sql, params } = await summarized({ orderedBySeq: false, exclude });
+    const flat = sql.replace(/\s+/g, ' ');
+
+    expect(flat).toMatch(/NOT EXISTS \( SELECT 1 FROM payment_intents held WHERE/);
+    expect(flat).toContain('held.voucher_seq = intent.voucher_seq');
+    expect(params).toMatchObject({
+      blockedOrgs: exclude.organizationIds,
+      blockedWalletKeys: exclude.walletKeys,
+      blockedChainAccounts: ['eip155:46630:0xbad'],
+    });
+  });
+
+  it('on an ordered chain also leaves out the later seqs of a blocked payer', async () => {
+    const { sql } = await summarized({ orderedBySeq: true, exclude });
+    expect(sql.replace(/\s+/g, ' ')).toContain('held.voucher_seq <= intent.voucher_seq');
+  });
+
+  it('adds nothing when nobody is blocked', async () => {
+    const { sql } = await summarized({ orderedBySeq: false });
+    expect(sql).not.toContain('payment_intents held');
+  });
+});

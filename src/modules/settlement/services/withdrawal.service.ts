@@ -8,7 +8,7 @@ import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-t
 import { decayVoucherWindow } from '@modules/payment/domain/voucher-window';
 
 import { loweredCaps, lowersAnything, UnsettledVouchers } from '../domain/unsettled-vouchers';
-import { SettlementErrors } from '../errors/settlement.errors';
+import { SettlementErrorCode, SettlementErrors } from '../errors/settlement.errors';
 import {
   ESCROW_INTENT_BUILDER,
   EscrowIntentBuilderPort,
@@ -288,8 +288,16 @@ export class WithdrawalService {
     }
 
     const relay = async () => {
-      await this.relayedRate.admit(account, organizationId);
-      return this.relayed.submit({ ...intent, account } as RelayedEscrowIntent);
+      const admission = await this.relayedRate.admit(account, organizationId);
+      try {
+        return await this.relayed.submit({ ...intent, account } as RelayedEscrowIntent);
+      } catch (error) {
+        // A 503 is the platform's (a fee spike, a critical relayer float, the
+        // relayer's global budget): nothing was sent, and the attempt goes
+        // back to the buyer's hourly budget.
+        if (isRelayedIntentUnavailable(error)) await admission?.release();
+        throw error;
+      }
     };
 
     // Lowered limits are checked once more against the unsettled payments, and
@@ -460,4 +468,12 @@ function limitsCheck(account: AccountId, asset: AssetId, escrow: EscrowState, ne
   if (!lowersAnything(lowered)) return null;
   const scope = escrowWindowScope(account, asset, escrow);
   return scope === null ? null : { scope, lowered };
+}
+
+/** Whether `error` is `SettlementErrors.relayedIntentUnavailable` (the 503). */
+function isRelayedIntentUnavailable(error: unknown): boolean {
+  return (
+    (error as { errorCode?: unknown })?.errorCode ===
+    SettlementErrorCode.SETTLEMENT_RELAYED_INTENT_UNAVAILABLE
+  );
 }

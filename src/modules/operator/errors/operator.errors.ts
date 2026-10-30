@@ -34,6 +34,7 @@ export enum OperatorErrorCode {
   OPERATOR_APPROVAL_NOT_APPROVED = 'OPERATOR_APPROVAL_NOT_APPROVED',
   OPERATOR_APPROVAL_PAYLOAD_MISMATCH = 'OPERATOR_APPROVAL_PAYLOAD_MISMATCH',
   OPERATOR_APPROVAL_CALL_STALE = 'OPERATOR_APPROVAL_CALL_STALE',
+  OPERATOR_DEBT_VOID_INVALID = 'OPERATOR_DEBT_VOID_INVALID',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -277,5 +278,21 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     code: OperatorErrorCode.OPERATOR_APPROVAL_PAYLOAD_MISMATCH,
     statusCode: 500,
     message: () => 'The stored approval payload does not match its hash',
+  },
+
+  // ── M-1 · Bulk void of buyer debts ──
+
+  /**
+   * A bulk void request that cannot be queued as asked: an id that is not an
+   * open buyer debt now, or ids of more than one asset (one request pins one
+   * asset's total). `intentIds` names the offending ids, so the console can
+   * drop them and ask again.
+   */
+  debtVoidInvalid: {
+    code: OperatorErrorCode.OPERATOR_DEBT_VOID_INVALID,
+    statusCode: 400,
+    publicContext: ['detail', 'intentIds'],
+    message: (context?: Record<string, any>) =>
+      `The bulk void cannot be requested${context?.detail ? `: ${context.detail}` : ''}`,
   },
 });
