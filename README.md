@@ -22,9 +22,11 @@ boundary in `src/modules/chains/`.
 
 ## Status
 
-**Experimental. Not production-ready, and not deployed with real funds.**
+**Early production. Use with care.**
 
-- The backend is developed against Solana devnet and the Robinhood Chain testnet only; no deployment from this repository is published.
+- Assay's production deployment settles on Robinhood Chain mainnet (`eip155:4663`) in real USDG.
+  The dev deployment and local development use the Robinhood Chain testnet (`eip155:46630`) and
+  Solana devnet.
 - The backend and the on-chain programs have been reviewed internally; they have **not** been
   independently audited.
 - Signing keys are currently provisioned through environment variables behind signer ports; a
