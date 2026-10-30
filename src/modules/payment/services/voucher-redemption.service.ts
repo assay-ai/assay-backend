@@ -291,12 +291,15 @@ export class VoucherRedemptionService {
     // whether the transaction reached the chain. Elsewhere it is unused.
     const blocked = new Set<string>();
 
-    // `maxBatchSize` is the CHAIN's answer, not a policy of this service:
+    // The batch size is the CHAIN's answer, not a policy of this service:
     // Solana's `redeem_voucher` takes one voucher and there is no room in a
     // transaction for a second, so `1` runs the loop below unchanged and
     // Solana's behaviour is byte-identical to what it has always been.
-    if (this.redeemer.maxBatchSize > 1) {
-      return this.runBatched(pending, blocked, ordered);
+    // Asked for this asset's chain: a pass is one asset, so the least capable
+    // chain wired elsewhere does not get a say.
+    const batchSize = this.redeemer.maxBatchSizeFor?.(asset) ?? this.redeemer.maxBatchSize;
+    if (batchSize > 1) {
+      return this.runBatched(pending, blocked, ordered, batchSize);
     }
 
     for (const row of pending) {
@@ -362,7 +365,7 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * One pass, in batches of `maxBatchSize`.
+   * One pass, in batches of `batchSize` (the asset's chain's `maxBatchSizeFor`).
    *
    * Where the chain requires ascending seq (`ordered`), **one row per payer per
    * batch**: rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the
@@ -382,6 +385,7 @@ export class VoucherRedemptionService {
     pending: readonly RedeemableIntent[],
     blocked: Set<string>,
     ordered: boolean,
+    batchSize: number,
   ): Promise<void> {
     let queue: readonly RedeemableIntent[] = pending;
 
@@ -413,7 +417,7 @@ export class VoucherRedemptionService {
         }
         // One per payer where order matters; one per (payer, seq) everywhere.
         const slot = ordered ? row.agentAccount : `${row.agentAccount}#${row.voucherSeq}`;
-        if (batch.length >= this.redeemer.maxBatchSize || seen.has(slot)) {
+        if (batch.length >= batchSize || seen.has(slot)) {
           carried.push(row);
           continue;
         }
