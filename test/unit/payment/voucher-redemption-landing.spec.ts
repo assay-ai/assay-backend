@@ -186,6 +186,7 @@ function build(
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     findById: jest.fn().mockResolvedValue({ heldStatus: null }),
     releaseHold: jest.fn().mockResolvedValue(true),
+    voidUnredeemed: jest.fn().mockResolvedValue(true),
   };
   const payments = {
     recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
@@ -530,7 +531,7 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
   /**
    * Final review N-7: a node a few blocks behind says "not found" for a mined
    * hash. That is "unknown" until the recorded transaction is old enough that
-   * every node would have it; only then does the voucher become buyer debt.
+   * every node would have it; only then is the voucher closed.
    */
   it('treats "not found" as unknown while its own transaction is recent', async () => {
     const redeemer = new ChainRedeemer(async () => {
@@ -551,7 +552,12 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
     clock.nowSeconds = PAST_DEADLINE + 3_600;
     await service.run(USDC);
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    expect(payments.lapseRedemption).toHaveBeenCalledWith('org-1', 'intent-1', 'VoucherExpired');
+    // Only a receipt timeout, never a refusal: the platform's failure, voided.
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.voidUnredeemed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'intent-1' }),
+      'voided:PLATFORM_UNREDEEMED',
+    );
   });
 
   /**
