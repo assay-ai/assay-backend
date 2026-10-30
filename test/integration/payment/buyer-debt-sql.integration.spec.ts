@@ -531,6 +531,11 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'OperatorApprovalResult1793318400010',
+      'OrganizationReceiptsPublic1793318400000',
+      'ProtocolAnalyticsReadIndexes1793232000000',
+      'WithdrawalBookingUniqueness1762400000150',
+      'ProviderOwnerContactOptional1762400000140',
       'VerificationRecordLabels1762400000130',
       'EvmChainStateParamsChanged1762400000120',
       'DepositPendingUniqueness1762400000110',
@@ -577,6 +582,7 @@ describe('buyer debt migrations, down and up again', () => {
       'IdempotencyKeyLiveIntents1761000000000',
     ];
     const CONCURRENT_INDEX_MIGRATIONS = new Set([
+      'ProtocolAnalyticsReadIndexes1793232000000',
       'PaymentKeySpendIndexes1762400000020',
       'IdempotencyKeyLiveIntents1761000000000',
     ]);
