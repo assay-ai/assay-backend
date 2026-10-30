@@ -125,6 +125,20 @@ export class SettlementAssetDto {
 
   @ApiProperty({ description: 'The scale `priceAmount` is quoted in.', example: 6 })
   decimals: number;
+
+  /**
+   * The paid-call minimum for the caller's bindings in this asset: a PAID or
+   * FREEMIUM binding priced below it is refused by the editor
+   * (`PROVIDER_BINDING_PRICE_BELOW_MINIMUM`), and an existing one takes no
+   * paid call (`PAYMENT_PRICE_BELOW_MINIMUM`). `'0'` when no minimum applies.
+   */
+  @ApiProperty({
+    description:
+      'Minimum `priceAmount` (atomic units of this asset) of a PAID or FREEMIUM binding. ' +
+      "'0' when no minimum applies to the caller.",
+    example: '100000',
+  })
+  minPaidPrice: string;
 }
 
 /**

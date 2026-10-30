@@ -22,6 +22,13 @@ import { PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON } from '@modules/payment/con
 import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.constants';
 import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
+  formatAtomicUsd,
+  PAID_PRICE_FLOOR,
+  PAID_PRICE_FLOOR_FROM_ENV,
+  PaidPriceFloor,
+  paidPriceBelowFloor,
+} from '@modules/payment/domain/paid-price-floor';
+import {
   RequestCall,
   computeRequestHash,
   computeRoutedCallHash,
@@ -198,6 +205,11 @@ export class McpToolCallService {
     // How long a pending deposit waits (the insufficient-funds text). Optional
     // so a hand-built harness needs none; absent, the cautious text is used.
     @Optional() private readonly chains?: ChainAdapterRegistry,
+    // The paid-call minimum (`MIN_PAID_PRICE_USD`), enforced on rail B in
+    // `callOnRailB`. Optional: unprovided, the env value is used.
+    @Optional()
+    @Inject(PAID_PRICE_FLOOR)
+    private readonly priceFloor: PaidPriceFloor = PAID_PRICE_FLOOR_FROM_ENV,
   ) {}
 
   /**
@@ -884,6 +896,33 @@ export class McpToolCallService {
     // settlement. On the retry the re-drawn offer must name the same price, or
     // `VoucherService` refuses the signed amount.
     const price = offer.price;
+
+    // The paid-call minimum (`paid-price-floor.ts`), the single admission
+    // point of a paid rail-B call: refused here, before a seq is allocated, a
+    // voucher is verified or a hold is taken, so nothing is charged and nothing
+    // has to be swept. Against the OFFERED provider's own price and id (the
+    // router's answer, never the agent's echo), so an exempt internal provider
+    // is admitted and a binding priced below the minimum before the floor
+    // existed is not. Free calls (FREE, and a FREEMIUM free tier) never reach
+    // this method.
+    const minimum = paidPriceBelowFloor(
+      this.priceFloor,
+      offer.providerId,
+      price.amount,
+      price.decimals,
+    );
+    if (minimum !== null) {
+      throw PaymentErrors.priceBelowMinimum({
+        tool: tool.name,
+        toolId: tool.id,
+        providerId: offer.providerId,
+        priceAmount: price.amount,
+        priceUsd: `$${formatAtomicUsd(BigInt(price.amount), price.decimals)}`,
+        minimumAmount: minimum.toString(),
+        minimumUsd: `$${formatAtomicUsd(minimum, price.decimals)}`,
+        decimals: price.decimals,
+      });
+    }
 
     const call = voucherCallOf(tool, args);
     const requestHash = computeRequestHash({
