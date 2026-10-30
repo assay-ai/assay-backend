@@ -1,6 +1,9 @@
 import { toFunctionSelector } from 'viem';
 
 import {
+  backgroundSendCharge,
+  backgroundSendVerdict,
+  EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM,
   EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
   NODE_INTERFACE_L1_ABI,
   estimateL1Gas,
@@ -56,5 +59,47 @@ describe('estimateL1Gas', () => {
     expect(exceedsCostCap(atCap, L2_BASE_FEE, cap)).toBe(false);
     expect(exceedsCostCap(atCap + 1n, L2_BASE_FEE, cap)).toBe(true);
     expect(exceedsCostCap(10n ** 12n, null, cap)).toBe(false);
+  });
+});
+
+describe('the background send cost cap and its hard ceiling (review 2026-10-30 I-1)', () => {
+  const CAP = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM;
+  const CEILING = EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM;
+  const gasCosting = (wei: bigint) => wei / L2_BASE_FEE;
+
+  it('is 1e-5 ETH per item, with a ceiling of 5x that', () => {
+    expect(CAP).toBe(10_000_000_000_000n);
+    expect(CEILING).toBe(50_000_000_000_000n);
+  });
+
+  it('sends within the cap, urgent or not', () => {
+    expect(backgroundSendVerdict(gasCosting(CAP), L2_BASE_FEE, 1, false)).toBe('SEND');
+    expect(backgroundSendVerdict(gasCosting(CAP), L2_BASE_FEE, 1, true)).toBe('SEND');
+  });
+
+  it('above the cap: defers an ordinary send, waives it for an urgent one', () => {
+    expect(backgroundSendVerdict(gasCosting(CAP) + 1n, L2_BASE_FEE, 1, false)).toBe('DEFER');
+    expect(backgroundSendVerdict(gasCosting(CAP) + 1n, L2_BASE_FEE, 1, true)).toBe('SEND_WAIVED');
+    expect(backgroundSendVerdict(gasCosting(CEILING), L2_BASE_FEE, 1, true)).toBe('SEND_WAIVED');
+  });
+
+  it('above the hard ceiling: defers even an urgent send', () => {
+    expect(backgroundSendVerdict(gasCosting(CEILING) + 1n, L2_BASE_FEE, 1, true)).toBe(
+      'DEFER_CEILING',
+    );
+    expect(backgroundSendVerdict(gasCosting(CEILING) + 1n, L2_BASE_FEE, 1, false)).toBe(
+      'DEFER_CEILING',
+    );
+  });
+
+  it('scales both bounds per item, and has no opinion when the basefee is unknown', () => {
+    expect(backgroundSendVerdict(gasCosting(CEILING) + 1n, L2_BASE_FEE, 2, false)).toBe('DEFER');
+    expect(backgroundSendVerdict(10n ** 12n, null, 1, false)).toBe('SEND');
+  });
+
+  it('charges gasLimit x basefee, else x the fallback fee, else the per-item cap', () => {
+    expect(backgroundSendCharge(1_000n, 5n, 7n, 3)).toBe(5_000n);
+    expect(backgroundSendCharge(1_000n, null, 7n, 3)).toBe(7_000n);
+    expect(backgroundSendCharge(1_000n, null, null, 3)).toBe(CAP * 3n);
   });
 });

@@ -42,22 +42,44 @@ export const NODE_INTERFACE_L1_ABI = [
 
 /**
  * The most wei one background send (a redemption, a held collect or refund) may
- * cost, **per item it carries**.
+ * cost, **per item it carries**: 0.00001 ETH.
  *
  * A single `redeemVoucher` at its 320k budget and a 0.02 gwei basefee costs
- * about 6.4e-6 ETH; this is about 8× that, so an ordinary spike still sends and
- * only an extreme one waits (`FEE_SPIKE_DEFERRED`). Per item, because a batch
- * of 64 legitimately carries 64 times the calldata, and so about 64 times the
- * L1 part. Deferring costs nothing but time: the hold stays and the next pass
- * asks again.
+ * about 6.4e-6 ETH; this is about 1.5× that, so an ordinary day sends and a
+ * spike waits (`FEE_SPIKE_DEFERRED`). Per item, because a batch of 64
+ * legitimately carries 64 times the calldata, and so about 64 times the L1 part.
+ * Deferring costs nothing but time: the hold stays and the next pass asks again.
+ * A plain constant, like every other cost cap in this module (review 2026-10-30
+ * I-1 lowered it from 0.00005 ETH).
  */
-export const EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM = 50_000_000_000_000n; // 0.00005 ETH
+export const EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM = 10_000_000_000_000n; // 0.00001 ETH
+
+/**
+ * The HARD CEILING on a background send's cost per item, which even the
+ * deadline waiver ({@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS}) does not lift:
+ * {@link EVM_BACKGROUND_SEND_HARD_CEILING_MULTIPLIER}× the per-item cap, so
+ * 0.00005 ETH.
+ *
+ * The waiver exists because a deferred urgent send loses a payment rather than
+ * saving gas. Without a ceiling it was also an open cheque: a spike of any size
+ * near a deadline was paid in full. Above the ceiling nothing is sent and the
+ * item is deferred like any other. A voucher that reaches its on-chain deadline
+ * this way is `VoucherExpired` and lapses into BUYER DEBT, not a platform loss:
+ * the buyer's hold is released, the provider is not credited, and operators can
+ * void the debt (two-person approval) when the cause was the platform's.
+ */
+export const EVM_BACKGROUND_SEND_HARD_CEILING_MULTIPLIER = 5n;
+
+/** {@link EVM_BACKGROUND_SEND_HARD_CEILING_MULTIPLIER} × the per-item cap: 0.00005 ETH. */
+export const EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM =
+  EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * EVM_BACKGROUND_SEND_HARD_CEILING_MULTIPLIER;
 
 /**
  * How close to the point of no return a background send stops waiting for fees
  * to fall: within this many seconds of a voucher's on-chain deadline
  * (`expiresAt + REDEEM_GRACE_SECONDS`) or of a held payment's timeout, the
- * cost cap is waived and the send goes out at whatever the fees are.
+ * per-item cost cap is waived and the send goes out at any cost up to the hard
+ * ceiling ({@link EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM}).
  *
  * Deferring past that point would not save the gas, it would trade it for the
  * payment itself: an expired voucher is voided and its provider is never paid,
@@ -67,6 +89,51 @@ export const EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM = 50_000_000_000_000n; //
  * room for another.
  */
 export const EVM_FEE_CAP_WAIVED_WITHIN_SECONDS = 1_800;
+
+/**
+ * What a background send of `items` at `gasLimit` should do:
+ *
+ * - `SEND`: within the per-item cap (or the basefee is unknown);
+ * - `SEND_WAIVED`: above the cap but `urgent`, and within the hard ceiling;
+ * - `DEFER`: above the cap and not urgent;
+ * - `DEFER_CEILING`: above the hard ceiling, urgent or not.
+ *
+ * Both deferrals send nothing; the item waits for the next pass.
+ */
+export type BackgroundSendVerdict = 'SEND' | 'SEND_WAIVED' | 'DEFER' | 'DEFER_CEILING';
+
+export function backgroundSendVerdict(
+  gasLimit: bigint,
+  l2BaseFee: bigint | null,
+  items: number,
+  urgent: boolean,
+): BackgroundSendVerdict {
+  const count = BigInt(items);
+  if (exceedsCostCap(gasLimit, l2BaseFee, EVM_BACKGROUND_SEND_HARD_CEILING_WEI_PER_ITEM * count)) {
+    return 'DEFER_CEILING';
+  }
+  if (!exceedsCostCap(gasLimit, l2BaseFee, EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * count)) {
+    return 'SEND';
+  }
+  return urgent ? 'SEND_WAIVED' : 'DEFER';
+}
+
+/**
+ * The wei a background send is charged against the redeemer's hourly budget:
+ * `gasLimit × L2 basefee`, else `gasLimit × fallbackFeePerGas` (the float's
+ * `maxFeePerGas`), else the per-item cap × `items` — never 0 for a send that
+ * spends.
+ */
+export function backgroundSendCharge(
+  gasLimit: bigint,
+  l2BaseFee: bigint | null,
+  fallbackFeePerGas: bigint | null,
+  items: number,
+): bigint {
+  if (l2BaseFee !== null) return gasLimit * l2BaseFee;
+  if (fallbackFeePerGas !== null) return gasLimit * fallbackFeePerGas;
+  return EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(items);
+}
 
 /** The margin on the L1 part, the same 20 % the estimates elsewhere get. */
 const L1_MARGIN_NUM = 12n;

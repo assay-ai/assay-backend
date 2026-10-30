@@ -10,11 +10,13 @@ import {
   RelayedEscrowSubmission,
 } from '@modules/settlement/ports/relayed-escrow-intent.port';
 
+import { chainMetadata } from '../chain-metadata';
 import { ChainErrors } from '../errors/chains.errors';
-import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
+import { AccountId, AssetId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
+import { EvmEscrowBalanceReader } from './evm-escrow-balance-reader.service';
 import { EvmL1GasClient, estimateL1Gas, exceedsCostCap } from './evm-l1-gas';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.gate';
@@ -67,17 +69,18 @@ export const EVM_RELAYED_INTENT_MAX_GAS = 300_000n;
 
 /**
  * The most wei one relayed request may cost: `gasLimit` (L1 part included) ×
- * the L2 basefee. 0.00005 ETH.
+ * the L2 basefee. 0.00001 ETH (review 2026-10-30 I-2 lowered it from 0.00005).
  *
  * {@link EVM_RELAYED_INTENT_MAX_GAS} bounds the **execution** half only; on a
  * Nitro chain the L1 half is a fee, not a shape, and it spikes (`evm-l1-gas.ts`).
- * This is the bound on what a spike may cost: about 20× the ordinary 2.3e-6 ETH
- * of a `setLimitsBySig`, and about 1/15 of the relayer's 0.00075 ETH float, so
- * the per-account rate limit still bounds the float in requests. Above it the
- * request is a 503 "try again shortly" — the fees will come down, the
- * signature stays valid until its deadline, and nothing was sent.
+ * This is the bound on what a spike may cost: about 4× the ordinary 2.3e-6 ETH
+ * of a `setLimitsBySig`, and 1/20 of the relayer's shared hourly budget
+ * (`EVM_RELAYER_HOURLY_SPEND_WEI`), so twenty requests at the cap is the worst
+ * hour a crowd of strangers can cost. Above it the request is a 503 "try again
+ * shortly" — the fees will come down, the signature stays valid until its
+ * deadline, and nothing was sent.
  */
-export const EVM_RELAYED_INTENT_MAX_COST_WEI = 50_000_000_000_000n;
+export const EVM_RELAYED_INTENT_MAX_COST_WEI = 10_000_000_000_000n;
 
 /**
  * `RelayedEscrowIntentPort` on `eip155` — **the buyer signs, the relayer
@@ -143,10 +146,17 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
     @Optional()
     @Inject(EVM_RELAYER_FLOAT_GATE)
     private readonly floatGate: Pick<RedeemerFloatGate, 'isRelayerCritical'> | null = null,
-    /** The relayer's global hourly send budget. Absent: not checked. */
+    /** The relayer's global hourly spend budget. Absent: not checked. */
     @Optional()
     @Inject(EVM_RELAYER_HOURLY_BUDGET)
-    private readonly hourly: Pick<EvmRelayerHourlyBudget, 'take'> | null = null,
+    private readonly hourly: Pick<EvmRelayerHourlyBudget, 'take' | 'settle'> | null = null,
+    /**
+     * The escrow read that decides the budget's reserved lane: only an account
+     * holding something in its escrow may spend it. Absent: no reserved lane.
+     */
+    @Optional()
+    @Inject(EvmEscrowBalanceReader)
+    private readonly escrow: Pick<EvmEscrowBalanceReader, 'read'> | null = null,
   ) {}
 
   async submit(intent: RelayedEscrowIntent): Promise<RelayedEscrowSubmission> {
@@ -163,11 +173,19 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
 
     const relayer = parseAccountId(await this.relayer.address(chainId)).address as `0x${string}`;
 
-    const gasLimit = await this.preflight(chainId, relayer, to, data);
+    const { gasLimit, l2BaseFee } = await this.preflight(chainId, relayer, to, data);
 
     // Last, immediately before the send: a request any check above refused
-    // costs the global budget nothing.
-    if (this.hourly && !(await this.hourly.take(chainId, `relayed ${intent.kind}`))) {
+    // costs the global budget nothing. Charged at `gasLimit × basefee`, or at
+    // the per-request cap when the basefee is unknown; settled to the receipt.
+    const ticket = this.hourly
+      ? await this.hourly.take(chainId, {
+          wei: l2BaseFee !== null ? gasLimit * l2BaseFee : EVM_RELAYED_INTENT_MAX_COST_WEI,
+          purpose: `relayed ${intent.kind}`,
+          funded: () => this.holdsEscrow(intent.account, chainId),
+        })
+      : null;
+    if (this.hourly && !ticket) {
       throw SettlementErrors.relayedIntentUnavailable({ relayerBusy: true });
     }
 
@@ -194,6 +212,10 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       throw error;
     }
 
+    if (ticket && l2BaseFee !== null && typeof result.gasUsed === 'bigint') {
+      await this.hourly?.settle(ticket, result.gasUsed * l2BaseFee);
+    }
+
     if (result.status !== 'SUCCESS') {
       // The pre-flight passed and the send still reverted, so state moved between
       // the two — a block mined, or a load balancer answering from two nodes at
@@ -217,6 +239,22 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * Whether `account` holds something in its escrow on chain — a non-zero
+   * balance or a withdrawal still pending — which is what admits it to the
+   * relayer budget's reserved lane. A buyer who emptied their escrow has
+   * nothing left to brake or withdraw, so a zero escrow is "not funded".
+   */
+  private async holdsEscrow(account: AccountId, chainId: ChainId): Promise<boolean> {
+    if (!this.escrow) return false;
+    const reading = await this.escrow.read(
+      account,
+      chainMetadata(chainId).settlementAsset as AssetId,
+    );
+    if (!reading) return false;
+    return BigInt(reading.balance.amount) > 0n || reading.withdrawRequested > 0n;
+  }
 
   /**
    * The calldata, built from **validated fields** against this repository's own
@@ -313,7 +351,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
     relayer: `0x${string}`,
     to: `0x${string}`,
     data: `0x${string}`,
-  ): Promise<bigint> {
+  ): Promise<{ gasLimit: bigint; l2BaseFee: bigint | null }> {
     let estimate: bigint;
     try {
       estimate = await this.client(chainId).estimateGas({ account: relayer, to, data, value: 0n });
@@ -365,7 +403,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       );
       throw SettlementErrors.relayedIntentUnavailable({ feeSpike: true });
     }
-    return gasLimit;
+    return { gasLimit, l2BaseFee };
   }
 
   /**
