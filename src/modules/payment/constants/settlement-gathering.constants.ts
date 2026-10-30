@@ -4,8 +4,8 @@ import { MAX_HELD_BATCH } from '../ports/held-payments.port';
 import { VOUCHER_REDEMPTION_BATCH } from './voucher-redemption.constants';
 
 /**
- * Gathering: wait for a larger batch before an on-chain send (owner decision
- * 2026-10-30).
+ * Gathering: wait for a larger batch before an on-chain send (owner decisions
+ * 2026-10-30: first 20 vouchers or 15 minutes, then 64 or 30 minutes).
  *
  * A batched send has a fixed part paid once per transaction (redeem about
  * 121k gas, collect about 80k) and a part per item (81k, 40k). One voucher
@@ -33,12 +33,15 @@ import { VOUCHER_REDEMPTION_BATCH } from './voucher-redemption.constants';
  *   served rail-B call not redeemed yet is refund-guaranteed — a dispute filed
  *   then is recorded on the intent, the voucher is still redeemed into the
  *   escrow's hold as usual, and the full `collectHoldSeconds` window starts at
- *   the redemption. Waiting up to 15 minutes only lengthens the time a dispute
+ *   the redemption. Waiting up to 30 minutes only lengthens the time a dispute
  *   is guaranteed; it never shortens the window.
  * - **Voucher deadline**: a voucher is redeemable until `expiresAt + 7,200 s`
- *   on eip155 (about 7,620 s after issue). The age trigger (900 s, at most
+ *   on eip155 (about 7,620 s after issue). The age trigger (1,800 s, at most
  *   3,600 s) fires long before, and the deadline trigger fires before the fee
- *   cap is waived — gathering never pushes a voucher towards expiry.
+ *   cap is waived — gathering never pushes a voucher towards expiry. The
+ *   default leaves a voucher at least 7,200 − 1,800 − 1,800 = 3,600 s for a
+ *   failed send, a dead process or an empty redeemer float to be put right
+ *   before the deadline trigger itself is due.
  * - **`collectHoldSeconds` (1 h)**: frozen per record at redemption and
  *   counted from it, so a later redemption moves `collectableAt` later by the
  *   same amount. The dispute guard (`collectableAt − 60 s`) is unchanged.
@@ -50,7 +53,7 @@ import { VOUCHER_REDEMPTION_BATCH } from './voucher-redemption.constants';
  * - **Provider earnings**: the provider's ledger credit is booked only when
  *   the chain says `COLLECTED`, so a call stays pending in the provider's
  *   earnings up to `REDEEM_MAX_WAIT_SECONDS` + 1 h + `COLLECT_MAX_WAIT_SECONDS`
- *   (by default about 7 h 15 min) instead of about 1 h.
+ *   (by default about 7 h 30 min) instead of about 1 h.
  * - **Timeout**: anyone may collect `collectableAt + 7 days`; the age trigger
  *   (6 h, at most 24 h) fires days before the timeout queue takes over.
  */
@@ -61,12 +64,23 @@ export interface GatheringPolicy {
   readonly maxWaitSeconds: number;
 }
 
-export const DEFAULT_REDEEM_MIN_BATCH = 20;
-export const DEFAULT_REDEEM_MAX_WAIT_SECONDS = 900;
+/**
+ * A full EVM batch (`MAX_REDEEM_BATCH`): measured on a fork of mainnet 4663,
+ * 64 vouchers cost about 85k gas each against 94k at 20; a pass that fires on
+ * the count therefore sends full transactions.
+ */
+export const DEFAULT_REDEEM_MIN_BATCH = 64;
+/**
+ * 30 minutes. Against today's traffic the gain from waiting longer is about
+ * 1% of gas (121.9k against 120.7k per call at 3,600 s), while every minute
+ * of wait is a minute less of margin before a voucher's deadline.
+ */
+export const DEFAULT_REDEEM_MAX_WAIT_SECONDS = 1_800;
 /** Far inside the 7,620 s an eip155 voucher stays redeemable. */
 export const MAX_REDEEM_MAX_WAIT_SECONDS = 3_600;
 
-export const DEFAULT_COLLECT_MIN_BATCH = 20;
+/** A full held batch (`MAX_HELD_BATCH`). */
+export const DEFAULT_COLLECT_MIN_BATCH = 64;
 export const DEFAULT_COLLECT_MAX_WAIT_SECONDS = 21_600;
 /** Far inside the 7-day held timeout. */
 export const MAX_COLLECT_MAX_WAIT_SECONDS = 86_400;
@@ -94,7 +108,7 @@ function integer(
   return Number(raw);
 }
 
-/** `REDEEM_MIN_BATCH` (1–100, default 20) and `REDEEM_MAX_WAIT_SECONDS` (0–3,600, default 900). */
+/** `REDEEM_MIN_BATCH` (1–100, default 64) and `REDEEM_MAX_WAIT_SECONDS` (0–3,600, default 1,800). */
 export function loadRedeemGathering(env: NodeJS.ProcessEnv = process.env): GatheringPolicy {
   return {
     minBatch: integer(
@@ -114,7 +128,7 @@ export function loadRedeemGathering(env: NodeJS.ProcessEnv = process.env): Gathe
   };
 }
 
-/** `COLLECT_MIN_BATCH` (1–64, default 20) and `COLLECT_MAX_WAIT_SECONDS` (0–86,400, default 21,600). */
+/** `COLLECT_MIN_BATCH` (1–64, default 64) and `COLLECT_MAX_WAIT_SECONDS` (0–86,400, default 21,600). */
 export function loadCollectGathering(env: NodeJS.ProcessEnv = process.env): GatheringPolicy {
   return {
     minBatch: integer(env, 'COLLECT_MIN_BATCH', DEFAULT_COLLECT_MIN_BATCH, 1, MAX_HELD_BATCH),
