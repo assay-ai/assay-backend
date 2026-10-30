@@ -577,6 +577,9 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // was charged and the seq is not spent; the same call passes once the change
   // has landed. The error carries `retryAfter` (seconds).
   PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+  // The platform's EVM redeemer is being topped up. Nothing was charged; the
+  // same call passes once the float is back. Carries `retryAfter` (seconds).
+  PaymentErrorCode.PAYMENT_SETTLEMENT_GAS_PAUSED,
   // A seq never used but passed by a parallel call of the same payer (final
   // review N-6). Nothing was charged; the call passes with a fresh seq.
   PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
