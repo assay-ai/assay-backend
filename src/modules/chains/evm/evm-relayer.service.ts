@@ -15,6 +15,8 @@ import {
 } from './evm-relayer-key-source';
 import { EvmSendingKey, floatDedupeKey } from './evm-relayer-float.constants';
 import { DEFAULT_EVM_RELAYER_TIMING, EvmRelayerTiming } from './evm-relayer-timing';
+import { estimateL1Gas, paddedL1Gas } from './evm-l1-gas';
+import { EvmSendRejectedError, sendAnswerOf } from './evm-send-rejected.error';
 import {
   EvmRelayResult,
   EvmRelayedCall,
@@ -48,6 +50,20 @@ export interface EvmRelayClient {
     blockNumber?: bigint;
   }): Promise<unknown>;
 }
+
+/** The intrinsic gas of a plain value transfer to an account. */
+export const EVM_VALUE_TRANSFER_GAS = 21_000n;
+
+/**
+ * The gas a value transfer gets for its L1 part when the L1 part could not be
+ * read (`NodeInterface` did not answer). On Nitro the gas limit must cover the
+ * L1 data fee too, so a bare 21 000 is refused as `intrinsic gas too low` as
+ * soon as L1 costs anything. A transfer carries about 110 bytes, under half of
+ * a `setLimitsBySig`, whose L1 part measured about 845k gas at the worst spike
+ * seen. Unused gas is not charged, so the margin costs only balance headroom
+ * (about 5e-6 ETH at 0.024 gwei).
+ */
+export const EVM_VALUE_TRANSFER_FALLBACK_L1_GAS = 200_000n;
 
 /** How little ETH is too little, when nothing says otherwise. */
 export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.005 ETH
@@ -161,6 +177,12 @@ export class EvmRelayer implements EvmRelayerPort {
     return this.clientFor(chainId).getBalance({ address: this.accountFor(chainId).address });
   }
 
+  async feesPerGas(
+    chainId: ChainId,
+  ): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    return this.clientFor(chainId).estimateFeesPerGas();
+  }
+
   async sendCall(call: EvmRelayedCall): Promise<EvmRelayResult> {
     const to = this.addressOnChain(call.chainId, call.to);
     return this.send(
@@ -173,9 +195,11 @@ export class EvmRelayer implements EvmRelayerPort {
 
   async sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult> {
     const to = this.addressOnChain(transfer.chainId, transfer.to);
-    // `data` is absent, not empty-and-overwritable, and `gas` is the intrinsic
-    // cost of a transfer to an account. There is nothing here to fill in.
-    return this.send(transfer.chainId, { to, value: transfer.wei, gas: 21_000n });
+    // `data` is absent, not empty-and-overwritable. `gas` is the intrinsic cost
+    // of a transfer to an account plus, on Nitro, the L1 data fee in L2 gas.
+    // There is nothing here to fill in.
+    const gas = await this.valueTransferGas(transfer.chainId, to);
+    return this.send(transfer.chainId, { to, value: transfer.wei, gas });
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -219,10 +243,26 @@ export class EvmRelayer implements EvmRelayerPort {
     const client = this.clientFor(chainId);
     const account = this.accountFor(chainId);
 
-    const [nonce, fees] = await Promise.all([
+    const [nonce, fees, balance] = await Promise.all([
       client.getTransactionCount({ address: account.address, blockTag: 'pending' }),
       client.estimateFeesPerGas(),
+      // Unknown is not "empty": a balance that cannot be read leaves the check
+      // to the node, as before.
+      client.getBalance({ address: account.address }).catch(() => null),
     ]);
+
+    // The node's own admission rule, applied before anything is signed: a send
+    // it would refuse for funds is refused here, with nothing signed, recorded
+    // or broadcast.
+    const worstCost = tx.gas * fees.maxFeePerGas + tx.value;
+    if (balance !== null && balance < worstCost) {
+      await this.warnIfFloatLowQuietly(chainId);
+      throw new EvmSendRejectedError(
+        'INSUFFICIENT_FUNDS',
+        null,
+        `the ${this.identity.key} holds ${balance} wei and this send may cost ${worstCost}`,
+      );
+    }
 
     const serializedTransaction = (await account.signTransaction({
       chainId: Number(parseChainId(chainId).reference),
@@ -241,10 +281,27 @@ export class EvmRelayer implements EvmRelayerPort {
     // The hash is the signed bytes' keccak, known before anything is sent. A
     // caller that records it first can find the transaction again if this
     // process never sees the receipt.
+    const signedHash = keccak256(serializedTransaction);
     if (beforeBroadcast) {
-      await beforeBroadcast(keccak256(serializedTransaction));
+      await beforeBroadcast(signedHash);
     }
-    const hash = await client.sendRawTransaction({ serializedTransaction });
+    let hash: `0x${string}`;
+    try {
+      hash = await client.sendRawTransaction({ serializedTransaction });
+    } catch (error) {
+      // A refusal from the node's admission checks means the bytes were never
+      // pooled: definitely not broadcast (`evm-send-rejected.error.ts`). "Already
+      // known" means the node HAS them, so the broadcast happened and the
+      // receipt is awaited as usual. Anything else is an unknown outcome and
+      // is rethrown untouched.
+      const answer = sendAnswerOf(error);
+      if (answer === null) throw error;
+      if (answer !== 'ALREADY_KNOWN') {
+        if (answer === 'INSUFFICIENT_FUNDS') await this.warnIfFloatLowQuietly(chainId);
+        throw new EvmSendRejectedError(answer, signedHash);
+      }
+      hash = signedHash;
+    }
     // An explicit timeout, the one `relayedSendBudgetMs` counts on.
     const receipt = await client.waitForTransactionReceipt({
       hash,
@@ -296,6 +353,30 @@ export class EvmRelayer implements EvmRelayerPort {
       return null;
     } catch (error) {
       return revertDataOf(error);
+    }
+  }
+
+  /**
+   * The gas limit of a value transfer to `to`: 21 000 plus the L1 part, padded
+   * 20 %. When `NodeInterface` does not answer, 21 000 plus
+   * {@link EVM_VALUE_TRANSFER_FALLBACK_L1_GAS}.
+   */
+  private async valueTransferGas(chainId: ChainId, to: `0x${string}`): Promise<bigint> {
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(this.clientFor(chainId), {
+      to,
+      data: '0x',
+      account: this.accountFor(chainId).address,
+    });
+    if (l2BaseFee === null) return EVM_VALUE_TRANSFER_GAS + EVM_VALUE_TRANSFER_FALLBACK_L1_GAS;
+    return EVM_VALUE_TRANSFER_GAS + paddedL1Gas(l1Gas);
+  }
+
+  /** {@link warnIfFloatLow}, for a path that is already failing: never throws. */
+  private async warnIfFloatLowQuietly(chainId: ChainId): Promise<void> {
+    try {
+      await this.warnIfFloatLow(chainId);
+    } catch {
+      // The refusal is the answer; the alert is a courtesy.
     }
   }
 

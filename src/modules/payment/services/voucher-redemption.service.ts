@@ -13,6 +13,7 @@ import {
 import { BlockedRole, BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { isInsufficientFunds, isSendRejected } from '@modules/chains/evm/evm-send-rejected.error';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -575,9 +576,22 @@ export class VoucherRedemptionService {
           // Cannot tell: assume it may have reached the chain.
           broadcast = true;
         }
+        // The node REFUSED the transaction: the ref recorded before the send
+        // was never broadcast, whatever the count says.
+        if (isSendRejected(error)) broadcast = false;
         if (broadcast) {
           for (const entry of batch) {
             blocked.add(entry.row.agentAccount);
+          }
+          return;
+        }
+        // Refused for lack of ETH: every single would be refused the same way,
+        // so the fallback, and the pass, stop here. Each row is marked as the
+        // fallback's own throw would have marked it.
+        if (isInsufficientFunds(error)) {
+          for (const entry of batch) {
+            blocked.add(entry.row.agentAccount);
+            await this.recordSendFailure(entry.row);
           }
           return;
         }
@@ -593,6 +607,7 @@ export class VoucherRedemptionService {
               `Redemption of intent ${entry.row.id} (seq ${entry.row.voucherSeq}) threw past ` +
                 `its own handling: ${describe(single)}`,
             );
+            if (isInsufficientFunds(single)) return;
           }
         }
         queue = carried;
