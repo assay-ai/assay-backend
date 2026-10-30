@@ -29,8 +29,8 @@ reporters in the advisory unless you ask us not to.
 
 ## Scope notes
 
-- The backend is not deployed with real user funds. It is developed against Solana devnet and the Robinhood Chain testnet; no
-  deployment from this repository is published.
+- Assay's production deployment settles on Robinhood Chain mainnet (`eip155:4663`) in real USDG. The
+  dev deployment uses the Robinhood Chain testnet and Solana devnet.
 - The on-chain programs and contracts live in the `assay-solana` and `assay-evm` repositories;
   report issues in them through those repositories.
 - The code has been reviewed internally and has **not** been independently audited.
