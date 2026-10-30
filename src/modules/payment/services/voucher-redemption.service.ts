@@ -448,7 +448,15 @@ export class VoucherRedemptionService {
     ordered: boolean,
     batchSize: number,
   ): Promise<void> {
-    let queue: readonly RedeemableIntent[] = pending;
+    // Vouchers still redeemable first, ones past their on-chain deadline last
+    // (stable, so the repository's order holds within each group). Closing an
+    // expired voucher reads the chain and takes seconds; ahead of live ones it
+    // spent the pass on them while the live ones expired too (prod
+    // 2026-10-30, a backlog after the redeemer was refunded).
+    let queue: readonly RedeemableIntent[] = [
+      ...pending.filter((row) => !this.pastRedemptionDeadline(row)),
+      ...pending.filter((row) => this.pastRedemptionDeadline(row)),
+    ];
 
     while (queue.length > 0) {
       const batch: { row: RedeemableIntent; request: RedeemVoucherRequest; issuedAt: number }[] =
@@ -1387,6 +1395,12 @@ export class VoucherRedemptionService {
   private atRedemptionDeadline(row: RedeemableIntent): boolean {
     const deadline = Math.floor(row.expiresAt.getTime() / 1000) + redeemGraceSeconds(row.assetId);
     return Math.floor(this.now() / 1000) >= deadline - REDEMPTION_DEADLINE_MARGIN_SECONDS;
+  }
+
+  /** Whether the chain would now refuse the voucher as expired (`expiresAt + redeemGraceSeconds`). */
+  private pastRedemptionDeadline(row: RedeemableIntent): boolean {
+    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + redeemGraceSeconds(row.assetId);
+    return Math.floor(this.now() / 1000) > deadline;
   }
 
   /** Unix seconds at which {@link pastLandingWindow} turns true. */
