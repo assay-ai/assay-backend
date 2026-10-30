@@ -10,6 +10,7 @@ import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
 import { checksummedAccount, checksummedAsset } from '@modules/chains/evm/eip55';
 import { AccountId, AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
+import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
 import {
@@ -720,6 +721,9 @@ export class McpToolCallService {
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
     await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
+    // No paid-call minimum here (owner decision 2026-10-30): rail A settles
+    // against the ledger and sends nothing on chain per call, so the gas the
+    // floor covers on rail B is never spent (`paid-price-floor.ts`).
 
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
@@ -877,6 +881,19 @@ export class McpToolCallService {
       ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules, contract),
       onlyProviderId: payment?.providerId,
       callClass: 'PAID',
+      // The router draws among bindings at or above the paid-call minimum while
+      // any can serve; the check after the offer refuses only when none can.
+      belowPaidPriceFloor: (binding) => {
+        const { decimals } = getAssetMetadata(binding.assetId);
+        return (
+          paidPriceBelowFloor(
+            this.priceFloor,
+            binding.providerId,
+            binding.priceAmount,
+            decimals,
+          ) !== null
+        );
+      },
     };
 
     const offer = await this.router.offer(tool.id, context);

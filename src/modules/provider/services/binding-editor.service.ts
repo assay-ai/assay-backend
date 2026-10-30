@@ -340,6 +340,11 @@ export class BindingEditorService {
     // and is not a property worth resting a revision number on.
     const before = versionedSnapshot(row);
     const chainsBefore = JSON.stringify(row.settlementChains);
+    const priceBefore = {
+      pricingMode: row.pricingMode as PricingMode,
+      priceAmount: row.priceAmount,
+      assetId: row.assetId,
+    };
 
     if (body.requestMapping !== undefined) {
       row.requestMapping = inspectRequestMapping(body.requestMapping, {
@@ -421,16 +426,19 @@ export class BindingEditorService {
     // After the merge, so `{ pricingMode: 'PAID' }` against a stored zero and
     // `{ priceAmount: '0' }` against a stored PAID are both caught.
     assertPriceMatchesMode(row.pricingMode as PricingMode, row.priceAmount);
-    // On EVERY update, not only one that names the price: a binding priced
-    // below the minimum before the floor existed cannot take a paid call
-    // (`PAYMENT_PRICE_BELOW_MINIMUM`), and the editor says so — with the
-    // minimum — the first time its provider touches it.
-    this.assertPriceAtLeastFloor(
-      row.organizationId,
-      row.pricingMode as PricingMode,
-      row.priceAmount,
-      row.assetId,
-    );
+    // Only when the edit SETS a price: a new amount or asset, or a switch from
+    // FREE to a charging mode. A binding priced below the minimum before the
+    // floor existed keeps its other edits (an endpoint fix, a timeout) — its
+    // paid calls are refused at admission (`PAYMENT_PRICE_BELOW_MINIMUM`), or
+    // routed to another provider, until its provider raises the price.
+    if (setsNewPrice(priceBefore, row)) {
+      this.assertPriceAtLeastFloor(
+        row.organizationId,
+        row.pricingMode as PricingMode,
+        row.priceAmount,
+        row.assetId,
+      );
+    }
 
     // Answered against what was read, not against what the caller sent: a
     // `PATCH` that re-sends the same endpoint is not an edit, and treating it
@@ -864,6 +872,20 @@ function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingS
 
 function dedupe(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
+}
+
+/**
+ * Whether an update sets a price the paid-call minimum must judge: the amount
+ * or the asset changed, or the binding switched from FREE to a charging mode.
+ * A PAID ⇄ FREEMIUM switch at the same price sets nothing new.
+ */
+function setsNewPrice(
+  before: { pricingMode: PricingMode; priceAmount: string; assetId: string },
+  row: ToolBindingEntity,
+): boolean {
+  if (BigInt(before.priceAmount) !== BigInt(row.priceAmount)) return true;
+  if (before.assetId !== row.assetId) return true;
+  return before.pricingMode === PricingMode.FREE && row.pricingMode !== PricingMode.FREE;
 }
 
 /** `FREE` is the only mode allowed to cost nothing; `PAID` and `FREEMIUM` both charge past the free tier. */

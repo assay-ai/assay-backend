@@ -133,23 +133,76 @@ describe('binding editor — paid price floor', () => {
     expect(error.errorCode).toBe(ProviderErrorCode.PROVIDER_BINDING_PRICE_BELOW_MINIMUM);
   });
 
-  it('refuses any update of a binding priced below the minimum before the floor existed', async () => {
-    const { editor, validBody, rows } = harness();
-    const saved = await editor.create(PROVIDER, 'cred', { ...validBody, priceAmount: '100000' });
-    // As written before the floor: $0.001.
-    rows[0].priceAmount = '1000';
+  describe('a binding priced below the minimum before the floor existed', () => {
+    async function oldCheapBinding(pricingMode = PricingMode.PAID) {
+      const h = harness();
+      const saved = await h.editor.create(PROVIDER, 'cred', {
+        ...h.validBody,
+        pricingMode,
+        priceAmount: '100000',
+        ...(pricingMode === PricingMode.FREEMIUM ? { freeQuotaPerAgent: 10 } : {}),
+      });
+      // As written before the floor: $0.001.
+      h.rows[0].priceAmount = '1000';
+      return { ...h, id: saved.id };
+    }
+
+    it('keeps edits that leave the price alone', async () => {
+      const { editor, id } = await oldCheapBinding();
+
+      const updated = await editor.update(PROVIDER, 'cred', id, { timeoutMs: 9_000 });
+
+      expect(updated.timeoutMs).toBe(9_000);
+      expect(updated.price.amount).toBe('1000');
+    });
+
+    it('keeps an edit that re-sends the same price, or switches PAID to FREEMIUM at it', async () => {
+      const { editor, id } = await oldCheapBinding();
+
+      await editor.update(PROVIDER, 'cred', id, { priceAmount: '1000' });
+      const switched = await editor.update(PROVIDER, 'cred', id, {
+        pricingMode: PricingMode.FREEMIUM,
+        freeQuotaPerAgent: 10,
+      });
+
+      expect(switched.pricingMode).toBe(PricingMode.FREEMIUM);
+    });
+
+    it('refuses a NEW price that is still below the minimum', async () => {
+      const { editor, id } = await oldCheapBinding();
+
+      const error = await failure(() =>
+        editor.update(PROVIDER, 'cred', id, { priceAmount: '2000' }),
+      );
+
+      expect(error.errorCode).toBe(ProviderErrorCode.PROVIDER_BINDING_PRICE_BELOW_MINIMUM);
+    });
+
+    it('accepts raising the price to the minimum', async () => {
+      const { editor, id } = await oldCheapBinding();
+
+      const raised = await editor.update(PROVIDER, 'cred', id, { priceAmount: '100000' });
+
+      expect(raised.price.amount).toBe('100000');
+    });
+  });
+
+  it('refuses switching a FREE binding to PAID below the minimum', async () => {
+    const { editor, validBody } = harness();
+    const saved = await editor.create(PROVIDER, 'cred', {
+      ...validBody,
+      pricingMode: PricingMode.FREE,
+      priceAmount: '0',
+    });
 
     const error = await failure(() =>
-      editor.update(PROVIDER, 'cred', saved.id, { timeoutMs: 9_000 }),
+      editor.update(PROVIDER, 'cred', saved.id, {
+        pricingMode: PricingMode.PAID,
+        priceAmount: '50000',
+      }),
     );
 
     expect(error.errorCode).toBe(ProviderErrorCode.PROVIDER_BINDING_PRICE_BELOW_MINIMUM);
-    // Raising the price in the same edit is the way out.
-    const raised = await editor.update(PROVIDER, 'cred', saved.id, {
-      timeoutMs: 9_000,
-      priceAmount: '100000',
-    });
-    expect(raised.price.amount).toBe('100000');
   });
 
   it('lets an exempt (internal) provider create and update below the minimum', async () => {

@@ -8,15 +8,28 @@
  * fee (`takeRateBps`, 10 %), so a call priced at $0.001–$0.02 loses money on
  * every send. A floor of $0.10 makes the fee ($0.01) cover the gas.
  *
- * Applied in two places, with ONE function ({@link paidPriceBelowFloor}):
+ * Applied in three places, with ONE function ({@link paidPriceBelowFloor}):
  *
  * - the binding editor refuses to create or update a PAID or FREEMIUM binding
  *   priced below it (`PROVIDER_BINDING_PRICE_BELOW_MINIMUM`);
  * - rail-B admission refuses a paid call to an existing binding priced below
  *   it (`PAYMENT_PRICE_BELOW_MINIMUM`), before any seq, voucher or hold.
  *
+ * - the router, offering a paid rail-B call, draws among the bindings at or
+ *   above it while any of them can serve (`RoutingContext.belowPaidPriceFloor`),
+ *   so a call is refused only when every candidate is below it.
+ *
+ * The editor judges a create, and an update that sets a NEW price (amount,
+ * asset, or a switch from FREE to a charging mode). Other edits of a binding
+ * priced below it before the floor existed are allowed.
+ *
  * Free calls (FREE bindings, and the free tier of a FREEMIUM one) never reach
  * either check.
+ *
+ * **Rail A is not checked** (owner decision 2026-10-30). A rail-A call is
+ * settled against the ledger and the provider is credited there: it sends no
+ * per-call redeem or collect on chain, so it costs the platform none of the
+ * gas the floor exists to cover.
  *
  * ## Exempt providers
  *

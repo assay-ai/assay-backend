@@ -161,3 +161,91 @@ describe('McpToolCallService — paid price floor at rail-B admission', () => {
     expect(h.seqs.allocated).toEqual([]);
   });
 });
+
+describe('ProviderRouterService.offer — the paid price floor in the draw', () => {
+  offerSolanaRailBInThisSuite();
+
+  const CHEAP = 'provider-cheap';
+  const FAIR = 'provider-fair';
+
+  function market(
+    prices: Record<string, string>,
+    options: { exempt?: string[]; unstaked?: string[]; random?: () => number } = {},
+  ) {
+    const ids = Object.keys(prices);
+    const invoker = new ScriptedInvoker(
+      Object.fromEntries(ids.map((id) => [`binding-${id}`, async () => ok('forty-two')])),
+    );
+    return buildMcpHarness({
+      bindings: ids.map((id) => buildBinding(id, { priceAmount: prices[id] })),
+      providers: ids.map((id) => buildProvider(id)),
+      stakes: Object.fromEntries(
+        ids.filter((id) => !options.unstaked?.includes(id)).map((id) => [id, usdc(1000)]),
+      ),
+      invoker,
+      random: options.random,
+      paidPriceFloor: floor(options.exempt),
+    });
+  }
+
+  async function offeredProvider(h: ReturnType<typeof market>): Promise<string> {
+    const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+    });
+    if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+    return (outcome.detail.paymentRequired as VoucherRequirement).providerId;
+  }
+
+  it('skips a binding below the minimum while another can serve, on every draw', async () => {
+    for (const draw of [0, 0.25, 0.5, 0.75, 0.999]) {
+      const h = market(
+        { [CHEAP]: usdc('0.001').amount, [FAIR]: usdc('0.10').amount },
+        { random: () => draw },
+      );
+      expect(await offeredProvider(h)).toBe(FAIR);
+    }
+  });
+
+  it('refuses PAYMENT_PRICE_BELOW_MINIMUM only when every candidate is below it', async () => {
+    const h = market({ [CHEAP]: usdc('0.001').amount, [FAIR]: usdc('0.05').amount });
+
+    const error = await refusal(
+      h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        voucher: null,
+      }),
+    );
+
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM);
+    expect(h.seqs.allocated).toEqual([]);
+  });
+
+  it('falls back to the cheap binding — and refuses — when the one above it cannot serve', async () => {
+    // The fair provider has no stake: the router cannot route to it, so the
+    // refusal names the price, not "no eligible binding".
+    const h = market(
+      { [CHEAP]: usdc('0.001').amount, [FAIR]: usdc('0.10').amount },
+      { unstaked: [FAIR] },
+    );
+
+    const error = await refusal(
+      h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        voucher: null,
+      }),
+    );
+
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM);
+  });
+
+  it('treats an exempt provider below the minimum as eligible, and skips the non-exempt one', async () => {
+    for (const draw of [0, 0.5, 0.999]) {
+      const h = market(
+        { [CHEAP]: usdc('0.001').amount, [FAIR]: usdc('0.002').amount },
+        { exempt: [FAIR], random: () => draw },
+      );
+      expect(await offeredProvider(h)).toBe(FAIR);
+    }
+  });
+});
