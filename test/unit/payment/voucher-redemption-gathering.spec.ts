@@ -5,7 +5,9 @@ import { EVM_FEE_CAP_WAIVED_WITHIN_SECONDS } from '@modules/chains/evm/evm-l1-ga
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import {
+  DEFAULT_REDEEM_MAX_WAIT_SECONDS,
   GatheringPolicy,
+  loadCollectGathering,
   loadRedeemGathering,
   NO_GATHERING,
 } from '@modules/payment/constants/settlement-gathering.constants';
@@ -130,11 +132,27 @@ function build(options: {
 }
 
 describe('VoucherRedemptionService — gathering', () => {
-  it('reads its defaults from the env: 20 vouchers or 900 s', () => {
-    expect(loadRedeemGathering({})).toEqual({ minBatch: 20, maxWaitSeconds: 900 });
+  it('reads its defaults from the env: 64 vouchers or 1,800 s', () => {
+    expect(loadRedeemGathering({})).toEqual({ minBatch: 64, maxWaitSeconds: 1_800 });
     expect(() => loadRedeemGathering({ REDEEM_MAX_WAIT_SECONDS: '7200' })).toThrow(
       /REDEEM_MAX_WAIT_SECONDS/,
     );
+  });
+
+  it('reads the collect defaults from the env: 64 held payments or 21,600 s', () => {
+    expect(loadCollectGathering({})).toEqual({ minBatch: 64, maxWaitSeconds: 21_600 });
+    expect(() => loadCollectGathering({ COLLECT_MIN_BATCH: '65' })).toThrow(/COLLECT_MIN_BATCH/);
+  });
+
+  it('leaves an hour of recovery before the deadline trigger at the default wait', () => {
+    // Vouchers reach the backend with as little as the redeem grace left. The
+    // default wait plus the fee-cap waiver window must leave at least an hour
+    // for a failed send, a dead process or an empty float to be put right.
+    const recovery =
+      redeemGraceSeconds(ASSET) -
+      DEFAULT_REDEEM_MAX_WAIT_SECONDS -
+      EVM_FEE_CAP_WAIVED_WITHIN_SECONDS;
+    expect(recovery).toBeGreaterThanOrEqual(3_600);
   });
 
   it('skips the pass below both thresholds, loading no rows', async () => {
