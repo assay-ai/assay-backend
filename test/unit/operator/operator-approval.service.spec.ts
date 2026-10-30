@@ -330,3 +330,71 @@ describe('approvals — CMP on A-22 (handle reassignment, lot 1 C10)', () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Review 2026-10-30 M-5: a bulk buyer-debt void's `result` (intent ids,
+ * amounts) is shown to TRE and ADJL only; any other operator reads `null`
+ * there, with the rest of the approval unchanged.
+ */
+describe('approvals — the buyer-debt void result is for TRE and ADJL only', () => {
+  const RESULT = { approvalId: 'a-void', voidedCount: 1, items: [{ intentId: 'i-1' }] };
+  const TRE = operator('op-tre', [OperatorRole.TRE]);
+
+  function withResults() {
+    const rows = new Map(
+      [
+        ['a-void', 'buyer_debt.bulk_void'],
+        ['a-other', 'account.unblock'],
+      ].map(([id, action]) => [
+        id,
+        {
+          id,
+          action,
+          requestedBy: 'op-x',
+          target: 't',
+          payload: PAYLOAD,
+          payloadHash: payloadHash(PAYLOAD),
+          status: 'APPROVED',
+          approvedBy: null,
+          rejectedBy: null,
+          createdAt: new Date(),
+          decidedAt: null,
+          expiresAt: new Date(Date.now() + 60_000),
+          result: RESULT,
+        },
+      ]),
+    );
+    return new OperatorApprovalService(
+      { findOneBy: async ({ id }: { id: string }) => rows.get(id) ?? null } as never,
+      { findById: async () => null } as never,
+      {} as never,
+    );
+  }
+
+  it('GET /operator/approvals/:id: shown to TRE and ADJL, null for any other role', async () => {
+    const service = withResults();
+
+    expect((await service.get('a-void', TRE)).result).toEqual(RESULT);
+    expect((await service.get('a-void', LEAD)).result).toEqual(RESULT);
+    const forSre = await service.get('a-void', SRE);
+    expect(forSre.result).toBeNull();
+    expect(forSre.payload).toEqual(PAYLOAD);
+    expect(forSre.status).toBe('APPROVED');
+  });
+
+  it('leaves the result of any other action alone', async () => {
+    expect((await withResults().get('a-other', SRE)).result).toEqual(RESULT);
+  });
+
+  it('the routes pass the operator through to the service', async () => {
+    const list = jest.fn(async () => ({ items: [] }));
+    const get = jest.fn(async () => ({}));
+    const controller = new OperatorApprovalsController({ list, get } as never);
+
+    await controller.list(SRE, {} as never);
+    await controller.get(SRE, '11111111-1111-4111-8111-111111111111');
+
+    expect(list).toHaveBeenCalledWith({}, SRE);
+    expect(get).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111', SRE);
+  });
+});

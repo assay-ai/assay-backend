@@ -20,6 +20,16 @@ export const VOUCHER_REDEMPTION_CRON = '0 * * * * *';
 export const VOUCHER_REDEMPTION_BATCH = 100;
 
 /**
+ * The most vouchers past their on-chain deadline one pass closes, on a chain
+ * that admits any seq order (review 2026-10-30 I-1). Closing one reads the
+ * chain for seconds (about 9 s on eip155), so a backlog of a hundred kept one
+ * pass running for a quarter of an hour while live vouchers waited behind it.
+ * The rest are closed by later passes; the queue fetches them after every
+ * live row, so with no live row left they are all reached in turn.
+ */
+export const VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS = 20;
+
+/**
  * `MAX_VOUCHER_LIFETIME_SECONDS` (300) and `CLOCK_SKEW_TOLERANCE_SECONDS` (120)
  * are the same on both chains. The redemption grace is not (assay-evm D-24):
  * the Solana program keeps `REDEEM_GRACE_SECONDS = 30 * 60`, `AssayEscrow`

@@ -8,6 +8,7 @@ import {
   REDEMPTION_RETRY_BASE_SECONDS,
   REDEMPTION_RETRY_MAX_SECONDS,
   redeemGraceIntervalSql,
+  redeemGraceSeconds,
 } from '@modules/payment/constants/voucher-redemption.constants';
 import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
@@ -1281,27 +1282,52 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     // before anybody's second, so no payer and no provider can take the batch
     // while somebody else is waiting — and a lone busy one still fills it.
     // Within a round, rows never refused come first, then the nearest deadline.
+    //
+    // LIVE BEFORE EXPIRED, first of all (review 2026-10-30 I-1). A row past its
+    // on-chain deadline (`expires_at` + the chain's redeem grace, a parameter
+    // for this asset's chain) can only be closed, which reads the chain for
+    // seconds; ordered by deadline alone, a backlog of more than one page of
+    // them filled the LIMIT, nothing live was fetched, and the live vouchers
+    // expired too (prod 2026-10-30). Expired rows come after every live row,
+    // so they are fetched only when the live ones leave room — and with no
+    // live row at all they fill the page, so they are never starved. The
+    // rounds are counted within each group, so an expired row of a payer does
+    // not push that payer's live rows into a later round.
     query.andWhere('(intent.redemptionRetryAt IS NULL OR intent.redemptionRetryAt <= now())');
     const [inner, parameters] = query.getQueryAndParameters();
+    const graceParam = `$${parameters.length + 1}`;
+    const limitParam = `$${parameters.length + 2}`;
     const rows = (await this.manager.query(
       `SELECT ranked.* FROM (
-         SELECT queue.*,
-                row_number() OVER (PARTITION BY queue."agentAccount"
-                                   ORDER BY queue."expiresAt", queue."voucherSeq") AS "payerRound",
-                row_number() OVER (PARTITION BY queue."providerAccount"
-                                   ORDER BY queue."expiresAt", queue."agentAccount",
-                                            queue."voucherSeq") AS "providerRound"
-           FROM (${inner}) queue
+         SELECT flagged.*,
+                row_number() OVER (PARTITION BY flagged."pastDeadline", flagged."agentAccount"
+                                   ORDER BY flagged."expiresAt", flagged."voucherSeq") AS "payerRound",
+                row_number() OVER (PARTITION BY flagged."pastDeadline", flagged."providerAccount"
+                                   ORDER BY flagged."expiresAt", flagged."agentAccount",
+                                            flagged."voucherSeq") AS "providerRound"
+           FROM (
+             SELECT queue.*,
+                    (queue."expiresAt" + make_interval(secs => ${graceParam}::int) < now())
+                      AS "pastDeadline"
+               FROM (${inner}) queue
+           ) flagged
        ) ranked
-       ORDER BY GREATEST(ranked."payerRound", ranked."providerRound") ASC,
+       ORDER BY ranked."pastDeadline" ASC,
+                GREATEST(ranked."payerRound", ranked."providerRound") ASC,
                 (ranked."redemptionLastError" IS NOT NULL) ASC,
                 ranked."expiresAt" ASC,
                 ranked."agentAccount" ASC,
                 ranked."voucherSeq" ASC
-       LIMIT $${parameters.length + 1}`,
-      [...parameters, limit],
-    )) as (RedeemableIntent & { payerRound?: unknown; providerRound?: unknown })[];
-    return rows.map(({ payerRound: _payer, providerRound: _provider, ...row }) => row);
+       LIMIT ${limitParam}`,
+      [...parameters, redeemGraceSeconds(assetId), limit],
+    )) as (RedeemableIntent & {
+      payerRound?: unknown;
+      providerRound?: unknown;
+      pastDeadline?: unknown;
+    })[];
+    return rows.map(
+      ({ payerRound: _payer, providerRound: _provider, pastDeadline: _past, ...row }) => row,
+    );
   }
 
   /**

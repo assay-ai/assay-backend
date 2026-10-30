@@ -27,6 +27,7 @@ import {
   REDEMPTION_DEADLINE_MARGIN_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
+  VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS,
 } from '../constants/voucher-redemption.constants';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
 import {
@@ -363,6 +364,21 @@ export class VoucherRedemptionService {
       return this.runBatched(pending, blocked, ordered, batchSize);
     }
 
+    const closes = this.expiredCloses(ordered);
+    try {
+      await this.runSingles(ordered ? pending : this.liveFirst(pending), blocked, ordered, closes);
+    } finally {
+      closes.report();
+    }
+  }
+
+  /** The one-row-per-send loop of {@link run} (a chain whose batch is one voucher). */
+  private async runSingles(
+    pending: readonly RedeemableIntent[],
+    blocked: Set<string>,
+    ordered: boolean,
+    closes: ExpiredCloses,
+  ): Promise<void> {
     for (const row of pending) {
       // Payer side first: a blocked buyer freezes collection, and that freeze
       // must hold even when the provider is blocked too (review L4).
@@ -384,6 +400,7 @@ export class VoucherRedemptionService {
         );
         continue;
       }
+      if (!closes.admit(row)) continue;
 
       let stop = false;
       try {
@@ -448,16 +465,82 @@ export class VoucherRedemptionService {
     ordered: boolean,
     batchSize: number,
   ): Promise<void> {
-    // Vouchers still redeemable first, ones past their on-chain deadline last
-    // (stable, so the repository's order holds within each group). Closing an
-    // expired voucher reads the chain and takes seconds; ahead of live ones it
-    // spent the pass on them while the live ones expired too (prod
-    // 2026-10-30, a backlog after the redeemer was refunded).
-    let queue: readonly RedeemableIntent[] = [
+    // Live first, and at most so many expired closes per pass (review
+    // 2026-10-30 I-1): see `liveFirst` and `expiredCloses`. Never where the
+    // chain requires ascending seq (M-4): there the repository's
+    // `(agent_account, voucher_seq)` order is the one that must hold.
+    const closes = this.expiredCloses(ordered);
+    try {
+      await this.runBatches(
+        ordered ? pending : this.liveFirst(pending),
+        blocked,
+        ordered,
+        batchSize,
+        closes,
+      );
+    } finally {
+      closes.report();
+    }
+  }
+
+  /**
+   * Vouchers still redeemable first, ones past their on-chain deadline last
+   * (stable, so the repository's order holds within each group). Closing an
+   * expired voucher reads the chain and takes seconds; ahead of live ones it
+   * spent the pass on them while the live ones expired too (prod 2026-10-30, a
+   * backlog after the redeemer was refunded). The repository already orders
+   * the page so; this keeps it true of a row whose deadline passed between the
+   * read and the pass. Only on a chain that admits any seq order (M-4).
+   */
+  private liveFirst(pending: readonly RedeemableIntent[]): RedeemableIntent[] {
+    return [
       ...pending.filter((row) => !this.pastRedemptionDeadline(row)),
       ...pending.filter((row) => this.pastRedemptionDeadline(row)),
     ];
+  }
 
+  /**
+   * The pass's budget of expired closes ({@link VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS}):
+   * `admit` says whether a row may be attempted, counting the expired ones it
+   * lets through; past the budget an expired row is left for a later pass,
+   * untouched — not blocked, as nothing of its payer depends on it on a chain
+   * that admits any order. `report` logs what was left, once. A chain that
+   * requires ascending seq is not capped (M-4): it keeps its order and its
+   * hold-backs exactly as they were.
+   */
+  private expiredCloses(ordered: boolean): ExpiredCloses {
+    let left = VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS;
+    let deferred = 0;
+    return {
+      admit: (row) => {
+        if (ordered || !this.pastRedemptionDeadline(row)) return true;
+        if (left > 0) {
+          left -= 1;
+          return true;
+        }
+        deferred += 1;
+        return false;
+      },
+      report: () => {
+        if (deferred === 0) return;
+        this.logger.warn(
+          `${deferred} voucher(s) past their on-chain deadline are left for a later pass ` +
+            `(${VOUCHER_REDEMPTION_EXPIRED_CLOSES_PER_PASS} closes per pass)`,
+        );
+        deferred = 0;
+      },
+    };
+  }
+
+  /** The batch loop of {@link runBatched}. */
+  private async runBatches(
+    pending: readonly RedeemableIntent[],
+    blocked: Set<string>,
+    ordered: boolean,
+    batchSize: number,
+    closes: ExpiredCloses,
+  ): Promise<void> {
+    let queue = pending;
     while (queue.length > 0) {
       const batch: { row: RedeemableIntent; request: RedeemVoucherRequest; issuedAt: number }[] =
         [];
@@ -490,6 +573,7 @@ export class VoucherRedemptionService {
           carried.push(row);
           continue;
         }
+        if (!closes.admit(row)) continue;
 
         const built = this.toRequest(row);
         if (!built) {
@@ -1578,4 +1662,10 @@ export class VoucherRedemptionService {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** See `VoucherRedemptionService.expiredCloses`. */
+interface ExpiredCloses {
+  admit(row: RedeemableIntent): boolean;
+  report(): void;
 }

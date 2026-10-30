@@ -495,15 +495,20 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
     // 7b. The relayer's global hourly spend budget, across every buyer. Taken
     //     only once this grant holds the reservation, so a grant refused above
     //     costs it nothing. Charged the grant's value plus its own 21 000-gas
-    //     transfer at the quoted fee. A grant is only ever for a buyer whose
-    //     withdrawal has matured, so the account always holds escrow and may
-    //     use the reserved lane. Spent: the float cannot cover it right now.
+    //     transfer at the quoted fee. The reserved lane takes it only when the
+    //     account passes the lane's own test (review 2026-10-30 I-3): a matured
+    //     withdrawal of dust is not "funded". Judged on the escrow read above,
+    //     so it costs no further RPC call. Spent: the float cannot cover it now.
     if (
       this.hourly &&
       !(await this.hourly.take(chainId, {
         wei: wei + VALUE_TRANSFER_GAS * fees.maxFeePerGas,
         purpose: 'withdraw gas grant',
-        funded: true,
+        account,
+        escrow: {
+          balance: BigInt(reading.balance.amount),
+          withdrawRequested: reading.withdrawRequested,
+        },
       }))
     ) {
       await this.release(account);

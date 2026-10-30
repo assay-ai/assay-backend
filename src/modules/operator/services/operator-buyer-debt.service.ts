@@ -21,6 +21,7 @@ import { PaymentIntentService } from '@modules/payment/services/payment-intent.s
 import { applyTimeWindow, asInstant, ListSpec, paginate } from '@shared/api';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { BUYER_DEBT_BULK_VOID_ACTION } from '../domain/debt-void-visibility';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
   BuyerDebtVoidItemDto,
@@ -38,7 +39,7 @@ import { OperatorApprover, OperatorSession } from '../ports/operator-session.por
 import { OperatorApprovalService } from './operator-approval.service';
 import { OverrideLogService } from './override-log.service';
 
-export const DEBT_VOID_APPROVAL_ACTION = 'buyer_debt.bulk_void';
+export const DEBT_VOID_APPROVAL_ACTION = BUYER_DEBT_BULK_VOID_ACTION;
 export const DEBT_VOID_OVERRIDE_CODE = 'M-1';
 export const DEBT_VOID_TARGET = 'buyer_debt_void';
 /** The register's reason code for `M-1`; the operator's own words go in `reason`. */
@@ -213,10 +214,12 @@ export class OperatorBuyerDebtService {
    * The outcome is then kept WITH THE APPROVAL (`operator_approvals.result`,
    * review 2026-10-30 I-3), so it outlives the HTTP response: a console that
    * lost the response reads it back from `GET /operator/approvals/:id`, and the
-   * activity feed shows its counts. Written in the loop's `finally`, so a run
-   * that stops part-way still records what it did, with the ids it never
-   * reached as `NOT_ATTEMPTED` and `complete: false`. Nothing here depends on
-   * the client still listening: the loop and the write run to the end either way.
+   * activity feed shows its counts. Written AS IT GOES (review 2026-10-30
+   * M-6): after every id, with `complete: false` and the ids not reached yet as
+   * `NOT_ATTEMPTED`, so a process that dies mid-loop leaves the partial record
+   * of what it did rather than `NULL`; and once more in the loop's `finally`,
+   * `complete` once every id was reached. Nothing here depends on the client
+   * still listening: the loop and the writes run to the end either way.
    */
   private async execute(
     requester: OperatorSession,
@@ -270,6 +273,10 @@ export class OperatorBuyerDebtService {
         const { skipReason, amount } = await this.voidOne(id, payload.assetId);
         items.push({ intentId: id, result: skipReason ? 'SKIPPED' : 'VOIDED', skipReason });
         if (!skipReason) voidedAmount += amount;
+        // Progress, kept as it goes (M-6); the last id is written by `finally`.
+        if (items.length < ids.length) {
+          await this.recordOutcome(approvalId, payload, items, voidedAmount, false, true);
+        }
       }
       complete = true;
     } finally {
@@ -296,6 +303,8 @@ export class OperatorBuyerDebtService {
   /**
    * Keeps the outcome with the approval. Never throws: the voids are done, and
    * losing their summary must not hide the result the caller is about to get.
+   * A `progress` write that fails is only logged at WARN: the next one, or the
+   * final one, writes the whole record again.
    */
   private async recordOutcome(
     approvalId: string,
@@ -303,6 +312,7 @@ export class OperatorBuyerDebtService {
     processed: readonly BuyerDebtVoidItemDto[],
     voidedAmount: bigint,
     complete: boolean,
+    progress = false,
   ): Promise<void> {
     const reached = new Set(processed.map((item) => item.intentId));
     const items: BuyerDebtVoidItemDto[] = [
@@ -320,7 +330,12 @@ export class OperatorBuyerDebtService {
       approvalId,
       record as unknown as Record<string, unknown>,
     );
-    if (!stored) {
+    if (!stored && progress) {
+      this.logger.warn(
+        `M-1 approval ${approvalId}: progress after ${processed.length} of ` +
+          `${payload.intentIds.length} ids could not be kept; the next write retries`,
+      );
+    } else if (!stored) {
       this.logger.error(
         `M-1 approval ${approvalId}: the outcome (voided ${record.voidedCount}, skipped ` +
           `${record.skippedCount}${complete ? '' : ', incomplete'}) could not be kept with the approval`,
