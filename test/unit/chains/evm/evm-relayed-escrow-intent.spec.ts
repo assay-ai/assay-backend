@@ -435,6 +435,19 @@ describe('the L1 half of the estimate (Nitro)', () => {
     expect(sendCall.mock.calls[0][0].gasLimit).toBe((SPIKE_TOTAL * 12n) / 10n);
   });
 
+  it('never sends without execution gas when the L1 part reads above the whole estimate', async () => {
+    // The two reads are a moment apart; an L1 part at or above the total leaves
+    // the split unknown, so the whole estimate is budgeted for execution.
+    const { submitter, sendCall } = build({
+      estimateGas: jest.fn().mockResolvedValue(100_000n),
+      call: fakeNodeInterface({ l1Gas: 120_000n }),
+    });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(((100_000n + 120_000n) * 12n) / 10n);
+  });
+
   it('still refuses execution above the ceiling, whatever the L1 part', async () => {
     const execution = (EVM_RELAYED_INTENT_MAX_GAS * 10n) / 12n + 1n;
     const { submitter, sendCall } = build({

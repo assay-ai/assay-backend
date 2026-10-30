@@ -300,7 +300,12 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       to,
       data,
     });
-    const execution = estimate > l1Gas ? estimate - l1Gas : 0n;
+    // The two reads are a moment apart. When the L1 part read back at or above
+    // the whole estimate, the split is unknown: nothing is held against the
+    // execution ceiling, and the whole estimate is budgeted for execution below
+    // so the transaction is never sent with no execution gas at all.
+    const split = estimate > l1Gas;
+    const execution = split ? estimate - l1Gas : 0n;
 
     // 20 % margin, for the reason the builder gives at its own: an estimate is a
     // floor rather than an answer, and a transaction that runs out of gas has
@@ -313,9 +318,8 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
           `ceiling a relayed request is allowed to cost`,
       });
     }
-    // The limit sent covers both halves, each with the margin; the two reads
-    // are a moment apart, so an L1 part above the total is taken as it is.
-    const gasLimit = ((execution + l1Gas) * 12n) / 10n;
+    // The limit sent covers both halves, each with the margin.
+    const gasLimit = (((split ? execution : estimate) + l1Gas) * 12n) / 10n;
     if (exceedsCostCap(gasLimit, l2BaseFee, EVM_RELAYED_INTENT_MAX_COST_WEI)) {
       this.logger.warn(
         `a relayed request on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) at ` +

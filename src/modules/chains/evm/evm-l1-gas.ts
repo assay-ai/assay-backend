@@ -53,6 +53,21 @@ export const NODE_INTERFACE_L1_ABI = [
  */
 export const EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM = 50_000_000_000_000n; // 0.00005 ETH
 
+/**
+ * How close to the point of no return a background send stops waiting for fees
+ * to fall: within this many seconds of a voucher's on-chain deadline
+ * (`expiresAt + REDEEM_GRACE_SECONDS`) or of a held payment's timeout, the
+ * cost cap is waived and the send goes out at whatever the fees are.
+ *
+ * Deferring past that point would not save the gas, it would trade it for the
+ * payment itself: an expired voucher is voided and its provider is never paid,
+ * and a refund deferred past the hold's timeout can no longer be sent. A spike
+ * that outlasts the deadline costs cents here; the payment it saves is the
+ * reason the send exists. Several passes wide, so one failed pass still leaves
+ * room for another.
+ */
+export const EVM_FEE_CAP_WAIVED_WITHIN_SECONDS = 1_800;
+
 /** The margin on the L1 part, the same 20 % the estimates elsewhere get. */
 const L1_MARGIN_NUM = 12n;
 const L1_MARGIN_DEN = 10n;

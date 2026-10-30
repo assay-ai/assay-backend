@@ -444,7 +444,10 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       execution = HELD_FALLBACK_BASE_GAS + HELD_PER_ITEM_GAS * extra;
     } else {
       const ceiling = HELD_MAX_BASE_GAS + HELD_MAX_PER_ITEM_GAS * extra;
-      const bare = estimate > l1Gas ? estimate - l1Gas : 0n;
+      // An L1 part read at or above the whole estimate (the reads are a moment
+      // apart) leaves the split unknown: the whole estimate is budgeted for
+      // execution, never nothing.
+      const bare = estimate > l1Gas ? estimate - l1Gas : estimate;
       const padded = (bare * HELD_ESTIMATE_NUM + HELD_ESTIMATE_DEN - 1n) / HELD_ESTIMATE_DEN;
       execution = padded < ceiling ? padded : ceiling;
     }

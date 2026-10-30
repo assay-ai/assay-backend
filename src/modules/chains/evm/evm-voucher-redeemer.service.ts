@@ -28,6 +28,7 @@ import {
   EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
   estimateL1Gas,
   exceedsCostCap,
+  EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
   paddedL1Gas,
 } from './evm-l1-gas';
 import {
@@ -310,7 +311,12 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // costs an `eth_call` and never a mined revert (review S2-2).
     const args = [voucher, this.signatureOf(request)] as const;
     const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'redeemVoucher', args });
-    const gasLimit = await this.gasLimit(chainId, data, 1);
+    const gasLimit = await this.gasLimit(
+      chainId,
+      data,
+      1,
+      nearDeadline([voucher], state.nowSeconds),
+    );
     if (gasLimit === null) return FEE_SPIKE_DEFERRED_OUTCOME;
     const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasLimit);
     if (simulated !== null) {
@@ -497,7 +503,12 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       functionName: 'redeemVoucherBatch',
       args: batchArgs,
     });
-    const gasLimit = await this.gasLimit(chainId, data, admissible.length);
+    const gasLimit = await this.gasLimit(
+      chainId,
+      data,
+      admissible.length,
+      admissible.some((i) => nearDeadline([vouchers[i]], states[i].nowSeconds)),
+    );
     if (gasLimit === null) {
       // Not sent, and not split: singles would meet the same fees. Every
       // admissible item waits for the next pass; the rest are what they are.
@@ -639,17 +650,27 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
    * The limit a redemption of `vouchers` is sent with: the execution budget
    * plus the L1 part padded 20 %. `null` when that limit at the L2 basefee would
    * cost more than {@link EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM} per voucher —
-   * nothing is simulated or sent, and the caller defers.
+   * nothing is simulated or sent, and the caller defers. Never `null` when
+   * `urgent` (a voucher within {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its
+   * deadline): deferring it any further would lose the payment, not the gas.
    */
   private async gasLimit(
     chainId: ChainId,
     data: `0x${string}`,
     vouchers: number,
+    urgent: boolean,
   ): Promise<bigint | null> {
     const to = getAddress(this.deployment(chainId).escrow);
     const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), { to, data });
     const gasLimit = gasFor(vouchers) + paddedL1Gas(l1Gas);
     const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(vouchers);
+    if (urgent && exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
+      this.logger.warn(
+        `A redemption of ${vouchers} on ${chainId} is above the ${maxWei} wei cap ` +
+          `(${gasLimit} gas, L1 ${l1Gas}) but a voucher in it is near its deadline: sending anyway`,
+      );
+      return gasLimit;
+    }
     if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
       this.logger.warn(
         `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
@@ -1151,6 +1172,15 @@ function isNotFound(error: unknown): boolean {
     name === 'TransactionReceiptNotFoundError' ||
     name === 'TransactionNotFoundError' ||
     /could not be found/i.test(messageOf(error))
+  );
+}
+
+/** Whether any of `vouchers` is within {@link EVM_FEE_CAP_WAIVED_WITHIN_SECONDS} of its on-chain deadline. */
+function nearDeadline(vouchers: readonly EvmVoucher[], nowSeconds: number): boolean {
+  const window = BigInt(EVM_FEE_CAP_WAIVED_WITHIN_SECONDS);
+  return vouchers.some(
+    (voucher) =>
+      voucher.expiresAt + BigInt(EVM_CONSTANTS.REDEEM_GRACE_SECONDS) - BigInt(nowSeconds) <= window,
   );
 }
 

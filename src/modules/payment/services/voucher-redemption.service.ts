@@ -1077,11 +1077,11 @@ export class VoucherRedemptionService {
         );
         return { stop: false, settled: true };
       }
-      await this.closeNotProviderCaused(row, cause);
+      return this.closeNotProviderCaused(row, request, cause);
     } else if (fault !== null) {
       await this.forfeit(row, cause && cause !== fault ? `${fault} (refused ${cause})` : fault);
     } else {
-      await this.closeNotProviderCaused(row, cause);
+      return this.closeNotProviderCaused(row, request, cause);
     }
     // Settled, in the only sense this loop cares about: the hold is closed
     // and nothing will ever redeem this seq, so it cannot be stepped over.
@@ -1398,11 +1398,37 @@ export class VoucherRedemptionService {
    * it ({@link platformVoidTag}), else buyer debt. A cause on neither list
    * takes the debt default and is logged as unclassified.
    */
-  private async closeNotProviderCaused(row: RedeemableIntent, cause: string | null): Promise<void> {
+  private async closeNotProviderCaused(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+    cause: string | null,
+  ): Promise<{ stop: boolean; settled: boolean }> {
     const tag = platformVoidTag(cause);
     if (tag !== null) {
+      // A void RELEASES the hold, so it must be certain the chain never took
+      // this voucher: `findLanding` only sees our own recorded transactions,
+      // and a refusal like `VoucherExpired` is decided before the seq is ever
+      // looked at. The chain's own `held(payer, seq)` record decides — a used
+      // seq goes the `VoucherSeqUsed` way (committed, or held for a human),
+      // and an unreadable record keeps the hold open for the next pass.
+      if (this.redeemer.usedSeqRecord) {
+        let record: UsedSeqRecord;
+        try {
+          record = await this.redeemer.usedSeqRecord(request);
+        } catch (error) {
+          this.logger.warn(
+            `Intent ${row.id} (seq ${row.voucherSeq}) would be voided (${cause ?? 'unknown'}), ` +
+              `but the chain's record of the seq could not be read: ${describe(error)}. ` +
+              `The hold stays open.`,
+          );
+          return { stop: false, settled: true };
+        }
+        if (record !== 'NONE') {
+          return this.closeSeqUsedUnobserved(row, request, cause);
+        }
+      }
       await this.voidForPlatform(row, cause, tag);
-      return;
+      return { stop: false, settled: true };
     }
     if (cause !== null && !BUYER_SIDE_CAUSES.has(cause)) {
       this.logger.warn(
@@ -1411,6 +1437,7 @@ export class VoucherRedemptionService {
       );
     }
     await this.lapse(row, cause);
+    return { stop: false, settled: true };
   }
 
   /**

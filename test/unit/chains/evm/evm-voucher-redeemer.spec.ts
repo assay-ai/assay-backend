@@ -1313,6 +1313,20 @@ describe('EvmVoucherRedeemer — the L1 half of the gas (Nitro)', () => {
     expect(state.simulated).toEqual([]);
   });
 
+  it('sends anyway above the cost cap when the voucher is near its on-chain deadline', async () => {
+    // Deferring past `expiresAt + REDEEM_GRACE_SECONDS` would lose the payment,
+    // not the gas: within the waiver window the cap gives way.
+    const { redeemer, sendCall } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+    });
+
+    const expiresAt = NOW - EVM_CONSTANTS.REDEEM_GRACE_SECONDS + 600;
+    const outcome = await redeemer.redeem(request(0, { issuedAt: expiresAt - 60, expiresAt }));
+
+    expect(outcome.programError).not.toBe(FEE_SPIKE_DEFERRED);
+    expect(sendCall).toHaveBeenCalledTimes(1);
+  });
+
   it('defers a whole batch above the cap without splitting it, and keeps its refusals', async () => {
     const { redeemer, sendCall } = harness({
       nodeInterface: fakeNodeInterface({ l1Gas: 20_000_000n }),

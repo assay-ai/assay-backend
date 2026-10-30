@@ -72,7 +72,12 @@ const EXPIRED: RedeemOutcome = {
 function build(
   rows: RedeemableIntent[],
   redeem: (request: RedeemVoucherRequest) => Promise<RedeemOutcome> = async () => EXPIRED,
-  options: { landed?: string | null; refs?: string[]; voided?: boolean } = {},
+  options: {
+    landed?: string | null;
+    refs?: string[];
+    voided?: boolean;
+    usedSeq?: () => Promise<string>;
+  } = {},
 ) {
   const alerts: Alert[] = [];
   const redeemer: Record<string, unknown> = {
@@ -83,6 +88,9 @@ function build(
   };
   if (options.landed !== undefined) {
     redeemer.findLanding = jest.fn(async () => options.landed);
+  }
+  if (options.usedSeq !== undefined) {
+    redeemer.usedSeqRecord = jest.fn(options.usedSeq);
   }
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
@@ -149,6 +157,46 @@ describe('VoucherRedemptionService — a voucher the platform failed to redeem i
 
     expect(redeemer.redeem).toHaveBeenCalledTimes(2);
     expectVoided(intents, payments, 'voided:PLATFORM_UNREDEEMED', live.holdId);
+  });
+
+  it('voids only once the chain says the seq was never used', async () => {
+    const expired = row();
+    const { service, intents, payments, redeemer } = build([expired], undefined, {
+      usedSeq: async () => 'NONE',
+    });
+
+    await service.run(USDC);
+
+    expect(redeemer.usedSeqRecord).toHaveBeenCalledTimes(1);
+    expectVoided(intents, payments, 'voided:PLATFORM_UNREDEEMED', expired.holdId);
+  });
+
+  it('never voids a seq the chain shows as used: it goes the VoucherSeqUsed way', async () => {
+    const expired = row();
+    const { service, intents, payments } = build([expired], undefined, {
+      usedSeq: async () => 'MISMATCH',
+    });
+
+    await service.run(USDC);
+
+    expect(intents.voidUnredeemed).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  it('keeps the hold open when the chain record cannot be read', async () => {
+    const expired = row();
+    const { service, intents, payments } = build([expired], undefined, {
+      usedSeq: async () => {
+        throw new Error('rpc down');
+      },
+    });
+
+    await service.run(USDC);
+
+    expect(intents.voidUnredeemed).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
   });
 
   it('UNKNOWN_REVERT:none recorded on the retries voids', async () => {
