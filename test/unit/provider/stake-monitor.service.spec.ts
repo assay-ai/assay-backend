@@ -134,7 +134,7 @@ describe('StakeMonitorService — grace periods', () => {
     expect(h.grace.insert).not.toHaveBeenCalled();
     expect(h.alerts.emit).toHaveBeenCalledWith(
       expect.objectContaining({
-        severity: AlertSeverity.WARN,
+        severity: AlertSeverity.INFO,
         name: 'provider_stake_headroom_low',
         details: expect.objectContaining({ bindingId: BINDING_A, providerId: PROVIDER_A }),
       }),
