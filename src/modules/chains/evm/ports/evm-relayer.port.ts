@@ -94,6 +94,12 @@ export interface EvmRelayResult {
    */
   readonly revertReason: string | null;
   readonly gasUsed: bigint;
+  /**
+   * The price per gas the receipt says was charged (`effectiveGasPrice`), so a
+   * spend budget can settle at what the send really cost (review 2026-10-30
+   * M-2). Absent when the node's receipt has none.
+   */
+  readonly effectiveGasPrice?: bigint;
   readonly blockNumber: bigint;
 }
 

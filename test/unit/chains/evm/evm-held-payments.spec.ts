@@ -42,7 +42,8 @@ function build(
     nodeInterface?: jest.Mock;
     float?: EvmSendFloat;
     now?: number;
-    hourly?: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'>;
+    hourly?: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle' | 'paused'>;
+    sendResult?: Record<string, unknown>;
   } = {},
 ) {
   const reads: Array<{
@@ -87,7 +88,9 @@ function build(
     address: jest.fn(() => Promise.resolve(`${CHAIN}:0x5555555555555555555555555555555555555555`)),
     sendCall: jest.fn((call: { data: `0x${string}`; to: string }) => {
       sent.push(call);
-      return Promise.resolve({ hash: '0xabc', status: 'SUCCESS', revertReason: null });
+      return Promise.resolve(
+        options.sendResult ?? { hash: '0xabc', status: 'SUCCESS', revertReason: null },
+      );
     }),
   };
   const service = new EvmHeldPayments(
@@ -526,7 +529,11 @@ describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
   });
 
   it('defers a move the hourly budget refuses, after the simulation and before the send', async () => {
-    const hourly = { take: jest.fn(async () => null), settle: jest.fn(async () => undefined) };
+    const hourly = {
+      take: jest.fn(async () => null),
+      settle: jest.fn(async () => undefined),
+      paused: jest.fn(() => false),
+    };
     const { service, sent, reads } = build(heldRecord(86_400), {
       nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
       now: NOW_MS,
@@ -549,6 +556,7 @@ describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
     const hourly = {
       take: jest.fn(async () => ({ ticket: null })),
       settle: jest.fn(async () => undefined),
+      paused: jest.fn(() => false),
     };
     const { service, sent } = build(heldRecord(86_400), {
       nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
@@ -559,6 +567,75 @@ describe('EvmHeldPayments — the hold timeout and the redeemer float', () => {
     await service.collect(ASSET, one);
 
     expect(sent).toHaveLength(1);
+  });
+
+  it('settles at the receipt gasUsed x effectiveGasPrice (review 2026-10-30 M-2)', async () => {
+    const hourly = {
+      take: jest.fn(async () => ({ ticket: null })),
+      settle: jest.fn(async () => undefined),
+      paused: jest.fn(() => false),
+    };
+    const { service } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+      sendResult: {
+        hash: '0xabc',
+        status: 'SUCCESS',
+        revertReason: null,
+        gasUsed: 80_000n,
+        effectiveGasPrice: 5n,
+      },
+    });
+
+    await service.collect(ASSET, one);
+
+    expect(hourly.settle).toHaveBeenCalledWith({ ticket: null }, 400_000n);
+  });
+
+  /** Review 2026-10-30 M-7: a spent budget is not re-estimated or re-simulated. */
+  it('defers before estimating or simulating while the budget is paused', async () => {
+    const hourly = {
+      take: jest.fn(async () => ({ ticket: null })),
+      settle: jest.fn(async () => undefined),
+      paused: jest.fn(() => true),
+    };
+    const { service, sent, reads, estimates } = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+
+    const error = await service.collect(ASSET, one).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(HeldSendDeferredError);
+    expect(estimates).toEqual([]);
+    expect(reads.filter((read) => read.account)).toEqual([]);
+    expect(hourly.take).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('with only the ordinary lane paused, goes on for a record near its timeout', async () => {
+    const hourly = {
+      take: jest.fn(async () => ({ ticket: null })),
+      settle: jest.fn(async () => undefined),
+      paused: jest.fn((_chain: unknown, urgent: boolean) => !urgent),
+    };
+    const near = build(heldRecord(60), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+    await near.service.refund(ASSET, one);
+    expect(near.sent).toHaveLength(1);
+
+    const far = build(heldRecord(86_400), {
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+      now: NOW_MS,
+      hourly,
+    });
+    await expect(far.service.refund(ASSET, one)).rejects.toBeInstanceOf(HeldSendDeferredError);
+    expect(far.estimates).toEqual([]);
   });
 
   it('still defers a record far from its timeout, and one already past it', async () => {

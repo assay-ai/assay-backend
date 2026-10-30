@@ -568,7 +568,7 @@ describe('EvmRelayedEscrowIntentSubmitter, protecting the relayer float', () => 
   });
 
   it('charges the budget gasLimit x basefee and settles it to gasUsed x basefee', async () => {
-    const ticket = { key: 'k', member: 'm', score: 1 };
+    const ticket = { parts: [], score: 1 };
     const take = jest.fn().mockResolvedValue(ticket);
     const settle = jest.fn().mockResolvedValue(undefined);
     const { submitter, sendCall } = build({
@@ -584,7 +584,7 @@ describe('EvmRelayedEscrowIntentSubmitter, protecting the relayer float', () => 
   });
 
   it('charges the per-request cap when the basefee is unknown', async () => {
-    const take = jest.fn().mockResolvedValue({ key: 'k', member: 'm', score: 1 });
+    const take = jest.fn().mockResolvedValue({ parts: [], score: 1 });
     const { submitter } = build({ hourly: { take } });
 
     await submitter.submit(setLimits());
@@ -592,26 +592,54 @@ describe('EvmRelayedEscrowIntentSubmitter, protecting the relayer float', () => 
     expect(take.mock.calls[0][1].wei).toBe(EVM_RELAYED_INTENT_MAX_COST_WEI);
   });
 
-  it('decides the reserved lane by the account escrow on chain: funded iff balance or pending withdrawal', async () => {
-    const cases: Array<[unknown, boolean]> = [
-      [null, false],
-      [{ balance: { amount: '0' }, withdrawRequested: 0n }, false],
-      [{ balance: { amount: '1' }, withdrawRequested: 0n }, true],
-      [{ balance: { amount: '0' }, withdrawRequested: 5n }, true],
+  it('hands the budget the account and its escrow on chain, read lazily (review 2026-10-30 I-3)', async () => {
+    const cases: Array<[unknown, unknown]> = [
+      [null, null],
+      [
+        { balance: { amount: '1' }, withdrawRequested: 0n },
+        { balance: 1n, withdrawRequested: 0n },
+      ],
+      [
+        { balance: { amount: '2000000' }, withdrawRequested: 5n },
+        { balance: 2_000_000n, withdrawRequested: 5n },
+      ],
     ];
-    for (const [reading, funded] of cases) {
-      const take = jest.fn().mockResolvedValue({ key: 'k', member: 'm', score: 1 });
+    for (const [reading, holding] of cases) {
+      const take = jest.fn().mockResolvedValue({ parts: [], score: 1 });
       const read = jest.fn().mockResolvedValue(reading);
       const { submitter } = build({ hourly: { take }, escrow: { read } });
 
       await submitter.submit(setLimits());
 
-      const lazy = take.mock.calls[0][1].funded as () => Promise<boolean>;
+      expect(take.mock.calls[0][1].account).toBe(BUYER_ACCOUNT);
+      const lazy = take.mock.calls[0][1].escrow as () => Promise<unknown>;
       // Lazy: nothing read until the budget asks.
       expect(read).not.toHaveBeenCalled();
-      await expect(lazy()).resolves.toBe(funded);
+      await expect(lazy()).resolves.toEqual(holding);
       expect(read.mock.calls[0][0]).toBe(BUYER_ACCOUNT);
     }
+  });
+
+  it('settles at the receipt gasUsed x effectiveGasPrice when the receipt carries one (M-2)', async () => {
+    const ticket = { parts: [], score: 1 };
+    const take = jest.fn().mockResolvedValue(ticket);
+    const settle = jest.fn().mockResolvedValue(undefined);
+    const { submitter, sendCall } = build({
+      hourly: { take, settle },
+      call: fakeNodeInterface({ l1Gas: 0n }),
+    });
+    sendCall.mockResolvedValueOnce({
+      hash: '0x' + 'ab'.repeat(32),
+      status: 'SUCCESS',
+      revertReason: null,
+      gasUsed: 50_000n,
+      effectiveGasPrice: 7n,
+      blockNumber: 1n,
+    });
+
+    await submitter.submit(setLimits());
+
+    expect(settle).toHaveBeenCalledWith(ticket, 350_000n);
   });
 
   it('caps one relayed request at 1e-5 ETH', () => {

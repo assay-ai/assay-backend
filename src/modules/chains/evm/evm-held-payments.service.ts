@@ -34,6 +34,7 @@ import {
   paddedL1Gas,
 } from './evm-l1-gas';
 import { EvmRedeemerHourlyBudget } from './evm-redeemer-hourly-budget';
+import { receiptCostWei } from './evm-hourly-wei-budget';
 import { EvmSendFloat, fitsBudget } from './evm-send-float';
 import { EvmSendRejectedError, isInsufficientFunds } from './evm-send-rejected.error';
 import { isRevert } from './evm-voucher-authority';
@@ -169,7 +170,10 @@ export class EvmHeldPayments implements HeldPaymentsPort {
      * The redeemer's hourly spend budget, shared with redemption (review
      * 2026-10-30 I-1): the same key sends both. Absent: not checked.
      */
-    private readonly hourly: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'> | null = null,
+    private readonly hourly: Pick<
+      EvmRedeemerHourlyBudget,
+      'take' | 'settle' | 'paused'
+    > | null = null,
   ) {}
 
   /** Chains whose escrow answered `totalHeld()`: the hold is there, for good. */
@@ -363,6 +367,19 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       });
     }
     const chainId = chainIdOf(asset);
+    // Read only when a cap would stop the send: one `held()` per key.
+    const urgent = once(() => this.nearTimeout(asset, keys));
+    // A budget refused moments ago is still spent: nothing is estimated or
+    // simulated until it can admit again (review 2026-10-30 M-7). The urgent
+    // lane is asked about (and `held()` read) only when the ordinary one waits.
+    if (
+      this.hourly?.paused(chainId, false) &&
+      (this.hourly.paused(chainId, true) || !(await urgent()))
+    ) {
+      throw new HeldSendDeferredError(
+        `the redeemer's hourly spend budget on ${chainId} is spent; nothing was sent`,
+      );
+    }
     const payers = keys.map((key) => getAddress(parseAccountId(key.payer).address));
     const seqs = keys.map((key) => BigInt(key.seq));
     const data =
@@ -381,8 +398,6 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const args = keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs];
     const escrow = getAddress(this.deployment(chainId).escrow);
     const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
-    // Read only when a cap would stop the send: one `held()` per key.
-    const urgent = once(() => this.nearTimeout(asset, keys));
     const { gasLimit, estimate, l2BaseFee } = await this.gasFor(
       chainId,
       keys.length,
@@ -457,9 +472,10 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       throw error;
     }
     if (maxFeePerGas !== null) this.float?.spent(chainId, gasLimit * maxFeePerGas);
-    if (fee !== null && typeof result.gasUsed === 'bigint') {
-      await this.hourly?.settle(admission, result.gasUsed * fee);
-    }
+    // What the receipt says it cost (review 2026-10-30 M-2), not the basefee
+    // read before the send. A send that threw above keeps its estimate.
+    const actual = receiptCostWei(result, fee);
+    if (actual !== null) await this.hourly?.settle(admission, actual);
     if (result.status !== 'SUCCESS') {
       throw ChainErrors.payloadMalformed({
         reason: `${single} reverted: ${result.revertReason ?? 'unknown'} (${result.hash})`,
