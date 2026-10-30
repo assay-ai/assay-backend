@@ -59,13 +59,16 @@ describe('ProtocolAnalyticsService', () => {
   });
   afterEach(() => jest.useRealTimers());
 
-  it('uses a two-second deadline tied to the snapshot, then reads fresh data', async () => {
+  it('uses a five-minute deadline tied to the snapshot, then reads fresh data', async () => {
     await service.read({ range: '7d' });
-    expect(redis.set.mock.calls[0].slice(-2)).toEqual(['PX', 2000]);
+    expect(redis.set.mock.calls[0].slice(-2)).toEqual(['PX', 300000]);
     await service.read({ range: '7d' });
     expect(repository.read).toHaveBeenCalledTimes(1);
     // Expired timestamps are refused even if Redis returned an old entry.
-    jest.advanceTimersByTime(2001);
+    jest.advanceTimersByTime(299999);
+    await service.read({ range: '7d' });
+    expect(repository.read).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(2);
     await service.read({ range: '7d' });
     expect(repository.read).toHaveBeenCalledTimes(2);
   });

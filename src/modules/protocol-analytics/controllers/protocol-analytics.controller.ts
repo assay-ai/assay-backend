@@ -21,7 +21,7 @@ export class ProtocolAnalyticsController {
   @ApiOperation({
     summary: 'Protocol payment analytics, one asset at a time',
     description:
-      'Two-second Redis snapshots; browser and CDN caching disabled. Funded PAID calls only. Money is atomic-unit strings. Recent payments are daily tool groups, never wallet activity. All-time totals with a bounded 90-day chart.',
+      'Five-minute Redis snapshots; browser and CDN caching disabled. Funded PAID calls only. Money is atomic-unit strings. Recent payments are daily tool groups, never wallet activity. All-time totals with a bounded 90-day chart.',
   })
   @ApiResponse({ status: 200, type: ProtocolAnalyticsResponseDto })
   @ApiResponse({ status: 400, description: 'Invalid range or disabled asset.' })
