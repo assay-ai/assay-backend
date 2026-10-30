@@ -10,6 +10,7 @@ import {
   MAX_HELD_BATCH,
   RedemptionClass,
 } from '@modules/payment/ports/held-payments.port';
+import { FEE_SPIKE_DEFERRED } from '@modules/payment/ports/voucher-redeemer.port';
 
 import { ChainErrors } from '../errors/chains.errors';
 import { AssetId, ChainId, chainIdOf, parseAccountId, toAccountId } from '../ports/caip.types';
@@ -22,18 +23,27 @@ import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
+import {
+  EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
+  estimateL1Gas,
+  exceedsCostCap,
+  paddedL1Gas,
+} from './evm-l1-gas';
 import { isRevert } from './evm-voucher-authority';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
- * The gas a held move is sent with is `eth_estimateGas` x 1.25, capped. When the
- * estimate fails, a fixed limit: 180k for one move (a single collect uses ~109k
- * warm, ~126.5k when the treasury or the provider holds 0, ~144k when both do;
- * BUG-PROD-COLLECT-01), plus 60k for each further one in a batch.
+ * The gas a held move is sent with is its execution — `eth_estimateGas` less the
+ * L1 part — x 1.25, capped, plus the L1 part x 1.2 uncapped (`evm-l1-gas.ts`:
+ * on Nitro the estimate carries the L1 posting cost, and a cap that cut it
+ * refused sends as "out of gas at limit 520000 (estimate 609758)"). When the
+ * estimate fails, a fixed execution limit: 180k for one move (a single collect
+ * uses ~109k warm, ~126.5k when the treasury or the provider holds 0, ~144k
+ * when both do; BUG-PROD-COLLECT-01), plus 60k for each further one in a batch.
  */
 const HELD_FALLBACK_BASE_GAS = 180_000n;
 const HELD_PER_ITEM_GAS = 60_000n;
-/** The most a held move is sent with, whatever the estimate says. */
+/** The most a held move's EXECUTION is given, whatever the estimate says. */
 const HELD_MAX_BASE_GAS = 400_000n;
 const HELD_MAX_PER_ITEM_GAS = 120_000n;
 /** The headroom over the estimate, as a ratio (125 / 100). */
@@ -109,6 +119,19 @@ export class HeldSendRefusedError extends Error {
   constructor(readonly reason: string) {
     super(`held send refused: ${reason}`);
     this.name = 'HeldSendRefusedError';
+  }
+}
+
+/**
+ * A held move NOT sent because the network's fees are briefly too high: the
+ * limit at the L2 basefee is above `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM`
+ * per record. Its message starts with {@link FEE_SPIKE_DEFERRED}, the reason the
+ * row backs off with; the next pass tries again.
+ */
+export class HeldSendDeferredError extends Error {
+  constructor(detail: string) {
+    super(`${FEE_SPIKE_DEFERRED}: ${detail}`);
+    this.name = 'HeldSendDeferredError';
   }
 }
 
@@ -336,7 +359,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const args = keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs];
     const escrow = getAddress(this.deployment(chainId).escrow);
     const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
-    const { gasLimit, estimate } = await this.gasFor(chainId, keys.length, {
+    const { gasLimit, estimate } = await this.gasFor(chainId, keys.length, data, {
       address: escrow,
       abi: ASSAY_ESCROW_HOLD_ABI,
       functionName,
@@ -388,10 +411,16 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     return { txRef: result.hash };
   }
 
-  /** `eth_estimateGas` x 1.25, capped; the fixed fallback when the estimate fails. */
+  /**
+   * Execution (`eth_estimateGas` less the L1 part) x 1.25, capped — the fixed
+   * fallback when the estimate fails — plus the L1 part x 1.2. Throws
+   * {@link HeldSendDeferredError}, before any simulation or send, when that
+   * limit would cost more than the per-record cap.
+   */
   private async gasFor(
     chainId: ChainId,
     count: number,
+    data: `0x${string}`,
     call: Parameters<EstimateClient['estimateContractGas']>[0],
   ): Promise<{ gasLimit: bigint; estimate: bigint | null }> {
     const extra = BigInt(count - 1);
@@ -404,12 +433,32 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     } catch {
       // A refusal or an outage: the fixed limit, and the pre-check says why.
     }
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(client, {
+      to: call.address,
+      data,
+      account: call.account,
+    });
+    let execution: bigint;
     if (estimate === null || estimate <= 0n) {
-      return { gasLimit: HELD_FALLBACK_BASE_GAS + HELD_PER_ITEM_GAS * extra, estimate: null };
+      estimate = null;
+      execution = HELD_FALLBACK_BASE_GAS + HELD_PER_ITEM_GAS * extra;
+    } else {
+      const ceiling = HELD_MAX_BASE_GAS + HELD_MAX_PER_ITEM_GAS * extra;
+      // An L1 part read at or above the whole estimate (the reads are a moment
+      // apart) leaves the split unknown: the whole estimate is budgeted for
+      // execution, never nothing.
+      const bare = estimate > l1Gas ? estimate - l1Gas : estimate;
+      const padded = (bare * HELD_ESTIMATE_NUM + HELD_ESTIMATE_DEN - 1n) / HELD_ESTIMATE_DEN;
+      execution = padded < ceiling ? padded : ceiling;
     }
-    const ceiling = HELD_MAX_BASE_GAS + HELD_MAX_PER_ITEM_GAS * extra;
-    const padded = (estimate * HELD_ESTIMATE_NUM + HELD_ESTIMATE_DEN - 1n) / HELD_ESTIMATE_DEN;
-    return { gasLimit: padded < ceiling ? padded : ceiling, estimate };
+    const gasLimit = execution + paddedL1Gas(l1Gas);
+    const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(count);
+    if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
+      throw new HeldSendDeferredError(
+        `${gasLimit} gas (L1 ${l1Gas}) at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
+      );
+    }
+    return { gasLimit, estimate };
   }
 
   private client(chainId: ChainId): EvmReaderClient {

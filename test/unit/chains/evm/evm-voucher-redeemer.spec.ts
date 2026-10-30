@@ -16,6 +16,7 @@ import {
   EVM_REDEEM_PER_VOUCHER_GAS,
   EvmVoucherRedeemer,
 } from '@modules/chains/evm/evm-voucher-redeemer.service';
+import { EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM } from '@modules/chains/evm/evm-l1-gas';
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import {
   EvmRelayedCall,
@@ -26,6 +27,7 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
 import {
+  FEE_SPIKE_DEFERRED,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
@@ -33,6 +35,7 @@ import { Alert, AlertPort } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { deployment } from './evm-fixtures';
+import { L2_BASE_FEE, fakeNodeInterface } from './helpers/fake-node-interface';
 
 /**
  * `EvmVoucherRedeemer` — pre-validate the batch, and retry singly.
@@ -139,6 +142,10 @@ interface ChainState {
   heldTerms: Record<string, { provider: string; amount: bigint }>;
   /** This process's wall clock, seconds. */
   wallClock: number;
+  /** The client's `eth_call` to NodeInterface; absent = a client without `call`. */
+  nodeInterface: jest.Mock | null;
+  /** The `gas` every simulation was run with, in order. */
+  simulatedGas: bigint[];
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -161,6 +168,8 @@ function harness(overrides: Partial<ChainState> = {}) {
     blockTimestamp: NOW,
     heldTerms: {},
     wallClock: NOW,
+    nodeInterface: null,
+    simulatedGas: [],
     ...overrides,
   };
 
@@ -238,8 +247,11 @@ function harness(overrides: Partial<ChainState> = {}) {
     readContract: async (args) => {
       const from = (args as { account?: string }).account;
       if (from !== undefined) state.simulatedFrom.push(from);
+      const gas = (args as { gas?: bigint }).gas;
+      if (gas !== undefined) state.simulatedGas.push(gas);
       return answer(args.functionName, args.args);
     },
+    ...(state.nodeInterface ? { call: state.nodeInterface } : {}),
     multicall: async (args) =>
       args.contracts.map((c) => {
         state.read.push(c.functionName);
@@ -1254,5 +1266,103 @@ describe('EvmVoucherRedeemer.providerShortOnlyByUnplannedSlashes (M-2)', () => {
     await redeemer.providerShortOnlyByUnplannedSlashes(request(0));
     await redeemer.providerShortOnlyByUnplannedSlashes(request(1));
     expect(multicalls).toHaveLength(1);
+  });
+});
+
+describe('EvmVoucherRedeemer — the L1 half of the gas (Nitro)', () => {
+  const budget = (n: number) => EVM_REDEEM_BATCH_BASE_GAS + EVM_REDEEM_PER_VOUCHER_GAS * BigInt(n);
+
+  it('with an L1 part of 0, sends and simulates with the execution budget alone', async () => {
+    const { redeemer, sendCall, state } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 0n }),
+    });
+
+    await redeemer.redeem(request(0));
+
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(budget(1));
+    expect(state.simulatedGas).toEqual([budget(1)]);
+  });
+
+  it('adds the L1 part x 1.2 to the limit it simulates and sends with', async () => {
+    const nodeInterface = fakeNodeInterface({ l1Gas: 845_000n });
+    const { redeemer, sendCall, state } = harness({ nodeInterface });
+
+    await redeemer.redeemBatch([request(0), request(1)]);
+
+    const limit = budget(2) + 1_014_000n;
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(limit);
+    expect(state.simulatedGas).toEqual([limit]);
+    // Asked about the exact calldata that was sent.
+    expect(nodeInterface.asked[0].data).toBe(sendCall.mock.calls[0][0].data);
+  });
+
+  it('defers a single redemption above the cost cap: RETRY FeeSpikeDeferred, nothing sent', async () => {
+    const { redeemer, sendCall, state } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+    });
+
+    const outcome = await redeemer.redeem(request(0));
+
+    expect(outcome).toEqual({
+      kind: RedeemOutcomeKind.RETRY,
+      signature: null,
+      programError: FEE_SPIKE_DEFERRED,
+    });
+    expect(FEE_SPIKE_DEFERRED).toBe('FeeSpikeDeferred');
+    expect(sendCall).not.toHaveBeenCalled();
+    expect(state.simulated).toEqual([]);
+  });
+
+  it('sends anyway above the cost cap when the voucher is near its on-chain deadline', async () => {
+    // Deferring past `expiresAt + REDEEM_GRACE_SECONDS` would lose the payment,
+    // not the gas: within the waiver window the cap gives way.
+    const { redeemer, sendCall } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 11_800_000n }),
+    });
+
+    const expiresAt = NOW - EVM_CONSTANTS.REDEEM_GRACE_SECONDS + 600;
+    const outcome = await redeemer.redeem(request(0, { issuedAt: expiresAt - 60, expiresAt }));
+
+    expect(outcome.programError).not.toBe(FEE_SPIKE_DEFERRED);
+    expect(sendCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers a whole batch above the cap without splitting it, and keeps its refusals', async () => {
+    const { redeemer, sendCall } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 20_000_000n }),
+      paused: false,
+      escrows: { [payerAddress(1).toLowerCase()]: { balance: 0n } },
+    });
+
+    const outcomes = await redeemer.redeemBatch([request(0), request(1), request(2)]);
+
+    expect(outcomes[0].programError).toBe(FEE_SPIKE_DEFERRED);
+    expect(outcomes[2].programError).toBe(FEE_SPIKE_DEFERRED);
+    expect(outcomes[1].programError).not.toBe(FEE_SPIKE_DEFERRED);
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('scales the cap per voucher: what defers one still sends in a batch of 64', async () => {
+    // Just over the one-voucher cap, far under 64 of them.
+    const l1Gas = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM / L2_BASE_FEE;
+    const single = harness({ nodeInterface: fakeNodeInterface({ l1Gas }) });
+    expect((await single.redeemer.redeem(request(0))).programError).toBe(FEE_SPIKE_DEFERRED);
+
+    const batch = harness({ nodeInterface: fakeNodeInterface({ l1Gas: l1Gas * 4n }) });
+    const requests = Array.from({ length: 64 }, (_, i) => request(i));
+    const outcomes = await batch.redeemer.redeemBatch(requests);
+    expect(outcomes.every((o) => o.kind === RedeemOutcomeKind.REDEEMED)).toBe(true);
+    expect(batch.sendCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to L1 = 0 when NodeInterface fails', async () => {
+    const { redeemer, sendCall } = harness({
+      nodeInterface: fakeNodeInterface(new Error('execution reverted')),
+    });
+
+    const outcome = await redeemer.redeem(request(0));
+
+    expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(budget(1));
   });
 });

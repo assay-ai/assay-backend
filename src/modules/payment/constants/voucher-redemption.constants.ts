@@ -5,8 +5,8 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
  *
  * The deadline this races is {@link maxVoucherRedeemableLifeSeconds} (2,220s ≈
  * 37 minutes on Solana, 7,620s ≈ 2 h 7 min on eip155) — after which the chain
- * refuses the voucher outright and the call becomes buyer debt — so a
- * five-minute cadence would spend an eighth of the Solana budget sitting in a
+ * refuses the voucher outright and the call is closed (buyer debt or, when
+ * the platform failed to redeem it, voided) — so a five-minute cadence would spend an eighth of the Solana budget sitting in a
  * queue. Written out rather than
  * `CronExpression.EVERY_MINUTE` for the reason `RECONCILIATION_CRON` is: the
  * cadence a runbook quotes should be greppable as a literal.
@@ -106,6 +106,17 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    */
   UNREDEEMABLE: 'voucher_unredeemable',
   /**
+   * A served call's voucher could not be redeemed because of the PLATFORM —
+   * the redeemer could not send (unfunded, transport/RPC failure), the chain
+   * reverted with no named reason, or sends were deferred on a fee spike —
+   * and it was VOIDED (incident 2026-10-29): the buyer's hold is released,
+   * the buyer is not charged, the provider is not paid. CRITICAL: providers
+   * are losing served calls until a human fixes the redeemer. Aggregated per
+   * asset and cause (`ONCE_PER_INCIDENT`), so an outage that voids hundreds
+   * of vouchers pages once per incident window, not once per voucher.
+   */
+  PLATFORM_VOIDED: 'voucher_platform_voided',
+  /**
    * A hold has outlived {@link maxVoucherRedeemableLifeSeconds} and is still not
    * redeemed — an overdue hold needs an alert. It is about to become
    * an `UNREDEEMABLE`.
@@ -117,9 +128,10 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    *
    * CRITICAL and not WARN: nothing redeems until a human acts, every rail-B
    * hold stays open meanwhile, and each one is on a clock —
-   * {@link maxVoucherRedeemableLifeSeconds} — after which the call becomes buyer
-   * debt the buyer must re-sign. An outage that silently converts into debt is
-   * the shape of failure the alert catalogue exists for.
+   * {@link maxVoucherRedeemableLifeSeconds} — after which the call is voided
+   * and the provider is not paid ({@link VOUCHER_REDEMPTION_ALERTS.PLATFORM_VOIDED}).
+   * An outage that silently costs providers their served calls is the shape of
+   * failure the alert catalogue exists for.
    */
   MISCONFIGURED: 'voucher_redemption_misconfigured',
   /**
@@ -192,6 +204,23 @@ export const UNCOLLECTED_PREFIX = 'uncollected:';
  * same literal.
  */
 export const DEBT_VOIDED_PREFIX = 'voided:';
+
+/**
+ * What follows {@link DEBT_VOIDED_PREFIX} when the voucher was voided because
+ * the PLATFORM failed to redeem it, then the cause tag:
+ * `voided:PLATFORM_UNREDEEMED`, `voided:PLATFORM_UNKNOWN_REVERT`,
+ * `voided:PLATFORM_FEE_SPIKE_DEFERRED`. The hand fix of the 2026-10-29
+ * incident wrote `voided:PLATFORM_REDEEMER_UNFUNDED` the same way.
+ */
+export const PLATFORM_VOID_OUTCOME_PREFIX = 'PLATFORM_';
+
+/**
+ * The refusal the redemption job records when it DEFERS a send because L1
+ * fees spiked: the platform chose not to send. Not about the voucher, so a
+ * voucher that expires with it as its last refusal is voided, never buyer
+ * debt. Defined once, beside the redeemer port that returns it.
+ */
+export { FEE_SPIKE_DEFERRED } from '../ports/voucher-redeemer.port';
 
 /**
  * How close to a voucher's on-chain deadline (`expiresAt + redeemGraceSeconds`)

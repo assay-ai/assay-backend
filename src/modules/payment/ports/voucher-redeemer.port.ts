@@ -32,6 +32,15 @@ export enum RedeemOutcomeKind {
   MISCONFIGURED = 'MISCONFIGURED',
 }
 
+/**
+ * The `programError` of a `RETRY` whose send was **deferred, not refused**: the
+ * network's fees were briefly too high to send it (an L1 fee spike on an EVM
+ * rollup), so nothing was signed or broadcast. A platform-side cause, never the
+ * buyer's or the provider's. Also the reason a deferred held collect or refund
+ * backs off with.
+ */
+export const FEE_SPIKE_DEFERRED = 'FeeSpikeDeferred';
+
 export interface RedeemOutcome {
   readonly kind: RedeemOutcomeKind;
   /** The confirmed transaction signature, and `null` on every other outcome. */

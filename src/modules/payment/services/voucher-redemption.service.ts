@@ -18,9 +18,12 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
+  DEBT_VOIDED_PREFIX,
+  FEE_SPIKE_DEFERRED,
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
   maxVoucherRedeemableLifeSeconds,
+  PLATFORM_VOID_OUTCOME_PREFIX,
   PROVIDER_FORFEIT_PREFIX,
   redeemGraceSeconds,
   REDEMPTION_DEADLINE_MARGIN_SECONDS,
@@ -121,6 +124,78 @@ const BUYER_TIGHTENING_ERRORS: ReadonlySet<string> = new Set([
 const ADDRESS_BLOCKED = 'AddressBlocked';
 
 /**
+ * This service's own name for a voucher frozen because its payer, payer
+ * organization or delegate is blocked (platform blocklist or on chain),
+ * recorded on every such voucher each pass
+ * (`PaymentIntentRepository.recordPayerBlocks`). Blocking a buyer freezes
+ * collection, and a voucher that expires frozen is the buyer's debt — without
+ * this record it would close with no recorded cause and be voided as a
+ * platform failure.
+ */
+const PAYER_BLOCKED = 'PayerBlocked';
+
+/**
+ * The refusals that make a voucher the BUYER's debt when it can no longer be
+ * redeemed and the provider did not cause it: refusals about the buyer's own
+ * grant, caps, funding, block or signature — each something the buyer did or
+ * controls. Enumerated from the code: {@link BUYER_TIGHTENING_ERRORS}; the
+ * empty escrow (`EscrowInsufficient`, retryable on eip155); a payer-side block
+ * (`AddressBlocked` when the payee side is not the one blocked, and
+ * {@link PAYER_BLOCKED}); and the signature refusals of both chains — the
+ * buyer produced those bytes, and voiding them would let a buyer who can make
+ * a signature pass admission but fail on chain call for free.
+ */
+const BUYER_SIDE_CAUSES: ReadonlySet<string> = new Set([
+  ...BUYER_TIGHTENING_ERRORS,
+  'EscrowInsufficient',
+  ADDRESS_BLOCKED,
+  PAYER_BLOCKED,
+  'SignerIsNotPayer',
+  'InvalidSignature',
+  'MalleableSignature',
+  'BadSignatureV',
+  'MissingBuyerSignature',
+]);
+
+/** The prefix of a revert the chain gave no name for (`UNKNOWN_REVERT:none`, `UNKNOWN_REVERT:0x…`). */
+const UNKNOWN_REVERT_PREFIX = 'UNKNOWN_REVERT:';
+
+/**
+ * The causes that mean the PLATFORM failed to redeem the voucher (incident
+ * 2026-10-29), by the tag of their `voided:PLATFORM_<tag>` mark:
+ *
+ * - **no recorded refusal** — `null`, or `VoucherExpired` as the closing cause
+ *   (`VoucherExpired` closes with the last RETRY's refusal, so a bare one means
+ *   no attempt was ever refused for the voucher). This is what every
+ *   transport failure leaves: a send that throws (redeemer unfunded,
+ *   `eth_sendRawTransaction` failing), an RPC that does not answer, a batch
+ *   that throws, a pause or a misconfiguration — none records a cause. Tag
+ *   `UNREDEEMED`;
+ * - **`UNKNOWN_REVERT:*`** — the chain reverted and named no reason (out of
+ *   gas, a send the node refused): nothing says the buyer did it. Tag
+ *   `UNKNOWN_REVERT`;
+ * - **{@link FEE_SPIKE_DEFERRED}** — the platform chose not to send while L1
+ *   fees spiked. Tag `FEE_SPIKE_DEFERRED`.
+ *
+ * Any other cause is buyer debt, whether it is in {@link BUYER_SIDE_CAUSES}
+ * or not. **The default for an unknown cause is buyer debt**, deliberately:
+ * an unlisted cause is a NAMED refusal — the chain said something about the
+ * voucher the buyer signed or its escrow — and a void is final (the provider
+ * can never be paid for it, and a buyer able to provoke such a refusal would
+ * call for free), while a debt can still be settled by the buyer re-signing
+ * or voided by hand (`PaymentIntentService.voidDebt`). The causes that carry
+ * no information about the voucher are exactly the ones listed here, so an
+ * outage cannot reach the debt default. An unlisted cause is logged as
+ * unclassified so it can be added to one side.
+ */
+function platformVoidTag(cause: string | null): string | null {
+  if (cause === null || cause === 'VoucherExpired') return 'UNREDEEMED';
+  if (cause.startsWith(UNKNOWN_REVERT_PREFIX)) return 'UNKNOWN_REVERT';
+  if (cause === FEE_SPIKE_DEFERRED) return 'FEE_SPIKE_DEFERRED';
+  return null;
+}
+
+/**
  * `findLanding` looked at this intent's own transactions and none of them
  * redeemed it — as far as the node that answered can see. See
  * {@link VoucherRedemptionService.pastLandingWindow}.
@@ -180,14 +255,23 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  * with that transaction. Otherwise the CAUSE decides who loses the money:
  *
  * - **the provider caused it** → the provider forfeits ({@link forfeit});
+ * - **the platform failed to redeem it** — the redeemer could not send
+ *   (unfunded, transport/RPC failure), the chain reverted with no named
+ *   reason, a fee-spike deferral, a pause or misconfiguration that outlived
+ *   the voucher ({@link platformVoidTag}) → the call is **voided**
+ *   ({@link voidForPlatform}): the hold is released, the buyer is not charged
+ *   and never refused for it, and the provider is not paid (owner decision
+ *   after the 2026-10-29 incident, where an unfunded redeemer turned 228
+ *   served calls into debt the buyers had done nothing to cause);
  * - **anything else** — a buyer tightening (revoked or shortened delegate,
- *   lower caps), an empty escrow, a pause, an outage, a late verdict, a payer
- *   block lifted after the deadline → the call becomes **buyer debt**
+ *   lower caps), an empty escrow, a payer block lifted after the deadline, a
+ *   bad signature, any other named refusal → the call becomes **buyer debt**
  *   ({@link lapse}): the buyer's hold stays OPEN, nobody is credited, and the
  *   payer's paid calls are refused (`PAYMENT_DEBT_OUTSTANDING`) until the
  *   buyer signs a replacement voucher (`BuyerDebtService`), which this job
  *   then redeems like any other. A debt not settled within 30 days is written
- *   off: the hold is released and the provider is not paid.
+ *   off: the hold is released and the provider is not paid. (A verdict too
+ *   late for its voucher still becomes debt in `PaymentIntentService`.)
  *
  * ## Unless the provider caused it: the provider forfeits
  *
@@ -198,7 +282,7 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  * at once rather than waiting for the voucher to expire; a stake refusal is
  * retried until the deadline first, because the provider may top it up.
  *
- * Before ANY lapse the provider is checked live — stake against the chain's
+ * Before ANY lapse or platform void the provider is checked live — stake against the chain's
  * minimum, and blocks — and a provider at fault right now forfeits instead.
  * A provider-caused refusal, once recorded on the intent, is never overwritten
  * by a later one from elsewhere and decides the close whatever the closing
@@ -258,6 +342,7 @@ export class VoucherRedemptionService {
     // check below stays as a second line for a block that lands mid-pass.
     const exclusions = await this.exclusions(asset);
     await this.recordProviderBlocks(asset, exclusions);
+    await this.recordPayerBlocks(asset, exclusions);
     // Asked of the chain, once per pass: see the class comment.
     const ordered = this.redeemer.requiresAscendingSeq?.(asset) ?? true;
     this.retryBackoff = !ordered;
@@ -514,7 +599,9 @@ export class VoucherRedemptionService {
    * Solana, about two hours on eip155)
    * with `VoucherExpired`, so a block that lasts longer than that does not
    * "resume": the next pass after the unblock meets `UNREDEEMABLE`, and the
-   * call becomes buyer debt ({@link lapse}) — the platform pays nothing. A
+   * call becomes buyer debt ({@link lapse}) — the platform pays nothing. The
+   * block is recorded on the row ({@link recordPayerBlocks}) so that close is
+   * not mistaken for a platform failure. A
    * provider-side block seen meanwhile is recorded on the row
    * ({@link recordHeldProviderCause}), so the provider still forfeits.
    */
@@ -575,6 +662,25 @@ export class VoucherRedemptionService {
   }
 
   /**
+   * Records a payer-side block on every awaiting voucher of `asset` whose
+   * payer, payer organization or delegate is blocked — the queue leaves them
+   * out — as {@link PAYER_BLOCKED}, so one that expires frozen closes as buyer
+   * debt and not as a platform void. Provider causes and the unplanned-slash
+   * shortfall are kept (the provider still forfeits). Best effort, like
+   * {@link recordProviderBlocks}.
+   */
+  private async recordPayerBlocks(asset: AssetId, blocked: RedemptionExclusions): Promise<void> {
+    try {
+      await this.payments.recordPayerBlocks(asset, blocked, PAYER_BLOCKED, [
+        ...PROVIDER_CAUSED_ERRORS,
+        UNPLANNED_SLASH_SHORTFALL,
+      ]);
+    } catch (error) {
+      this.logger.warn(`Payer blocks could not be recorded this pass: ${describe(error)}`);
+    }
+  }
+
+  /**
    * A held row is frozen, not closed — but a provider-side block on it is
    * still recorded, sticky, so the close after the payer's unblock forfeits
    * (review #2, M2). Never overwrites a provider cause already recorded.
@@ -624,7 +730,7 @@ export class VoucherRedemptionService {
     this.logHeld(
       row,
       `${reason}. It keeps its hold (collection is frozen); past its on-chain expiry it ` +
-        `becomes buyer debt.`,
+        `becomes buyer debt if its payer side is blocked, or is voided if the contracts are paused.`,
     );
     return true;
   }
@@ -897,7 +1003,8 @@ export class VoucherRedemptionService {
   /**
    * Closes a voucher nothing will redeem from here: committed with the
    * transaction that already landed it if there is one, else forfeited by the
-   * provider ({@link forfeit}) or turned into buyer debt ({@link lapse}). The
+   * provider ({@link forfeit}), voided when the platform failed to redeem it
+   * ({@link voidForPlatform}), or turned into buyer debt ({@link lapse}). The
    * platform never pays.
    *
    * Every refusal, not only `VoucherSeqNotIncreasing` (Solana) or
@@ -952,7 +1059,7 @@ export class VoucherRedemptionService {
       return { stop: false, settled: true };
     }
 
-    // About to make it buyer debt. Not if the provider is at fault right now:
+    // About to void it or make it buyer debt. Not if the provider is at fault right now:
     // asked LIVE, not taken from whatever the last retry recorded (review
     // 2026-10-15, M3/M1) — the provider forfeits, and the refusal that closed
     // the voucher is kept beside its cause (review #2, L5).
@@ -960,7 +1067,8 @@ export class VoucherRedemptionService {
     if (fault === undefined) {
       // Unknown. Retried each pass, but only until the landing deadline
       // (review #2, L4): a read that keeps failing is then taken as neutral —
-      // the call becomes buyer debt, which pays nobody and pages.
+      // the call is voided or becomes buyer debt by its cause, which pays
+      // nobody and pages.
       if (!this.pastLandingWindow(row)) {
         this.logger.warn(
           `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${cause ?? 'unknown'}, and ` +
@@ -969,11 +1077,11 @@ export class VoucherRedemptionService {
         );
         return { stop: false, settled: true };
       }
-      await this.lapse(row, cause);
+      return this.closeNotProviderCaused(row, request, cause);
     } else if (fault !== null) {
       await this.forfeit(row, cause && cause !== fault ? `${fault} (refused ${cause})` : fault);
     } else {
-      await this.lapse(row, cause);
+      return this.closeNotProviderCaused(row, request, cause);
     }
     // Settled, in the only sense this loop cares about: the hold is closed
     // and nothing will ever redeem this seq, so it cannot be stepped over.
@@ -1286,8 +1394,114 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * The voucher can never be redeemed and the provider did not cause it, so
-   * the served call becomes BUYER DEBT: the hold stays OPEN (the amount stays
+   * The provider did not cause it: voided when the platform failed to redeem
+   * it ({@link platformVoidTag}), else buyer debt. A cause on neither list
+   * takes the debt default and is logged as unclassified.
+   */
+  private async closeNotProviderCaused(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+    cause: string | null,
+  ): Promise<{ stop: boolean; settled: boolean }> {
+    const tag = platformVoidTag(cause);
+    if (tag !== null) {
+      // A void RELEASES the hold, so it must be certain the chain never took
+      // this voucher: `findLanding` only sees our own recorded transactions,
+      // and a refusal like `VoucherExpired` is decided before the seq is ever
+      // looked at. The chain's own `held(payer, seq)` record decides — a used
+      // seq goes the `VoucherSeqUsed` way (committed, or held for a human),
+      // and an unreadable record keeps the hold open for the next pass.
+      if (this.redeemer.usedSeqRecord) {
+        let record: UsedSeqRecord;
+        try {
+          record = await this.redeemer.usedSeqRecord(request);
+        } catch (error) {
+          this.logger.warn(
+            `Intent ${row.id} (seq ${row.voucherSeq}) would be voided (${cause ?? 'unknown'}), ` +
+              `but the chain's record of the seq could not be read: ${describe(error)}. ` +
+              `The hold stays open.`,
+          );
+          return { stop: false, settled: true };
+        }
+        if (record !== 'NONE') {
+          return this.closeSeqUsedUnobserved(row, request, cause);
+        }
+      }
+      await this.voidForPlatform(row, cause, tag);
+      return { stop: false, settled: true };
+    }
+    if (cause !== null && !BUYER_SIDE_CAUSES.has(cause)) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) closes on ${cause}, which is neither a ` +
+          `buyer-side nor a platform-side cause: buyer debt by default.`,
+      );
+    }
+    await this.lapse(row, cause);
+    return { stop: false, settled: true };
+  }
+
+  /**
+   * The PLATFORM failed to redeem the voucher, so the served call is VOIDED
+   * (incident 2026-10-29): the hold is released, the buyer is not charged and
+   * its paid calls are not refused, and nobody is credited — the provider is
+   * not paid and the platform pays nothing. Mark and release are one ledger
+   * transaction under the payer's lock (`PaymentIntentService.voidUnredeemed`),
+   * so it never counts as debt. Reason `voided:PLATFORM_<tag>`.
+   *
+   * Pages once per asset and cause per incident window, not per voucher: one
+   * outage voids every voucher it outlives.
+   */
+  private async voidForPlatform(
+    row: RedeemableIntent,
+    cause: string | null,
+    tag: string,
+  ): Promise<void> {
+    const price = MoneyUtil.of(row.priceAmount, row.assetId as AssetId, row.decimals);
+    const outcome = `${PLATFORM_VOID_OUTCOME_PREFIX}${tag}`;
+    const voided = await this.intents.voidUnredeemed(
+      {
+        organizationId: row.organizationId,
+        id: row.id,
+        payer: row.agentAccount,
+        holdId: row.holdId,
+      },
+      `${DEBT_VOIDED_PREFIX}${outcome}`,
+    );
+    if (!voided) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was to be voided (${outcome}) but is no ` +
+          `longer awaiting redemption; left as it is.`,
+      );
+      return;
+    }
+
+    this.logger.error(
+      `Intent ${row.id} (seq ${row.voucherSeq}) was never redeemed because of the platform ` +
+        `(${cause ?? 'no recorded refusal'}): VOIDED. ${MoneyUtil.format(price)} is released to ` +
+        `${row.agentAccount}, the buyer is not charged, and the provider is not paid.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.PLATFORM_VOIDED,
+      summary:
+        `Served calls' vouchers are being voided because the platform could not redeem them ` +
+        `(${outcome}): buyers are not charged and providers are not paid until the redeemer ` +
+        `is fixed`,
+      details: {
+        asset: row.assetId,
+        outcome,
+        firstIntentId: row.id,
+        firstCause: cause ?? 'none',
+        firstAmount: MoneyUtil.format(price),
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: `${row.assetId}:${outcome}`,
+    });
+  }
+
+  /**
+   * The voucher can never be redeemed, the provider did not cause it and the
+   * platform did not fail to send it, so the served call becomes BUYER DEBT: the hold stays OPEN (the amount stays
    * out of the buyer's spendable balance), nobody is credited, and the payer's
    * paid calls are refused until the buyer signs a replacement voucher
    * (`BuyerDebtService`) — then this job redeems it like any other, and the
@@ -1345,7 +1559,7 @@ export class VoucherRedemptionService {
       `redeem_voucher refuses this deployment (${programError ?? 'Config.redeemer mismatch'}) — ` +
         `stopping the pass at intent ${row.id}. NO voucher can be redeemed until ` +
         `Config.redeemer names the key this process pays with; every rail-B hold stays open ` +
-        `and becomes buyer debt once it outlives the redemption window.`,
+        `and is voided (the provider is not paid) once it outlives the redemption window.`,
     );
 
     await this.alerts.emit({
@@ -1413,7 +1627,8 @@ export class VoucherRedemptionService {
    * Counted from `issued_at` rather than from the intent's own timestamps,
    * because `maxVoucherRedeemableLifeSeconds` is the chain's window and the
    * chain counts from the signed field. Once past it the next pass will come
-   * back `VoucherExpired` and the call becomes buyer debt — so this fires
+   * back `VoucherExpired` and the call is closed — buyer debt, or voided when
+   * the platform failed to redeem it — so this fires
    * *before* the collection fails, not after it.
    */
   private async warnIfOverdue(
