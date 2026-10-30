@@ -229,6 +229,19 @@ export class OperatorApprovalService {
     return row;
   }
 
+  /**
+   * Keeps what an approved action did with its approval, for `GET
+   * /operator/approvals/:id` and the lists. Never throws: the action has
+   * already happened, and losing its summary must not turn it into a 500.
+   */
+  async recordResult(id: string, result: Record<string, unknown>): Promise<boolean> {
+    try {
+      return await this.approvals.recordResult(id, result);
+    } catch {
+      return false;
+    }
+  }
+
   async approve(
     id: string,
     approver: OperatorSession,
@@ -356,6 +369,7 @@ export class OperatorApprovalService {
         createdAt: row.createdAt,
         decidedAt: lapsed ? row.expiresAt : row.decidedAt,
         expiresAt: row.expiresAt,
+        result: row.result ?? null,
       });
     }
     return out;

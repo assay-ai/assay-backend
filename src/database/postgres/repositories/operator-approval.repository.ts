@@ -53,6 +53,28 @@ export class OperatorApprovalRepository extends AbstractRepository<OperatorAppro
   }
 
   /**
+   * Stores what an APPROVED action did. Only on an approved row: a result is
+   * never attached to a request nobody approved. Returns whether a row took it.
+   */
+  async recordResult(id: string, result: Record<string, unknown>): Promise<boolean> {
+    const outcome = await this.createQueryBuilder()
+      .update(OperatorApprovalEntity)
+      .set({ result })
+      .where('id = :id', { id })
+      .andWhere('status = :approved', { approved: 'APPROVED' })
+      .execute();
+    return (outcome.affected ?? 0) === 1;
+  }
+
+  /** The approvals of `ids`, for the reads that show their results. */
+  async findManyById(ids: readonly string[]): Promise<OperatorApprovalEntity[]> {
+    if (ids.length === 0) return [];
+    return this.createQueryBuilder('approval')
+      .where('approval.id IN (:...ids)', { ids: [...ids] })
+      .getMany();
+  }
+
+  /**
    * `PENDING` → `EXPIRED`, now: a request pinned to a state that has moved on
    * can never run, and a newer one replaces it. Returns whether this call
    * moved it.

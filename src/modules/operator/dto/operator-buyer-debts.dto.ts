@@ -16,7 +16,7 @@ import { PageInfoDto } from '@shared/api/dto/cursor-page.dto';
 import { ListQueryDto } from '@shared/api/dto/list-query.dto';
 
 /** At most this many intents per bulk void request (`M-1`). */
-export const DEBT_VOID_MAX_IDS = 500;
+export const DEBT_VOID_MAX_IDS = 100;
 
 /**
  * `GET /operator/buyer-debts`. Open buyer debts across every organization.
@@ -125,7 +125,7 @@ export class OperatorBuyerDebtRowDto {
   @ApiProperty({
     description:
       'INFORMATIONAL ONLY. True when the recorded cause suggests the platform failed to redeem ' +
-      '(`VoucherExpired` with no other cause, `UNKNOWN_REVERT:*`, `FeeSpikeDeferred`). Never ' +
+      '(`VoucherExpired` with no other cause, `UNKNOWN_REVERT:*`). Never ' +
       'acted on by the server: a person decides.',
   })
   suggestedPlatformCause: boolean;
@@ -203,6 +203,9 @@ export const DEBT_VOID_SKIP_REASONS = [
   'SEQ_USED_ON_CHAIN',
   'CHAIN_UNREADABLE',
   'CHANGED_UNDERNEATH',
+  // Only in a persisted record whose run stopped part-way (`complete: false`):
+  // the ids it never reached. Still open debts; asking again voids them.
+  'NOT_ATTEMPTED',
 ] as const;
 export type DebtVoidSkipReason = (typeof DEBT_VOID_SKIP_REASONS)[number];
 
@@ -219,7 +222,8 @@ export class BuyerDebtVoidItemDto {
     description:
       '`NOT_A_DEBT`: settled, replaced or voided since. `SEQ_USED_ON_CHAIN`: `held(payer, seq)` ' +
       'is not NONE. `CHAIN_UNREADABLE`: the chain record could not be read. ' +
-      '`CHANGED_UNDERNEATH`: the row changed between the check and the void',
+      '`CHANGED_UNDERNEATH`: the row changed between the check and the void. ' +
+      '`NOT_ATTEMPTED`: the run stopped before this id (persisted record only)',
   })
   skipReason: DebtVoidSkipReason | null;
 }
@@ -249,4 +253,66 @@ export class BuyerDebtVoidResultDto {
 
   @ApiProperty({ type: [BuyerDebtVoidItemDto] })
   items: BuyerDebtVoidItemDto[];
+}
+
+/**
+ * What an approved bulk void did, kept with its approval (`operator_approvals.result`)
+ * and served by `GET /operator/approvals/:id` and the approvals lists: the approve
+ * route's result, plus the skipped side and whether the run finished.
+ */
+export class BuyerDebtVoidRecordDto extends BuyerDebtVoidResultDto {
+  @ApiProperty({ description: 'Ids not voided (`voidedCount + skippedCount = requestedCount`)' })
+  skippedCount: number;
+
+  @ApiProperty({
+    description:
+      'Requested total less voided total, atomic units, at the amounts pinned on request',
+  })
+  skippedAmount: string;
+
+  @ApiProperty({
+    description:
+      '`false` when the run stopped part-way; the ids it never reached are `NOT_ATTEMPTED`',
+  })
+  complete: boolean;
+
+  @ApiProperty({ description: 'When the record was written' })
+  recordedAt: string;
+}
+
+/**
+ * The outcome of a bulk void as the activity feed shows it (`outcome` on a
+ * `buyer_debt_void` entry of `GET /operator/override-log`): the counts and amounts
+ * of the approval's persisted record. `null` there while the void is still running.
+ */
+export class BuyerDebtVoidOutcomeDto {
+  @ApiProperty()
+  approvalId: string;
+
+  @ApiProperty()
+  assetId: string;
+
+  @ApiProperty()
+  decimals: number;
+
+  @ApiProperty()
+  requestedCount: number;
+
+  @ApiProperty()
+  requestedAmount: string;
+
+  @ApiProperty()
+  voidedCount: number;
+
+  @ApiProperty()
+  voidedAmount: string;
+
+  @ApiProperty()
+  skippedCount: number;
+
+  @ApiProperty()
+  skippedAmount: string;
+
+  @ApiProperty()
+  complete: boolean;
 }
