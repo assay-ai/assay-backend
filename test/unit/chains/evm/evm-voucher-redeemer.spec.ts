@@ -154,7 +154,7 @@ interface ChainState {
 function harness(
   overrides: Partial<ChainState> = {},
   float: EvmSendFloat | null = null,
-  hourly: Pick<EvmRedeemerHourlyBudget, 'take' | 'settle'> | null = null,
+  hourly: Pick<EvmRedeemerHourlyBudget, 'takeFor' | 'settle' | 'paused'> | null = null,
 ) {
   const state: ChainState = {
     paused: false,
@@ -1523,10 +1523,18 @@ describe('EvmVoucherRedeemer — the hourly spend budget (review 2026-10-30 I-1)
 
   function hourly(admit: boolean) {
     return {
-      take: jest.fn(async () => (admit ? { ticket: null } : null)),
+      takeFor: jest.fn(async (..._args: unknown[]) =>
+        admit
+          ? { admitted: true, admission: { ticket: null }, overShare: [] as string[] }
+          : { admitted: false, admission: null, overShare: [] as string[] },
+      ),
       settle: jest.fn(async () => undefined),
+      paused: jest.fn((..._args: unknown[]) => false),
     };
   }
+  const PROVIDER_ACCOUNT = toAccountId(TESTNET, PROVIDER);
+  const OTHER = '0x' + '77'.repeat(20);
+  const OTHER_ACCOUNT = toAccountId(TESTNET, OTHER);
 
   function urgentRequest(index: number): RedeemVoucherRequest {
     const expiresAt = NOW - EVM_CONSTANTS.REDEEM_GRACE_SECONDS + 600;
@@ -1544,11 +1552,12 @@ describe('EvmVoucherRedeemer — the hourly spend budget (review 2026-10-30 I-1)
     await redeemer.redeem(request(0));
 
     expect(state.simulated).toEqual(['redeemVoucher']);
-    expect(budget.take).toHaveBeenCalledWith(
+    expect(budget.takeFor).toHaveBeenCalledWith(
       TESTNET,
       budgetGas(1) * L2_BASE_FEE,
       false,
       expect.stringContaining('redeemVoucher'),
+      [PROVIDER_ACCOUNT],
     );
     expect(sendCall).toHaveBeenCalledTimes(1);
     expect(budget.settle).toHaveBeenCalledWith({ ticket: null }, 100_000n * L2_BASE_FEE);
@@ -1585,7 +1594,7 @@ describe('EvmVoucherRedeemer — the hourly spend budget (review 2026-10-30 I-1)
 
     expect(outcomes.every((o) => o.programError === FEE_SPIKE_DEFERRED)).toBe(true);
     expect(sendCall).not.toHaveBeenCalled();
-    expect(budget.take).toHaveBeenCalledTimes(1);
+    expect(budget.takeFor).toHaveBeenCalledTimes(1);
   });
 
   it('tells the budget which sends are urgent, so it may stretch for them', async () => {
@@ -1594,7 +1603,7 @@ describe('EvmVoucherRedeemer — the hourly spend budget (review 2026-10-30 I-1)
 
     await redeemer.redeemBatch([request(0), urgentRequest(1)]);
 
-    expect(budget.take.mock.calls.map((call) => (call as unknown[])[2])).toEqual([true, false]);
+    expect(budget.takeFor.mock.calls.map((call) => (call as unknown[])[2])).toEqual([true, false]);
   });
 
   it('charges the per-item cap when no fee is known (no basefee, no float)', async () => {
@@ -1603,9 +1612,120 @@ describe('EvmVoucherRedeemer — the hourly spend budget (review 2026-10-30 I-1)
 
     await redeemer.redeem(request(0));
 
-    expect((budget.take.mock.calls[0] as unknown[])[1]).toBe(
+    expect((budget.takeFor.mock.calls[0] as unknown[])[1]).toBe(
       EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
     );
     expect(budget.settle).not.toHaveBeenCalled();
+  });
+
+  it('settles at the receipt gasUsed x effectiveGasPrice, not the basefee read before (M-2)', async () => {
+    const budget = hourly(true);
+    const { redeemer, sendCall } = harness({}, null, budget);
+    sendCall.mockResolvedValueOnce({
+      hash: '0x' + 'ab'.repeat(32),
+      status: 'SUCCESS',
+      revertReason: null,
+      gasUsed: 90_000n,
+      effectiveGasPrice: 3n,
+      blockNumber: 1n,
+    });
+
+    await redeemer.redeem(request(0));
+
+    // Settled even with no basefee known: the receipt carries the price.
+    expect(budget.settle).toHaveBeenCalledWith({ ticket: null }, 270_000n);
+  });
+
+  /** Review 2026-10-30 M-7: a spent budget is not re-simulated every tick. */
+  it('while the budget is paused, defers without estimating or simulating', async () => {
+    const budget = hourly(true);
+    budget.paused.mockReturnValue(true);
+    const { redeemer, sendCall, state } = harness(
+      { nodeInterface: fakeNodeInterface({ l1Gas: 0n }) },
+      null,
+      budget,
+    );
+
+    const single = await redeemer.redeem(request(0));
+    const batched = await redeemer.redeemBatch([request(1), request(2)]);
+
+    expect([single, ...batched].every((o) => o.programError === FEE_SPIKE_DEFERRED)).toBe(true);
+    expect(state.simulated).toEqual([]);
+    expect(budget.takeFor).not.toHaveBeenCalled();
+    expect(sendCall).not.toHaveBeenCalled();
+    expect(budget.paused).toHaveBeenCalledWith(TESTNET, false, PROVIDER_ACCOUNT);
+  });
+
+  it('still decides a voucher pre-validation refuses while the budget is paused', async () => {
+    const budget = hourly(true);
+    budget.paused.mockReturnValue(true);
+    const { redeemer } = harness({}, null, budget);
+    const expired = NOW - EVM_CONSTANTS.REDEEM_GRACE_SECONDS - 600;
+
+    const outcome = await redeemer.redeem(
+      request(0, { issuedAt: expired - 60, expiresAt: expired }),
+    );
+
+    expect(outcome.programError).not.toBe(FEE_SPIKE_DEFERRED);
+  });
+
+  it('leaves out only the paused provider of a batch (M-7)', async () => {
+    const budget = hourly(true);
+    budget.paused.mockImplementation((...args: unknown[]) => args[2] === OTHER_ACCOUNT);
+    const { redeemer, sendCall } = harness(
+      { nodeInterface: fakeNodeInterface({ l1Gas: 0n }) },
+      null,
+      budget,
+    );
+
+    const outcomes = await redeemer.redeemBatch([
+      request(0),
+      request(1, { provider: OTHER_ACCOUNT }),
+    ]);
+
+    expect(outcomes[0].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(outcomes[1].programError).toBe(FEE_SPIKE_DEFERRED);
+    expect(sendCall).toHaveBeenCalledTimes(1);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual([payerAddress(0).toLowerCase()]);
+  });
+
+  /**
+   * Review 2026-10-30 I-2: the budget refuses a mixed batch because one
+   * provider is over its share. That provider's items wait; the rest is
+   * sized, simulated and charged again without them, and sent.
+   */
+  it('drops the items of a provider over its share and sends the rest', async () => {
+    const budget = hourly(true);
+    budget.takeFor.mockImplementationOnce(async () => ({
+      admitted: false,
+      admission: null,
+      overShare: [OTHER_ACCOUNT.toLowerCase()],
+    }));
+    const { redeemer, sendCall, state } = harness(
+      { nodeInterface: fakeNodeInterface({ l1Gas: 0n }) },
+      null,
+      budget,
+    );
+
+    const outcomes = await redeemer.redeemBatch([
+      request(0),
+      request(1, { provider: OTHER_ACCOUNT }),
+      request(2),
+    ]);
+
+    expect(outcomes[1].programError).toBe(FEE_SPIKE_DEFERRED);
+    expect(outcomes[0].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(outcomes[2].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(budget.takeFor).toHaveBeenCalledTimes(2);
+    expect((budget.takeFor.mock.calls[1] as unknown[])[4]).toEqual([
+      PROVIDER_ACCOUNT,
+      PROVIDER_ACCOUNT,
+    ]);
+    expect(state.simulated).toEqual(['redeemVoucherBatch', 'redeemVoucherBatch']);
+    expect(sendCall).toHaveBeenCalledTimes(1);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual([
+      payerAddress(0).toLowerCase(),
+      payerAddress(2).toLowerCase(),
+    ]);
   });
 });

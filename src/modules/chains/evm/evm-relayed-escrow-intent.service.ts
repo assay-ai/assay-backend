@@ -20,7 +20,12 @@ import { EvmEscrowBalanceReader } from './evm-escrow-balance-reader.service';
 import { EvmL1GasClient, estimateL1Gas, exceedsCostCap } from './evm-l1-gas';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.gate';
-import { EVM_RELAYER_HOURLY_BUDGET, EvmRelayerHourlyBudget } from './evm-relayer-hourly-budget';
+import {
+  EVM_RELAYER_HOURLY_BUDGET,
+  EvmRelayerEscrowHolding,
+  EvmRelayerHourlyBudget,
+} from './evm-relayer-hourly-budget';
+import { receiptCostWei } from './evm-hourly-wei-budget';
 import { isSendRejected } from './evm-send-rejected.error';
 
 /**
@@ -182,7 +187,8 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       ? await this.hourly.take(chainId, {
           wei: l2BaseFee !== null ? gasLimit * l2BaseFee : EVM_RELAYED_INTENT_MAX_COST_WEI,
           purpose: `relayed ${intent.kind}`,
-          funded: () => this.holdsEscrow(intent.account, chainId),
+          account: intent.account,
+          escrow: () => this.escrowHolding(intent.account, chainId),
         })
       : null;
     if (this.hourly && !ticket) {
@@ -212,9 +218,9 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       throw error;
     }
 
-    if (ticket && l2BaseFee !== null && typeof result.gasUsed === 'bigint') {
-      await this.hourly?.settle(ticket, result.gasUsed * l2BaseFee);
-    }
+    // At what the receipt says it cost (review 2026-10-30 M-2).
+    const actual = ticket ? receiptCostWei(result, l2BaseFee) : null;
+    if (ticket && actual !== null) await this.hourly?.settle(ticket, actual);
 
     if (result.status !== 'SUCCESS') {
       // The pre-flight passed and the send still reverted, so state moved between
@@ -241,19 +247,26 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
   // ── Internals ────────────────────────────────────────────────────────────
 
   /**
-   * Whether `account` holds something in its escrow on chain — a non-zero
-   * balance or a withdrawal still pending — which is what admits it to the
-   * relayer budget's reserved lane. A buyer who emptied their escrow has
-   * nothing left to brake or withdraw, so a zero escrow is "not funded".
+   * What `account` holds in its escrow on chain — its balance and any
+   * withdrawal still pending — for the relayer budget's reserved lane, which
+   * admits only an account holding at least the lane's minimum of either
+   * (review 2026-10-30 I-3: `holdsReservedLaneMinimum`; a dust deposit is not
+   * enough). `null`: nothing to read, which counts as holding nothing.
    */
-  private async holdsEscrow(account: AccountId, chainId: ChainId): Promise<boolean> {
-    if (!this.escrow) return false;
+  private async escrowHolding(
+    account: AccountId,
+    chainId: ChainId,
+  ): Promise<EvmRelayerEscrowHolding | null> {
+    if (!this.escrow) return null;
     const reading = await this.escrow.read(
       account,
       chainMetadata(chainId).settlementAsset as AssetId,
     );
-    if (!reading) return false;
-    return BigInt(reading.balance.amount) > 0n || reading.withdrawRequested > 0n;
+    if (!reading) return null;
+    return {
+      balance: BigInt(reading.balance.amount),
+      withdrawRequested: reading.withdrawRequested,
+    };
   }
 
   /**

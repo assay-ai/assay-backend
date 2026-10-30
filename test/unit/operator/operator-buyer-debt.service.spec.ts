@@ -684,6 +684,69 @@ describe('OperatorBuyerDebtService — the outcome is kept with the approval (re
     });
   });
 
+  /**
+   * Review 2026-10-30 M-6: the record was written only in `finally`, so a
+   * process that died mid-loop left `result` NULL. It is now written after
+   * every id, `complete: false`, so a crash leaves the partial record.
+   */
+  it('keeps its progress after every id, then the complete record', async () => {
+    const { service, approvals, queued } = await approvedRun();
+    const snapshots: Record<string, unknown>[] = [];
+    const record = jest.spyOn(approvals, 'recordResult');
+    record.mockImplementation(async (_id, result) => {
+      snapshots.push(JSON.parse(JSON.stringify(result)));
+      return true;
+    });
+    void service;
+
+    await approvals.approve(queued.approvalId, approverOf(LEAD), null);
+
+    expect(snapshots.map((snapshot) => snapshot.complete)).toEqual([false, false, true]);
+    expect(snapshots[0]).toMatchObject({
+      complete: false,
+      voidedCount: 1,
+      items: [
+        { intentId: ids.a, result: 'VOIDED', skipReason: null },
+        { intentId: ids.b, result: 'SKIPPED', skipReason: 'NOT_ATTEMPTED' },
+        { intentId: ids.c, result: 'SKIPPED', skipReason: 'NOT_ATTEMPTED' },
+      ],
+    });
+    expect(snapshots[1]).toMatchObject({
+      complete: false,
+      items: [
+        { intentId: ids.a, result: 'VOIDED' },
+        { intentId: ids.b, result: 'SKIPPED', skipReason: 'SEQ_USED_ON_CHAIN' },
+        { intentId: ids.c, skipReason: 'NOT_ATTEMPTED' },
+      ],
+    });
+  });
+
+  it('a crash after the first id leaves that progress stored, not NULL', async () => {
+    const { service, approvals, queued } = await approvedRun();
+    const stored: Record<string, unknown>[] = [];
+    const real = approvals.recordResult.bind(approvals);
+    jest.spyOn(approvals, 'recordResult').mockImplementation(async (id, result) => {
+      stored.push(result);
+      return real(id, result);
+    });
+    const voidOne = (service as unknown as { voidOne: (id: string) => Promise<unknown> }).voidOne;
+    let calls = 0;
+    jest
+      .spyOn(service as unknown as { voidOne: () => Promise<unknown> }, 'voidOne')
+      .mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        calls += 1;
+        // The process dies: nothing after this line runs, `finally` included.
+        if (calls === 2) return new Promise(() => undefined);
+        return (voidOne as (...a: unknown[]) => Promise<unknown>).apply(service, args);
+      });
+
+    void approvals.approve(queued.approvalId, approverOf(LEAD), null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ complete: false, voidedCount: 1 });
+  });
+
   it('a result that cannot be stored never fails the approval', async () => {
     const { approvals, queued } = await approvedRun();
     jest.spyOn(approvals, 'recordResult').mockImplementation(async () => false);

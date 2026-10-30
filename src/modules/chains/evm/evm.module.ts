@@ -52,19 +52,25 @@ import { EVM_RELAYER_FLOAT_GATE, RedeemerFloatGate } from './evm-redeemer-float.
 import { EVM_RELAYER_FLOAT_CRITICAL_WEI } from './evm-relayer-float.constants';
 import {
   DEFAULT_EVM_RELAYER_HOURLY_SPEND_WEI,
+  DEFAULT_EVM_RELAYER_RESERVED_LANE_ACCOUNT_SHARE_BPS,
+  DEFAULT_EVM_RELAYER_RESERVED_LANE_MIN_BALANCE_ATOMIC,
   DEFAULT_EVM_RELAYER_RESERVED_LANE_WEI,
   EVM_RELAYER_HOURLY_BUDGET,
   EVM_RELAYER_HOURLY_SPEND_WEI_ENV,
+  EVM_RELAYER_RESERVED_LANE_ACCOUNT_SHARE_BPS_ENV,
+  EVM_RELAYER_RESERVED_LANE_MIN_BALANCE_ENV,
   EVM_RELAYER_RESERVED_LANE_WEI_ENV,
   EvmRelayerHourlyBudget,
 } from './evm-relayer-hourly-budget';
 import {
   DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
+  DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS,
   EVM_REDEEMER_HOURLY_BUDGET,
   EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
+  EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV,
   EvmRedeemerHourlyBudget,
 } from './evm-redeemer-hourly-budget';
-import { readWeiBudget } from './evm-hourly-wei-budget';
+import { readBps, readWeiBudget } from './evm-hourly-wei-budget';
 import { EVM_REDEEMER_SEND_FLOAT, EvmSendFloat, parseSendReserveWei } from './evm-send-float';
 import { EvmSlashRecordRepository } from '@database/postgres/repositories/evm-slash-record.repository';
 import { loadChainParamsFallback } from './chain-params-fallback';
@@ -445,6 +451,19 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
                 DEFAULT_EVM_RELAYER_RESERVED_LANE_WEI,
                 EVM_RELAYER_RESERVED_LANE_WEI_ENV,
               ),
+              {
+                // Review 2026-10-30 I-3: who may use the reserved lane, and how much of it.
+                reservedMinBalanceAtomic: readWeiBudget(
+                  config.get<string>(EVM_RELAYER_RESERVED_LANE_MIN_BALANCE_ENV),
+                  DEFAULT_EVM_RELAYER_RESERVED_LANE_MIN_BALANCE_ATOMIC,
+                  EVM_RELAYER_RESERVED_LANE_MIN_BALANCE_ENV,
+                ),
+                reservedAccountShareBps: readBps(
+                  config.get<string>(EVM_RELAYER_RESERVED_LANE_ACCOUNT_SHARE_BPS_ENV),
+                  DEFAULT_EVM_RELAYER_RESERVED_LANE_ACCOUNT_SHARE_BPS,
+                  EVM_RELAYER_RESERVED_LANE_ACCOUNT_SHARE_BPS_ENV,
+                ),
+              },
             )
           : null,
       inject: [{ token: CacheService, optional: true }, ConfigService],
@@ -465,6 +484,15 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
                 DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
                 EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
               ),
+              () => Date.now(),
+              {
+                // Review 2026-10-30 I-2: one provider's most of the hour.
+                providerShareBps: readBps(
+                  config.get<string>(EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV),
+                  DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS,
+                  EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV,
+                ),
+              },
             )
           : null,
       inject: [{ token: CacheService, optional: true }, ConfigService, ALERT_PORT],

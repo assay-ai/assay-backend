@@ -574,13 +574,15 @@ describe('EvmGasGrantService', () => {
       const outcome = await service.grantWithdrawGas(ORGANIZATION, BUYER);
 
       expect(outcome).toEqual({ kind: 'REFUSED', reason: 'RELAYER_FLOAT_LOW' });
-      // Charged in wei — the grant plus its own transfer — on the reserved lane:
-      // a matured withdrawal means the account holds escrow.
+      // Charged in wei — the grant plus its own transfer. The reserved lane is
+      // NOT granted by default (review 2026-10-30 I-3): the budget judges the
+      // escrow read the grant already made, against the lane's minimum.
       const wei = (ESTIMATED_GAS * feePerGas * 12n) / 10n;
       expect(take).toHaveBeenCalledWith(CHAIN, {
         wei: wei + 21_000n * feePerGas,
         purpose: 'withdraw gas grant',
-        funded: true,
+        account: BUYER,
+        escrow: { balance: 1_000_000n, withdrawRequested: 5_000_000n },
       });
       expect(sendValue).not.toHaveBeenCalled();
       expect(grants.reservations.size).toBe(0);

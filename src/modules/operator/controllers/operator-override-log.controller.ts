@@ -6,11 +6,13 @@ import { OperatorApprovalRepository } from '@database/postgres/repositories/oper
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { ApiCursorPage, CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
-import { OperatorAuthGuard, OperatorRolesGuard } from '@shared/auth';
+import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard } from '@shared/auth';
 
+import { mayReadDebtVoidResult } from '../domain/debt-void-visibility';
 import { lookupOverride, OverrideFamily } from '../domain/override-register';
 import { ListOverrideLogQueryDto, OverrideLogEntryDto } from '../dto/operator-console.dto';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
+import { OperatorSession } from '../ports/operator-session.port';
 import { debtVoidOutcome, DEBT_VOID_TARGET } from '../services/operator-buyer-debt.service';
 
 /**
@@ -48,7 +50,10 @@ export class OperatorOverrideLogController {
   @Get()
   @ApiOperation({ summary: 'Every manual intervention, newest first' })
   @ApiCursorPage(OverrideLogEntryDto)
-  async list(@Query() query: ListOverrideLogQueryDto): Promise<CursorPageDto<OverrideLogEntryDto>> {
+  async list(
+    @CurrentOperator() operator: OperatorSession,
+    @Query() query: ListOverrideLogQueryDto,
+  ): Promise<CursorPageDto<OverrideLogEntryDto>> {
     const page = await paginate(
       this.entries.feedQueryBuilder({
         family: query.family,
@@ -63,7 +68,13 @@ export class OperatorOverrideLogController {
     );
 
     const subjects = await this.resolveSubjects(page.items);
-    const outcomes = await this.debtVoidOutcomes(page.items);
+    // What a bulk debt void did (intent ids, amounts) is for TRE and ADJL only
+    // (review 2026-10-30 M-5): any other operator reads `outcome: null`, and
+    // the rest of the entry unchanged. Not even read for them.
+    const mayReadOutcome = mayReadDebtVoidResult(operator.roles);
+    const outcomes = mayReadOutcome
+      ? await this.debtVoidOutcomes(page.items)
+      : new Map<string, ReturnType<typeof debtVoidOutcome>>();
 
     const items: OverrideLogEntryDto[] = page.items.map((row) => ({
       id: row.id,

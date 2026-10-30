@@ -41,6 +41,7 @@ export interface EvmRelayClient {
   waitForTransactionReceipt(args: { hash: `0x${string}`; timeout?: number }): Promise<{
     status: 'success' | 'reverted';
     gasUsed: bigint;
+    effectiveGasPrice?: bigint;
     blockNumber: bigint;
   }>;
   call(args: {
@@ -318,6 +319,7 @@ export class EvmRelayer implements EvmRelayerPort {
         status: 'SUCCESS',
         revertReason: null,
         gasUsed: receipt.gasUsed,
+        ...priceOf(receipt),
         blockNumber: receipt.blockNumber,
       };
     }
@@ -329,6 +331,7 @@ export class EvmRelayer implements EvmRelayerPort {
         await this.revertDataFor(client, account.address, tx, receipt.blockNumber),
       ),
       gasUsed: receipt.gasUsed,
+      ...priceOf(receipt),
       blockNumber: receipt.blockNumber,
     };
   }
@@ -461,4 +464,11 @@ export class EvmRelayer implements EvmRelayerPort {
     }
     return client;
   }
+}
+
+/** The receipt's `effectiveGasPrice`, when it carries one (review 2026-10-30 M-2). */
+function priceOf(receipt: { effectiveGasPrice?: bigint }): { effectiveGasPrice?: bigint } {
+  return typeof receipt.effectiveGasPrice === 'bigint'
+    ? { effectiveGasPrice: receipt.effectiveGasPrice }
+    : {};
 }
