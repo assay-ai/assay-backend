@@ -7,8 +7,10 @@ import {
   REDEEMER_FLOAT_FLAG_TTL_SECONDS,
   REDEEMER_FLOAT_GATE_ALERTS,
   REDEEMER_FLOAT_READ_CACHE_MS,
+  RELAYER_FLOAT_GATE_ALERTS,
   RedeemerFloatGate,
   redeemerFloatCriticalKey,
+  relayerFloatCriticalKey,
 } from '@modules/chains/evm/evm-redeemer-float.gate';
 import { parseFloatMarks } from '@modules/chains/evm/evm-relayer-float.constants';
 import { EvmRelayerFloatMonitor } from '@modules/chains/evm/evm-relayer-float.monitor';
@@ -203,7 +205,7 @@ describe('RedeemerFloatGate', () => {
       ]);
     });
 
-    it('never pauses on the RELAYER float, which no served call depends on', async () => {
+    it('never pauses paid calls on the RELAYER float: it closes relayed requests instead', async () => {
       const monitor = new EvmRelayerFloatMonitor(
         port(async () => CRITICAL_WEI),
         alerts as unknown as AlertPort,
@@ -215,6 +217,41 @@ describe('RedeemerFloatGate', () => {
 
       await monitor.check();
       expect(redis.values.has(KEY)).toBe(false);
+      expect(redis.values.get(relayerFloatCriticalKey(TESTNET))).toBe('1');
+      expect(await gate.isPaused(TESTNET)).toBe(false);
+      expect(await gate.isRelayerCritical(TESTNET)).toBe(true);
+    });
+  });
+
+  describe('the relayer flag', () => {
+    it('is its own key, with its own pause and resume alerts', async () => {
+      await gate.publish(TESTNET, 'CRITICAL', 'relayer');
+      await gate.publish(TESTNET, 'CRITICAL', 'relayer');
+      expect(redis.values.get(relayerFloatCriticalKey(TESTNET))).toBe('1');
+      expect(redis.ttls.get(relayerFloatCriticalKey(TESTNET))).toBe(
+        REDEEMER_FLOAT_FLAG_TTL_SECONDS,
+      );
+      expect(redis.values.has(KEY)).toBe(false);
+
+      await gate.publish(TESTNET, 'OK', 'relayer');
+      expect(redis.values.has(relayerFloatCriticalKey(TESTNET))).toBe(false);
+      expect(alertNames()).toEqual([
+        RELAYER_FLOAT_GATE_ALERTS.PAUSED,
+        RELAYER_FLOAT_GATE_ALERTS.RESUMED,
+      ]);
+    });
+
+    it('is read apart from the redeemer flag, and fails open the same way', async () => {
+      redis.values.set(KEY, '1');
+      expect(await gate.isRelayerCritical(TESTNET)).toBe(false);
+      expect(await gate.isPaused(TESTNET)).toBe(true);
+
+      const other = new RedeemerFloatGate(
+        { getRedisClient: () => redis } as unknown as CacheService,
+        alerts as unknown as AlertPort,
+      );
+      redis.failWith = new Error('ECONNREFUSED');
+      expect(await other.isRelayerCritical(TESTNET)).toBe(false);
     });
   });
 });

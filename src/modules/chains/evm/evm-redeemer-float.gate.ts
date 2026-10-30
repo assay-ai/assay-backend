@@ -5,6 +5,7 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
+import type { EvmSendingKey } from './evm-relayer-float.constants';
 import type { FloatLevel } from './evm-relayer-float.monitor';
 
 /**
@@ -12,10 +13,33 @@ import type { FloatLevel } from './evm-relayer-float.monitor';
  * of `EvmRelayerFloatMonitor` read that chain's REDEEMER float at or below its
  * critical mark.
  */
+/**
+ * DI token: the gate as `EvmModule` provides it to the relayed-request path, or
+ * `null` in a process without Redis.
+ */
+export const EVM_RELAYER_FLOAT_GATE = 'EVM_RELAYER_FLOAT_GATE';
+
 export const REDEEMER_FLOAT_CRITICAL_KEY_PREFIX = 'assay:evm-redeemer-float-critical';
 
 export function redeemerFloatCriticalKey(chainId: ChainId): string {
   return `${REDEEMER_FLOAT_CRITICAL_KEY_PREFIX}:${chainId}`;
+}
+
+/**
+ * `assay:evm-relayer-float-critical:<chainId>`: the same flag for the RELAYER's
+ * float, which pays for relayed `*BySig` requests, gas grants and slash sends.
+ * While it is set, relayed requests are refused with the 503 "try again
+ * shortly" (`relayedIntentUnavailable`), and the float left is kept for slash
+ * sends.
+ */
+export const RELAYER_FLOAT_CRITICAL_KEY_PREFIX = 'assay:evm-relayer-float-critical';
+
+export function relayerFloatCriticalKey(chainId: ChainId): string {
+  return `${RELAYER_FLOAT_CRITICAL_KEY_PREFIX}:${chainId}`;
+}
+
+function floatCriticalKey(chainId: ChainId, key: EvmSendingKey): string {
+  return key === 'relayer' ? relayerFloatCriticalKey(chainId) : redeemerFloatCriticalKey(chainId);
 }
 
 /**
@@ -38,6 +62,11 @@ export const PAID_CALLS_PAUSED_RETRY_AFTER_SECONDS = 60;
 export const REDEEMER_FLOAT_GATE_ALERTS = {
   PAUSED: 'paid_calls_paused_redeemer_float',
   RESUMED: 'paid_calls_resumed_redeemer_float',
+} as const;
+
+export const RELAYER_FLOAT_GATE_ALERTS = {
+  PAUSED: 'relayed_requests_paused_relayer_float',
+  RESUMED: 'relayed_requests_resumed_relayer_float',
 } as const;
 
 interface CachedRead {
@@ -95,7 +124,7 @@ interface CachedRead {
 @Injectable()
 export class RedeemerFloatGate {
   private readonly logger = new Logger(RedeemerFloatGate.name);
-  private readonly reads = new Map<ChainId, CachedRead>();
+  private readonly reads = new Map<string, CachedRead>();
 
   constructor(
     private readonly cache: CacheService,
@@ -105,27 +134,36 @@ export class RedeemerFloatGate {
   // ── The scheduler's half ─────────────────────────────────────────────────
 
   /**
-   * Records one redeemer reading. Never throws: the monitor's next chain must
-   * still be read, and a lost write is bounded by the TTL.
+   * Records one reading of `sender`'s float (the redeemer's unless named).
+   * Never throws: the monitor's next chain must still be read, and a lost
+   * write is bounded by the TTL. The relayer's flag works exactly like the
+   * redeemer's and closes relayed requests rather than paid calls.
    */
-  async publish(chainId: ChainId, level: FloatLevel): Promise<void> {
+  async publish(
+    chainId: ChainId,
+    level: FloatLevel,
+    sender: EvmSendingKey = 'redeemer',
+  ): Promise<void> {
     if (level !== 'CRITICAL' && level !== 'OK' && level !== 'LOW') return;
-    const key = redeemerFloatCriticalKey(chainId);
+    const key = floatCriticalKey(chainId, sender);
     const redis = this.cache.getRedisClient();
+    const relayer = sender === 'relayer';
     try {
       if (level === 'CRITICAL') {
         const set = await redis.set(key, '1', 'EX', REDEEMER_FLOAT_FLAG_TTL_SECONDS, 'NX');
         if (set === 'OK') {
           await this.emit({
             severity: AlertSeverity.CRITICAL,
-            name: REDEEMER_FLOAT_GATE_ALERTS.PAUSED,
-            summary: `New paid calls on ${chainId} are refused until the EVM redeemer is topped up`,
+            name: relayer ? RELAYER_FLOAT_GATE_ALERTS.PAUSED : REDEEMER_FLOAT_GATE_ALERTS.PAUSED,
+            summary: relayer
+              ? `Relayed escrow requests on ${chainId} are refused until the EVM relayer is topped up`
+              : `New paid calls on ${chainId} are refused until the EVM redeemer is topped up`,
             details: {
               chainId,
               key,
               retryAfterSeconds: PAID_CALLS_PAUSED_RETRY_AFTER_SECONDS,
               flagTtlSeconds: REDEEMER_FLOAT_FLAG_TTL_SECONDS,
-              resumes: 'on the first monitor pass that reads the redeemer above its critical mark',
+              resumes: `on the first monitor pass that reads the ${sender} above its critical mark`,
             },
           });
         } else {
@@ -136,14 +174,16 @@ export class RedeemerFloatGate {
       if ((await redis.del(key)) > 0) {
         await this.emit({
           severity: AlertSeverity.WARN,
-          name: REDEEMER_FLOAT_GATE_ALERTS.RESUMED,
-          summary: `Paid calls on ${chainId} are admitted again: the EVM redeemer float is above its critical mark`,
+          name: relayer ? RELAYER_FLOAT_GATE_ALERTS.RESUMED : REDEEMER_FLOAT_GATE_ALERTS.RESUMED,
+          summary: relayer
+            ? `Relayed escrow requests on ${chainId} are admitted again: the EVM relayer float is above its critical mark`
+            : `Paid calls on ${chainId} are admitted again: the EVM redeemer float is above its critical mark`,
           details: { chainId, key, level },
         });
       }
     } catch (error) {
       this.logger.error(
-        `the redeemer float flag for ${chainId} was not written (${level}); ` +
+        `the ${sender} float flag for ${chainId} was not written (${level}); ` +
           `admission keeps its last state until the flag's TTL. ${describe(error)}`,
       );
     }
@@ -153,31 +193,46 @@ export class RedeemerFloatGate {
 
   /** Whether new paid calls on `chainId` are refused. Never throws. */
   async isPaused(chainId: ChainId): Promise<boolean> {
+    return this.isCritical(chainId, 'redeemer');
+  }
+
+  /**
+   * Whether relayed escrow requests on `chainId` are refused: the RELAYER's
+   * float is at or below its critical mark. Never throws, and fails open
+   * exactly like {@link isPaused}.
+   */
+  async isRelayerCritical(chainId: ChainId): Promise<boolean> {
+    return this.isCritical(chainId, 'relayer');
+  }
+
+  private async isCritical(chainId: ChainId, sender: EvmSendingKey): Promise<boolean> {
     if (namespaceOf(chainId) !== ChainNamespace.EIP155) return false;
     const now = Date.now();
-    const cached = this.reads.get(chainId);
+    const cacheKey = `${sender}:${chainId}`;
+    const cached = this.reads.get(cacheKey);
     if (cached && cached.until > now) return cached.paused;
+    const what = sender === 'relayer' ? 'relayed requests' : 'paid calls';
 
     let paused = false;
     try {
       const value = await withRedisTimeout(() =>
-        this.cache.getRedisClient().get(redeemerFloatCriticalKey(chainId)),
+        this.cache.getRedisClient().get(floatCriticalKey(chainId, sender)),
       );
       paused = value !== null;
     } catch (error) {
       this.logger.warn(
-        `the redeemer float flag for ${chainId} could not be read; admitting paid calls. ` +
+        `the ${sender} float flag for ${chainId} could not be read; admitting ${what}. ` +
           describe(error),
       );
     }
     if ((cached?.paused ?? false) !== paused) {
       this.logger.warn(
         paused
-          ? `paid calls on ${chainId} paused: the redeemer float is critical`
-          : `paid calls on ${chainId} admitted again`,
+          ? `${what} on ${chainId} paused: the ${sender} float is critical`
+          : `${what} on ${chainId} admitted again`,
       );
     }
-    this.reads.set(chainId, { paused, until: now + REDEEMER_FLOAT_READ_CACHE_MS });
+    this.reads.set(cacheKey, { paused, until: now + REDEEMER_FLOAT_READ_CACHE_MS });
     return paused;
   }
 

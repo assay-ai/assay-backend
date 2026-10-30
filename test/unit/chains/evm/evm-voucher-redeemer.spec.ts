@@ -18,6 +18,8 @@ import {
 } from '@modules/chains/evm/evm-voucher-redeemer.service';
 import { EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM } from '@modules/chains/evm/evm-l1-gas';
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
+import { EvmSendFloat } from '@modules/chains/evm/evm-send-float';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import {
   EvmRelayedCall,
   EvmRelayResult,
@@ -148,7 +150,7 @@ interface ChainState {
   simulatedGas: bigint[];
 }
 
-function harness(overrides: Partial<ChainState> = {}) {
+function harness(overrides: Partial<ChainState> = {}, float: EvmSendFloat | null = null) {
   const state: ChainState = {
     paused: false,
     redeemer: REDEEMER,
@@ -291,6 +293,8 @@ function harness(overrides: Partial<ChainState> = {}) {
     alerts,
     { now: () => state.wallClock * 1000 },
     { isLive: async () => state.tightenDelay },
+    null,
+    float,
   );
 
   return { redeemer, sendCall, emitted, state };
@@ -1364,5 +1368,126 @@ describe('EvmVoucherRedeemer — the L1 half of the gas (Nitro)', () => {
 
     expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
     expect(sendCall.mock.calls[0][0].gasLimit).toBe(budget(1));
+  });
+});
+
+describe('EvmVoucherRedeemer — sized to the redeemer float', () => {
+  const GWEI = 1_000_000_000n;
+  const budget = (n: number) => EVM_REDEEM_BATCH_BASE_GAS + EVM_REDEEM_PER_VOUCHER_GAS * BigInt(n);
+  const RESERVE = 100_000_000_000_000n; // 1e14
+
+  function float(balanceWei: bigint, reserve = RESERVE) {
+    return new EvmSendFloat(
+      {
+        balanceWei: async () => balanceWei,
+        feesPerGas: async () => ({ maxFeePerGas: GWEI, maxPriorityFeePerGas: 0n }),
+      },
+      reserve,
+    );
+  }
+
+  /** A voucher within the fee-cap waiver window of its on-chain deadline. */
+  function urgent(index: number): RedeemVoucherRequest {
+    const expiresAt = NOW - EVM_CONSTANTS.REDEEM_GRACE_SECONDS + 600;
+    return request(index, { issuedAt: expiresAt - 60, expiresAt });
+  }
+
+  it('cuts the batch to what the float pays over the reserve, and leaves the rest unattempted', async () => {
+    // Two fit (440k gas × 1 gwei), three do not (560k).
+    const { redeemer, sendCall } = harness({}, float(budget(2) * GWEI + RESERVE));
+
+    const outcomes = await redeemer.redeemBatch([0, 1, 2, 3].map((i) => request(i)));
+
+    expect(sendCall).toHaveBeenCalledTimes(1);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual(
+      [0, 1].map((i) => payerAddress(i).toLowerCase()),
+    );
+    expect(sendCall.mock.calls[0][0].gasLimit).toBe(budget(2));
+    expect(outcomes[0].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(outcomes[1].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    // Empty: "not attempted", which the redemption pass blocks for the pass.
+    expect(outcomes[2]).toBeUndefined();
+    expect(outcomes[3]).toBeUndefined();
+  });
+
+  it('ends the pass, broadcasting and recording nothing, when not even one fits', async () => {
+    const { redeemer, sendCall, state } = harness({}, float(budget(1) * GWEI + RESERVE - 1n));
+    const recordAttempt = jest.fn(async () => undefined);
+
+    const error = await redeemer
+      .redeemBatch([request(0, { recordAttempt }), request(1, { recordAttempt })])
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(EvmSendRejectedError);
+    expect((error as EvmSendRejectedError).reason).toBe('INSUFFICIENT_FUNDS');
+    expect((error as EvmSendRejectedError).hash).toBeNull();
+    expect(sendCall).not.toHaveBeenCalled();
+    expect(state.simulated).toEqual([]);
+    expect(recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('refuses a single the float cannot pay the same way', async () => {
+    const { redeemer, sendCall } = harness({}, float(RESERVE));
+
+    await expect(redeemer.redeem(request(0))).rejects.toBeInstanceOf(EvmSendRejectedError);
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('lets an urgent voucher spend the reserve, and pays it before anything else', async () => {
+    // Above the reserve there is nothing; the reserve covers one redemption.
+    const reserve = budget(1) * GWEI;
+    const { redeemer, sendCall } = harness({}, float(reserve, reserve));
+
+    const outcomes = await redeemer.redeemBatch([request(0), request(1), urgent(2)]);
+
+    expect(sendCall).toHaveBeenCalledTimes(1);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual([payerAddress(2).toLowerCase()]);
+    expect(outcomes[2].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    // Not thrown away with a throw: the ordinary ones are just not attempted.
+    expect(outcomes[0]).toBeUndefined();
+    expect(outcomes[1]).toBeUndefined();
+  });
+
+  it('keeps what an earlier batch did when the node refuses the next one for funds', async () => {
+    const { redeemer, sendCall } = harness({}, float(10n ** 18n));
+    sendCall
+      .mockResolvedValueOnce({
+        hash: '0xfeed',
+        status: 'SUCCESS',
+        revertReason: null,
+        gasUsed: 1n,
+        blockNumber: 1n,
+      })
+      .mockRejectedValueOnce(new EvmSendRejectedError('INSUFFICIENT_FUNDS', '0xabc'));
+
+    const outcomes = await redeemer.redeemBatch([urgent(0), request(1)]);
+
+    expect(outcomes[0].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(outcomes[1]).toBeUndefined();
+  });
+
+  it('sends an urgent voucher as its own batch, so it does not lift the fee cap for the rest', async () => {
+    const { redeemer, sendCall } = harness({
+      nodeInterface: fakeNodeInterface({ l1Gas: 20_000_000n }),
+    });
+
+    const outcomes = await redeemer.redeemBatch([request(0), urgent(1), request(2)]);
+
+    expect(sendCall).toHaveBeenCalledTimes(1);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual([payerAddress(1).toLowerCase()]);
+    expect(outcomes[1].kind).toBe(RedeemOutcomeKind.REDEEMED);
+    expect(outcomes[0].programError).toBe(FEE_SPIKE_DEFERRED);
+    expect(outcomes[2].programError).toBe(FEE_SPIKE_DEFERRED);
+  });
+
+  it('sends urgent and ordinary vouchers as two batches, urgent first, when fees are normal', async () => {
+    const { redeemer, sendCall } = harness();
+
+    const outcomes = await redeemer.redeemBatch([request(0), urgent(1)]);
+
+    expect(sendCall).toHaveBeenCalledTimes(2);
+    expect(batchedPayers(sendCall.mock.calls[0][0])).toEqual([payerAddress(1).toLowerCase()]);
+    expect(batchedPayers(sendCall.mock.calls[1][0])).toEqual([payerAddress(0).toLowerCase()]);
+    expect(outcomes.every((o) => o.kind === RedeemOutcomeKind.REDEEMED)).toBe(true);
   });
 });

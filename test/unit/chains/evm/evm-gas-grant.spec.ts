@@ -8,6 +8,7 @@ import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.
 import { AccountId, AssetId, CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import {
   EVM_GAS_GRANT_MAX_WEI_ENV,
   EVM_GAS_GRANT_DAILY_MAX_WEI_ENV,
@@ -135,6 +136,7 @@ describe('EvmGasGrantService', () => {
   let sendCall: jest.Mock<Promise<EvmRelayResult>, [EvmRelayedCall]>;
   let alerts: { emit: jest.Mock<Promise<void>, [Alert]> };
   let service: EvmGasGrantService;
+  let build: (hourly?: { take: jest.Mock } | null) => EvmGasGrantService;
 
   const reading = (): EscrowChainBalance => ({
     balance: MoneyUtil.of('1000000', ASSET as AssetId, 6),
@@ -179,30 +181,33 @@ describe('EvmGasGrantService', () => {
       sendValue,
     };
 
-    service = new EvmGasGrantService(
-      grants as never,
-      { read: async () => reading() } as never,
-      relayer,
-      new Map([
-        [
-          CHAIN as ChainId,
-          {
-            estimateGas: async () => ESTIMATED_GAS,
-            estimateFeesPerGas: async () => ({
-              maxFeePerGas: feePerGas,
-              maxPriorityFeePerGas: feePerGas / 10n,
-            }),
-            getBalance: async () => buyerBalance,
-            getBlock: async () => ({ timestamp: chainSeconds }),
-            getCode: async () => buyerCode,
-          },
-        ],
-      ]),
-      new Map([[CHAIN as ChainId, DEPLOYMENT]]),
-      CAPS,
-      alerts as unknown as AlertPort,
-      { now: () => serverSeconds * 1000 },
-    );
+    build = (hourly = null) =>
+      new EvmGasGrantService(
+        grants as never,
+        { read: async () => reading() } as never,
+        relayer,
+        new Map([
+          [
+            CHAIN as ChainId,
+            {
+              estimateGas: async () => ESTIMATED_GAS,
+              estimateFeesPerGas: async () => ({
+                maxFeePerGas: feePerGas,
+                maxPriorityFeePerGas: feePerGas / 10n,
+              }),
+              getBalance: async () => buyerBalance,
+              getBlock: async () => ({ timestamp: chainSeconds }),
+              getCode: async () => buyerCode,
+            },
+          ],
+        ]),
+        new Map([[CHAIN as ChainId, DEPLOYMENT]]),
+        CAPS,
+        alerts as unknown as AlertPort,
+        { now: () => serverSeconds * 1000 },
+        hourly,
+      );
+    service = build();
   });
 
   // ── The grant ────────────────────────────────────────────────────────────
@@ -543,6 +548,53 @@ describe('EvmGasGrantService', () => {
     await expect(service.grantWithdrawGas(ORGANIZATION, BUYER)).rejects.toThrow(/socket hang up/);
 
     expect(grants.reservations.get(BUYER)).toBe(NOW_SECONDS * 1000);
+  });
+
+  it.each([
+    ['INSUFFICIENT_FUNDS', 'RELAYER_FLOAT_LOW'],
+    ['NONCE_TOO_LOW', 'TRANSFER_FAILED'],
+  ] as const)(
+    'gives the reservation back when the NODE refused the transfer (%s): it was never broadcast',
+    async (reason, refusal) => {
+      sendValue.mockRejectedValue(new EvmSendRejectedError(reason, null));
+
+      const outcome = await service.grantWithdrawGas(ORGANIZATION, BUYER);
+
+      expect(outcome).toEqual({ kind: 'REFUSED', reason: refusal });
+      expect(grants.reservations.size).toBe(0);
+      expect(grants.rows).toHaveLength(0);
+    },
+  );
+
+  describe('the relayer’s global hourly budget', () => {
+    it('refuses RELAYER_FLOAT_LOW when it is spent, sends nothing, and releases the reservation', async () => {
+      const take = jest.fn().mockResolvedValue(false);
+      service = build({ take });
+
+      const outcome = await service.grantWithdrawGas(ORGANIZATION, BUYER);
+
+      expect(outcome).toEqual({ kind: 'REFUSED', reason: 'RELAYER_FLOAT_LOW' });
+      expect(take).toHaveBeenCalledWith(CHAIN, 'withdraw gas grant');
+      expect(sendValue).not.toHaveBeenCalled();
+      expect(grants.reservations.size).toBe(0);
+    });
+
+    it('is not touched by a grant refused for a free reason', async () => {
+      const take = jest.fn().mockResolvedValue(true);
+      service = build({ take });
+      buyerBalance = 10n ** 18n;
+
+      await service.grantWithdrawGas(ORGANIZATION, BUYER);
+
+      expect(take).not.toHaveBeenCalled();
+    });
+
+    it('grants when there is room', async () => {
+      const take = jest.fn().mockResolvedValue(true);
+      service = build({ take });
+
+      expect((await service.grantWithdrawGas(ORGANIZATION, BUYER)).kind).toBe('GRANTED');
+    });
   });
 
   it('takes over a reservation older than the lease, and says so', async () => {

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { encodeFunctionData, getAddress, isAddress } from 'viem';
 
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
@@ -17,6 +17,8 @@ import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_RELAYER_FLOAT_LOW_WEI } from './evm-relayer-float.constants';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EVM_RELAYER_HOURLY_BUDGET, EvmRelayerHourlyBudget } from './evm-relayer-hourly-budget';
+import { isInsufficientFunds, isSendRejected } from './evm-send-rejected.error';
 
 /**
  * The four read calls this service makes, and **no send**.
@@ -303,6 +305,13 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
     @Inject(EVM_GAS_GRANT_CAPS) private readonly caps: EvmGasGrantCaps | null,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(EVM_GAS_GRANT_CONFIG) private readonly config: EvmGasGrantConfig,
+    /**
+     * The relayer's global hourly send budget, shared with relayed requests.
+     * Absent: not checked.
+     */
+    @Optional()
+    @Inject(EVM_RELAYER_HOURLY_BUDGET)
+    private readonly hourly: Pick<EvmRelayerHourlyBudget, 'take'> | null = null,
   ) {}
 
   /**
@@ -483,13 +492,36 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
       );
     }
 
+    // 7b. The relayer's global hourly budget, across every buyer. Taken only
+    //     once this grant holds the reservation, so a grant refused above
+    //     costs it nothing. Spent: the float cannot cover it right now.
+    if (this.hourly && !(await this.hourly.take(chainId, 'withdraw gas grant'))) {
+      await this.release(account);
+      return refuse(GasGrantRefusal.RELAYER_FLOAT_LOW);
+    }
+
     // 8. Send. `sendValue`, and only `sendValue` — see the class comment.
-    const sent = await this.relayer.sendValue({
-      chainId,
-      to: account,
-      wei,
-      purpose: 'withdraw-gas-grant',
-    });
+    let sent: Awaited<ReturnType<EvmRelayerPort['sendValue']>>;
+    try {
+      sent = await this.relayer.sendValue({
+        chainId,
+        to: account,
+        wei,
+        purpose: 'withdraw-gas-grant',
+      });
+    } catch (error) {
+      // The node REFUSED it, so it was definitely not broadcast: nothing was
+      // funded and the reservation goes back at once. Any other throw leaves
+      // the outcome unknown and keeps the reservation (see below).
+      if (!isSendRejected(error)) throw error;
+      this.logger.error(`gas grant transfer to ${account} was refused: ${error.message}`);
+      await this.release(account);
+      return refuse(
+        isInsufficientFunds(error)
+          ? GasGrantRefusal.RELAYER_FLOAT_LOW
+          : GasGrantRefusal.TRANSFER_FAILED,
+      );
+    }
 
     if (sent.status !== 'SUCCESS') {
       // The chain answered and refused: there is a receipt, and nothing was
