@@ -15,6 +15,7 @@ import {
   parseFloatMarks,
 } from './evm-relayer-float.constants';
 import { RedeemerFloatGate } from './evm-redeemer-float.gate';
+import { EvmChainClockMonitor } from './evm-chain-clock.monitor';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
 import { EvmEscrowWithdrawalIndexer } from './evm-escrow-withdrawal.indexer';
@@ -110,6 +111,8 @@ function readConfirmations(raw: string | undefined): number {
       inject: [ConfigService, ENABLED_CHAINS],
     },
     EvmRelayerFloatMonitor,
+    // The chain clock check (L-4), run on the float monitor's pass.
+    EvmChainClockMonitor,
     // The writer half of the paid-call pause on a dry redeemer; `PaymentModule`
     // provides the reader half. The state is in Redis (`CacheService` is
     // global), so two instances of the class share it.

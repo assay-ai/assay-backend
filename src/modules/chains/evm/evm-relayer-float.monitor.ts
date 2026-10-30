@@ -16,6 +16,7 @@ import {
   EvmSendingKey,
   floatDedupeKey,
 } from './evm-relayer-float.constants';
+import { EvmChainClockMonitor } from './evm-chain-clock.monitor';
 import { RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EVM_REDEEMER_KEYS_ENV, EVM_RELAYER_KEYS_ENV } from './evm-relayer-key-source';
 import { EVM_REDEEMER, EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
@@ -140,6 +141,11 @@ export class EvmRelayerFloatMonitor {
     @Optional() @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort | null = null,
     /** Optional for the same reason: a test of the readings alone need not build one. */
     @Optional() private readonly gate: RedeemerFloatGate | null = null,
+    /**
+     * The chain clock check (review 2026-10-23 L-4), run on this pass rather
+     * than on a cron of its own. Optional: a test of the floats need not build it.
+     */
+    @Optional() private readonly clock: EvmChainClockMonitor | null = null,
   ) {}
 
   /**
@@ -158,6 +164,16 @@ export class EvmRelayerFloatMonitor {
     } catch (error) {
       this.logger.error(
         `the relayer float check threw past its own error handling: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    // After the floats, and whatever they did: the clock check never throws,
+    // and the catch is only for a fault in it this class did not foresee.
+    try {
+      await this.clock?.check();
+    } catch (error) {
+      this.logger.error(
+        `the chain clock check threw past its own error handling: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
