@@ -883,26 +883,6 @@ export class PaymentIntentService {
     return true;
   }
 
-  /**
-   * Voids a served rail-B call whose voucher the PLATFORM failed to redeem
-   * (redeemer unfunded, transport failure, unknown revert, fee-spike deferral
-   * — incident 2026-10-29): the hold is released, nobody is credited, the
-   * buyer is not charged and is never refused for it. The `voided:` mark
-   * (`reason`) and the release commit together, under the payer's admission
-   * lock (`PaymentIntentRepository.markUnredeemedVoided`), so the call never
-   * counts as debt. `false` when the row is no longer awaiting redemption.
-   */
-  async voidUnredeemed(target: DebtCloseTarget, reason: string): Promise<boolean> {
-    const resolution = await this.ledger.releaseHoldIf(
-      target.organizationId,
-      target.holdId,
-      (runner) => this.intents.markUnredeemedVoided(runner, target, reason),
-    );
-    if (resolution === null) return false;
-    await this.settled(target.organizationId);
-    return true;
-  }
-
   /** `held(payer, seq)` for a rail-B intent, or `null` when there is no chain hold. */
   async readHeldRecord(intent: PaymentIntent) {
     if (!this.held || intent.rail !== PaymentRail.RAIL_B_VOUCHER || !intent.voucherSeq) {

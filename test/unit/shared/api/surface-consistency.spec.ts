@@ -439,6 +439,9 @@ describe('REST surface consistency', () => {
       // The buyer call-dispute queue (G3.B1): disputes filed by tenants, decided
       // by an operator who has none.
       'modules/operator/controllers/operator-call-disputes.controller.ts',
+      // `M-1`, open buyer debts and their two-person bulk void: debts of every
+      // buyer organization, voided by operators who have none.
+      'modules/operator/controllers/operator-buyer-debts.controller.ts',
       // `A-15`–`A-23`: delisting and taking down tool sets and public names,
       // renames and reassignments, and the reports queue. The subject is a
       // publisher who is never the caller.

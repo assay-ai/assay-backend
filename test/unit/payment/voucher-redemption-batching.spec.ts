@@ -90,8 +90,12 @@ class FakeRedeemer {
     return ascending === undefined ? undefined : () => ascending;
   }
 
+  /** Set to make each single `redeem` throw too (a send that fails before the chain answers). */
+  singleThrows = false;
+
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
     this.singles.push(request);
+    if (this.singleThrows) throw new Error('redeemer has no gas');
     return this.outcomeFor(request);
   }
 
@@ -131,7 +135,6 @@ function build(
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     releaseHold: jest.fn().mockResolvedValue(true),
-    voidUnredeemed: jest.fn().mockResolvedValue(true),
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
@@ -363,6 +366,21 @@ describe('VoucherRedemptionService — a chain that redeems any seq order', () =
     expect(redeemer.batches).toHaveLength(1);
     expect(redeemer.singles.map((r) => r.seq)).toEqual(['5', '9']);
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(2);
+  });
+
+  it('a single that throws in the fallback records nothing on the row (owner decision 2026-10-30)', async () => {
+    // A recorded error would cost the buyer the dispute refund guarantee, and
+    // the lapse is buyer debt whatever left it unredeemed.
+    const { service, redeemer, intents, payments } = anyOrder([pending(5, ALICE)], 64);
+    redeemer.batchThrows = true;
+    redeemer.singleThrows = true;
+
+    await service.run(USDC);
+
+    expect(redeemer.singles.map((r) => r.seq)).toEqual(['5']);
+    expect(payments.recordRedemptionError).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });
 
   it('a batch that throws after a ref was recorded is not retried singly this pass', async () => {

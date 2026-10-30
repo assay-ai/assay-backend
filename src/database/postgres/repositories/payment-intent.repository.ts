@@ -653,6 +653,53 @@ export interface DuePaymentIntent {
 }
 
 /** The row a debt close (write-off, void) must still be — see `markWrittenOff`. */
+/**
+ * Read on a `SETTLED` rail-B intent: an open buyer debt an operator may void
+ * (`PaymentIntentService.voidDebt`, register row `M-1`) — lapsed, no
+ * replacement in flight, and its hold still open or written off (a written-off
+ * debt still refuses the payer's paid calls, `DEBT_REFUSING_SQL`). The same
+ * predicate `markDebtVoided` closes on.
+ */
+export const OPERATOR_VOIDABLE_DEBT_SQL =
+  `(intent.status = 'SETTLED' AND intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
+  `AND intent.redemption_lapsed_at IS NOT NULL AND intent.redemption_replaced_at IS NULL ` +
+  `AND (intent.hold_released_at IS NULL OR intent.redemption_last_error LIKE 'uncollected:%'))`;
+
+/** The filters of the operator's buyer-debt list. Every field optional. */
+export interface OperatorDebtFilter {
+  readonly chainId?: string;
+  readonly assetId?: string;
+  readonly payerAccount?: string;
+  readonly buyerOrganizationId?: string;
+  readonly providerId?: string;
+  /** The refusal the voucher lapsed on, exactly (`uncollected:` is looked through). */
+  readonly lastError?: string;
+  /** Only rows {@link OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL} labels. */
+  readonly suggestedOnly?: boolean;
+}
+
+/**
+ * The informational label of the operator's debt list: the recorded cause
+ * suggests the PLATFORM failed to redeem — `VoucherExpired` with no other
+ * recorded refusal, a revert with no name (`UNKNOWN_REVERT:*`), or a fee-spike
+ * deferral (`FeeSpikeDeferred`); `uncollected:` is looked through. Never acted
+ * on: a person decides (`M-1`). `OperatorBuyerDebtService.suggestsPlatformCause`
+ * is the same test in code.
+ */
+export const OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL =
+  `(regexp_replace(intent.redemption_last_error, '^uncollected:', '') IN ` +
+  `('VoucherExpired', 'FeeSpikeDeferred') ` +
+  `OR regexp_replace(intent.redemption_last_error, '^uncollected:', '') LIKE 'UNKNOWN\\_REVERT:%')`;
+
+/** One asset's share of the operator's buyer-debt list. */
+export interface OperatorDebtTotal {
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly count: number;
+  /** Atomic units, as an exact decimal string. */
+  readonly amount: string;
+}
+
 export interface DebtCloseTarget {
   readonly organizationId: string;
   readonly id: string;
@@ -1411,59 +1458,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Records a PAYER-side block (`cause`, e.g. `PayerBlocked`) on every rail-B
-   * voucher of `assetId` still awaiting redemption whose payer organization,
-   * payer account or delegate is blocked — on the platform blocklist
-   * (`organizationIds`, `walletKeys`) or on chain (`chainAccounts`). The queue
-   * leaves such rows out, so nothing else records why they are frozen; a
-   * voucher that expires while its payer is blocked must close as buyer debt,
-   * not as a platform failure (whose close records no cause at all).
-   *
-   * Never overwrites a cause in `keep` (provider-caused ones: the provider
-   * still forfeits), a closed outcome, or the same cause. A no-op when nothing
-   * is blocked.
-   */
-  async recordPayerBlocks(
-    assetId: string,
-    blocked: RedemptionExclusions,
-    cause: string,
-    keep: readonly string[],
-  ): Promise<void> {
-    if (!hasExclusions(blocked)) return;
-    const key = (column: string) =>
-      `(split_part("${column}", ':', 1) || ':' || CASE WHEN split_part("${column}", ':', 1) = 'eip155' ` +
-      `THEN lower(split_part("${column}", ':', 3)) ELSE split_part("${column}", ':', 3) END)`;
-    await this.manager.query(
-      `UPDATE "payment_intents"
-          SET "redemption_last_error" = $2
-        WHERE "organization_id" IS NOT NULL
-          AND "asset_id" = $1
-          AND "rail" = 'RAIL_B_VOUCHER'
-          AND "status" = 'SETTLED'
-          AND "hold_id" IS NOT NULL
-          AND "hold_released_at" IS NULL
-          AND ("redemption_lapsed_at" IS NULL OR "redemption_replaced_at" IS NOT NULL)
-          AND ("redemption_last_error" IS NULL OR NOT (
-                "redemption_last_error" = $2
-                OR "redemption_last_error" = ANY($3::text[])
-                OR ${CLOSED_OUTCOME_SQL('"payment_intents"')}))
-          AND ("organization_id"::text = ANY($4::text[])
-               OR ${key('agent_account')} = ANY($5::text[])
-               OR ("voucher_delegate" IS NOT NULL AND ${key('voucher_delegate')} = ANY($5::text[]))
-               OR lower("agent_account") = ANY($6::text[])
-               OR lower("voucher_delegate") = ANY($6::text[]))`,
-      [
-        assetId,
-        cause,
-        [...keep],
-        [...blocked.organizationIds],
-        [...blocked.walletKeys],
-        blocked.chainAccounts.map((account) => account.toLowerCase()),
-      ],
-    );
-  }
-
-  /**
    * Turns a served rail-B call into BUYER DEBT: its voucher can no longer be
    * redeemed for a reason that is not the provider's. The hold stays OPEN, so
    * the amount stays out of the buyer's spendable balance, and nobody is
@@ -1510,6 +1504,35 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [organizationId, payer, limit],
     )) as RawOutstandingDebt[];
     return rows.map(toOutstandingDebt);
+  }
+
+  /**
+   * How many buyer debts each asset gained since `since`, still open
+   * ({@link DEBT_REFUSING_SQL}): the input of the buyer-debt spike alert
+   * (`BuyerDebtSpikeMonitor`). Read from the table rather than counted in
+   * memory, so a restart loses nothing. `assetId` narrows it to one asset.
+   *
+   * Cheap at any table size: the predicate is `idx_payment_intents_open_debt`'s
+   * own, so only the open debts (hundreds, thousands) are visited.
+   * **Deliberately cross-organization**: a spike is a platform incident,
+   * counted over every buyer organization.
+   */
+  async countDebtsLapsedSince(
+    since: Date,
+    assetId?: string,
+  ): Promise<Array<{ assetId: string; count: number }>> {
+    const rows = (await this.manager.query(
+      `SELECT "asset_id" AS "assetId", COUNT(*)::int AS "count"
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND ${DEBT_REFUSING_SQL}
+          AND "rail" = 'RAIL_B_VOUCHER'
+          AND "redemption_lapsed_at" >= $1
+          AND ($2::text IS NULL OR "asset_id" = $2)
+        GROUP BY "asset_id"`,
+      [since, assetId ?? null],
+    )) as Array<{ assetId: string; count: number | string }>;
+    return rows.map((row) => ({ assetId: row.assetId, count: Number(row.count) }));
   }
 
   /**
@@ -1622,36 +1645,80 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Closes a served rail-B call whose voucher the PLATFORM failed to redeem
-   * (incident 2026-10-29): VOIDED, never buyer debt. Inside the ledger
-   * transaction that releases the hold, under the payer's admission lock, in
-   * one statement — the lapse and the `voided:` mark land together with the
-   * release, so the row never matches {@link DEBT_REFUSING_SQL} in between.
-   * `redemption_lapsed_at` is set as on the hand-voided rows of that incident.
-   * Only a row still awaiting redemption: the same hold, still open. `false`
-   * (nothing to release) when it changed underneath.
+   * The operator's buyer-debt list ({@link OPERATOR_VOIDABLE_DEBT_SQL}),
+   * filtered, unordered and unpaged: the caller pages it.
+   *
+   * **Deliberately cross-organization**: the operator console has no tenant
+   * of its own, and the list exists to find the debts one platform incident
+   * left across every buyer organization. `organizationId IS NOT NULL`
+   * satisfies the scoped repository's guard, as on `exportQueryBuilder`.
    */
-  async markUnredeemedVoided(
-    runner: QueryRunner,
-    target: DebtCloseTarget,
-    reason: string,
-  ): Promise<boolean> {
-    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-      `voucher-admission:${target.payer}`,
-    ]);
-    const result = (await runner.query(
-      `UPDATE "payment_intents"
-          SET "redemption_lapsed_at" = COALESCE("redemption_lapsed_at", now()),
-              "redemption_replaced_at" = NULL,
-              "redemption_last_error" = $5,
-              "hold_released_at" = now()
-        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
-          AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
-          AND "hold_released_at" IS NULL
-        RETURNING "id"`,
-      [target.organizationId, target.id, target.payer, target.holdId, reason],
-    )) as [unknown[], number] | unknown[];
-    return affected(result) > 0;
+  operatorDebtsQuery(filter: OperatorDebtFilter): SelectQueryBuilder<PaymentIntentEntity> {
+    const qb = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere(OPERATOR_VOIDABLE_DEBT_SQL);
+    if (filter.chainId) qb.andWhere('intent.chainId = :chainId', { chainId: filter.chainId });
+    if (filter.assetId) qb.andWhere('intent.assetId = :assetId', { assetId: filter.assetId });
+    if (filter.payerAccount) {
+      qb.andWhere('lower(intent.agentAccount) = lower(:payerAccount)', {
+        payerAccount: filter.payerAccount,
+      });
+    }
+    if (filter.buyerOrganizationId) {
+      qb.andWhere('intent.organizationId = :buyerOrganizationId', {
+        buyerOrganizationId: filter.buyerOrganizationId,
+      });
+    }
+    if (filter.providerId) {
+      qb.andWhere('intent.providerId = :providerId', { providerId: filter.providerId });
+    }
+    if (filter.lastError) {
+      qb.andWhere(
+        `(intent.redemption_last_error = :lastError ` +
+          `OR intent.redemption_last_error = ('uncollected:' || :lastError))`,
+        { lastError: filter.lastError },
+      );
+    }
+    if (filter.suggestedOnly) qb.andWhere(OPERATOR_SUGGESTED_PLATFORM_CAUSE_SQL);
+    return qb;
+  }
+
+  /** Count and amount per asset of {@link operatorDebtsQuery}'s rows (cross-organization, as it). */
+  async operatorDebtTotals(
+    qb: SelectQueryBuilder<PaymentIntentEntity>,
+  ): Promise<OperatorDebtTotal[]> {
+    const rows = await qb
+      .select('intent.assetId', 'assetId')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('COUNT(*)::int', 'count')
+      .addSelect('COALESCE(SUM(intent.priceAmount), 0)::text', 'amount')
+      .groupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .orderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        assetId: string;
+        decimals: number | string;
+        count: number | string;
+        amount: string;
+      }>();
+    return rows.map((row) => ({
+      assetId: row.assetId,
+      decimals: Number(row.decimals),
+      count: Number(row.count),
+      amount: String(row.amount),
+    }));
+  }
+
+  /**
+   * The open buyer debts among `ids` ({@link OPERATOR_VOIDABLE_DEBT_SQL}),
+   * read across organizations for the operator's bulk void (`M-1`); an id
+   * that is not one now is simply absent.
+   */
+  async findOperatorDebts(ids: readonly string[]): Promise<PaymentIntentEntity[]> {
+    if (ids.length === 0) return [];
+    return this.operatorDebtsQuery({})
+      .andWhere('intent.id IN (:...ids)', { ids: [...ids] })
+      .getMany();
   }
 
   /**

@@ -280,6 +280,32 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     implemented: false,
   }),
 
+  // ── M · Money ────────────────────────────────────────────────────────────
+  /**
+   * Void open buyer debts in bulk (owner decision 2026-10-30): served rail-B
+   * calls whose vouchers lapsed, judged by a person to be the PLATFORM's
+   * failure to redeem (an unfunded redeemer, an RPC outage). Each hold is
+   * released, the buyer is not charged and its paid calls are no longer
+   * refused, and nobody is credited: the provider is not paid for those calls.
+   * Nothing voids automatically; this row is the only way.
+   *
+   * Always two-person, whatever the amount: a void cannot be undone (the
+   * voucher is dead on chain, so the provider can never be paid for it). The
+   * treasury pair of `S-5`/`S-16` — `TRE` owns the money, `ADJL` judges who
+   * was at fault — as maker and as checker.
+   */
+  'M-1': define({
+    code: 'M-1',
+    family: OverrideFamily.MONEY,
+    action: 'buyer_debt.bulk_voided',
+    label: 'Void buyer debts the platform caused, in bulk',
+    roles: [OperatorRole.TRE, OperatorRole.ADJL],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.TRE, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
+
   // ── V · Verification and quality ─────────────────────────────────────────
   'V-3': define({
     code: 'V-3',

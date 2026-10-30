@@ -33,6 +33,7 @@ import {
   findPaymentIntentTransition,
 } from '../domain/payment-intent-transitions';
 import { PaymentIntentStatus } from '../ports/payment.types';
+import { BuyerDebtSpikeMonitor } from './buyer-debt-spike.monitor';
 import { PaymentIntentService } from './payment-intent.service';
 
 export interface PaymentIntentSweepReport {
@@ -109,6 +110,9 @@ export class PaymentIntentExpiryService {
     // (blocking freezes collection, review-buyer-debt L1). Optional so a
     // spec that builds the sweep by hand need not stand one up.
     @Optional() private readonly blocklist: AccountBlocklistService | null = null,
+    // The buyer-debt spike alert: debts settled here count with the
+    // redemption job's lapses. Optional for the same reason.
+    @Optional() private readonly debtSpike: BuyerDebtSpikeMonitor | null = null,
   ) {}
 
   async sweep(
@@ -419,6 +423,7 @@ export class PaymentIntentExpiryService {
           dedupeKey: VOUCHER_REDEMPTION_ALERTS.VERDICT_DEADLINE_DEBT,
         })
         .catch(() => undefined);
+      await this.debtSpike?.check(now);
     }
     return { settled, failed };
   }
