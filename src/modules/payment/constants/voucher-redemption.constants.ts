@@ -223,6 +223,16 @@ export const PLATFORM_VOID_OUTCOME_PREFIX = 'PLATFORM_';
 export { FEE_SPIKE_DEFERRED } from '../ports/voucher-redeemer.port';
 
 /**
+ * The refusal the redemption job records when its OWN attempt to redeem a
+ * voucher threw before any answer from the chain — an RPC that is down, a
+ * redeemer with no gas to pay for the send (incident 2026-10-29). Written only
+ * on a row with no recorded cause, so it never hides a named one, and any
+ * later named refusal overwrites it. Platform-side: a voucher that expires
+ * with it is voided, never buyer debt.
+ */
+export const PLATFORM_SEND_FAILED = 'PlatformSendFailed';
+
+/**
  * How close to a voucher's on-chain deadline (`expiresAt + redeemGraceSeconds`)
  * the platform stops waiting on it: one redemption pass. A verdict that lands
  * later settles as debt at once, and a voucher still refused by a buyer

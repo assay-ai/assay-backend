@@ -38,7 +38,9 @@ const USDC = ASSET_IDS.USDC_SOLANA_DEVNET;
 const NOW = 1_800_000_000;
 const PROVIDER_ORG_UUID = '44444444-4444-4444-8444-444444444444';
 
-function row() {
+function row(
+  overrides: { redemptionTxRefCount?: number; redemptionLastError?: string | null } = {},
+) {
   return {
     organizationId: 'org-1',
     id: 'intent-1',
@@ -58,6 +60,7 @@ function row() {
     providerId: PROVIDER_ORG_UUID,
     providerAmount: '800000',
     platformFee: '200000',
+    ...overrides,
   };
 }
 
@@ -182,6 +185,7 @@ function build(
   blocklist = noBlocks(),
 ) {
   const refs = new Map<string, string[]>();
+  const errors = new Map<string, string>();
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     findById: jest.fn().mockResolvedValue({ heldStatus: null }),
@@ -190,16 +194,24 @@ function build(
   };
   const payments = {
     recordRedemptionRetry: jest.fn().mockResolvedValue(undefined),
-    findAwaitingRedemption: jest
-      .fn()
-      .mockImplementation(async () =>
-        intents.commitRedeemedHold.mock.calls.length > 0 ? [] : [row()],
-      ),
+    // As the database would: the row carries the refs and the cause recorded so far.
+    findAwaitingRedemption: jest.fn().mockImplementation(async () =>
+      intents.commitRedeemedHold.mock.calls.length > 0
+        ? []
+        : [
+            row({
+              redemptionTxRefCount: (refs.get('intent-1') ?? []).length,
+              redemptionLastError: errors.get('intent-1') ?? null,
+            }),
+          ],
+    ),
     recordRedemptionTxRef: jest.fn(async (_org: string, id: string, ref: string) => {
       refs.set(id, [...(refs.get(id) ?? []), ref]);
     }),
     findRedemptionTxRefs: jest.fn(async (_org: string, id: string) => refs.get(id) ?? []),
-    recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+    recordRedemptionError: jest.fn(async (_org: string, id: string, error: string) => {
+      errors.set(id, error);
+    }),
     lapseRedemption: jest.fn().mockResolvedValue(undefined),
   };
   const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
@@ -552,11 +564,12 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
     clock.nowSeconds = PAST_DEADLINE + 3_600;
     await service.run(USDC);
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    // Only a receipt timeout, never a refusal: the platform's failure, voided.
+    // Only a receipt timeout, never a refusal: the platform's failure
+    // (recorded as its own send failing), voided.
     expect(payments.lapseRedemption).not.toHaveBeenCalled();
     expect(intents.voidUnredeemed).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'intent-1' }),
-      'voided:PLATFORM_UNREDEEMED',
+      'voided:PLATFORM_SEND_FAILED',
     );
   });
 
