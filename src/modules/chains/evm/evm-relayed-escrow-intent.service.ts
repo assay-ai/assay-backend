@@ -15,10 +15,11 @@ import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.t
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
+import { EvmL1GasClient, estimateL1Gas, exceedsCostCap } from './evm-l1-gas';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
- * One read call, and **no send**.
+ * Two read calls, and **no send**.
  *
  * The same structural guarantee `EvmEscrowIntentBuilder` and
  * `EvmGasGrantService` make with their own narrow client interfaces: a class
@@ -27,7 +28,7 @@ import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
  * is {@link EvmRelayerPort.sendCall}'s, which queues nonces, decodes reverts and
  * watches the float.
  */
-export interface EvmRelayedIntentClient {
+export interface EvmRelayedIntentClient extends EvmL1GasClient {
   estimateGas(args: {
     account: `0x${string}`;
     to: `0x${string}`;
@@ -60,6 +61,20 @@ const SECP256K1_SIGNATURE_RE = /^0x[0-9a-fA-F]{130}$/;
  * whatever it comes to.
  */
 export const EVM_RELAYED_INTENT_MAX_GAS = 300_000n;
+
+/**
+ * The most wei one relayed request may cost: `gasLimit` (L1 part included) ×
+ * the L2 basefee. 0.00005 ETH.
+ *
+ * {@link EVM_RELAYED_INTENT_MAX_GAS} bounds the **execution** half only; on a
+ * Nitro chain the L1 half is a fee, not a shape, and it spikes (`evm-l1-gas.ts`).
+ * This is the bound on what a spike may cost: about 20× the ordinary 2.3e-6 ETH
+ * of a `setLimitsBySig`, and about 1/15 of the relayer's 0.00075 ETH float, so
+ * the per-account rate limit still bounds the float in requests. Above it the
+ * request is a 503 "try again shortly" — the fees will come down, the
+ * signature stays valid until its deadline, and nothing was sent.
+ */
+export const EVM_RELAYED_INTENT_MAX_COST_WEI = 50_000_000_000_000n;
 
 /**
  * `RelayedEscrowIntentPort` on `eip155` — **the buyer signs, the relayer
@@ -246,6 +261,10 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
    * a signature that is expired, replayed, malleated or somebody else's costs
    * one RPC round trip, never gas.
    *
+   * A request that is valid but would cost more than
+   * {@link EVM_RELAYED_INTENT_MAX_COST_WEI} right now is not refused: it is a
+   * 503, because the chain did not say no — its fees are briefly high.
+   *
    * Anything that is not revert data — a transport failure, a node that is down
    * — propagates untouched, for the reason `estimateWithdrawGas` gives next
    * door: mapping everything here would answer "the chain refused you" to an
@@ -272,16 +291,37 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       throw SettlementErrors.relayedIntentRefused({ reason: name });
     }
 
+    // On Nitro the estimate is execution + the L1 posting cost in L2 gas. The
+    // ceiling is about the contract's shape, so it applies to execution only;
+    // the L1 half is a fee, bounded by cost below. Off Nitro, L1 is 0 and this
+    // is the check it always was.
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), {
+      account: relayer,
+      to,
+      data,
+    });
+    const execution = estimate > l1Gas ? estimate - l1Gas : 0n;
+
     // 20 % margin, for the reason the builder gives at its own: an estimate is a
     // floor rather than an answer, and a transaction that runs out of gas has
     // still spent it.
-    const gasLimit = (estimate * 12n) / 10n;
-    if (gasLimit > EVM_RELAYED_INTENT_MAX_GAS) {
+    const executionLimit = (execution * 12n) / 10n;
+    if (executionLimit > EVM_RELAYED_INTENT_MAX_GAS) {
       throw SettlementErrors.relayedIntentRefused({
         reason:
-          `the call estimates at ${gasLimit} gas, above the ${EVM_RELAYED_INTENT_MAX_GAS} ` +
+          `the call estimates at ${executionLimit} gas, above the ${EVM_RELAYED_INTENT_MAX_GAS} ` +
           `ceiling a relayed request is allowed to cost`,
       });
+    }
+    // The limit sent covers both halves, each with the margin; the two reads
+    // are a moment apart, so an L1 part above the total is taken as it is.
+    const gasLimit = ((execution + l1Gas) * 12n) / 10n;
+    if (exceedsCostCap(gasLimit, l2BaseFee, EVM_RELAYED_INTENT_MAX_COST_WEI)) {
+      this.logger.warn(
+        `a relayed request on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) at ` +
+          `${l2BaseFee} wei is above the ${EVM_RELAYED_INTENT_MAX_COST_WEI} wei cap`,
+      );
+      throw SettlementErrors.relayedIntentUnavailable({ feeSpike: true });
     }
     return gasLimit;
   }

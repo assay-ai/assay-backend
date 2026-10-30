@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { decodeEventLog, encodeFunctionData, getAddress, isAddress, zeroAddress } from 'viem';
 
 import {
+  FEE_SPIKE_DEFERRED,
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
@@ -23,6 +24,12 @@ import { ASSAY_ESCROW_HOLD_ABI } from './abi/assay-hold.abi';
 import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment, MULTICALL3_ADDRESS } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
+import {
+  EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM,
+  estimateL1Gas,
+  exceedsCostCap,
+  paddedL1Gas,
+} from './evm-l1-gas';
 import {
   freeBondedStake,
   PrevalidationDelegation,
@@ -68,9 +75,22 @@ const UNPLANNED_SLASH_ANSWER_TTL_MS = 30_000;
  * ERC-20. Real USDG is an upgradeable proxy with a blocklist and a
  * redemption performs two transfers, which is what the margin above is for;
  * it has not yet been re-measured against the real token on 46630.
+ *
+ * This is the **execution** budget. On a Nitro chain the limit sent also carries
+ * the L1 posting cost in L2 gas, read per send and padded 20 % (`evm-l1-gas.ts`);
+ * a send whose whole limit would cost more than
+ * `EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM` per voucher is not sent, and every
+ * voucher it carries is a `RETRY` with `programError = FeeSpikeDeferred`.
  */
 export const EVM_REDEEM_BATCH_BASE_GAS = 200_000n;
 export const EVM_REDEEM_PER_VOUCHER_GAS = 120_000n;
+
+/** A send deferred by {@link FEE_SPIKE_DEFERRED}: nothing signed, nothing broadcast. */
+const FEE_SPIKE_DEFERRED_OUTCOME: RedeemOutcome = {
+  kind: RedeemOutcomeKind.RETRY,
+  signature: null,
+  programError: FEE_SPIKE_DEFERRED,
+};
 
 /** The alert a refusal nobody can name raises. */
 export const EVM_REDEEM_UNKNOWN_REVERT_ALERT = 'evm_redeem_unknown_revert';
@@ -289,7 +309,10 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     // so a refusal pre-validation cannot see — the signature, a wallet's answer —
     // costs an `eth_call` and never a mined revert (review S2-2).
     const args = [voucher, this.signatureOf(request)] as const;
-    const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasFor(1));
+    const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'redeemVoucher', args });
+    const gasLimit = await this.gasLimit(chainId, data, 1);
+    if (gasLimit === null) return FEE_SPIKE_DEFERRED_OUTCOME;
+    const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasLimit);
     if (simulated !== null) {
       return this.decided(chainId, simulated, voucher, state);
     }
@@ -297,12 +320,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const result = await this.redeemer.sendCall({
       chainId,
       to: this.escrowAccount(chainId),
-      data: encodeFunctionData({
-        abi: ASSAY_ESCROW_ABI,
-        functionName: 'redeemVoucher',
-        args,
-      }),
-      gasLimit: gasFor(1),
+      data,
+      gasLimit,
       purpose: `redeemVoucher seq=${request.seq}`,
       beforeBroadcast: async (hash) => {
         await request.recordAttempt?.(hash);
@@ -473,12 +492,22 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       admissible.map((i) => vouchers[i]),
       admissible.map((i) => signatures[i]),
     ] as const;
-    const simulated = await this.simulate(
-      chainId,
-      'redeemVoucherBatch',
-      batchArgs,
-      gasFor(admissible.length),
-    );
+    const data = encodeFunctionData({
+      abi: ASSAY_ESCROW_ABI,
+      functionName: 'redeemVoucherBatch',
+      args: batchArgs,
+    });
+    const gasLimit = await this.gasLimit(chainId, data, admissible.length);
+    if (gasLimit === null) {
+      // Not sent, and not split: singles would meet the same fees. Every
+      // admissible item waits for the next pass; the rest are what they are.
+      return refusals.map((name, i) =>
+        name === null
+          ? FEE_SPIKE_DEFERRED_OUTCOME
+          : this.decided(chainId, name, vouchers[i], states[i]),
+      );
+    }
+    const simulated = await this.simulate(chainId, 'redeemVoucherBatch', batchArgs, gasLimit);
     if (simulated !== null) {
       this.logger.warn(
         `A redemption batch of ${admissible.length} would revert with ${simulated}; ` +
@@ -496,12 +525,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const result = await this.redeemer.sendCall({
       chainId,
       to: this.escrowAccount(chainId),
-      data: encodeFunctionData({
-        abi: ASSAY_ESCROW_ABI,
-        functionName: 'redeemVoucherBatch',
-        args: [admissible.map((i) => vouchers[i]), admissible.map((i) => signatures[i])],
-      }),
-      gasLimit: gasFor(admissible.length),
+      data,
+      gasLimit,
       purpose: `redeemVoucherBatch n=${admissible.length}`,
       // One hash, recorded on every voucher it carries.
       beforeBroadcast: async (hash) => {
@@ -609,6 +634,31 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * The limit a redemption of `vouchers` is sent with: the execution budget
+   * plus the L1 part padded 20 %. `null` when that limit at the L2 basefee would
+   * cost more than {@link EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM} per voucher —
+   * nothing is simulated or sent, and the caller defers.
+   */
+  private async gasLimit(
+    chainId: ChainId,
+    data: `0x${string}`,
+    vouchers: number,
+  ): Promise<bigint | null> {
+    const to = getAddress(this.deployment(chainId).escrow);
+    const { l1Gas, l2BaseFee } = await estimateL1Gas(this.client(chainId), { to, data });
+    const gasLimit = gasFor(vouchers) + paddedL1Gas(l1Gas);
+    const maxWei = EVM_BACKGROUND_SEND_MAX_COST_WEI_PER_ITEM * BigInt(vouchers);
+    if (exceedsCostCap(gasLimit, l2BaseFee, maxWei)) {
+      this.logger.warn(
+        `A redemption of ${vouchers} on ${chainId} was deferred: ${gasLimit} gas (L1 ${l1Gas}) ` +
+          `at ${l2BaseFee} wei is above the ${maxWei} wei cap; nothing was sent`,
+      );
+      return null;
+    }
+    return gasLimit;
+  }
 
   /**
    * `eth_call` of the exact redemption, FROM the redeemer and WITH the gas it
