@@ -30,6 +30,7 @@ import {
 } from '@modules/mcp/services/mcp-idempotency.store';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { PaidPriceFloor } from '@modules/payment/domain/paid-price-floor';
 import { IDEMPOTENCY_RELEASED_STATUSES } from '@modules/payment/services/payment-intent.service';
 import {
   PaymentIntent,
@@ -818,6 +819,8 @@ export interface McpHarnessOptions {
   readonly idempotencyConfig?: Partial<McpIdempotencyConfig>;
   /** The paid-call pause on a dry EVM redeemer; absent, nothing is paused. */
   readonly redeemerFloat?: Pick<RedeemerFloatGate, 'isPaused'>;
+  /** The paid-call minimum; absent, the suite's env value (off, `test/setup-env.ts`). */
+  readonly paidPriceFloor?: PaidPriceFloor;
 }
 
 export interface McpHarness {
@@ -926,6 +929,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
             depositCreditsOnSoftConfirmation: options.depositCreditsOnSoftConfirmation,
           }),
         } as never),
+    options.paidPriceFloor,
   );
 
   return {

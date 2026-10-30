@@ -9,6 +9,7 @@ import {
 } from '@modules/chains/evm/evm-relayed-escrow-intent.service';
 import { EvmRelayerPort, EvmRelayResult } from '@modules/chains/evm/ports/evm-relayer.port';
 import { EvmRpcError } from '@modules/chains/evm/sanctioned-evm-rpc';
+import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
 import { CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
 import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
 import { RelayedEscrowIntent } from '@modules/settlement/ports/relayed-escrow-intent.port';
@@ -65,19 +66,27 @@ interface Harness {
 }
 
 function build(
-  options: { estimateGas?: jest.Mock; send?: Partial<EvmRelayResult>; call?: jest.Mock } = {},
+  options: {
+    estimateGas?: jest.Mock;
+    send?: Partial<EvmRelayResult>;
+    call?: jest.Mock;
+    sendError?: unknown;
+    relayerCritical?: boolean;
+    hourly?: { take: jest.Mock };
+  } = {},
 ): Harness {
   const estimateGas = options.estimateGas ?? jest.fn().mockResolvedValue(65_638n);
-  const sendCall = jest.fn(
-    async (): Promise<EvmRelayResult> => ({
+  const sendCall = jest.fn(async (): Promise<EvmRelayResult> => {
+    if (options.sendError) throw options.sendError;
+    return {
       hash: '0x1e23e27f81ba84a1a27b0b58b3f4dc5049dd54016c734e94549f4951ecc3f6c9',
       status: 'SUCCESS',
       revertReason: null,
       gasUsed: 65_536n,
       blockNumber: 101_847n,
       ...options.send,
-    }),
-  );
+    };
+  });
   const sendValue = jest.fn();
 
   const client: EvmRelayedIntentClient = {
@@ -96,6 +105,10 @@ function build(
     new Map<ChainId, EvmRelayedIntentClient>([[TESTNET, client]]),
     new Map([[TESTNET, DEPLOYMENT]]),
     relayer,
+    options.relayerCritical === undefined
+      ? null
+      : { isRelayerCritical: jest.fn().mockResolvedValue(options.relayerCritical) },
+    options.hourly ?? null,
   );
   return { submitter, estimateGas, sendCall, sendValue };
 }
@@ -499,5 +512,68 @@ describe('the L1 half of the estimate (Nitro)', () => {
 
     expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_REFUSED');
     expect(sendCall).not.toHaveBeenCalled();
+  });
+});
+
+describe('EvmRelayedEscrowIntentSubmitter, protecting the relayer float', () => {
+  it('answers a 503 "try again shortly" while the relayer float is critical, before any RPC', async () => {
+    const { submitter, estimateGas, sendCall } = build({ relayerCritical: true });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+    expect(caught(error).status).toBe(503);
+    expect(caught(error).message).toMatch(/cannot relay requests right now.*try again shortly/);
+    expect(estimateGas).not.toHaveBeenCalled();
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('relays as usual when the float is not critical', async () => {
+    const { submitter, sendCall } = build({ relayerCritical: false });
+
+    await submitter.submit(setLimits());
+
+    expect(sendCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the global hourly budget only after the pre-flight passed, and 503s when it is spent', async () => {
+    const take = jest.fn().mockResolvedValue(false);
+    const { submitter, estimateGas, sendCall } = build({ hourly: { take } });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(estimateGas).toHaveBeenCalled();
+    expect(take).toHaveBeenCalledWith(TESTNET, expect.stringContaining('SET_LIMITS'));
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it('costs the hourly budget nothing when the chain refuses at the pre-flight', async () => {
+    const take = jest.fn().mockResolvedValue(true);
+    const { submitter } = build({
+      hourly: { take },
+      estimateGas: reverting('0x' + 'deadbeef'),
+    });
+
+    await submitter.submit(setLimits()).catch(() => null);
+
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  it('answers a send the node refused (not broadcast) with the same 503', async () => {
+    const { submitter } = build({
+      sendError: new EvmSendRejectedError('INSUFFICIENT_FUNDS', null),
+    });
+
+    const error = await submitter.submit(setLimits()).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_UNAVAILABLE');
+  });
+
+  it('lets any other send failure through untouched: its outcome is unknown', async () => {
+    const timeout = new Error('receipt timed out');
+    const { submitter } = build({ sendError: timeout });
+
+    await expect(submitter.submit(setLimits())).rejects.toBe(timeout);
   });
 });

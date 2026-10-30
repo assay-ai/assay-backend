@@ -118,7 +118,8 @@ export interface FloatCheckOptions {
  * debt. So each redeemer reading is also handed to {@link RedeemerFloatGate},
  * which the api and mcp processes read before admitting a voucher — CRITICAL
  * pauses new paid calls on that chain, OK or LOW resumes them. The relayer's
- * float gates nothing: no served call depends on it.
+ * reading is handed over the same way and closes RELAYED requests while it is
+ * critical, so the float left is kept for slash sends.
  */
 @Injectable()
 export class EvmRelayerFloatMonitor {
@@ -209,7 +210,11 @@ export class EvmRelayerFloatMonitor {
     // scheduler's rather than the enabled list's, and the test that proves this
     // never sums the chains reads that order.
     for (const chainId of chains) {
-      readings.push(await this.readOne(this.relayer, 'relayer', chainId, marks));
+      const relayerReading = await this.readOne(this.relayer, 'relayer', chainId, marks);
+      readings.push(relayerReading);
+      // CRITICAL closes relayed requests on that chain (the 503 "try again
+      // shortly"), keeping what is left for slash sends.
+      await this.gate?.publish(chainId, relayerReading.level, 'relayer');
       if (this.redeemer) {
         const reading = await this.readOne(this.redeemer, 'redeemer', chainId, marks);
         readings.push(reading);

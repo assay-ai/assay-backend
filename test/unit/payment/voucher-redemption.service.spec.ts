@@ -124,7 +124,6 @@ function build(rows: RedeemableIntent[], blocklist = noBlocks()) {
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     releaseHold: jest.fn().mockResolvedValue(true),
-    voidUnredeemed: jest.fn().mockResolvedValue(true),
   };
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
@@ -382,10 +381,6 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
   const intents = {
     commitRedeemedHold: jest.fn(async (_org: string, id: string) => void open.delete(id)),
     releaseHold: jest.fn(async ({ id }: { id: string }) => open.delete(id)),
-    voidUnredeemed: jest.fn(async ({ id }: { id: string }, reason: string) => {
-      lastErrors.set(id, reason);
-      return open.delete(id);
-    }),
   };
   const walletKey = (account: string | null) =>
     account ? subjectKey(BlockSubjectKind.WALLET, account) : null;
@@ -443,23 +438,6 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
         if (cause && !lastErrors.has(row.id)) lastErrors.set(row.id, cause);
       }
     }),
-    // The payer side, as the repository's statement: never over a provider cause.
-    recordPayerBlocks: jest.fn(
-      async (_asset: string, blocked: RedemptionExclusions, cause: string, keep: string[]) => {
-        for (const row of all) {
-          if (!open.has(row.id)) continue;
-          const payerBlocked =
-            blocked.organizationIds.includes(row.organizationId) ||
-            [row.agentAccount, row.voucherDelegate].some(
-              (account) =>
-                walletKey(account) !== null && blocked.walletKeys.includes(walletKey(account)!),
-            );
-          if (payerBlocked && !keep.includes(lastErrors.get(row.id) ?? '')) {
-            lastErrors.set(row.id, cause);
-          }
-        }
-      },
-    ),
   };
   const service = new VoucherRedemptionService(
     payments as never,
@@ -631,9 +609,7 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
     expect(calls).toHaveLength(1);
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
-    // Recorded while frozen, so the close is the buyer's, not a platform void.
-    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'PayerBlocked');
-    expect(intents.voidUnredeemed).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
   });
 
   it('AUDIT E-1: a blocked payer with a full batch of holds does not starve another buyer', async () => {

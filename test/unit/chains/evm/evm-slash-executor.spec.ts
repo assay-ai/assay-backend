@@ -18,6 +18,8 @@ import {
   STAKE,
   TREASURY,
 } from './helpers/fake-stake-chain';
+import { fakeNodeInterface } from './helpers/fake-node-interface';
+import { NODE_INTERFACE_ADDRESS } from '@modules/chains/evm/evm-l1-gas';
 
 const VERIFIER_SECRET = new Uint8Array(32).fill(9);
 const VERIFIER = privateKeyToAccount(toHex(VERIFIER_SECRET)).address;
@@ -657,5 +659,70 @@ describe('review fixes — EvmSlashExecutor', () => {
         '3000000',
       ]);
     });
+  });
+});
+
+describe('EvmSlashExecutor — the L1 half of the gas, and its cost cap', () => {
+  const GRACE = 7n * 86_400n;
+
+  /** Makes the chain answer NodeInterface with `l1Gas`, and fold it into eth_estimateGas as Nitro does. */
+  function withL1(chain: FakeStakeChain, l1Gas: bigint): void {
+    const nodeInterface = fakeNodeInterface({ l1Gas });
+    const call = chain.client.call.bind(chain.client);
+    const estimate = chain.client.estimateGas.bind(chain.client);
+    Object.assign(chain.client, {
+      call: async (args: { to: string; data: `0x${string}`; account?: `0x${string}` }) =>
+        args.to.toLowerCase() === NODE_INTERFACE_ADDRESS.toLowerCase()
+          ? nodeInterface(args)
+          : call(args as never),
+      estimateGas: async (args: { to: `0x${string}`; data: `0x${string}` }) =>
+        (await estimate(args as never)) + l1Gas,
+    });
+  }
+
+  it('pads execution 1.3x and the L1 part 1.2x, and keeps the ceiling on execution only', async () => {
+    const { chain, executor } = build();
+    withL1(chain, 100_000n);
+
+    await executor.propose(proposal(1));
+
+    // 150 000 execution x 1.3 + 100 000 L1 x 1.2.
+    expect(chain.sent[0].gasLimit).toBe(195_000n + 120_000n);
+  });
+
+  it('defers a send above the cost cap, unnamed and unsent, so the case is retried', async () => {
+    const { chain, executor } = build();
+    withL1(chain, 3_000_000n);
+
+    const error = await executor.propose(proposal(1)).catch((caught) => caught);
+
+    expect(error.errorCode).toBe(ChainErrorCode.CHAIN_TRANSACTION_FAILED);
+    expect(error.message).toMatch(/FeeSpikeDeferred/);
+    expect(chainErrorName(error)).toBeNull();
+    expect(chain.sent).toHaveLength(0);
+  });
+
+  it('waives the cap for an execution near its deadline, and only then', async () => {
+    const built = build();
+    await built.executor.propose(proposal(1, '150001'));
+    const record = built.chain.record(requestId(1))!;
+    built.chain.sent.length = 0;
+    withL1(built.chain, 3_000_000n);
+    const execution = {
+      chainId: CHAIN,
+      requestId: requestId(1),
+      provider: PROVIDER,
+      beneficiary: AGENTS[1],
+    };
+
+    // Matured, a week of grace left: deferred.
+    built.chain.now = record.executableAt;
+    await expect(built.executor.executeProposal(execution)).rejects.toThrow(/FeeSpikeDeferred/);
+    expect(built.chain.sent).toHaveLength(0);
+
+    // Ten minutes before the record may be expired: sent at whatever it costs.
+    built.chain.now = record.executableAt + GRACE - 600n;
+    await built.executor.executeProposal(execution);
+    expect(built.chain.sent).toHaveLength(1);
   });
 });

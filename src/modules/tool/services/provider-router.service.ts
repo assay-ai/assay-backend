@@ -791,12 +791,23 @@ export class ProviderRouterService {
     // not serve it is refused (`PAYEE_NO_LONGER_ELIGIBLE`), never followed.
     const contract = this.resolveContract(tool, classPoolOf(candidates, context), context, now);
     if (!contract.version) throw contractRefused(tool, contract.refusal, context);
-    const { picked, rejected, ruleRejected, fellBack, settlementChainOf } = this.select(
-      candidates,
-      context,
-      now,
-      contract.version,
-    );
+    // The paid-call minimum: drawn among the bindings at or above it first,
+    // and from the whole pool only when none of those can serve — the offer
+    // then names a binding below it and the caller refuses the call
+    // (`PAYMENT_PRICE_BELOW_MINIMUM`). The contract version is resolved on the
+    // whole pool either way, so a cheap binding never changes which version a
+    // call is served at.
+    const belowFloor = context.belowPaidPriceFloor;
+    const atOrAboveFloor = belowFloor
+      ? candidates.filter(({ binding }) => !servesPaidBelowFloor(binding, belowFloor))
+      : candidates;
+    const preferred =
+      atOrAboveFloor.length < candidates.length && atOrAboveFloor.length > 0
+        ? this.select(atOrAboveFloor, context, now, contract.version)
+        : null;
+    const { picked, rejected, ruleRejected, fellBack, settlementChainOf } = preferred?.picked
+      ? preferred
+      : this.select(candidates, context, now, contract.version);
     if (!picked) throw unroutable(toolId, rejected, context, ruleRejected);
 
     const settlementChain = settlementChainOf.get(picked.candidate.binding.id);
@@ -2122,6 +2133,14 @@ function toRuleRejectionDetail(rejection: RuleRejection): RuleRejectionDetail {
       ? { requestedRange: rejection.requestedRange ? [...rejection.requestedRange] : null }
       : {}),
   };
+}
+
+/** A chargeable binding the caller's paid-call minimum refuses (`RoutingContext.belowPaidPriceFloor`). */
+function servesPaidBelowFloor(
+  binding: ToolBinding,
+  belowFloor: (binding: ToolBinding) => boolean,
+): boolean {
+  return binding.pricingMode !== PricingMode.FREE && belowFloor(binding);
 }
 
 /** The candidates that may serve a call of this class (`RoutingContext.callClass`). */

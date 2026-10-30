@@ -82,6 +82,16 @@ function fakeRedis(options: { failOn?: 'exec' | 'throw' | 'null' } = {}) {
           order.push('write');
           return api;
         },
+        zrem(key: string, member: string) {
+          ops.push(() => {
+            sets.set(
+              key,
+              (sets.get(key) ?? []).filter((entry) => entry.member !== member),
+            );
+          });
+          order.push('write');
+          return api;
+        },
         async exec(): Promise<[Error | null, unknown][] | null> {
           if (options.failOn === 'throw') throw new Error('Connection is closed.');
           if (options.failOn === 'null') return null;
@@ -164,11 +174,26 @@ describe('relayedIntentRetryAt', () => {
 });
 
 describe('RelayedIntentRateLimiter, counting', () => {
+  it('gives an admitted attempt back on release, in both scopes', async () => {
+    const redis = fakeRedis();
+    const service = limiter(redis);
+
+    for (let i = 0; i < LIMITS.perAccount - 1; i += 1) await service.admit(ACCOUNT, ORG);
+    // The platform could not submit this one (a 503): it goes back.
+    const admission = await service.admit(ACCOUNT, ORG);
+    await admission.release();
+
+    for (const [, entries] of redis.sets) expect(entries).toHaveLength(LIMITS.perAccount - 1);
+    // So the buyer still has room for one more.
+    await expect(service.admit(ACCOUNT, ORG)).resolves.toEqual({ release: expect.any(Function) });
+    await expect(service.admit(ACCOUNT, ORG)).rejects.toBeDefined();
+  });
+
   it('admits up to the per-account ceiling and refuses the one after it', async () => {
     const service = limiter(fakeRedis());
 
     for (let i = 0; i < LIMITS.perAccount; i += 1) {
-      await expect(service.admit(ACCOUNT, ORG)).resolves.toBeUndefined();
+      await expect(service.admit(ACCOUNT, ORG)).resolves.toEqual({ release: expect.any(Function) });
     }
 
     const error = await service.admit(ACCOUNT, ORG).catch((e: unknown) => e);
@@ -282,7 +307,9 @@ describe('RelayedIntentRateLimiter, counting', () => {
       CHAIN_IDS.ROBINHOOD_TESTNET,
       '0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65',
     );
-    await expect(service.admit(other, 'a-different-organization')).resolves.toBeUndefined();
+    await expect(service.admit(other, 'a-different-organization')).resolves.toEqual({
+      release: expect.any(Function),
+    });
   });
 
   it('drops attempts that fell out of the window', async () => {
@@ -296,7 +323,7 @@ describe('RelayedIntentRateLimiter, counting', () => {
       [1, 2, 3].map((n) => ({ score: Date.now() - 7_200_000 - n, member: `old-${n}` })),
     );
 
-    await expect(service.admit(ACCOUNT, ORG)).resolves.toBeUndefined();
+    await expect(service.admit(ACCOUNT, ORG)).resolves.toEqual({ release: expect.any(Function) });
     expect(redis.sets.get(key)).toHaveLength(1);
   });
 });

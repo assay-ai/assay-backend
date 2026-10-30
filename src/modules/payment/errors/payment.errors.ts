@@ -48,6 +48,9 @@ export enum PaymentErrorCode {
   // ── The buyer's money is on the wrong CHAIN, not short.
   PAYMENT_NO_SETTLEABLE_CHAIN = 'PAYMENT_NO_SETTLEABLE_CHAIN',
 
+  // ── The provider's price is below the platform's paid-call minimum.
+  PAYMENT_PRICE_BELOW_MINIMUM = 'PAYMENT_PRICE_BELOW_MINIMUM',
+
   // ── The buyer's own on-chain escrow replaces the pooled vault.
   PAYMENT_ESCROW_NOT_OPEN = 'PAYMENT_ESCROW_NOT_OPEN',
   PAYMENT_ESCROW_ACCOUNT_CLAIMED = 'PAYMENT_ESCROW_ACCOUNT_CLAIMED',
@@ -508,6 +511,20 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `The provider is paused on ${context?.chainId ?? 'this chain'} while its outstanding ` +
       'penalties cannot be collected (slash hold); no payment to it can be created there now',
+  },
+  /**
+   * A paid (rail-B) call to a binding priced below the paid-call minimum
+   * (`MIN_PAID_PRICE_USD`, `paid-price-floor.ts`). Refused before any seq,
+   * voucher or hold: nothing is charged. Not retryable — only the provider can
+   * fix it, by raising its price.
+   */
+  priceBelowMinimum: {
+    code: PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.tool ?? 'This tool'}'s provider charges ${context?.priceUsd ?? '?'} per paid ` +
+      `call, below the platform minimum of ${context?.minimumUsd ?? '?'}. The provider must ` +
+      `raise its price before paid calls to it are accepted. Nothing was charged.`,
   },
   noSettleableChain: {
     code: PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN,

@@ -27,6 +27,11 @@ const COMMANDS_PER_SCOPE = 4;
 const READ_COMMANDS_PER_SCOPE = 2;
 
 /** A scope's count, and the instants of the attempts in its window. */
+/** One admitted attempt, which the caller may give back (see `release`). */
+export interface RelayedIntentAdmission {
+  release(): Promise<void>;
+}
+
 interface ScopeReading extends RelayedIntentObservation {
   readonly attemptsMs: readonly number[];
 }
@@ -77,11 +82,32 @@ export class RelayedIntentRateLimiter {
    * see `decideRelayedIntentRate` for why a refusal that did not count would
    * make the limit stop being one.
    */
-  async admit(account: AccountId, organizationId: string): Promise<void> {
-    const readings = await this.observe(account, organizationId, true);
+  async admit(account: AccountId, organizationId: string): Promise<RelayedIntentAdmission> {
+    const member = `${Date.now()}:${randomUUID()}`;
+    const readings = await this.observe(account, organizationId, true, member);
     const breached = decideRelayedIntentRate(readings);
     if (breached) {
       throw this.limited(breached as ScopeReading);
+    }
+    return { release: () => this.release(account, organizationId, member) };
+  }
+
+  /**
+   * Gives one admitted attempt back, for a submission the PLATFORM could not
+   * make: a 503 for a fee spike, a relayer whose float is critical, or a spent
+   * global budget. That was not the buyer's doing, and charging it to their
+   * hourly budget would lock them out of their brake for something we did.
+   * Best effort: a failure here only leaves the attempt counted.
+   */
+  private async release(account: AccountId, organizationId: string, member: string): Promise<void> {
+    try {
+      await this.redis
+        .multi()
+        .zrem(`${KEY_PREFIX}account:${account}`, member)
+        .zrem(`${KEY_PREFIX}organization:${organizationId}`, member)
+        .exec();
+    } catch {
+      // Counted, as if never given back. The window frees it within the hour.
     }
   }
 
@@ -123,13 +149,13 @@ export class RelayedIntentRateLimiter {
     account: AccountId,
     organizationId: string,
     record: boolean,
-  ): Promise<readonly ScopeReading[]> {
-    const now = Date.now();
-    const windowMs = this.limits.windowSeconds * 1000;
     // Unique per attempt. Two submissions in the same millisecond are ordinary
     // under load, and a plain timestamp member would silently overwrite one of
     // them — undercounting exactly when the count matters.
-    const member = `${now}:${randomUUID()}`;
+    member = `${Date.now()}:${randomUUID()}`,
+  ): Promise<readonly ScopeReading[]> {
+    const now = Number.parseInt(member.split(':')[0], 10);
+    const windowMs = this.limits.windowSeconds * 1000;
 
     const scopes = [
       // Narrowest first: `decideRelayedIntentRate` names the first breached

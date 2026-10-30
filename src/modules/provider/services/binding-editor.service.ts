@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -9,6 +9,13 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
+import {
+  formatAtomicUsd,
+  PAID_PRICE_FLOOR,
+  PAID_PRICE_FLOOR_FROM_ENV,
+  PaidPriceFloor,
+  paidPriceBelowFloor,
+} from '@modules/payment/domain/paid-price-floor';
 import { evaluateStakeGate } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
 import { MappingDirection, RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
@@ -163,6 +170,11 @@ export class BindingEditorService {
     // key for its live origin. Required: a missing vault module must fail at
     // boot rather than silently turn the guard off.
     private readonly vault: CredentialVaultService,
+    // The paid-call minimum (`MIN_PAID_PRICE_USD`). Optional: unprovided, the
+    // env value is used; a test injects its own.
+    @Optional()
+    @Inject(PAID_PRICE_FLOOR)
+    private readonly priceFloor: PaidPriceFloor = PAID_PRICE_FLOOR_FROM_ENV,
   ) {}
 
   /**
@@ -248,6 +260,12 @@ export class BindingEditorService {
     // price with no scale is not a price.
     assertKnownAsset(body.assetId);
     assertPriceMatchesMode(body.pricingMode, body.priceAmount);
+    this.assertPriceAtLeastFloor(
+      organizationId,
+      body.pricingMode,
+      body.pricingMode === PricingMode.FREE ? '0' : body.priceAmount,
+      body.assetId,
+    );
 
     const row = new ToolBindingEntity();
     row.organizationId = organizationId;
@@ -322,6 +340,11 @@ export class BindingEditorService {
     // and is not a property worth resting a revision number on.
     const before = versionedSnapshot(row);
     const chainsBefore = JSON.stringify(row.settlementChains);
+    const priceBefore = {
+      pricingMode: row.pricingMode as PricingMode,
+      priceAmount: row.priceAmount,
+      assetId: row.assetId,
+    };
 
     if (body.requestMapping !== undefined) {
       row.requestMapping = inspectRequestMapping(body.requestMapping, {
@@ -403,6 +426,19 @@ export class BindingEditorService {
     // After the merge, so `{ pricingMode: 'PAID' }` against a stored zero and
     // `{ priceAmount: '0' }` against a stored PAID are both caught.
     assertPriceMatchesMode(row.pricingMode as PricingMode, row.priceAmount);
+    // Only when the edit SETS a price: a new amount or asset, or a switch from
+    // FREE to a charging mode. A binding priced below the minimum before the
+    // floor existed keeps its other edits (an endpoint fix, a timeout) — its
+    // paid calls are refused at admission (`PAYMENT_PRICE_BELOW_MINIMUM`), or
+    // routed to another provider, until its provider raises the price.
+    if (setsNewPrice(priceBefore, row)) {
+      this.assertPriceAtLeastFloor(
+        row.organizationId,
+        row.pricingMode as PricingMode,
+        row.priceAmount,
+        row.assetId,
+      );
+    }
 
     // Answered against what was read, not against what the caller sent: a
     // `PATCH` that re-sends the same endpoint is not an edit, and treating it
@@ -608,6 +644,33 @@ export class BindingEditorService {
     }
   }
 
+  /**
+   * A PAID or FREEMIUM binding must charge at least the paid-call minimum
+   * (`paid-price-floor.ts`): every paid call costs the platform on-chain gas
+   * that its 10 % fee must cover. FREE is exempt (it settles nothing), and so
+   * is a provider on `MIN_PAID_PRICE_EXEMPT_PROVIDER_IDS` — checked against the
+   * binding's own organization, never anything the body carries. The same
+   * function refuses a paid call to a binding below it at admission.
+   */
+  private assertPriceAtLeastFloor(
+    organizationId: string,
+    pricingMode: PricingMode,
+    priceAmount: string,
+    assetId: string,
+  ): void {
+    if (pricingMode === PricingMode.FREE) return;
+    const { decimals } = getAssetMetadata(assetId as AssetId);
+    const minimum = paidPriceBelowFloor(this.priceFloor, organizationId, priceAmount, decimals);
+    if (minimum === null) return;
+    throw ProviderErrors.bindingPriceBelowMinimum({
+      pricingMode,
+      minimumAmount: minimum.toString(),
+      minimumUsd: `$${formatAtomicUsd(minimum, decimals)}`,
+      decimals,
+      assetId,
+    });
+  }
+
   private async tool(toolId: string): Promise<Tool> {
     const tool = await this.catalogue.findTool(toolId);
     if (!tool) throw ProviderErrors.bindingToolUnknown({ toolId });
@@ -809,6 +872,20 @@ function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingS
 
 function dedupe(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
+}
+
+/**
+ * Whether an update sets a price the paid-call minimum must judge: the amount
+ * or the asset changed, or the binding switched from FREE to a charging mode.
+ * A PAID ⇄ FREEMIUM switch at the same price sets nothing new.
+ */
+function setsNewPrice(
+  before: { pricingMode: PricingMode; priceAmount: string; assetId: string },
+  row: ToolBindingEntity,
+): boolean {
+  if (BigInt(before.priceAmount) !== BigInt(row.priceAmount)) return true;
+  if (before.assetId !== row.assetId) return true;
+  return before.pricingMode === PricingMode.FREE && row.pricingMode !== PricingMode.FREE;
 }
 
 /** `FREE` is the only mode allowed to cost nothing; `PAID` and `FREEMIUM` both charge past the free tier. */
