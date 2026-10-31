@@ -5,6 +5,10 @@
  * > A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it, and the
  * > provider's USDG balance increases by `amount − fee`.
  *
+ * On a shared chain the hold has no database row for the backend's own mirror, so the dev
+ * reconciliation reports one `HELD_MIRROR_DRIFT` (WARN) until the collect lands; a FAILED after
+ * the redemption names the payer and seq left held, to collect or refund by hand.
+ *
  * Since the dispute hold (redeem-into-hold, 2026-10-18) a redemption moves the money into
  * `held[payer][seq]` and pays nobody: the provider is paid when the platform's collector calls
  * `collectHeld` at or after `collectableAt`. So the criterion is checked in two transactions: the
@@ -217,6 +221,29 @@ async function run(): Promise<E2Result> {
     voucherTypedData(voucher, evmDomain(CHAIN_ID, escrow)),
   );
 
+  // `E2_ADVANCE_TIME` moves the clock with `evm_increaseTime`, which only a local node offers:
+  // refuse it before anything is redeemed rather than after (a live node would leave the held
+  // payment stranded with no database row).
+  const advanceTime = process.env.E2_ADVANCE_TIME === '1';
+  if (advanceTime) {
+    const client = String(
+      await pub.request({ method: 'web3_clientVersion' as never, params: [] as never }),
+    );
+    if (!/anvil|hardhat/i.test(client)) {
+      return {
+        outcome: 'FAILED',
+        evidence: `E2_ADVANCE_TIME=1 needs a local node (anvil/hardhat); this one is ${client}`,
+        unproven: null,
+      };
+    }
+  }
+  const maxWaitSeconds = Number(process.env.E2_MAX_WAIT_SECONDS ?? '7500');
+  if (!Number.isFinite(maxWaitSeconds) || maxWaitSeconds <= 0) {
+    throw new Error(
+      `E2_MAX_WAIT_SECONDS must be a positive number, got ${process.env.E2_MAX_WAIT_SECONDS}`,
+    );
+  }
+
   // ── 4. …the PLATFORM redeems it ─────────────────────────────────────────
   const app = await bootAppContext();
   const redeemer = app.get(EvmVoucherRedeemer, { strict: false });
@@ -280,10 +307,13 @@ async function run(): Promise<E2Result> {
   ]);
   const { amount, fee, payer, seq } = redeemed.args;
   const collectableAt = heldLog.args.collectableAt;
+  // Every FAILED from here on leaves a held payment with no database row: name it, so it can be
+  // collected (or refunded) by hand.
+  const stranded = `held payment payer ${buyer.address} seq ${voucher.seq} stays held`;
 
   // ── 6. …the hold runs out… ──────────────────────────────────────────────
   const chainNow = async () => (await pub.getBlock({ blockTag: 'latest' })).timestamp;
-  if (process.env.E2_ADVANCE_TIME === '1') {
+  if (advanceTime) {
     const gap = collectableAt - (await chainNow());
     if (gap > 0n) {
       await pub.request({
@@ -293,12 +323,12 @@ async function run(): Promise<E2Result> {
       await pub.request({ method: 'evm_mine' as never, params: [] as never });
     }
   } else {
-    const deadline = Date.now() + Number(process.env.E2_MAX_WAIT_SECONDS ?? '7500') * 1000;
+    const deadline = Date.now() + maxWaitSeconds * 1000;
     while ((await chainNow()) < collectableAt) {
       if (Date.now() > deadline) {
         return {
           outcome: 'FAILED',
-          evidence: `held until ${collectableAt}; E2_MAX_WAIT_SECONDS ran out before it matured`,
+          evidence: `held until ${collectableAt}; E2_MAX_WAIT_SECONDS ran out before it matured; ${stranded}`,
           unproven: null,
         };
       }
@@ -309,7 +339,20 @@ async function run(): Promise<E2Result> {
   // ── 7. …and the PLATFORM's collector pays the provider amount − fee ─────
   const heldPayments = app.get(EvmHeldPayments, { strict: false });
   const key = { payer: toAccountId(CHAIN_ID, buyer.address), seq: voucher.seq.toString() };
-  const { txRef } = await heldPayments.collect(asset, [key]);
+  // A fee spike, the hourly budget or a busy redeemer queue defers a collect without sending it;
+  // the platform's job simply retries on its next pass, and so does this.
+  let txRef: string | null = null;
+  for (let attempt = 1; txRef === null; attempt++) {
+    try {
+      ({ txRef } = await heldPayments.collect(asset, [key]));
+    } catch (error) {
+      if (attempt >= 5) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { outcome: 'FAILED', evidence: `collect: ${message}; ${stranded}`, unproven: null };
+      }
+      await new Promise((r) => setTimeout(r, 30_000));
+    }
+  }
   const collectReceipt = await pub.waitForTransactionReceipt({
     hash: txRef as `0x${string}`,
     timeout: 120_000,
@@ -320,7 +363,11 @@ async function run(): Promise<E2Result> {
     logs: collectReceipt.logs.filter((log) => getAddress(log.address) === escrow),
   });
   if (!collectedLog) {
-    return { outcome: 'FAILED', evidence: `${txRef} emitted no HeldCollected`, unproven: null };
+    return {
+      outcome: 'FAILED',
+      evidence: `${txRef} emitted no HeldCollected; ${stranded}`,
+      unproven: null,
+    };
   }
   const [beforeCollect, afterCollect] = await Promise.all([
     balanceAt(collectReceipt.blockNumber - 1n),
@@ -346,7 +393,21 @@ async function run(): Promise<E2Result> {
     providerAtCollect: paid.toString(),
   };
 
+  const sameAddress = (a: string, b: string) => getAddress(a) === getAddress(b);
   const checks: [boolean, string][] = [
+    [
+      sameAddress(heldLog.args.payer, buyer.address) &&
+        heldLog.args.seq === voucher.seq &&
+        sameAddress(heldLog.args.provider, provider) &&
+        heldLog.args.amount === AMOUNT,
+      'PaymentHeld names this voucher (payer, seq, provider, amount)',
+    ],
+    [
+      sameAddress(collectedLog.args.payer, buyer.address) &&
+        collectedLog.args.seq === voucher.seq &&
+        sameAddress(collectedLog.args.provider, provider),
+      'HeldCollected names this voucher (payer, seq, provider)',
+    ],
     [
       afterRedeem === beforeRedeem,
       `provider untouched at the redemption (delta ${afterRedeem - beforeRedeem})`,

@@ -68,6 +68,7 @@ import { Voucher } from '@modules/chains/ports/x402.types';
 import { EscrowDelegationKind } from '@modules/settlement/ports/escrow-delegation.port';
 import { RelayedEscrowIntent } from '@modules/settlement/ports/relayed-escrow-intent.port';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
 
 const RPC = process.env.E2_RPC_URL ?? 'http://127.0.0.1:8547';
 // Defaults assume the e2e workspace sits next to this repo; override with the env vars.
@@ -95,20 +96,20 @@ if (!ANVIL_NET) throw new Error(`no anvil entry for ${CHAIN} in ${MCP_DEPLOYMENT
 const caipAddress = (caip: string): string => caip.slice(caip.lastIndexOf(':') + 1);
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
-  config: process.env.E2_CONFIG ?? '0x7d4F60198a1519074ce1E316911E2f130643231c',
-  stake: process.env.E2_STAKE ?? '0xAfe1e699d188Ab5042B693978E889D7c5085F710',
+  config: process.env.E2_CONFIG || '0x7d4F60198a1519074ce1E316911E2f130643231c',
+  stake: process.env.E2_STAKE || '0xAfe1e699d188Ab5042B693978E889D7c5085F710',
   escrow: caipAddress(ANVIL_NET.escrow),
   asset: caipAddress(ANVIL_NET.asset),
   escrowImplementation:
-    process.env.E2_ESCROW_IMPLEMENTATION ?? '0xB2DD7cC50D95c3F1B4Cce9613dD4B6308876bD82',
-  admin: process.env.E2_ADMIN ?? '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
+    process.env.E2_ESCROW_IMPLEMENTATION || '0xB2DD7cC50D95c3F1B4Cce9613dD4B6308876bD82',
+  admin: process.env.E2_ADMIN || '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
-  owner: process.env.E2_OWNER ?? '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
+  owner: process.env.E2_OWNER || '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
   multicall3: MULTICALL3,
 } as EvmDeployment;
 /** The testnet provider. It must bond above the stake floor on the current stake contract first. */
 const PROVIDER = getAddress(
-  process.env.E2_PROVIDER ?? '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4',
+  process.env.E2_PROVIDER || '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4',
 );
 const USDG = `${CHAIN}/erc20:${DEPLOYMENT.asset}`;
 /**
@@ -442,20 +443,27 @@ async function main(): Promise<void> {
     functionName: 'balanceOf',
     args: [PROVIDER],
   })) as bigint;
-  // Redeem-into-hold: nobody is paid at the redemption. Past `collectableAt`
-  // (the hold is one hour) the redeemer collects it, and the provider is paid.
-  await testClient.increaseTime({ seconds: 3_601 });
+  // Redeem-into-hold: nobody is paid at the redemption. Past the record's own
+  // `collectableAt` the redeemer collects it, and the provider is paid.
+  const record = (await publicClient.readContract({
+    address: DEPLOYMENT.escrow as `0x${string}`,
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    functionName: 'held',
+    args: [payer.address, BigInt(paid.voucher.seq)],
+  })) as { collectableAt: bigint };
+  const gap = Number(record.collectableAt) - Number(await chainNow()) + 1;
+  if (gap > 0) await testClient.increaseTime({ seconds: gap });
   await testClient.mine({ blocks: 1 });
-  await publicClient.waitForTransactionReceipt({
-    hash: await relayerWallet.writeContract({
-      address: DEPLOYMENT.escrow as `0x${string}`,
-      abi: parseAbi(['function collectHeld(address payer, uint64 seq)']),
-      functionName: 'collectHeld',
-      args: [payer.address, 1n],
-      account: relayer,
-      chain,
-    } as never),
-  });
+  const collectHash = await relayerWallet.writeContract({
+    address: DEPLOYMENT.escrow as `0x${string}`,
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    functionName: 'collectHeld',
+    args: [payer.address, BigInt(paid.voucher.seq)],
+    account: relayer,
+    chain,
+  } as never);
+  const collectReceipt = await publicClient.waitForTransactionReceipt({ hash: collectHash });
+  assert(collectReceipt.status === 'success', `collectHeld reverted: ${collectHash}`);
   const providerAfter = (await publicClient.readContract({
     address: DEPLOYMENT.asset as `0x${string}`,
     abi: ERC20_ABI,
@@ -492,6 +500,7 @@ async function main(): Promise<void> {
     stranger: strangerAuthority,
     redeem: outcome,
     providerPaid: (providerAfter - providerBefore).toString(),
+    collect: collectHash,
     delegateSpentInWindow: grant.spentInWindow,
     payerEscrow: escrow,
   });
