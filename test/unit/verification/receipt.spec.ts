@@ -599,3 +599,77 @@ describe('ReceiptService — refundableIfReportedNow, read-only (wave-1 audit I1
     });
   });
 });
+
+describe('ReceiptService — paid to the provider after the collect (BUG-R2-BUY-05)', () => {
+  const COLLECT_TX = '0xcd4f68033e4ab3654804810988deefaabed013f37da0c252d0ceb4888bbee663';
+  const channelCall = (overrides: Partial<PaymentIntentEntity> = {}) =>
+    buildIntent({
+      status: PaymentIntentStatus.SETTLED,
+      rail: 'RAIL_B_VOUCHER',
+      voucherFormat: 'CHANNEL',
+      channelCumulative: '170000',
+      channelCalls: 17,
+      heldAt: new Date('2026-11-01T13:54:19Z'),
+      collectableAt: new Date('2026-11-01T15:00:00Z'),
+      ...overrides,
+    } as Partial<PaymentIntentEntity>);
+
+  it('a collected channel call carries collectedAt, the payout transaction and its channel', async () => {
+    const { service } = build(
+      channelCall({
+        heldStatus: 'COLLECTED',
+        heldTxRef: COLLECT_TX,
+        holdReleasedAt: new Date('2026-11-01T15:00:22Z'),
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.collectedAt).toEqual(new Date('2026-11-01T15:00:22Z'));
+    expect(receipt.payoutTxRef).toBe(COLLECT_TX);
+    expect(receipt.voucherFormat).toBe('CHANNEL');
+    expect(receipt.channel).toEqual({
+      cumulative: '170000',
+      calls: 17,
+      settled: true,
+      bucketMaturesAt: new Date('2026-11-01T15:00:00Z'),
+      refundWindowExtended: false,
+    });
+    expect(receipt.chargedPrice.amount).toBe('1000');
+  });
+
+  it('a call still in the on-chain hold is not paid yet', async () => {
+    const { service } = build(
+      channelCall({ heldStatus: 'HELD', heldTxRef: '0xsettle' }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.collectedAt).toBeNull();
+    expect(receipt.payoutTxRef).toBeNull();
+    expect(receipt.channel?.settled).toBe(true);
+  });
+
+  it('a refunded call is never "paid to the provider", and a per-call row has no channel', async () => {
+    const { service } = build(
+      buildIntent({
+        status: PaymentIntentStatus.SETTLED,
+        rail: 'RAIL_B_VOUCHER',
+        heldStatus: 'REFUNDED',
+        heldTxRef: '0xrefund',
+        holdReleasedAt: new Date('2026-11-01T14:34:20Z'),
+        redemptionLastError: 'voided:DISPUTE_UPHELD',
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.collectedAt).toBeNull();
+    expect(receipt.payoutTxRef).toBeNull();
+    expect(receipt.voucherFormat).toBe('PER_CALL');
+    expect(receipt.channel).toBeNull();
+  });
+});

@@ -168,6 +168,14 @@ export class ToolCallDto {
   collectedAt?: Date | null;
 
   @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'The collect (payout) transaction that paid the provider, once `collectedAt` is set and ' +
+      'the chain recorded one. Null otherwise',
+  })
+  payoutTxRef?: string | null;
+
+  @ApiPropertyOptional({
     enum: ['PER_CALL', 'CHANNEL'],
     description: 'Which voucher door paid the call',
   })
