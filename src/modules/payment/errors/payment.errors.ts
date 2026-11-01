@@ -829,6 +829,6 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `${context?.availableAt ? ` (claimable at ${context.availableAt})` : ''}` +
       `. Paid calls are paused while it is pending; free calls keep working. ` +
       `To resume paid calls, the escrow owner can cancel the withdrawal on the Funding page ` +
-      `of the portal (or claim it)`,
+      `of the portal (or claim it once it is claimable)`,
   },
 });

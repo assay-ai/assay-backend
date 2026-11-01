@@ -214,6 +214,7 @@ describe('a buyer with a standing withdrawal is not quoted on that chain', () =>
     expect(error?.message).toMatch(/paid calls are paused while it is pending/i);
     expect(error?.message).toMatch(/free calls keep working/i);
     expect(error?.message).toMatch(/cancel the withdrawal on the Funding page/i);
+    expect(error?.message).toMatch(/or claim it once it is claimable/i);
 
     expect(invoker.invocations).toHaveLength(0);
     // And no ceiling token was taken. Shedding debits a provider's declared
