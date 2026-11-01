@@ -1,3 +1,8 @@
+import { ChannelVouchers1793404800000 } from '@database/postgres/migrations/1793404800000-channel-vouchers';
+import { ChannelVoucherIndexes1793404800010 } from '@database/postgres/migrations/1793404800010-channel-voucher-indexes';
+import { DebtGuardHeldReplacement1793404800020 } from '@database/postgres/migrations/1793404800020-debt-guard-held-replacement';
+import { ChannelDebtPerCallReplacement1793404800030 } from '@database/postgres/migrations/1793404800030-channel-debt-per-call-replacement';
+import { ChannelReplacementCheckValidate1793404800040 } from '@database/postgres/migrations/1793404800040-channel-replacement-check-validate';
 import { PaymentIntentRedemptionRetry1762400000080 } from '@database/postgres/migrations/1762400000080-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
@@ -204,6 +209,11 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       ToolBindingAuthMode1762000000002,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
       PaymentIntentRedemptionRetry1762400000080,
+      ChannelVouchers1793404800000,
+      ChannelVoucherIndexes1793404800010,
+      DebtGuardHeldReplacement1793404800020,
+      ChannelDebtPerCallReplacement1793404800030,
+      ChannelReplacementCheckValidate1793404800040,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',

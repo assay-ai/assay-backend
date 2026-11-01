@@ -17,6 +17,7 @@ import {
   isRefundedByReport,
 } from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
+import { channelViewOf, payoutOf, voucherFormatOf } from '@modules/payment/domain/payout-view';
 import {
   CALL_DISPUTE_CONFIG,
   CallDisputeConfig,
@@ -166,6 +167,12 @@ export class ReceiptService {
       refundableIfReportedUntil: refund.until,
       evaluatedAt: record?.evaluatedAt ?? null,
       settledAt: record?.settledAt ?? null,
+      // The call list's payout reading (API-W2 §3.4c): after the collect the
+      // receipt says the provider was paid, and by which transaction
+      // (BUG-R2-BUY-05).
+      ...payoutOf(intent),
+      voucherFormat: voucherFormatOf(intent),
+      channel: channelViewOf(intent),
     };
   }
 

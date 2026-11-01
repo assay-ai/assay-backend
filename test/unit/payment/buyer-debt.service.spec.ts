@@ -15,6 +15,7 @@ import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { ChannelErrorCode } from '@modules/payment/errors/channel.errors';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { BuyerDebtService } from '@modules/payment/services/buyer-debt.service';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
@@ -175,6 +176,28 @@ function build() {
         return true;
       },
     ),
+    replaceChannelDebtPerCall: jest.fn(
+      async (
+        _org: string,
+        id: string,
+        _payer: string,
+        replacement: LapsedVoucherReplacement,
+        admission: { scope: VoucherAdmissionScope; admit: (o: OpenVoucherTotals) => void },
+        reopenHoldId: string | null,
+      ) => {
+        admission.admit(open);
+        replaced.push({ id, replacement, scope: admission.scope, reopenHoldId });
+        const index = debts.findIndex((d) => d.id === id);
+        debts[index] = {
+          ...debts[index],
+          replacedAt: new Date(),
+          writtenOff: false,
+          voucherFormat: 'PER_CALL',
+          replacedChannel: true,
+        };
+        return true;
+      },
+    ),
   };
   const intents = {
     reopenDebtHold: jest.fn(async () => 'hold-reopened'),
@@ -189,6 +212,17 @@ function build() {
   const tools = {
     findTool: jest.fn(async () => ({ id: TOOL_ID, name: 'get_weather' })),
   };
+  // The lane's on-chain books and clock (rev3 L-1/L-2): settled where the DB
+  // says, the chain clock at the wall clock.
+  const door = {
+    chainNow: jest.fn(async () => Math.floor(Date.now() / 1000)),
+    readBooks: jest.fn(async () => ({
+      slot: { settled: 100_000n },
+      unpaid: 0n,
+      totalUnpaid: 0n,
+      held: 0n,
+    })),
+  };
   const service = new BuyerDebtService(
     payments as never,
     intents as never,
@@ -199,6 +233,7 @@ function build() {
     tools as never,
     spendPolicy as never,
     rateLimiter as never,
+    door as never,
   );
   const session: McpSession = {
     organizationId,
@@ -212,6 +247,7 @@ function build() {
     signer.sign(adapter.buildVoucherMessage(voucher));
   return {
     service,
+    door,
     payments,
     intents,
     spendPolicy,
@@ -543,5 +579,238 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
       errorCode: PaymentErrorCode.PAYMENT_NEXT_SEQ_RATE_LIMITED,
     });
     expect(rateLimiter.take).toHaveBeenCalledWith(`credential:${session.credentialId}`);
+  });
+});
+
+describe('BuyerDebtService — a CHANNEL debt settled per call (client review M-2)', () => {
+  function channelDebt(h: ReturnType<typeof build>, laneExpiresAt: Date) {
+    h.debts[0] = {
+      ...h.debt,
+      voucherSeq: null,
+      voucherFormat: 'CHANNEL',
+      channelCumulative: '150000',
+      channelCalls: 3,
+      channelId: `0x${'aa'.repeat(32)}`,
+      channelKey: `0x${'cc'.repeat(32)}`,
+      channelSettledCumulative: '100000',
+      expiresAt: new Date(laneExpiresAt.getTime() - 3_600_000),
+      channelVoucherExpiresAt: laneExpiresAt,
+    };
+  }
+
+  it('is renew-only while a lane voucher covering it can still settle on chain; the flag says from when', async () => {
+    const h = build();
+    // The call's own voucher is long past, but a later lane voucher covering it is not.
+    const laneExpiresAt = new Date(Date.now() - 60_000);
+    channelDebt(h, laneExpiresAt);
+    const from = new Date(laneExpiresAt.getTime() + 7_320_000).toISOString();
+
+    const [listed] = await h.service.list(h.session);
+    expect(listed).toMatchObject({
+      voucherFormat: 'CHANNEL',
+      settleInPortal: false,
+      settleInPortalFrom: from,
+      replaceableAt: from,
+    });
+    await expect(h.service.voucherIntent(h.session, h.debt.id)).rejects.toMatchObject({
+      errorCode: ChannelErrorCode.CHANNEL_NOT_OFFERED,
+    });
+    const allocate = (h.service as unknown as { seqs: { allocate: jest.Mock } }).seqs.allocate;
+    expect(allocate).not.toHaveBeenCalled();
+    expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+  });
+
+  it('past the lane deadline: settled like a per-call debt, through the channel move, never the per-call swap', async () => {
+    const h = build();
+    channelDebt(h, new Date(Date.now() - 8_000_000));
+    const [listed] = await h.service.list(h.session);
+    expect(listed.settleInPortal).toBe(true);
+
+    const { voucher } = await h.service.voucherIntent(h.session, h.debt.id);
+    expect(voucher.amount.amount).toBe('50000');
+    expect(voucher.provider).toBe(PROVIDER);
+    const settled = await h.service.settle(h.session, h.debt.id, {
+      voucher,
+      signature: h.sign(voucher),
+    });
+
+    expect(settled.intentId).toBe(h.debt.id);
+    expect(h.payments.replaceChannelDebtPerCall).toHaveBeenCalledTimes(1);
+    expect(h.payments.replaceLapsedVoucher).not.toHaveBeenCalled();
+    // Now a per-call debt being collected: not re-signable, no channel flag.
+    const [after] = await h.service.list(h.session);
+    expect(after).toMatchObject({ state: 'REPLACING', voucherFormat: 'PER_CALL' });
+    expect(after.settleInPortal).toBeUndefined();
+    await expect(h.service.voucherIntent(h.session, h.debt.id)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_PENDING,
+    });
+  });
+
+  it('a written-off channel debt is reopened with a fresh hold, as a per-call one', async () => {
+    const h = build();
+    channelDebt(h, new Date(Date.now() - 8_000_000));
+    h.debts[0] = { ...h.debts[0], writtenOff: true, cause: 'uncollected:ChannelVoucherExpired' };
+    const { voucher } = await h.service.voucherIntent(h.session, h.debt.id);
+    await h.service.settle(h.session, h.debt.id, { voucher, signature: h.sign(voucher) });
+    expect(h.intents.reopenDebtHold).toHaveBeenCalledTimes(1);
+    expect(h.replaced[0].reopenHoldId).toBe('hold-reopened');
+  });
+
+  describe('rev3 L-1/L-2: the lane on chain is read before the move', () => {
+    async function settleAttempt(h: ReturnType<typeof build>) {
+      const { voucher } = await h.service.voucherIntent(h.session, h.debt.id);
+      return h.service.settle(h.session, h.debt.id, { voucher, signature: h.sign(voucher) });
+    }
+    const notYet = { errorCode: PaymentErrorCode.PAYMENT_DEBT_NOT_YET_REPLACEABLE };
+
+    it('passes the chain-checked settled value to the move', async () => {
+      const h = build();
+      channelDebt(h, new Date(Date.now() - 8_000_000));
+      await settleAttempt(h);
+      expect(h.door.readBooks).toHaveBeenCalledWith(USDG, `0x${'cc'.repeat(32)}`);
+      expect((h.payments.replaceChannelDebtPerCall.mock.calls[0] as unknown[])[6]).toBe('100000');
+    });
+
+    it.each([
+      ['ahead of the DB (an unbooked settle)', 150_000n],
+      ['behind the DB', 50_000n],
+    ])('refuses, retryably, while the chain settled value is %s', async (_label, settled) => {
+      const h = build();
+      channelDebt(h, new Date(Date.now() - 8_000_000));
+      h.door.readBooks.mockResolvedValueOnce({
+        slot: { settled },
+        unpaid: 0n,
+        totalUnpaid: 0n,
+        held: 0n,
+      });
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+      expect(h.intents.reopenDebtHold).not.toHaveBeenCalled();
+    });
+
+    it('refuses when the chain settled value reaches the call (DB in step)', async () => {
+      const h = build();
+      channelDebt(h, new Date(Date.now() - 8_000_000));
+      h.debts[0] = { ...h.debts[0], channelSettledCumulative: '150000' };
+      h.door.readBooks.mockResolvedValueOnce({
+        slot: { settled: 150_000n },
+        unpaid: 0n,
+        totalUnpaid: 0n,
+        held: 0n,
+      });
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+    });
+
+    it('refuses when the books cannot be read (error or no door)', async () => {
+      const h = build();
+      channelDebt(h, new Date(Date.now() - 8_000_000));
+      h.door.readBooks.mockRejectedValueOnce(new Error('rpc down'));
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      h.door.readBooks.mockResolvedValueOnce(null as never);
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+    });
+
+    it('L-2: refuses while the CHAIN clock is not past the covering deadline, though the DB clock is', async () => {
+      const h = build();
+      const laneExpiresAt = new Date(Date.now() - 8_000_000);
+      channelDebt(h, laneExpiresAt);
+      // The chain lags: its clock is just at the latest covering expiresAt + 7,320 s.
+      h.door.chainNow.mockResolvedValue(Math.floor(laneExpiresAt.getTime() / 1000) + 7_320);
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+      h.door.chainNow.mockResolvedValue(Math.floor(laneExpiresAt.getTime() / 1000) + 7_321);
+      await settleAttempt(h);
+      expect(h.payments.replaceChannelDebtPerCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('rev4: with a chain head, reads the clock and the books at the SAME block', async () => {
+      const h = build();
+      const laneExpiresAt = new Date(Date.now() - 8_000_000);
+      channelDebt(h, laneExpiresAt);
+      const head = { number: 4242n, timestamp: Math.floor(laneExpiresAt.getTime() / 1000) + 7_400 };
+      (h.door as unknown as { chainHead: jest.Mock }).chainHead = jest.fn(async () => head);
+      await settleAttempt(h);
+      expect(h.door.readBooks).toHaveBeenCalledWith(USDG, `0x${'cc'.repeat(32)}`, undefined, 4242n);
+      expect(h.door.chainNow).not.toHaveBeenCalled();
+      expect(h.payments.replaceChannelDebtPerCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('rev4: a chain head behind the covering deadline refuses, retryably', async () => {
+      const h = build();
+      const laneExpiresAt = new Date(Date.now() - 8_000_000);
+      channelDebt(h, laneExpiresAt);
+      (h.door as unknown as { chainHead: jest.Mock }).chainHead = jest.fn(async () => ({
+        number: 1n,
+        timestamp: Math.floor(laneExpiresAt.getTime() / 1000) + 7_320,
+      }));
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.payments.replaceChannelDebtPerCall).not.toHaveBeenCalled();
+    });
+
+    it('a lane that moved under the lock: retryable, the reopened hold given back', async () => {
+      const h = build();
+      channelDebt(h, new Date(Date.now() - 8_000_000));
+      h.debts[0] = { ...h.debts[0], writtenOff: true, cause: 'uncollected:ChannelVoucherExpired' };
+      h.payments.replaceChannelDebtPerCall.mockResolvedValueOnce('LANE_MOVED' as never);
+      await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      expect(h.intents.releaseUnusedHold).toHaveBeenCalledWith(
+        h.debt.organizationId,
+        'hold-reopened',
+      );
+    });
+
+    describe('R-7: the move runs on the DB clock, the app checks on its own', () => {
+      it('a move that changed nothing while the debt is still CHANNEL: not yet replaceable, never 404', async () => {
+        const h = build();
+        channelDebt(h, new Date(Date.now() - 8_000_000));
+        h.payments.replaceChannelDebtPerCall.mockResolvedValueOnce(false as never);
+        const before = Date.now();
+        const error = (await settleAttempt(h).catch((e: unknown) => e)) as {
+          errorCode: string;
+          context?: { replaceableAt?: string };
+        };
+        expect(error).toMatchObject(notYet);
+        const retryAt = new Date(error.context?.replaceableAt ?? 0).getTime();
+        expect(retryAt).toBeGreaterThanOrEqual(before + 30_000);
+      });
+
+      it('the voucher_seq trigger refusing a still-CHANNEL debt: not yet replaceable, never 409 REFUSED', async () => {
+        const h = build();
+        channelDebt(h, new Date(Date.now() - 8_000_000));
+        h.payments.replaceChannelDebtPerCall.mockRejectedValueOnce(
+          new QueryFailedError('UPDATE', [], new Error('voucher_seq is immutable')) as never,
+        );
+        await expect(settleAttempt(h)).rejects.toMatchObject(notYet);
+      });
+
+      it('an identical submit that lost the race (no lane any more): replacement pending, not LANE_MOVED', async () => {
+        const h = build();
+        channelDebt(h, new Date(Date.now() - 8_000_000));
+        const { voucher } = await h.service.voucherIntent(h.session, h.debt.id);
+        h.payments.replaceChannelDebtPerCall.mockImplementationOnce(async () => {
+          // The first submit committed meanwhile: the row moved to the per-call door.
+          h.debts[0] = { ...h.debts[0], replacedAt: new Date(), voucherFormat: 'PER_CALL' };
+          return 'LANE_MOVED' as never;
+        });
+        await expect(
+          h.service.settle(h.session, h.debt.id, { voucher, signature: h.sign(voucher) }),
+        ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_PENDING });
+      });
+
+      it('a debt gone meanwhile keeps the 404', async () => {
+        const h = build();
+        channelDebt(h, new Date(Date.now() - 8_000_000));
+        const { voucher } = await h.service.voucherIntent(h.session, h.debt.id);
+        h.payments.replaceChannelDebtPerCall.mockImplementationOnce(async () => {
+          h.debts.splice(0, 1);
+          return false as never;
+        });
+        await expect(
+          h.service.settle(h.session, h.debt.id, { voucher, signature: h.sign(voucher) }),
+        ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_DEBT_NOT_FOUND });
+      });
+    });
   });
 });

@@ -722,6 +722,24 @@ describe('EvmVoucherRedeemer', () => {
     expect(emitted.length).toBeGreaterThan(0);
   });
 
+  it('a named AddressBlocked is RETRY and pages nothing (e2e R-4)', async () => {
+    // The service reads which side is blocked and retries or forfeits; it is not an unknown error.
+    const { redeemer, sendCall, emitted } = harness();
+    sendCall.mockResolvedValue({
+      hash: '0xbad',
+      status: 'REVERTED',
+      revertReason: 'AddressBlocked',
+      gasUsed: 10n,
+      blockNumber: 1n,
+    });
+
+    const [outcome] = await redeemer.redeemBatch([request(0)]);
+
+    expect(outcome.kind).toBe(RedeemOutcomeKind.RETRY);
+    expect(outcome.programError).toBe('AddressBlocked');
+    expect(emitted).toHaveLength(0);
+  });
+
   it.each([
     ['ProgramPaused', RedeemOutcomeKind.PAUSED],
     ['NotRedeemer', RedeemOutcomeKind.MISCONFIGURED],

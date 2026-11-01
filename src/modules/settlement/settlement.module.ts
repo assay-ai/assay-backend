@@ -11,6 +11,7 @@ import {
   RelayedIntentRateLimiter,
 } from './services/relayed-intent-rate-limiter.service';
 import { ReconciliationService } from './services/reconciliation.service';
+import { ChannelReconciliationService } from './services/channel-reconciliation.service';
 import { UnsettledVoucherGuard } from './services/unsettled-voucher-guard.service';
 import { WithdrawalService } from './services/withdrawal.service';
 
@@ -48,6 +49,7 @@ import { WithdrawalService } from './services/withdrawal.service';
   imports: [ChainsModule, LedgerModule],
   providers: [
     ReconciliationService,
+    ChannelReconciliationService,
     EscrowAccountService,
     WithdrawalService,
     EscrowDelegationService,

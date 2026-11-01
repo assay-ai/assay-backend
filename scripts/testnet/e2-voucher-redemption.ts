@@ -3,7 +3,17 @@
  * `yarn testnet:e2` — acceptance criterion E2 against the LIVE `eip155:46630` deployment.
  *
  * > A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it, and the
- * > provider's USDG balance increases by `amount − fee` in one transaction.
+ * > provider's USDG balance increases by `amount − fee`.
+ *
+ * On a shared chain the hold has no database row for the backend's own mirror, so the dev
+ * reconciliation reports one `HELD_MIRROR_DRIFT` (WARN) until the collect lands; a FAILED after
+ * the redemption names the payer and seq left held, to collect or refund by hand.
+ *
+ * Since the dispute hold (redeem-into-hold, 2026-10-18) a redemption moves the money into
+ * `held[payer][seq]` and pays nobody: the provider is paid when the platform's collector calls
+ * `collectHeld` at or after `collectableAt`. So the criterion is checked in two transactions: the
+ * redemption (a `PaymentHeld`, the provider untouched) and the platform's collect (the provider
+ * `+ providerAmount` in that block, `providerAmount + fee == amount`).
  *
  * ## Who plays which part
  *
@@ -22,10 +32,18 @@
  *
  * ## What is asserted, and against what
  *
- * The provider's balance is read at the redemption's own block and at the block before it, so
- * the delta is THIS transaction's and not a neighbour's. It must equal `amount − fee`, where
- * `fee` is read off the `VoucherRedeemed` event the same transaction emitted — never computed
- * here from a take rate the script assumed.
+ * The provider's balance is read at each transaction's own block and at the block before it, so
+ * each delta is THAT transaction's and not a neighbour's: 0 at the redemption, and at the collect
+ * `providerAmount` from the `HeldCollected` event that transaction emitted, which must equal
+ * `amount − fee` with `fee` read off the redemption's `VoucherRedeemed` — never computed here from
+ * a take rate the script assumed.
+ *
+ * ## Waiting out the hold
+ *
+ * On the live chain the script waits, polling chain time, until `collectableAt` (at most
+ * `E2_MAX_WAIT_SECONDS`, default 7,500 — the hold is one hour, rounded to the block). On a local
+ * chain or a fork, `E2_ADVANCE_TIME=1` moves the chain's clock instead (`evm_increaseTime`); it is
+ * refused on chain 46630 itself only by the node, which does not offer that method.
  *
  * ## What it does NOT prove
  *
@@ -52,6 +70,8 @@ import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { voucherTypedData } from '@modules/chains/evm/eip712/voucher';
 import { EvmVoucherRedeemer } from '@modules/chains/evm/evm-voucher-redeemer.service';
 import { ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
+import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
+import { EvmHeldPayments } from '@modules/chains/evm/evm-held-payments.service';
 import { ChainId, toAccountId, toAssetId } from '@modules/chains/ports/caip.types';
 import { RedeemOutcomeKind } from '@modules/payment/ports/voucher-redeemer.port';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -201,6 +221,29 @@ async function run(): Promise<E2Result> {
     voucherTypedData(voucher, evmDomain(CHAIN_ID, escrow)),
   );
 
+  // `E2_ADVANCE_TIME` moves the clock with `evm_increaseTime`, which only a local node offers:
+  // refuse it before anything is redeemed rather than after (a live node would leave the held
+  // payment stranded with no database row).
+  const advanceTime = process.env.E2_ADVANCE_TIME === '1';
+  if (advanceTime) {
+    const client = String(
+      await pub.request({ method: 'web3_clientVersion' as never, params: [] as never }),
+    );
+    if (!/anvil|hardhat/i.test(client)) {
+      return {
+        outcome: 'FAILED',
+        evidence: `E2_ADVANCE_TIME=1 needs a local node (anvil/hardhat); this one is ${client}`,
+        unproven: null,
+      };
+    }
+  }
+  const maxWaitSeconds = Number(process.env.E2_MAX_WAIT_SECONDS ?? '7500');
+  if (!Number.isFinite(maxWaitSeconds) || maxWaitSeconds <= 0) {
+    throw new Error(
+      `E2_MAX_WAIT_SECONDS must be a positive number, got ${process.env.E2_MAX_WAIT_SECONDS}`,
+    );
+  }
+
   // ── 4. …the PLATFORM redeems it ─────────────────────────────────────────
   const app = await bootAppContext();
   const redeemer = app.get(EvmVoucherRedeemer, { strict: false });
@@ -225,16 +268,29 @@ async function run(): Promise<E2Result> {
     };
   }
 
-  // ── 5. …and the provider is credited amount − fee, in THAT transaction ──
+  // ── 5. …into hold: a `PaymentHeld`, and the provider is not paid yet ────
   const hash = outcome.signature as `0x${string}`;
   const receipt = await pub.getTransactionReceipt({ hash });
+  const escrowLogs = receipt.logs.filter((log) => getAddress(log.address) === escrow);
   const [redeemed] = parseEventLogs({
     abi: ASSAY_ESCROW_ABI,
     eventName: 'VoucherRedeemed',
-    logs: receipt.logs.filter((log) => getAddress(log.address) === escrow),
+    logs: escrowLogs,
+  });
+  const [heldLog] = parseEventLogs({
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    eventName: 'PaymentHeld',
+    logs: escrowLogs,
   });
   if (!redeemed) {
     return { outcome: 'FAILED', evidence: `${hash} emitted no VoucherRedeemed`, unproven: null };
+  }
+  if (!heldLog) {
+    return {
+      outcome: 'FAILED',
+      evidence: `${hash} emitted no PaymentHeld (not a hold escrow?)`,
+      unproven: null,
+    };
   }
   const balanceAt = (blockNumber: bigint) =>
     pub.readContract({
@@ -244,13 +300,81 @@ async function run(): Promise<E2Result> {
       args: [provider],
       blockNumber,
     });
-  const [before, after, params] = await Promise.all([
+  const [beforeRedeem, afterRedeem, params] = await Promise.all([
     balanceAt(receipt.blockNumber - 1n),
     balanceAt(receipt.blockNumber),
     pub.readContract({ address: config, abi: ASSAY_CONFIG_ABI, functionName: 'params' }),
   ]);
   const { amount, fee, payer, seq } = redeemed.args;
-  const delta = after - before;
+  const collectableAt = heldLog.args.collectableAt;
+  // Every FAILED from here on leaves a held payment with no database row: name it, so it can be
+  // collected (or refunded) by hand.
+  const stranded = `held payment payer ${buyer.address} seq ${voucher.seq} stays held`;
+
+  // ── 6. …the hold runs out… ──────────────────────────────────────────────
+  const chainNow = async () => (await pub.getBlock({ blockTag: 'latest' })).timestamp;
+  if (advanceTime) {
+    const gap = collectableAt - (await chainNow());
+    if (gap > 0n) {
+      await pub.request({
+        method: 'evm_increaseTime' as never,
+        params: [Number(gap) + 1] as never,
+      });
+      await pub.request({ method: 'evm_mine' as never, params: [] as never });
+    }
+  } else {
+    const deadline = Date.now() + maxWaitSeconds * 1000;
+    while ((await chainNow()) < collectableAt) {
+      if (Date.now() > deadline) {
+        return {
+          outcome: 'FAILED',
+          evidence: `held until ${collectableAt}; E2_MAX_WAIT_SECONDS ran out before it matured; ${stranded}`,
+          unproven: null,
+        };
+      }
+      await new Promise((r) => setTimeout(r, 30_000));
+    }
+  }
+
+  // ── 7. …and the PLATFORM's collector pays the provider amount − fee ─────
+  const heldPayments = app.get(EvmHeldPayments, { strict: false });
+  const key = { payer: toAccountId(CHAIN_ID, buyer.address), seq: voucher.seq.toString() };
+  // A fee spike, the hourly budget or a busy redeemer queue defers a collect without sending it;
+  // the platform's job simply retries on its next pass, and so does this.
+  let txRef: string | null = null;
+  for (let attempt = 1; txRef === null; attempt++) {
+    try {
+      ({ txRef } = await heldPayments.collect(asset, [key]));
+    } catch (error) {
+      if (attempt >= 5) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { outcome: 'FAILED', evidence: `collect: ${message}; ${stranded}`, unproven: null };
+      }
+      await new Promise((r) => setTimeout(r, 30_000));
+    }
+  }
+  const collectReceipt = await pub.waitForTransactionReceipt({
+    hash: txRef as `0x${string}`,
+    timeout: 120_000,
+  });
+  const [collectedLog] = parseEventLogs({
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    eventName: 'HeldCollected',
+    logs: collectReceipt.logs.filter((log) => getAddress(log.address) === escrow),
+  });
+  if (!collectedLog) {
+    return {
+      outcome: 'FAILED',
+      evidence: `${txRef} emitted no HeldCollected; ${stranded}`,
+      unproven: null,
+    };
+  }
+  const [beforeCollect, afterCollect] = await Promise.all([
+    balanceAt(collectReceipt.blockNumber - 1n),
+    balanceAt(collectReceipt.blockNumber),
+  ]);
+  const paid = afterCollect - beforeCollect;
+  const { providerAmount, fee: collectFee } = collectedLog.args;
   const detail = {
     redemption: hash,
     block: receipt.blockNumber.toString(),
@@ -262,19 +386,55 @@ async function run(): Promise<E2Result> {
     amount: amount.toString(),
     fee: fee.toString(),
     takeRateBps: params.takeRateBps,
-    providerBefore: before.toString(),
-    providerAfter: after.toString(),
+    collectableAt: collectableAt.toString(),
+    collect: txRef,
+    collectBlock: collectReceipt.blockNumber.toString(),
+    providerAtRedeem: (afterRedeem - beforeRedeem).toString(),
+    providerAtCollect: paid.toString(),
   };
 
+  const sameAddress = (a: string, b: string) => getAddress(a) === getAddress(b);
   const checks: [boolean, string][] = [
-    [delta === amount - fee, `provider delta ${delta} === amount − fee ${amount - fee}`],
+    [
+      sameAddress(heldLog.args.payer, buyer.address) &&
+        heldLog.args.seq === voucher.seq &&
+        sameAddress(heldLog.args.provider, provider) &&
+        heldLog.args.amount === AMOUNT,
+      'PaymentHeld names this voucher (payer, seq, provider, amount)',
+    ],
+    [
+      sameAddress(collectedLog.args.payer, buyer.address) &&
+        collectedLog.args.seq === voucher.seq &&
+        sameAddress(collectedLog.args.provider, provider),
+      'HeldCollected names this voucher (payer, seq, provider)',
+    ],
+    [
+      afterRedeem === beforeRedeem,
+      `provider untouched at the redemption (delta ${afterRedeem - beforeRedeem})`,
+    ],
+    [
+      paid === amount - fee,
+      `provider delta at the collect ${paid} === amount − fee ${amount - fee}`,
+    ],
+    [
+      providerAmount === paid,
+      `HeldCollected.providerAmount ${providerAmount} === the provider's delta`,
+    ],
+    [
+      providerAmount + collectFee === amount,
+      `providerAmount + fee ${providerAmount + collectFee} === amount ${amount}`,
+    ],
     [amount === AMOUNT, `event amount ${amount} === voucher amount ${AMOUNT}`],
     [getAddress(payer) === buyer.address, 'event payer is the scripted buyer'],
     [getAddress(redeemed.args.provider) === provider, 'event provider is the provider'],
     [seq === voucher.seq, `event seq ${seq} === voucher seq ${voucher.seq}`],
     [
       getAddress(receipt.from) === getAddress(params.redeemer),
-      `sent by the configured redeemer ${params.redeemer}, i.e. the platform's redeemer key`,
+      `redemption sent by the configured redeemer ${params.redeemer}, i.e. the platform's redeemer key`,
+    ],
+    [
+      getAddress(collectReceipt.from) === getAddress(params.redeemer),
+      `collect sent by the configured redeemer ${params.redeemer}`,
     ],
   ];
   const failed = checks.filter(([ok]) => !ok).map(([, what]) => what);
@@ -283,8 +443,9 @@ async function run(): Promise<E2Result> {
     : {
         outcome: 'PASSED',
         evidence:
-          `redeemed by the platform in ${hash} (block ${receipt.blockNumber}); provider ` +
-          `${provider} +${delta} = ${amount} − fee ${fee} in that block`,
+          `redeemed into hold by the platform in ${hash} (block ${receipt.blockNumber}), collected ` +
+          `by the platform in ${txRef} (block ${collectReceipt.blockNumber}); provider ${provider} ` +
+          `+${paid} = ${amount} − fee ${fee} in that block`,
         unproven:
           'the voucher was signed by the scripted client, not issued by VoucherService behind a ' +
           'paid rail-B call — that half needs a published eip155 binding with a live upstream.',

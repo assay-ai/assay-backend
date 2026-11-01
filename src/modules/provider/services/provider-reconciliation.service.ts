@@ -9,6 +9,7 @@ import {
   FORFEITED_SQL,
   DEBT_OUTSTANDING_SQL,
   VOIDED_SQL,
+  REFUNDED_UPHELD_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -56,6 +57,8 @@ interface ReconciliationGroupRow {
   readonly forfeited: boolean | string | null;
   /** `VOIDED_SQL`: a debt voided by a late rejecting verdict — same caveat. */
   readonly voided?: boolean | string | null;
+  /** `REFUNDED_UPHELD_SQL`: not charged after an upheld buyer report — same caveat. */
+  readonly refundedUpheld?: boolean | string | null;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -101,6 +104,8 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
   [CallReconciliationClass.PROVIDER_FORFEITED]:
     'voucher not collected because of your stake or a block — forfeited, not credited',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
+  [CallReconciliationClass.REFUNDED_UPHELD]:
+    'passed, but the buyer’s report was upheld, so the buyer does not pay for this call — not credited',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
   [CallReconciliationClass.EXPLORATION]:
@@ -216,6 +221,7 @@ export class ProviderReconciliationService {
           debtOutstanding: row.debtOutstanding === true || row.debtOutstanding === 'true',
           forfeited: row.forfeited === true || row.forfeited === 'true',
           voided: row.voided === true || row.voided === 'true',
+          refundedUpheld: row.refundedUpheld === true || row.refundedUpheld === 'true',
           credited: !(row.holdCommitted === false || row.holdCommitted === 'false'),
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
@@ -319,6 +325,7 @@ export class ProviderReconciliationService {
       .addSelect(CREDITED_SQL, 'holdCommitted')
       .addSelect(FORFEITED_SQL, 'forfeited')
       .addSelect(VOIDED_SQL, 'voided')
+      .addSelect(REFUNDED_UPHELD_SQL, 'refundedUpheld')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -359,6 +366,7 @@ export class ProviderReconciliationService {
       .addGroupBy(CREDITED_SQL)
       .addGroupBy(FORFEITED_SQL)
       .addGroupBy(VOIDED_SQL)
+      .addGroupBy(REFUNDED_UPHELD_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 }

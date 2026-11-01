@@ -218,6 +218,8 @@ function build(options: {
   asset?: AssetId;
   /** "Redeem into hold" (G3.B1): what the mirror holds per payer, and `totalHeld()`. */
   held?: { perAccount: ReadonlyMap<string, bigint>; chainTotal: bigint | null };
+  /** The channel door (W2): `channelBooks` held and `totalUnpaid`. */
+  channel?: { held: bigint; totalUnpaid: bigint };
 }) {
   const alerts = new RecordingAlertSink();
   const runs = options.runs ?? fakeRuns();
@@ -247,6 +249,13 @@ function build(options: {
       : null,
     options.held
       ? ({ totalHeld: jest.fn(() => Promise.resolve(options.held!.chainTotal)) } as never)
+      : null,
+    null,
+    null,
+    options.channel
+      ? ({
+          read: jest.fn(async () => ({ ...options.channel!, readable: true, findings: [] })),
+        } as never)
       : null,
   );
 
@@ -1337,5 +1346,41 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
     expect(report.findings.map((f) => f.code)).not.toContain(
       ReconciliationFindingCode.ESCROW_SEQ_REALIGNED,
     );
+  });
+});
+
+describe('ReconciliationService — channel buckets (SPEC-W2 §1.2)', () => {
+  it('a buyer with per-call and channel holds is neither short nor drifting, and the vault is covered', async () => {
+    // Deposited 4.00: 1.00 still in the escrow, 1.00 in a per-call hold
+    // (totalHeld), 2.00 in a channel bucket (channelBooks.held). The buyer's
+    // ledger still holds all 3.00; the per-account mirror counts both doors.
+    const { service } = build({
+      vaultBalance: 4_000_000n,
+      journal: { DEPOSIT: 4_000_000n },
+      snapshot: { available: 1_000_000n, held: 3_000_000n },
+      escrows: [{ account: BUYER_A, chain: 1_000_000n, mirror: 4_000_000n, openHolds: 3_000_000n }],
+      held: { perAccount: new Map([[BUYER_A, 3_000_000n]]), chainTotal: 1_000_000n },
+      channel: { held: 2_000_000n, totalUnpaid: 0n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    const codes = report.findings.map((finding) => finding.code);
+    expect(codes).not.toContain(ReconciliationFindingCode.ESCROW_SHORTFALL);
+    expect(codes).not.toContain(ReconciliationFindingCode.ESCROW_MIRROR_DRIFT);
+    expect(codes).not.toContain(ReconciliationFindingCode.RESERVES_BREACH);
+    expect(report.severity).not.toBe(ReconciliationSeverity.CRITICAL);
+    expect(await service.isFrozen(USDC)).toBe(false);
+  });
+
+  it('counts totalUnpaid as money the vault must hold (set aside, booked as paid out)', async () => {
+    const { service } = build({
+      vaultBalance: 0n,
+      channel: { held: 0n, totalUnpaid: 5_000_000n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((f) => f.code)).toContain(ReconciliationFindingCode.RESERVES_BREACH);
   });
 });

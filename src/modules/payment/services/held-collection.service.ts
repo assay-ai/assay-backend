@@ -1,3 +1,5 @@
+import { CHANNEL_POLICY } from '../constants/channel.constants';
+import { ChannelPolicy, DEFAULT_CHANNEL_POLICY } from '../domain/channel/channel-policy';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
@@ -147,6 +149,10 @@ export class HeldCollectionService {
     @Optional()
     @Inject(COLLECT_GATHERING)
     private readonly gathering: GatheringPolicy = COLLECT_GATHERING_FROM_ENV,
+    // SPEC-W2 §8 hourly payout minimum (`PROVIDER_PAYOUT_HOURLY_MIN_ATOMIC`, $25).
+    @Optional()
+    @Inject(CHANNEL_POLICY)
+    private readonly channelPolicy: ChannelPolicy = DEFAULT_CHANNEL_POLICY,
   ) {}
 
   /** One pass. Returns how many payments were booked as collected. */
@@ -213,11 +219,17 @@ export class HeldCollectionService {
    * which is booked only once the chain says `COLLECTED`. A failed count
    * collects as before.
    */
+  private get hourlyMinimumAtomic(): bigint {
+    return this.channelPolicy.hourlyPayoutMinimumAtomic;
+  }
+
   private async collectableToGather(
     exclusions: RedemptionExclusions,
   ): Promise<PaymentIntentEntity[]> {
     const beforeSeconds = HELD_TIMEOUT_SECONDS - TIMEOUT_RACE_MARGIN_SECONDS;
     let ready: ReadonlySet<string> | null = null;
+    // Assets due only through an HOURLY provider: only that provider's rows.
+    const hourly = new Map<string, Set<string>>();
     if (this.gathering.minBatch > 1) {
       try {
         const summary = await this.payments.summarizeCollectable(
@@ -244,7 +256,25 @@ export class HeldCollectionService {
             )
             .map(([asset]) => asset),
         );
-        if (ready.size === 0) return [];
+        // SPEC-W2 §8: a provider on the HOURLY cadence is paid on the hour once
+        // its ready per-call holds reach the hourly minimum ($25); the 6-hour
+        // default is the maximum wait above.
+        try {
+          for (const due of (await this.payments.hourlyPayoutsDue?.(
+            PaymentRail.RAIL_B_VOUCHER,
+            beforeSeconds,
+            this.hourlyMinimumAtomic,
+          )) ?? []) {
+            if (ready.has(due.assetId)) continue;
+            const providers = hourly.get(due.assetId) ?? new Set<string>();
+            providers.add(due.providerId);
+            hourly.set(due.assetId, providers);
+          }
+        } catch (error) {
+          // The cadence only makes a payout sooner: without it, the gathering rule stands.
+          this.logger.warn(`Hourly payout check failed: ${describe(error)}`);
+        }
+        if (ready.size === 0 && hourly.size === 0) return [];
       } catch (error) {
         this.logger.warn(`Gathering check failed; collecting as before: ${describe(error)}`);
         ready = null;
@@ -257,7 +287,13 @@ export class HeldCollectionService {
       beforeSeconds,
     );
     const gate = ready;
-    return gate === null ? rows : rows.filter((row) => gate.has(row.assetId));
+    return gate === null
+      ? rows
+      : rows.filter(
+          (row) =>
+            gate.has(row.assetId) ||
+            (row.providerId !== null && hourly.get(row.assetId)?.has(row.providerId) === true),
+        );
   }
 
   /**
@@ -539,6 +575,14 @@ export class HeldCollectionService {
       : status;
     if (confirmed === HeldStatus.COLLECTED) {
       await this.intents.bookHeldCollected(row.organizationId, row.id, txRef);
+      // Paid out now: the hourly cadence counts from here (M3).
+      if (row.providerId) {
+        try {
+          await this.payments.markProvidersPaidOut([row.providerId]);
+        } catch (error) {
+          this.logger.warn(`last_payout_at of ${row.providerId}: ${describe(error)}`);
+        }
+      }
       return 1;
     }
     if (confirmed !== HeldStatus.REFUNDED) return 0;

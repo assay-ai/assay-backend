@@ -42,6 +42,7 @@ import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmHeldPayments, parseHoldLiveChains } from './evm-held-payments.service';
+import { EvmChannelDoor } from './evm-channel-door.service';
 import {
   EvmEscrowDepositLogs,
   parseDepositLookbackBlocks,
@@ -66,6 +67,7 @@ import {
   DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
   DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS,
   EVM_REDEEMER_HOURLY_BUDGET,
+  EVM_REDEEMER_DEADLINE_LANE_WEI_ENV,
   EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
   EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV,
   EvmRedeemerHourlyBudget,
@@ -408,6 +410,35 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       ],
     },
     {
+      // The channel door (W2): settle, collect and refund with the REDEEMER
+      // key, through the same float and hourly budget.
+      provide: EvmChannelDoor,
+      useFactory: (
+        clients: never,
+        deployments: never,
+        redeemer: never,
+        float: EvmSendFloat,
+        hourly: EvmRedeemerHourlyBudget | null,
+        config: ConfigService,
+      ) =>
+        new EvmChannelDoor(
+          clients,
+          deployments,
+          redeemer,
+          float,
+          hourly,
+          parseTokenFreezeFunctions(config.get<string>('EVM_TOKEN_FREEZE_FUNCTIONS')),
+        ),
+      inject: [
+        EVM_RPC_CLIENTS,
+        EVM_DEPLOYMENTS,
+        EVM_REDEEMER,
+        EVM_REDEEMER_SEND_FLOAT,
+        EVM_REDEEMER_HOURLY_BUDGET,
+        ConfigService,
+      ],
+    },
+    {
       /**
        * The REDEEMER's float, read before a redemption or a held move so the
        * send is sized to it. One instance, shared, so both see what the other
@@ -491,6 +522,16 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
                   config.get<string>(EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV),
                   DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS,
                   EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV,
+                ),
+                // SPEC-W2 §3: the channel deadline lane, its own counter.
+                deadlineLaneWei: readWeiBudget(
+                  config.get<string>(EVM_REDEEMER_DEADLINE_LANE_WEI_ENV),
+                  readWeiBudget(
+                    config.get<string>(EVM_REDEEMER_HOURLY_SPEND_WEI_ENV),
+                    DEFAULT_EVM_REDEEMER_HOURLY_SPEND_WEI,
+                    EVM_REDEEMER_HOURLY_SPEND_WEI_ENV,
+                  ),
+                  EVM_REDEEMER_DEADLINE_LANE_WEI_ENV,
                 ),
               },
             )
@@ -698,6 +739,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
     EvmHeldPayments,
+    EvmChannelDoor,
     EvmEscrowDepositLogs,
     EvmTightenDelayProbe,
     EvmChainParamsCache,
@@ -709,6 +751,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmRelayer,
     EVM_RELAYER,
     EVM_REDEEMER,
+    EVM_REDEEMER_HOURLY_BUDGET,
     EVM_DEPLOYMENTS,
     EVM_RPC_CLIENTS,
   ],
@@ -716,6 +759,25 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
 export class EvmModule {}
 
 // ── Parsing ────────────────────────────────────────────────────────────────
+
+/**
+ * `EVM_TOKEN_FREEZE_FUNCTIONS`: `{"eip155:4663":"isFrozen"}`, the settlement
+ * token's issuer-freeze view per chain. Unset or a chain absent: never probed.
+ */
+export function parseTokenFreezeFunctions(raw: string | undefined): ReadonlyMap<string, string> {
+  const map = parseEvmChainMap(raw, 'EVM_TOKEN_FREEZE_FUNCTIONS');
+  const out = new Map<string, string>();
+  for (const [chainId, value] of map) {
+    if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(value)) {
+      throw ChainErrors.configValueInvalid({
+        variable: 'EVM_TOKEN_FREEZE_FUNCTIONS',
+        accepted: 'a Solidity function name per chain, e.g. {"eip155:4663":"isFrozen"}',
+      });
+    }
+    out.set(chainId, value);
+  }
+  return out;
+}
 
 /**
  * `{"eip155:46630": <value>}` → a map keyed by a **validated** CAIP-2 chain id.
@@ -816,7 +878,7 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
  * `deployments/<chainId>.json` in assay-evm, so requiring them costs one line
  * of configuration each.
  */
-function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
+export function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
   const record = value as Record<string, unknown>;
   const fields = [
     'config',
@@ -853,9 +915,44 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
     });
   }
 
+  // Optional: implementations still accepted besides `escrowImplementation`
+  // while an upgrade is staged (final review 2026-11-01 ops F1).
+  const previous = record.previousEscrowImplementations;
+  if (
+    previous !== undefined &&
+    (!Array.isArray(previous) ||
+      previous.some((entry) => typeof entry !== 'string' || !ADDRESS.test(entry)))
+  ) {
+    throw ChainErrors.configValueInvalid({
+      variable: `${EVM_DEPLOYMENTS_ENV}[${chainId}].previousEscrowImplementations`,
+      accepted:
+        'an array of 20-byte 0x addresses: escrow implementations still accepted besides ' +
+        'escrowImplementation while an upgrade is staged, or absent',
+    });
+  }
+
+  // Optional: the block the channel-door upgrade landed in, where the first
+  // foreign channel-transaction scan starts with no cursor (ops F13).
+  const fromBlock = record.channelDoorFromBlock;
+  const validFromBlock =
+    (typeof fromBlock === 'number' && Number.isSafeInteger(fromBlock) && fromBlock >= 0) ||
+    (typeof fromBlock === 'string' && /^[0-9]+$/.test(fromBlock));
+  if (fromBlock !== undefined && !validFromBlock) {
+    throw ChainErrors.configValueInvalid({
+      variable: `${EVM_DEPLOYMENTS_ENV}[${chainId}].channelDoorFromBlock`,
+      accepted: 'a non-negative whole block number (number or decimal string), or absent',
+    });
+  }
+
   return {
     chainId,
     ...(multicall3 ? { multicall3: multicall3 as `0x${string}` } : {}),
+    ...(fromBlock !== undefined
+      ? { channelDoorFromBlock: BigInt(fromBlock as number | string) }
+      : {}),
+    ...(previous !== undefined
+      ? { previousEscrowImplementations: previous as `0x${string}`[] }
+      : {}),
     config: record.config as `0x${string}`,
     stake: record.stake as `0x${string}`,
     escrow: record.escrow as `0x${string}`,

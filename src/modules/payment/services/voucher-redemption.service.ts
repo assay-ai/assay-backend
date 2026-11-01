@@ -47,6 +47,9 @@ import {
   REDEEM_GATHERING,
   REDEEM_GATHERING_FROM_ENV,
   redemptionPassReady,
+  URGENT_REPLACEMENT_LIMITER,
+  UrgentPassLimiter,
+  urgentReplacementLimiterFromEnv,
 } from '../constants/settlement-gathering.constants';
 
 // Re-exported: callers and specs have always imported it from here.
@@ -260,6 +263,11 @@ export class VoucherRedemptionService {
     @Optional()
     @Inject(REDEEM_GATHERING)
     private readonly gathering: GatheringPolicy = REDEEM_GATHERING_FROM_ENV,
+    // SPEC H-1: a debt replacement skips gathering, one urgent pass per asset
+    // per `REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS`.
+    @Optional()
+    @Inject(URGENT_REPLACEMENT_LIMITER)
+    private readonly urgentReplacements: UrgentPassLimiter = urgentReplacementLimiterFromEnv(),
   ) {}
 
   /** Assets whose current pass made at least one buyer debt. */
@@ -272,7 +280,9 @@ export class VoucherRedemptionService {
    * 2026-10-30): on a chain that batches, the pass waits — and touches nothing —
    * until `REDEEM_MIN_BATCH` vouchers await, the oldest was issued
    * `REDEEM_MAX_WAIT_SECONDS` ago, or one is within
-   * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS` of its on-chain deadline. A dispute
+   * `EVM_FEE_CAP_WAIVED_WITHIN_SECONDS` of its on-chain deadline — or a debt
+   * replacement awaits (SPEC H-1, one urgent pass per asset per
+   * `REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS`). A dispute
    * filed while a voucher waits is guaranteed as before: the voucher is
    * redeemed into the hold and its full window starts then.
    *
@@ -312,6 +322,11 @@ export class VoucherRedemptionService {
       graceSeconds: redeemGraceSeconds(asset),
       urgentWithinSeconds: EVM_FEE_CAP_WAIVED_WITHIN_SECONDS,
       nowMs: this.now(),
+      urgentReplacements: this.urgentReplacements,
+      onUrgent: (replacements) =>
+        this.logger.log(
+          `${replacements} debt replacement(s) await on ${asset}; running an urgent pass (gathering skipped)`,
+        ),
       onError: (error) =>
         this.logger.warn(
           `Gathering check for ${asset} failed; running the pass: ${describe(error)}`,

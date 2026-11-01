@@ -251,6 +251,15 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   can unblock — the dangerous direction): confirm with the admin.
   **WARN `evm_arbiter_blocked_address`**: the arbiter blocked an address;
   confirm with the arbiter.
+  **History on a fresh index.** While a chain's index has never caught up (a
+  new chain-state row: a cutover, a DB rebuild), an event whose block is more
+  than 1 hour older than the chain head (chain time, read in the same pass) is
+  recorded at INFO. Then ONE **WARN `evm_chain_state_history_replayed`** lists
+  those events per name (count, newest block, newest block time, block range)
+  when the first catch-up completes, and again every 10 passes while it is
+  still catching up. Check every listed lever against what was planned since
+  the deploy; an unplanned one is handled like its CRITICAL above. If the head
+  or a block time cannot be read, the event keeps its usual severity.
 - **Disputes.** A provider's `disputeSlash` shows on the case as
   `chainStatus: DISPUTED` and moves a `PROPOSED` case into review. The arbiter
   rules from the operator console's arbiter page (`/operator/arbiter/*`): the

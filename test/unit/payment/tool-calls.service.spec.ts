@@ -416,6 +416,11 @@ describe('ToolCallsService.list — include=free (BUG-AGT-01)', () => {
             refundedByReport: false,
             collectableAt: null,
             disputeWindowEndsAt: null,
+            // W2 receipt fields (API-W2 §3.4): additive.
+            collectedAt: null,
+            payoutTxRef: null,
+            voucherFormat: 'PER_CALL',
+            channel: null,
             verdict: null,
             createdAt: '2026-08-10T10:00:00.000Z',
           },

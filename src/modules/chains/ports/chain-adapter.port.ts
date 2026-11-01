@@ -1,3 +1,6 @@
+import { TypedDataDomain } from 'viem';
+
+import { ChannelVoucherMessage } from '@modules/chains/evm/eip712/channel-voucher';
 import { DelegateBindingChallenge, DelegateBindingTypedData } from './delegate-binding.types';
 import { VoucherAuthorityAnswer } from './voucher-authority.types';
 import { AccountId, AssetId, ChainId, ChainNamespace } from './caip.types';
@@ -143,6 +146,19 @@ export interface ChainAdapter {
     signature: string,
     nowSeconds: number,
   ): Promise<VoucherAuthorityAnswer>;
+  /**
+   * The channel door (eip155): who signed a `ChannelVoucher` for `payer` — the
+   * payer's own key, or a delegate the payer authorised on chain (with its
+   * terms) — with the same checks as {@link authorizeVoucherSigner}, over the
+   * escrow's own EIP-712 domain. Also answers the domain, for the offer.
+   */
+  authorizeChannelSigner?(
+    payer: AccountId,
+    message: ChannelVoucherMessage,
+    signature: string,
+    nowSeconds: number,
+  ): Promise<VoucherAuthorityAnswer>;
+  channelDomain?(chainId: ChainId): TypedDataDomain;
   /**
    * Whether `(payer, seq)` is already used on chain — on a chain whose replay
    * rule is per seq, in any order (`eip155`, D-23: `held(payer, seq)` has a

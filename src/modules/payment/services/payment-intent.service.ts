@@ -5,7 +5,9 @@ import {
 } from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { In, Not } from 'typeorm';
+import { EntityManager, In, Not } from 'typeorm';
+
+import { ChannelRefundService } from './channel-refund.service';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -40,6 +42,7 @@ import {
   DEBT_VOIDED_PREFIX,
   PROVIDER_FORFEIT_PREFIX,
 } from '../constants/voucher-redemption.constants';
+import { CHANNEL_TERMINAL_UNVERIFIED_REASON } from '../constants/channel.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
 import {
   COLLECTION_HOLD_WINDOW_SECONDS,
@@ -62,6 +65,7 @@ import {
   PaymentIntentStatus,
   PaymentIntentTransitionContext,
   PaymentRail,
+  VoucherFormat,
 } from '../ports/payment.types';
 
 /**
@@ -103,6 +107,17 @@ export const IDEMPOTENCY_RELEASED_STATUSES: readonly PaymentIntentStatus[] = [
 export interface VoucherAdmission {
   readonly scope: VoucherAdmissionScope;
   readonly admit: (open: OpenVoucherTotals) => void;
+  /**
+   * Runs under the same lock and in the same transaction, after `admit` and
+   * before the insert (the channel door: lock or open the lane, check
+   * continuity, store the voucher and advance the lane). It may complete the
+   * row (`channelRowId`). A throw rolls everything back.
+   */
+  readonly withinLock?: (
+    manager: EntityManager,
+    row: Partial<PaymentIntentEntity>,
+    open: OpenVoucherTotals,
+  ) => Promise<void>;
 }
 
 /**
@@ -137,6 +152,9 @@ export class PaymentIntentService {
     private readonly held: HeldPaymentsPort | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
     @Optional() private readonly epochs: TenantEpochService | null = null,
+    // The channel door's refunds (W2): a CHANNEL call is refunded out of its
+    // channel's bucket, never through `held(payer, seq)`.
+    @Optional() private readonly channelRefunds: ChannelRefundService | null = null,
   ) {}
 
   /**
@@ -257,6 +275,13 @@ export class PaymentIntentService {
       voucherIssuedAt: input.voucherIssuedAt === undefined ? null : String(input.voucherIssuedAt),
       voucherDelegate: input.voucherDelegate ?? null,
       credentialId: input.credentialId ?? null,
+      ...(input.voucherFormat === VoucherFormat.CHANNEL
+        ? {
+            voucherFormat: VoucherFormat.CHANNEL,
+            channelCumulative: input.channelCumulative ?? null,
+            channelCalls: input.channelCalls ?? null,
+          }
+        : {}),
       holdId: null,
       holdReleasedAt: null,
       classification: null,
@@ -326,7 +351,12 @@ export class PaymentIntentService {
     admission: VoucherAdmission | undefined,
   ): Promise<void> {
     if (admission) {
-      await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
+      await this.intents.insertAdmittedVoucherIntent(
+        row,
+        admission.scope,
+        admission.admit,
+        admission.withinLock,
+      );
     } else {
       await this.intents.insert(row);
     }
@@ -883,6 +913,54 @@ export class PaymentIntentService {
     return true;
   }
 
+  /**
+   * A REFUND / VOID verdict on a CHANNEL call that `T_term` settled as served
+   * and unverified, arriving while cancelling is still free (sec-audit
+   * 2026-11-01 B-6): not bound to a settlement, not charged into a bucket,
+   * not a debt. The call is voided (`voided:<outcome>`), its hold released,
+   * nobody credited; the lane's next settle waives it. `false` when it is no
+   * longer free (bound, charged, or a debt): the round charges it and the
+   * buyer's remedy is a dispute, as before.
+   */
+  async voidUnchargedChannelCall(
+    organizationId: string,
+    intentId: string,
+    outcome: string,
+  ): Promise<boolean> {
+    const intent = await this.findById(organizationId, intentId);
+    if (
+      intent.voucherFormat !== VoucherFormat.CHANNEL ||
+      !intent.channelRowId ||
+      intent.status !== PaymentIntentStatus.SETTLED ||
+      intent.statusReason !== CHANNEL_TERMINAL_UNVERIFIED_REASON ||
+      !intent.holdId ||
+      intent.holdReleasedAt !== null
+    ) {
+      return false;
+    }
+    const target = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+      channelRowId: intent.channelRowId,
+    };
+    const resolution = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markChannelCallVoided(
+        runner,
+        target,
+        `${DEBT_VOIDED_PREFIX}${outcome}`,
+        CHANNEL_TERMINAL_UNVERIFIED_REASON,
+      ),
+    );
+    if (resolution === null) return false;
+    this.logger.warn(
+      `Intent ${intentId}: judged ${outcome} after T_term settled the channel call unverified, ` +
+        `before any settlement charged it — voided: the hold is released, nobody is credited`,
+    );
+    return true;
+  }
+
   /** `held(payer, seq)` for a rail-B intent, or `null` when there is no chain hold. */
   async readHeldRecord(intent: PaymentIntent) {
     if (!this.held || intent.rail !== PaymentRail.RAIL_B_VOUCHER || !intent.voucherSeq) {
@@ -945,6 +1023,24 @@ export class PaymentIntentService {
     outcome: string,
   ): Promise<'REFUNDED' | 'COLLECTED' | 'NOT_HELD' | 'TIMED_OUT'> {
     const intent = await this.findById(organizationId, intentId);
+    if (
+      intent.voucherFormat === VoucherFormat.CHANNEL &&
+      intent.heldStatus === null &&
+      intent.channelSettlementId &&
+      // A call the landing waived keeps its settlement id with its hold
+      // released: nothing is in flight for it any more.
+      intent.holdReleasedAt === null
+    ) {
+      // A settlement carrying this call as charged is in flight: releasing the
+      // buyer's hold now would let the chain charge a call the ledger refunded.
+      // Retried once it lands (then it is HELD and refunded from the bucket).
+      throw PaymentErrors.invalidStateTransition({
+        intentId,
+        from: intent.status,
+        to: PaymentIntentStatus.SETTLED,
+        actual: 'its channel settlement is in flight — retried',
+      });
+    }
     if (!intent.holdId || intent.heldStatus !== HELD) {
       return intent.heldStatus === HELD_COLLECTED
         ? 'COLLECTED'
@@ -954,7 +1050,31 @@ export class PaymentIntentService {
     }
 
     let txRef: string | null = null;
-    if (intent.rail === PaymentRail.RAIL_B_VOUCHER) {
+    if (intent.voucherFormat === VoucherFormat.CHANNEL) {
+      // Routed by the format (v3 §5.2): out of the channel's bucket.
+      if (!this.channelRefunds || !intent.channelRowId) {
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: 'a channel hold, and no channel refunder is wired — retried',
+        });
+      }
+      // Idempotent per call (review 2026-10-31 H1): a retry reads the earlier
+      // send back and never refunds the same call twice.
+      const outcome = await this.channelRefunds.refund({
+        assetId: intent.price.asset,
+        channelRowId: intent.channelRowId,
+        amount: BigInt(intent.price.amount),
+        intentId,
+      });
+      if (outcome.kind === 'COLLECTED') return 'COLLECTED';
+      if (outcome.kind === 'TIMED_OUT') return 'TIMED_OUT';
+      if (outcome.kind === 'NOT_FOUND') {
+        throw PaymentErrors.channelRefundNotSent({ intentId, reason: outcome.reason });
+      }
+      txRef = outcome.txRef;
+    } else if (intent.rail === PaymentRail.RAIL_B_VOUCHER) {
       const key = { payer: intent.agentAccount, seq: intent.voucherSeq as string };
       const asset = intent.price.asset as AssetId;
       let record = await this.readHeldRecord(intent);
@@ -1152,6 +1272,11 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     heldStatus: row.heldStatus ?? null,
     heldAt: row.heldAt ?? null,
     heldAttempts: row.heldAttempts ?? 0,
+    voucherFormat: (row.voucherFormat as VoucherFormat | undefined) ?? VoucherFormat.PER_CALL,
+    channelRowId: row.channelRowId ?? null,
+    channelCumulative: row.channelCumulative ?? null,
+    channelCalls: row.channelCalls ?? null,
+    channelSettlementId: row.channelSettlementId ?? null,
     classification: row.classification,
     verificationVerdict: row.verificationVerdict,
     createdAt: row.createdAt,

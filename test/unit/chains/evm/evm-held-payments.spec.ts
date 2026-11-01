@@ -326,8 +326,9 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
         signature: '0x3e5b55ad',
       });
       const { service } = build(null, { simulateError: guarded });
+      // The selector now decodes to its `Errors.sol` name ahead of the message.
       await expect(service.collect(ASSET, one)).rejects.toMatchObject({
-        message: 'held send refused: HeldNotYetCollectable',
+        message: 'held send refused: HeldNotYetCollectable: HeldNotYetCollectable',
       });
     });
     it('names the Errors.sol error when the node returned its selector', async () => {

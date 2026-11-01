@@ -7,6 +7,7 @@ import {
   FORFEITED_SQL,
   PaymentIntentRepository,
   VOIDED_SQL,
+  REFUNDED_UPHELD_SQL,
   WRITTEN_OFF_SQL,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
@@ -78,6 +79,7 @@ interface ClassifiableRow {
   readonly debtOutstanding: boolean | string | null;
   readonly forfeited: boolean | string | null;
   readonly voided: boolean | string | null;
+  readonly refundedUpheld?: boolean | string | null;
   readonly calls: string;
   readonly providerAmount: string;
 }
@@ -300,6 +302,7 @@ export class ProviderEarningsService {
       .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect(FORFEITED_SQL, 'forfeited')
       .addSelect(VOIDED_SQL, 'voided')
+      .addSelect(REFUNDED_UPHELD_SQL, 'refundedUpheld')
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COALESCE(SUM(intent.providerAmount), 0)', 'providerAmount')
       .where('intent.organizationId IS NOT NULL')
@@ -323,6 +326,7 @@ export class ProviderEarningsService {
       .addGroupBy(DEBT_OUTSTANDING_SQL)
       .addGroupBy(FORFEITED_SQL)
       .addGroupBy(VOIDED_SQL)
+      .addGroupBy(REFUNDED_UPHELD_SQL)
       .getRawMany<ClassifiableRow>();
 
     const byGroup = new Map<string, Record<NotCreditedClass, ClassFigure>>();
@@ -336,6 +340,7 @@ export class ProviderEarningsService {
         debtOutstanding: flag(row.debtOutstanding),
         forfeited: flag(row.forfeited),
         voided: flag(row.voided),
+        refundedUpheld: flag(row.refundedUpheld ?? null),
       });
       if (!isNotCredited(cls)) continue;
 

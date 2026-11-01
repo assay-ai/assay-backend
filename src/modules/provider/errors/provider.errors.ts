@@ -7,6 +7,8 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum ProviderErrorCode {
   PROVIDER_NOT_FOUND = 'PROVIDER_NOT_FOUND',
+  /** `PUT /providers/me/payout-cadence` with a cadence that is not offered (SPEC-W2 §8). */
+  PROVIDER_PAYOUT_CADENCE_INVALID = 'PROVIDER_PAYOUT_CADENCE_INVALID',
   PROVIDER_ALREADY_REGISTERED = 'PROVIDER_ALREADY_REGISTERED',
   PROVIDER_SUSPENDED = 'PROVIDER_SUSPENDED',
   /** `POST /providers/me/payout-address` — no challenge by that id belongs to the caller. */
@@ -286,6 +288,13 @@ const STAKE_AUTHORITY_IMMOVABLE_WHILE_SLASHABLE =
   ' would follow the new key to an empty account and leave the collateral behind.';
 
 export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
+  payoutCadenceInvalid: {
+    code: ProviderErrorCode.PROVIDER_PAYOUT_CADENCE_INVALID,
+    statusCode: 400,
+    publicContext: ['options'],
+    message: (context?: Record<string, any>) =>
+      `Payout cadence must be one of ${(context?.options ?? []).join(', ')}`,
+  },
   providerNotFound: {
     code: ProviderErrorCode.PROVIDER_NOT_FOUND,
     statusCode: 404,

@@ -1,3 +1,4 @@
+import { ProviderPayoutStagesService } from './services/provider-payout-stages.service';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -156,6 +157,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderProfileService,
     ProviderEarningsService,
     ProviderCallsExportService,
+    ProviderPayoutStagesService,
     ProviderPayoutsService,
     ProviderVerdictService,
     ProviderReconciliationService,

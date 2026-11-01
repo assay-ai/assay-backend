@@ -87,9 +87,12 @@ function eventsOf(source: string, structs: Map<string, string>): Map<string, str
       (name) => EVM_ERROR_BY_SELECTOR.get(toFunctionSelector(`${name}()`)) !== name,
     );
     expect(missing).toEqual([]);
-    // And nothing the branch no longer declares (OpenZeppelin's two aside).
+    // And nothing the branch no longer declares (OpenZeppelin's errors aside).
     const extra = [...EVM_ERROR_BY_SELECTOR.values()].filter(
-      (name) => !declared.includes(name) && !name.startsWith('Ownable'),
+      (name) =>
+        !declared.includes(name) &&
+        !name.startsWith('Ownable') &&
+        name !== 'SafeERC20FailedOperation',
     );
     expect(extra).toEqual([]);
   });

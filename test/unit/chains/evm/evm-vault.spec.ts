@@ -193,12 +193,13 @@ function chain(overrides: Partial<ChainState> = {}): {
 function vaultWith(
   overrides: Partial<ChainState> = {},
   keys: { redeemer?: `0x${string}`; relayer?: `0x${string}` } = {},
+  record: typeof DEPLOYMENT = DEPLOYMENT,
 ) {
   const { client, calls } = chain(overrides);
   return {
     vault: new EvmVaultService(
       new Map<ChainId, EvmVaultClient>([[TESTNET, client]]),
-      new Map([[TESTNET, DEPLOYMENT]]),
+      new Map([[TESTNET, record]]),
       {
         redeemer: new Map(keys.redeemer ? [[TESTNET, keys.redeemer]] : []),
         relayer: new Map(keys.relayer ? [[TESTNET, keys.relayer]] : []),
@@ -269,6 +270,37 @@ describe('EvmVaultService', () => {
   it('getVaultBalance is the same reading, without the block', async () => {
     const { vault } = vaultWith({ balance: 7n });
     await expect(vault.getVaultBalance(USDG)).resolves.toEqual(MoneyUtil.of(7n, USDG, 6));
+  });
+
+  describe('an implementation SET (final review 2026-11-01 ops F1)', () => {
+    const NEXT_IMPLEMENTATION = '0x00000000000000000000000000000000000C0dE5';
+    const staged = {
+      ...DEPLOYMENT,
+      previousEscrowImplementations: [DEPLOYMENT.escrowImplementation],
+    };
+    const upgraded = { ...staged, escrowImplementation: NEXT_IMPLEMENTATION as `0x${string}` };
+
+    it('accepts the recorded implementation', async () => {
+      const { vault } = vaultWith({ implementation: NEXT_IMPLEMENTATION }, {}, upgraded as never);
+      await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
+    });
+
+    it('accepts a previous implementation the record still lists (deployed BEFORE the upgrade)', async () => {
+      // The proxy still points at the old code; the backend already names the new one.
+      const { vault } = vaultWith(
+        { implementation: DEPLOYMENT.escrowImplementation.toUpperCase().replace('0X', '0x') },
+        {},
+        upgraded as never,
+      );
+      await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
+    });
+
+    it('still refuses an implementation in neither', async () => {
+      const { vault } = vaultWith({ implementation: OTHER_IMPLEMENTATION }, {}, upgraded as never);
+      await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
+        errorCode: 'CHAIN_VAULT_CONTROL_UNVERIFIED',
+      });
+    });
   });
 
   it('refuses when the proxy points at an implementation the record does not name', async () => {

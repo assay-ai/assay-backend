@@ -1,3 +1,8 @@
+import { ChannelVouchers1793404800000 } from '@database/postgres/migrations/1793404800000-channel-vouchers';
+import { ChannelVoucherIndexes1793404800010 } from '@database/postgres/migrations/1793404800010-channel-voucher-indexes';
+import { DebtGuardHeldReplacement1793404800020 } from '@database/postgres/migrations/1793404800020-debt-guard-held-replacement';
+import { ChannelDebtPerCallReplacement1793404800030 } from '@database/postgres/migrations/1793404800030-channel-debt-per-call-replacement';
+import { ChannelReplacementCheckValidate1793404800040 } from '@database/postgres/migrations/1793404800040-channel-replacement-check-validate';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { DropLegacyPaymentSchema1762400000000 } from '@database/postgres/migrations/1762400000000-drop-legacy-payment-schema';
 import { PaymentKeySpendIndexes1762400000020 } from '@database/postgres/migrations/1762400000020-payment-key-spend-indexes';
@@ -240,6 +245,11 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       VoucherSeqDebtReplacementPerChain1762400000070,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
       PaymentIntentRedemptionRetry1762400000080,
+      ChannelVouchers1793404800000,
+      ChannelVoucherIndexes1793404800010,
+      DebtGuardHeldReplacement1793404800020,
+      ChannelDebtPerCallReplacement1793404800030,
+      ChannelReplacementCheckValidate1793404800040,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',

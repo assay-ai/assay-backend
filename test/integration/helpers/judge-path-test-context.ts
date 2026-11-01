@@ -1,3 +1,8 @@
+import { ChannelVouchers1793404800000 } from '@database/postgres/migrations/1793404800000-channel-vouchers';
+import { ChannelVoucherIndexes1793404800010 } from '@database/postgres/migrations/1793404800010-channel-voucher-indexes';
+import { DebtGuardHeldReplacement1793404800020 } from '@database/postgres/migrations/1793404800020-debt-guard-held-replacement';
+import { ChannelDebtPerCallReplacement1793404800030 } from '@database/postgres/migrations/1793404800030-channel-debt-per-call-replacement';
+import { ChannelReplacementCheckValidate1793404800040 } from '@database/postgres/migrations/1793404800040-channel-replacement-check-validate';
 import { PaymentIntentRedemptionRetry1762400000080 } from '@database/postgres/migrations/1762400000080-payment-intent-redemption-retry';
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
@@ -211,6 +216,11 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       ToolBindingAuthMode1762000000002,
       // The redemption retry back-off (review 2026-10-23 I-1), mapped by `PaymentIntentEntity`.
       PaymentIntentRedemptionRetry1762400000080,
+      ChannelVouchers1793404800000,
+      ChannelVoucherIndexes1793404800010,
+      DebtGuardHeldReplacement1793404800020,
+      ChannelDebtPerCallReplacement1793404800030,
+      ChannelReplacementCheckValidate1793404800040,
     ],
     synchronize: false,
     logging: false,
@@ -218,7 +228,8 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
 
   await dataSource.initialize();
   await resetSchemaIfMigrationsChanged(dataSource);
-  await dataSource.runMigrations();
+  // One transaction per migration: the channel indexes build CONCURRENTLY (`transaction = false`).
+  await dataSource.runMigrations({ transaction: 'each' });
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
   const entries = new LedgerEntryRepository(dataSource);

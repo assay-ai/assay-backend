@@ -149,6 +149,15 @@ export interface EvmDeployment {
    */
   readonly escrowImplementation: `0x${string}`;
   /**
+   * Implementations still accepted besides {@link escrowImplementation}
+   * (final review 2026-11-01 ops F1). An upgrade is staged by deploying the
+   * backend with the NEW implementation as `escrowImplementation` and the
+   * old one listed here BEFORE `upgradeToAndCall`, so the reconciler passes
+   * on either side of the upgrade and withdrawals never freeze in between;
+   * the old one is dropped in the next deploy. Anything else still fails.
+   */
+  readonly previousEscrowImplementations?: readonly `0x${string}`[];
+  /**
    * `AssayConfig.admin` — the OPERATIONAL key (`updateConfig`, `setPaused`, the
    * verifier registry, `cancelSlash`). It is **not** the upgrade authority:
    * since D-17 that is {@link owner}, and the owner appoints the admin.
@@ -184,6 +193,12 @@ export interface EvmDeployment {
    * `EVM_CHAIN_STATE_FROM_BLOCK`, since no `BlockedSet` can predate it.
    */
   readonly disputeUpgradeBlock?: bigint;
+  /**
+   * The block the channel-door upgrade landed in, when recorded: where the
+   * reconciler's first foreign channel-transaction scan starts with no cursor
+   * (ops F13). Absent: the last `FOREIGN_SCAN_BLOCKS` before the head.
+   */
+  readonly channelDoorFromBlock?: bigint;
 }
 
 /** DI token: `ReadonlyMap<ChainId, EvmDeployment>`. */

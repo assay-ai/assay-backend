@@ -202,6 +202,54 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
     expect(names).not.toContain('TypeError');
   });
 
+  it('rpcBatch: several calls in ONE request through the egress client, answered in call order (M-1)', async () => {
+    const { client: egress, requests } = fakeEgress((request) => {
+      const calls = JSON.parse(String(request.body)) as { id: number; method: string }[];
+      // Answered out of order, as a node may.
+      return {
+        body: JSON.stringify(
+          [...calls].reverse().map((c) => ({ jsonrpc: '2.0', id: c.id, result: c.method })),
+        ),
+      };
+    });
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never);
+    const results = await client.rpcBatch([
+      { method: 'eth_getTransactionCount', params: ['0x1', 'latest'] },
+      { method: 'eth_getTransactionReceipt', params: ['0x2'] },
+    ]);
+    expect(results).toEqual(['eth_getTransactionCount', 'eth_getTransactionReceipt']);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].policy?.trust).toBe(EgressTrust.INTERNAL_ALLOWED);
+  });
+
+  it('rpcBatch: a node that refuses batches, or one failed item, rejects the whole call', async () => {
+    const refusing = fakeEgress(() => ({
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32600, message: 'no batch' },
+      }),
+    }));
+    await expect(
+      createSanctionedEvmClient(RPC_URL, refusing.client, TEST_CHAIN as never).rpcBatch([
+        { method: 'eth_blockNumber', params: [] },
+      ]),
+    ).rejects.toThrow(/refused/);
+    const failing = fakeEgress((request) => {
+      const [c] = JSON.parse(String(request.body)) as { id: number }[];
+      return {
+        body: JSON.stringify([
+          { jsonrpc: '2.0', id: c.id, error: { code: -32000, message: 'secret prose' } },
+        ]),
+      };
+    });
+    const error = await createSanctionedEvmClient(RPC_URL, failing.client, TEST_CHAIN as never)
+      .rpcBatch([{ method: 'eth_blockNumber', params: [] }])
+      .catch((e: Error) => e);
+    expect(String((error as Error).message)).toMatch(/code -32000/);
+    expect(String((error as Error).message)).not.toMatch(/secret prose/);
+  });
+
   it('refuses a non-2xx answer rather than decoding whatever body came back', async () => {
     // The positive control is the first test above: the same fixture with a 200
     // succeeds. Without this, a 502 HTML error page decodes to `undefined` and

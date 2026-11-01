@@ -9,10 +9,13 @@ import {
   GatheringPolicy,
   loadCollectGathering,
   loadRedeemGathering,
+  loadUrgentReplacementIntervalSeconds,
   NO_GATHERING,
+  UrgentPassLimiter,
 } from '@modules/payment/constants/settlement-gathering.constants';
 import { redeemGraceSeconds } from '@modules/payment/constants/voucher-redemption.constants';
 import {
+  FEE_SPIKE_DEFERRED,
   RedeemOutcome,
   RedeemOutcomeKind,
   RedeemVoucherRequest,
@@ -63,6 +66,7 @@ interface Waiting {
   count: number;
   oldestIssuedAt: Date | null;
   earliestExpiresAt: Date | null;
+  replacementCount?: number;
 }
 
 function build(options: {
@@ -71,15 +75,21 @@ function build(options: {
   policy?: GatheringPolicy;
   rows?: number;
   blocklist?: ReturnType<typeof noBlocks>;
+  limiter?: UrgentPassLimiter;
+  now?: () => number;
+  deferAll?: boolean;
 }) {
   const rows = Array.from({ length: options.rows ?? 3 }, (_, index) => pending(index + 1));
   const batches: RedeemVoucherRequest[][] = [];
   const singles: RedeemVoucherRequest[] = [];
-  const outcome = (request: RedeemVoucherRequest): RedeemOutcome => ({
-    kind: RedeemOutcomeKind.REDEEMED,
-    signature: `sig-${request.seq}`,
-    programError: null,
-  });
+  const outcome = (request: RedeemVoucherRequest): RedeemOutcome =>
+    options.deferAll
+      ? { kind: RedeemOutcomeKind.RETRY, signature: null, programError: FEE_SPIKE_DEFERRED }
+      : {
+          kind: RedeemOutcomeKind.REDEEMED,
+          signature: `sig-${request.seq}`,
+          programError: null,
+        };
   const redeemer = {
     maxBatchSize: options.batchSize ?? 64,
     maxBatchSizeFor: () => options.batchSize ?? 64,
@@ -123,10 +133,11 @@ function build(options: {
     redeemer as never,
     { emit: async () => undefined } as never,
     options.blocklist ?? noBlocks(),
-    () => NOW_MS,
+    options.now ?? (() => NOW_MS),
     null,
     null,
     options.policy ?? GATHER,
+    options.limiter ?? new UrgentPassLimiter(300),
   );
   return { service, payments, batches, singles };
 }
@@ -258,5 +269,88 @@ describe('VoucherRedemptionService — gathering', () => {
 
     expect(payments.summarizeAwaitingRedemption).not.toHaveBeenCalled();
     expect(batches).toHaveLength(1);
+  });
+
+  describe('debt replacement (SPEC H-1)', () => {
+    const young = (replacementCount: number): Waiting => ({
+      count: 1,
+      oldestIssuedAt: new Date(NOW_MS - 10_000),
+      earliestExpiresAt: new Date(NOW_MS + 300_000),
+      replacementCount,
+    });
+
+    it('reads its interval from the env: 300 s by default, 60–3,600', () => {
+      expect(loadUrgentReplacementIntervalSeconds({})).toBe(300);
+      expect(
+        loadUrgentReplacementIntervalSeconds({ REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS: '600' }),
+      ).toBe(600);
+      expect(() =>
+        loadUrgentReplacementIntervalSeconds({ REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS: '10' }),
+      ).toThrow(/REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS/);
+    });
+
+    it('runs the pass at once for a replacement, below both gathering thresholds', async () => {
+      const { service, batches } = build({ rows: 1, waiting: young(1) });
+
+      await service.run(ASSET);
+
+      expect(batches.map((batch) => batch.length)).toEqual([1]);
+    });
+
+    it('runs at most one urgent pass per asset per interval', async () => {
+      let now = NOW_MS;
+      const limiter = new UrgentPassLimiter(300);
+      const { service, batches } = build({ rows: 1, waiting: young(1), limiter, now: () => now });
+
+      await service.run(ASSET);
+      now += 299_000;
+      await service.run(ASSET);
+      expect(batches).toHaveLength(1);
+
+      now += 1_000;
+      await service.run(ASSET);
+      expect(batches).toHaveLength(2);
+    });
+
+    it('a pass gathering runs anyway does not use the urgent allowance', async () => {
+      const limiter = new UrgentPassLimiter(300);
+      const full = build({
+        rows: 20,
+        waiting: { ...young(1), count: 20 },
+        limiter,
+      });
+      await full.service.run(ASSET);
+      expect(limiter.nextAllowedAt(ASSET, NOW_MS)).toBeNull();
+
+      const urgent = build({ rows: 1, waiting: young(1), limiter });
+      await urgent.service.run(ASSET);
+      expect(urgent.batches).toHaveLength(1);
+    });
+
+    it('still gathers when no replacement awaits', async () => {
+      const { service, batches } = build({ rows: 1, waiting: young(0) });
+
+      await service.run(ASSET);
+
+      expect(batches).toEqual([]);
+    });
+
+    it('is bounded per asset, not globally', async () => {
+      const limiter = new UrgentPassLimiter(300);
+      expect(limiter.tryTake(ASSET, NOW_MS)).toBe(true);
+      expect(limiter.tryTake(ASSET, NOW_MS + 1)).toBe(false);
+      expect(limiter.tryTake('eip155:4663/erc20:0xother', NOW_MS + 1)).toBe(true);
+    });
+
+    it('still goes through the redeemer, so a fee-spike or budget deferral holds the row', async () => {
+      // The redeemer owns the fee-spike and hourly-budget gates; the urgent
+      // pass reaches it like any other and a deferral redeems nothing.
+      const { service, batches, payments } = build({ rows: 1, waiting: young(1), deferAll: true });
+
+      await service.run(ASSET);
+
+      expect(batches).toHaveLength(1);
+      expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    });
   });
 });

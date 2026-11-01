@@ -148,11 +148,11 @@ export function loadProviderTerms(
       {
         key: 'payouts',
         label: 'Payouts',
-        // There is no payout batch: a provider is paid on chain when each
-        // call's voucher is redeemed, and the payment is final once the
-        // buyer report window (the on-chain collect hold) has closed.
-        value: 'as each call settles',
-        caption: `on chain; final ${hold} after each call`,
+        // Payouts run on a schedule (the provider's payout cadence): a call is
+        // recorded on chain, held at least the on-chain collect hold for buyer
+        // reports, then paid in the next payout run.
+        value: 'on a schedule',
+        caption: `on chain, after a dispute hold of at least ${hold}`,
       },
       {
         key: 'reserveHeld',

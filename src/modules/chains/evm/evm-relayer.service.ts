@@ -1,4 +1,4 @@
-import { keccak256 } from 'viem';
+import { keccak256, WaitForTransactionReceiptTimeoutError } from 'viem';
 import { PrivateKeyAccount, privateKeyToAccount } from 'viem/accounts';
 
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -21,6 +21,7 @@ import {
   EvmRelayResult,
   EvmRelayedCall,
   EvmRelayerPort,
+  EvmSignedTxMeta,
   EvmValueTransfer,
 } from './ports/evm-relayer.port';
 
@@ -39,6 +40,18 @@ export interface EvmRelayClient {
   estimateFeesPerGas(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
   sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`>;
   waitForTransactionReceipt(args: { hash: `0x${string}`; timeout?: number }): Promise<{
+    status: 'success' | 'reverted';
+    gasUsed: bigint;
+    effectiveGasPrice?: bigint;
+    blockNumber: bigint;
+  }>;
+  /**
+   * One receipt lookup (viem's public action). When present, the receipt is
+   * awaited with a bounded poll of this instead of `waitForTransactionReceipt`
+   * (sec-audit 2026-11-01 E-2: viem 2.21's wait rejects at its timeout but
+   * leaves its block watcher polling the hash until a receipt appears).
+   */
+  getTransactionReceipt?(args: { hash: `0x${string}` }): Promise<{
     status: 'success' | 'reverted';
     gasUsed: bigint;
     effectiveGasPrice?: bigint;
@@ -217,7 +230,7 @@ export class EvmRelayer implements EvmRelayerPort {
     tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
     /** Epoch ms after which this send is given up unsent, or null to wait its turn however long. */
     sendBy: number | null = null,
-    beforeBroadcast?: (hash: `0x${string}`) => Promise<void>,
+    beforeBroadcast?: (hash: `0x${string}`, sent?: EvmSignedTxMeta) => Promise<void>,
   ): Promise<EvmRelayResult> {
     const previous = this.queues.get(chainId) ?? Promise.resolve();
     const queuedAt = Date.now();
@@ -239,7 +252,7 @@ export class EvmRelayer implements EvmRelayerPort {
   private async sendNow(
     chainId: ChainId,
     tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
-    beforeBroadcast?: (hash: `0x${string}`) => Promise<void>,
+    beforeBroadcast?: (hash: `0x${string}`, sent?: EvmSignedTxMeta) => Promise<void>,
   ): Promise<EvmRelayResult> {
     const client = this.clientFor(chainId);
     const account = this.accountFor(chainId);
@@ -284,7 +297,9 @@ export class EvmRelayer implements EvmRelayerPort {
     // process never sees the receipt.
     const signedHash = keccak256(serializedTransaction);
     if (beforeBroadcast) {
-      await beforeBroadcast(signedHash);
+      // With the sender and nonce: a caller can later tell "dropped" (the
+      // sender's confirmed nonce passed it, no receipt) from "still pending".
+      await beforeBroadcast(signedHash, { from: account.address, nonce: BigInt(nonce) });
     }
     let hash: `0x${string}`;
     try {
@@ -304,10 +319,7 @@ export class EvmRelayer implements EvmRelayerPort {
       hash = signedHash;
     }
     // An explicit timeout, the one `relayedSendBudgetMs` counts on.
-    const receipt = await client.waitForTransactionReceipt({
-      hash,
-      timeout: this.timing.receiptTimeoutMs,
-    });
+    const receipt = await awaitReceipt(client, hash, this.timing.receiptTimeoutMs);
 
     // After the send, not before: the float is being reported, and reporting it
     // must not be able to stop a redemption that was going to work.
@@ -471,4 +483,37 @@ function priceOf(receipt: { effectiveGasPrice?: bigint }): { effectiveGasPrice?:
   return typeof receipt.effectiveGasPrice === 'bigint'
     ? { effectiveGasPrice: receipt.effectiveGasPrice }
     : {};
+}
+
+/** How often a bounded receipt wait asks again. */
+const RECEIPT_POLL_MS = 1_000;
+
+/**
+ * The receipt of `hash`, waited for at most `timeoutMs`, then
+ * `WaitForTransactionReceiptTimeoutError` as viem throws it. With a
+ * `getTransactionReceipt`, a bounded poll that stops at the timeout (E-2);
+ * otherwise viem's own wait. A "not found" answer is polled again; any other
+ * error is rethrown at once, as viem's wait does (an unknown outcome).
+ */
+async function awaitReceipt(
+  client: EvmRelayClient,
+  hash: `0x${string}`,
+  timeoutMs: number,
+): ReturnType<EvmRelayClient['waitForTransactionReceipt']> {
+  if (typeof client.getTransactionReceipt !== 'function') {
+    return client.waitForTransactionReceipt({ hash, timeout: timeoutMs });
+  }
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await client.getTransactionReceipt({ hash });
+    } catch (error) {
+      if ((error as { name?: string } | null)?.name !== 'TransactionReceiptNotFoundError') {
+        throw error;
+      }
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) throw new WaitForTransactionReceiptTimeoutError({ hash });
+    await new Promise((resolve) => setTimeout(resolve, Math.min(RECEIPT_POLL_MS, left)));
+  }
 }

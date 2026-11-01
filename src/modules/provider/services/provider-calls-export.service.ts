@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import {
   CallExportCursor,
   CallExportRow,
+  DISPUTE_REFUND_MARK,
   PaymentIntentPeriod,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -181,6 +182,10 @@ export const CSV_HEADER: readonly string[] = Object.freeze([
   'price_amount',
   'asset',
   'decimals',
+  // Appended in W2 (SPEC-W2 §11): never reorder the columns above.
+  'collectable_at',
+  'collected_at',
+  'payout_tx_ref',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -205,6 +210,7 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     uncollected: row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false,
     forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
     voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
+    refundedUpheld: row.redemptionLastError === DISPUTE_REFUND_MARK,
     credited: row.credited,
   });
   // A debt voided by a late rejecting verdict: nothing collected or credited
@@ -245,6 +251,9 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.priceAmount,
     row.asset,
     row.decimals,
+    row.collectableAt ? row.collectableAt.toISOString() : null,
+    row.collectedAt ? row.collectedAt.toISOString() : null,
+    row.payoutTxRef ?? null,
   ];
 }
 

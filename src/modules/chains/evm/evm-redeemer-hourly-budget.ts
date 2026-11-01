@@ -61,6 +61,14 @@ export const EVM_REDEEMER_URGENT_BUDGET_MULTIPLIER = 2n;
  * Held collects and refunds are charged to the global sum only: each follows a
  * redemption its provider's share already paid for.
  */
+/**
+ * The channel door's DEADLINE lane (SPEC-W2 §3): a settle a voucher needs to
+ * land before its deadline is charged to a counter of its own, so ordinary and
+ * urgent sends can never spend it, and it is capped by neither the per-provider
+ * share nor the urgent multiplier. Wei per hour; defaults to the ordinary limit.
+ */
+export const EVM_REDEEMER_DEADLINE_LANE_WEI_ENV = 'EVM_REDEEMER_DEADLINE_LANE_WEI';
+
 export const EVM_REDEEMER_PROVIDER_SHARE_BPS_ENV = 'EVM_REDEEMER_PROVIDER_SHARE_BPS';
 export const DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS = 2_500;
 
@@ -87,6 +95,10 @@ export function redeemerHourlyKey(chainId: ChainId): string {
 }
 
 /** `assay:evm-redeemer-hourly-wei:<chainId>:provider:<account>`: one provider's part of the hour. */
+export function redeemerDeadlineHourlyKey(chainId: ChainId): string {
+  return `${redeemerHourlyKey(chainId)}:deadline`;
+}
+
 export function redeemerProviderHourlyKey(chainId: ChainId, provider: string): string {
   return `${redeemerHourlyKey(chainId)}:provider:${provider.toLowerCase()}`;
 }
@@ -115,6 +127,8 @@ export interface EvmRedeemerVerdict {
 export interface EvmRedeemerHourlyBudgetOptions {
   /** {@link DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS}. */
   readonly providerShareBps?: number;
+  /** The channel deadline lane's limit (wei per hour); defaults to `limitWei`. */
+  readonly deadlineLaneWei?: bigint;
 }
 
 /** Uncounted urgent sends of one Redis outage, per chain (M-1). */
@@ -161,6 +175,48 @@ export class EvmRedeemerHourlyBudget {
   ) {
     this.window = new EvmHourlyWeiWindow(cache);
     this.providerShareBps = options.providerShareBps ?? DEFAULT_EVM_REDEEMER_PROVIDER_SHARE_BPS;
+    this.deadlineLaneWei = options.deadlineLaneWei ?? limitWei;
+  }
+
+  readonly deadlineLaneWei: bigint;
+
+  /** What the redeemer spent on `chainId` in the sliding hour, every lane (the reserve monitor's input). */
+  async spentThisHour(chainId: ChainId): Promise<bigint> {
+    const [ordinary, deadline] = await Promise.all([
+      this.window.spent(redeemerHourlyKey(chainId)),
+      this.window.spent(redeemerDeadlineHourlyKey(chainId)),
+    ]);
+    return ordinary + deadline;
+  }
+
+  /**
+   * Charges a channel settle that fired on its DEADLINE to the deadline lane
+   * only (SPEC-W2 §3): not the ordinary counter, not a provider's share, not
+   * the urgent multiplier. `null` when the lane itself is spent this hour (it
+   * is alerted like the urgent lane). A Redis outage admits it uncounted, like
+   * an urgent send, within the per-outage cap.
+   */
+  async takeDeadline(
+    chainId: ChainId,
+    wei: bigint,
+    purpose: string,
+  ): Promise<EvmRedeemerAdmission | null> {
+    let answer: EvmWeiBudgetAnswer;
+    try {
+      answer = await this.window.takeAll([
+        { key: redeemerDeadlineHourlyKey(chainId), wei, limit: this.deadlineLaneWei },
+      ]);
+    } catch (error) {
+      const verdict = await this.uncounted(chainId, wei, true, purpose, error);
+      return verdict.admitted ? verdict.admission : null;
+    }
+    if (answer.admitted) return { ticket: answer.ticket };
+    this.logger.error(
+      `the redeemer's DEADLINE lane on ${chainId} (${this.deadlineLaneWei} wei per hour) is ` +
+        `spent; ${purpose} (${wei} wei) deferred — a channel may reach its deadline unsettled`,
+    );
+    await this.alert(chainId, wei, true, `${purpose} (deadline lane)`);
+    return null;
   }
 
   /** One provider's most per hour: its share of the budget, or of the urgent allowance. */
