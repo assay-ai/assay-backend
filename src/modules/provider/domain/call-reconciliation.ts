@@ -97,6 +97,13 @@ export enum CallReconciliationClass {
   PROVIDER_FORFEITED = 'PROVIDER_FORFEITED',
   /** A `DATA_RESULT` that verification found `FAIL` — not credited, a strike recorded. */
   PAID_UNCREDITED = 'PAID_UNCREDITED',
+  /**
+   * Passed every check, but refunded to the buyer after an operator upheld the
+   * buyer's report (`voided:DISPUTE_UPHELD`): not credited. Apart from
+   * `PAID_UNCREDITED`, which says the result failed the checks and the buyer
+   * was not charged (BUG-R2-PRV-03).
+   */
+  REFUNDED_UPHELD = 'REFUNDED_UPHELD',
   /** The relay path — no payment machinery ever ran, regardless of what `status` says. */
   FREE = 'FREE',
   /** The provider's own dry run (the mapping tester). Charges nobody. */
@@ -142,6 +149,11 @@ export interface CallReconciliationCandidate {
    * a refund. Optional; absent means not.
    */
   readonly voided?: boolean;
+  /**
+   * Of `voided`: refunded after an upheld buyer report (`voided:DISPUTE_UPHELD`).
+   * Optional; absent means not.
+   */
+  readonly refundedUpheld?: boolean;
   /**
    * Whether the `SETTLED` intent's hold was committed, which is when
    * `PROVIDER_CREDIT` is written (`CREDITED_SQL`). Optional; absent means
@@ -189,6 +201,7 @@ export function classifyForReconciliation(
       // it is not an unresolved PENDING either — it is closed, and nobody was paid.
       if (candidate.forfeited) return CallReconciliationClass.PROVIDER_FORFEITED;
       if (candidate.uncollected) return CallReconciliationClass.PAID_UNCOLLECTED;
+      if (candidate.refundedUpheld) return CallReconciliationClass.REFUNDED_UPHELD;
       if (candidate.voided) return CallReconciliationClass.PAID_UNCREDITED;
       // Settled with no credit behind it: the money side is unresolved, and
       // calling it PAID_CREDITED would claim a credit the ledger does not hold
@@ -244,14 +257,15 @@ export const CALL_RECONCILIATION_CLASSES: readonly CallReconciliationClass[] = O
 /** The not-credited classes, one of {@link NOT_CREDITED_CLASSES}. */
 export type NotCreditedClass =
   | CallReconciliationClass.PAID_UNCREDITED
+  | CallReconciliationClass.REFUNDED_UPHELD
   | CallReconciliationClass.SYSTEM_ERROR
   | CallReconciliationClass.REQUEST_ERROR;
 
 /**
  * The classes a provider reads as "not credited": the call earned nothing
  * because of its answer or its request — a failed check (`REFUNDED`, or a
- * buyer debt voided by a late rejecting verdict), an endpoint error, or a
- * refused request. Held or not: a call is not credited whatever reserved its
+ * buyer debt voided by a late rejecting verdict), a refund after an upheld
+ * buyer report (`REFUNDED_UPHELD`), an endpoint error, or a refused request. Held or not: a call is not credited whatever reserved its
  * price (D17).
  *
  * The ONE definition. `ProviderEarningsService` folds its `withheld` /
@@ -267,6 +281,7 @@ export type NotCreditedClass =
  */
 export const NOT_CREDITED_CLASSES: readonly NotCreditedClass[] = Object.freeze([
   CallReconciliationClass.PAID_UNCREDITED,
+  CallReconciliationClass.REFUNDED_UPHELD,
   CallReconciliationClass.SYSTEM_ERROR,
   CallReconciliationClass.REQUEST_ERROR,
 ] as const);

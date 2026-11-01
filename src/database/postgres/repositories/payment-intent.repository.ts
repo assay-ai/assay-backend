@@ -307,6 +307,13 @@ export const WRITTEN_OFF_SQL = `(intent.redemption_last_error LIKE 'uncollected:
 export const VOIDED_SQL = `(intent.redemption_last_error LIKE 'voided:%')`;
 
 /**
+ * Of {@link VOIDED_SQL}: the call passed and was refunded to the buyer after
+ * an upheld report (`DISPUTE_REFUND_MARK`), not voided by a rejecting
+ * verdict. The provider's reports name it apart (BUG-R2-PRV-03).
+ */
+export const REFUNDED_UPHELD_SQL = `(intent.redemption_last_error = 'voided:DISPUTE_UPHELD')`;
+
+/**
  * The payer's paid calls are refused while ANY of its rows matches this (raw
  * column names, no alias): an open debt, a debt whose replacement is not held
  * on chain yet, or — until the contract change ships (H1 interim) — a debt

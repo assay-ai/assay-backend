@@ -108,3 +108,30 @@ describe('ProviderCallsExportService — streaming every row of a wide window', 
     }
   });
 });
+
+describe('ProviderCallsExportService — an upheld-report refund (BUG-R2-PRV-03)', () => {
+  it('classifies it REFUNDED_UPHELD, not PAID_UNCREDITED, with its reason and share', async () => {
+    const refunded = {
+      ...row(0),
+      credited: false,
+      redemptionLastError: 'voided:DISPUTE_UPHELD',
+      providerAmount: '9000',
+      platformFee: '1000',
+    };
+    const failed = { ...row(1), credited: false, redemptionLastError: 'voided:FAIL' };
+    const { repository } = fakeRepository([refunded, failed]);
+    const result = await new ProviderCallsExportService(repository).prepare('provider-1', {
+      from: '2026-10-14T12:00:00Z',
+      to: '2026-10-14T14:00:00Z',
+    } as never);
+    const rows: unknown[][] = [];
+    for await (const csvRow of result.rows) rows.push(csvRow as unknown[]);
+
+    const at = (name: string) => result.header.indexOf(name);
+    expect(rows[0][at('classification')]).toBe('REFUNDED_UPHELD');
+    expect(rows[0][at('reason')]).toBe('voided:DISPUTE_UPHELD');
+    expect(rows[0][at('provider_amount')]).toBe('9000');
+    expect(rows[0][at('platform_fee')]).toBe('0');
+    expect(rows[1][at('classification')]).toBe('PAID_UNCREDITED');
+  });
+});
