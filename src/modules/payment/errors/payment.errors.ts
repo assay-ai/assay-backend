@@ -826,7 +826,9 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `A withdrawal is pending on the payer's escrow` +
       `${context?.chains?.length ? ` on ${context.chains.join(', ')}` : ''}` +
-      `${context?.availableAt ? `, available at ${context.availableAt}` : ''}` +
-      `; paid calls are refused until then — the escrow owner must cancel or complete it`,
+      `${context?.availableAt ? ` (claimable at ${context.availableAt})` : ''}` +
+      `. Paid calls are paused while it is pending; free calls keep working. ` +
+      `To resume paid calls, the escrow owner can cancel the withdrawal on the Funding page ` +
+      `of the portal (or claim it)`,
   },
 });

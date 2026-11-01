@@ -209,7 +209,11 @@ describe('a buyer with a standing withdrawal is not quoted on that chain', () =>
     expect(error?.errorCode).toBe(PaymentErrorCode.PAYMENT_WITHDRAWAL_PENDING);
     expect(error?.context?.chains).toEqual([DEVNET]);
     expect(error?.message).toMatch(/withdrawal is pending/i);
-    expect(error?.message).toMatch(/cancel or complete/i);
+    // BUG-R2-BUY-04: paused (not refused for good), free calls still work,
+    // and where the owner resumes paid calls.
+    expect(error?.message).toMatch(/paid calls are paused while it is pending/i);
+    expect(error?.message).toMatch(/free calls keep working/i);
+    expect(error?.message).toMatch(/cancel the withdrawal on the Funding page/i);
 
     expect(invoker.invocations).toHaveLength(0);
     // And no ceiling token was taken. Shedding debits a provider's declared
