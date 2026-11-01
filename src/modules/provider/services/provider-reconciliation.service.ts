@@ -57,7 +57,7 @@ interface ReconciliationGroupRow {
   readonly forfeited: boolean | string | null;
   /** `VOIDED_SQL`: a debt voided by a late rejecting verdict — same caveat. */
   readonly voided?: boolean | string | null;
-  /** `REFUNDED_UPHELD_SQL`: refunded after an upheld buyer report — same caveat. */
+  /** `REFUNDED_UPHELD_SQL`: not charged after an upheld buyer report — same caveat. */
   readonly refundedUpheld?: boolean | string | null;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
@@ -105,7 +105,7 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
     'voucher not collected because of your stake or a block — forfeited, not credited',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.REFUNDED_UPHELD]:
-    'passed, refunded to the buyer after an upheld report — not credited',
+    'passed, but the buyer’s report was upheld, so the buyer does not pay for this call — not credited',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
   [CallReconciliationClass.EXPLORATION]:

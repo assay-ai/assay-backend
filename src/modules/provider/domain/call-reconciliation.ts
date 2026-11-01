@@ -98,10 +98,12 @@ export enum CallReconciliationClass {
   /** A `DATA_RESULT` that verification found `FAIL` — not credited, a strike recorded. */
   PAID_UNCREDITED = 'PAID_UNCREDITED',
   /**
-   * Passed every check, but refunded to the buyer after an operator upheld the
-   * buyer's report (`voided:DISPUTE_UPHELD`): not credited. Apart from
-   * `PAID_UNCREDITED`, which says the result failed the checks and the buyer
-   * was not charged (BUG-R2-PRV-03).
+   * Passed every check, but an operator upheld the buyer's report
+   * (`voided:DISPUTE_UPHELD`), so the buyer does not pay for the call: not
+   * credited. Covers both an upheld refund of money that was held AND a buyer
+   * debt voided by the uphold (the buyer was never charged), so the wording
+   * must not say "refunded". Apart from `PAID_UNCREDITED`, which says the
+   * result failed the checks (BUG-R2-PRV-03).
    */
   REFUNDED_UPHELD = 'REFUNDED_UPHELD',
   /** The relay path — no payment machinery ever ran, regardless of what `status` says. */
@@ -150,7 +152,7 @@ export interface CallReconciliationCandidate {
    */
   readonly voided?: boolean;
   /**
-   * Of `voided`: refunded after an upheld buyer report (`voided:DISPUTE_UPHELD`).
+   * Of `voided`: an upheld buyer report (`voided:DISPUTE_UPHELD`): refunded, or a debt voided.
    * Optional; absent means not.
    */
   readonly refundedUpheld?: boolean;
@@ -264,8 +266,8 @@ export type NotCreditedClass =
 /**
  * The classes a provider reads as "not credited": the call earned nothing
  * because of its answer or its request — a failed check (`REFUNDED`, or a
- * buyer debt voided by a late rejecting verdict), a refund after an upheld
- * buyer report (`REFUNDED_UPHELD`), an endpoint error, or a refused request. Held or not: a call is not credited whatever reserved its
+ * buyer debt voided by a late rejecting verdict), an upheld buyer report
+ * (`REFUNDED_UPHELD`: refunded, or a debt voided), an endpoint error, or a refused request. Held or not: a call is not credited whatever reserved its
  * price (D17).
  *
  * The ONE definition. `ProviderEarningsService` folds its `withheld` /

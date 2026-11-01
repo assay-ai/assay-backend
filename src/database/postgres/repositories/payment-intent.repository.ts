@@ -307,9 +307,11 @@ export const WRITTEN_OFF_SQL = `(intent.redemption_last_error LIKE 'uncollected:
 export const VOIDED_SQL = `(intent.redemption_last_error LIKE 'voided:%')`;
 
 /**
- * Of {@link VOIDED_SQL}: the call passed and was refunded to the buyer after
- * an upheld report (`DISPUTE_REFUND_MARK`), not voided by a rejecting
- * verdict. The provider's reports name it apart (BUG-R2-PRV-03).
+ * Of {@link VOIDED_SQL}: the call passed, but an operator upheld the buyer's
+ * report (`DISPUTE_REFUND_MARK`), so the buyer does not pay: either the held
+ * payment was refunded, or the buyer's unpaid debt was voided (both write the
+ * same mark). Not voided by a rejecting verdict. The provider's reports name
+ * it apart (BUG-R2-PRV-03).
  */
 export const REFUNDED_UPHELD_SQL = `(intent.redemption_last_error = 'voided:DISPUTE_UPHELD')`;
 
