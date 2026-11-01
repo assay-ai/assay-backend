@@ -26,11 +26,19 @@ export const EVM_CHAIN_STATE_MAX_BLOCKS = 10_000n;
 /** Blocks per `eth_getLogs` call. */
 export const EVM_CHAIN_STATE_CHUNK = 2_000n;
 /**
- * An event older than this when a FRESH index (one that never caught up)
- * first reads it is history, not a key being used now: its alert is recorded
- * at INFO instead of paging (BUG-R2-OPS-02).
+ * An event whose block is older than this, by the chain head's own clock,
+ * when a FRESH index (one that never caught up) first reads it is history,
+ * not a key being used now: its alert is recorded at INFO instead of paging
+ * (BUG-R2-OPS-02). One summary WARN still names every such event (see
+ * {@link EVM_CHAIN_STATE_ALERTS.HISTORY_REPLAYED}).
  */
 export const EVM_CHAIN_STATE_HISTORY_AGE_MS = 60 * 60 * 1000;
+/**
+ * While a fresh index is still catching up, the history summary WARN is sent
+ * every this many passes (ticks) that downgraded an event, not only at the
+ * end, so a catch-up that never finishes still pages.
+ */
+export const EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES = 10;
 /** Default `EVM_CHAIN_STATE_CONFIRMATIONS`: blocks behind the head the index stops at. */
 export const DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS = 12;
 
@@ -43,6 +51,8 @@ export const EVM_CHAIN_STATE_ALERTS = {
   ARBITER_BLOCK: 'evm_arbiter_blocked_address',
   UNKNOWN_START: 'evm_chain_state_unknown_start',
   DRIFT: 'evm_chain_state_drift',
+  /** One WARN naming the events a fresh index recorded as history (INFO). */
+  HISTORY_REPLAYED: 'evm_chain_state_history_replayed',
 } as const;
 
 export interface EvmChainStateIndexerConfig {
@@ -100,6 +110,21 @@ export interface EvmChainStateIndexerClient {
 /** Whether an event's alert is history (INFO) rather than news (its usual severity). */
 type HistoryCheck = (log: EvmConfigEventLog) => Promise<boolean>;
 
+/** Per event name: the events a fresh index recorded as history. */
+interface HistoryEntry {
+  count: number;
+  newestBlock: bigint;
+  newestTimeMs: number;
+}
+
+/** What a fresh index has downgraded and not yet summarised, per chain. */
+interface HistoryTally {
+  passes: number;
+  fromBlock: bigint | null;
+  toBlock: bigint | null;
+  events: Map<string, HistoryEntry>;
+}
+
 /**
  * Indexes `AssayConfig`'s pause and blocklist into Postgres, with a cursor per
  * chain kept in the same transaction as the events it covers (the H-1
@@ -129,6 +154,12 @@ type HistoryCheck = (log: EvmConfigEventLog) => Promise<boolean>;
 @Injectable()
 export class EvmChainStateIndexer {
   private readonly logger = new Logger(EvmChainStateIndexer.name);
+  /**
+   * In memory: a restart mid catch-up loses the not-yet-summarised part
+   * (at most {@link EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES} passes). Those
+   * events are still in the log and the alert sinks at INFO.
+   */
+  private readonly history = new Map<ChainId, HistoryTally>();
 
   constructor(
     @Inject(EVM_RPC_CLIENTS)
@@ -189,7 +220,11 @@ export class EvmChainStateIndexer {
     const safeHead = head > confirmations ? head - confirmations : 0n;
     const state = await this.repository.findState(chainId);
     const now = new Date(this.config.now());
-    const historical = this.historyCheck(client, state?.caughtUpAt ?? null);
+    const fresh = !state?.caughtUpAt;
+    // Pass-local: merged into the tally only once the range is written, so a
+    // pass that fails and is read again is not counted twice.
+    const pass = new Map<string, HistoryEntry>();
+    const historical = await this.historyCheck(client, fresh, head, pass);
     let start: bigint;
     if (state?.cursorBlock !== null && state?.cursorBlock !== undefined) {
       start = BigInt(state.cursorBlock) + 1n;
@@ -206,6 +241,7 @@ export class EvmChainStateIndexer {
         now,
         blocked: [],
       });
+      if (fresh) await this.tallyHistory(chainId, pass, null, null, true);
       return;
     }
     const end =
@@ -340,6 +376,93 @@ export class EvmChainStateIndexer {
         : {}),
       ...(paramsChanged ? { paramsChanged } : {}),
       blocked: blocked.filter((row) => row.address !== ''),
+    });
+    if (fresh) await this.tallyHistory(chainId, pass, start, end, end === safeHead);
+  }
+
+  /**
+   * Adds one written pass of a fresh index to the chain's history tally, and
+   * sends the summary WARN when the first catch-up completes, or every
+   * {@link EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES} passes while it is still
+   * catching up. Telegram pages WARN+, so a lever pulled between the deploy
+   * and the first index is seen by a human even though each event was INFO.
+   */
+  private async tallyHistory(
+    chainId: ChainId,
+    pass: ReadonlyMap<string, HistoryEntry>,
+    from: bigint | null,
+    to: bigint | null,
+    caughtUp: boolean,
+  ): Promise<void> {
+    let tally = this.history.get(chainId);
+    if (!tally) {
+      tally = { passes: 0, fromBlock: null, toBlock: null, events: new Map() };
+      this.history.set(chainId, tally);
+    }
+    tally.passes += 1;
+    if (from !== null && (tally.fromBlock === null || from < tally.fromBlock)) {
+      tally.fromBlock = from;
+    }
+    if (to !== null && (tally.toBlock === null || to > tally.toBlock)) tally.toBlock = to;
+    for (const [name, entry] of pass) mergeHistory(tally.events, name, entry);
+    const due = caughtUp || tally.passes % EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES === 0;
+    if (!due) return;
+    if (tally.events.size > 0) {
+      await this.alertHistory(chainId, tally, caughtUp);
+      tally.events = new Map();
+      tally.fromBlock = null;
+      tally.toBlock = null;
+    }
+    if (caughtUp) this.history.delete(chainId);
+  }
+
+  private async alertHistory(
+    chainId: ChainId,
+    tally: HistoryTally,
+    caughtUp: boolean,
+  ): Promise<void> {
+    const entries = [...tally.events].sort(([left], [right]) => left.localeCompare(right));
+    const total = entries.reduce((sum, [, entry]) => sum + entry.count, 0);
+    const list = entries
+      .map(
+        ([name, entry]) =>
+          `${name} x${entry.count} (newest block ${entry.newestBlock}, ` +
+          `${new Date(entry.newestTimeMs).toISOString()})`,
+      )
+      .join('; ');
+    const range =
+      tally.fromBlock !== null && tally.toBlock !== null
+        ? ` in blocks ${tally.fromBlock}..${tally.toBlock}`
+        : '';
+    const stage = caughtUp
+      ? 'finished its first catch-up and'
+      : `is still catching up after ${tally.passes} passes and so far`;
+    this.logger.warn(
+      `EVM chain-state index on ${chainId} ${stage} recorded ${total} event(s) as history: ${list}`,
+    );
+    const details: Record<string, string | number> = {
+      chainId,
+      events: total,
+      passes: tally.passes,
+      caughtUp: String(caughtUp),
+      fromBlock: tally.fromBlock?.toString() ?? '(unknown)',
+      toBlock: tally.toBlock?.toString() ?? '(unknown)',
+    };
+    for (const [name, entry] of entries) {
+      details[`${name}.count`] = entry.count;
+      details[`${name}.newestBlock`] = entry.newestBlock.toString();
+      details[`${name}.newestTime`] = new Date(entry.newestTimeMs).toISOString();
+    }
+    await this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: EVM_CHAIN_STATE_ALERTS.HISTORY_REPLAYED,
+      summary:
+        `A fresh EVM chain-state index on ${chainId} ${stage} recorded ${total} governance ` +
+        `event(s)${range} as history (INFO, older than 1 hour by chain time): ${list}. Confirm ` +
+        `each one was intended (runbook)`,
+      details,
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: `${chainId}:history:${details.fromBlock}-${details.toBlock}:${tally.passes}`,
     });
   }
 
@@ -481,29 +604,46 @@ export class EvmChainStateIndexer {
   /**
    * The history rule (BUG-R2-OPS-02): only while the index has NEVER caught up
    * (the first catch-up of a fresh index, e.g. from the deploy block), an
-   * event whose block is older than {@link EVM_CHAIN_STATE_HISTORY_AGE_MS} is
-   * history. A warm index, an event with no block, or a block whose time
-   * cannot be read keeps the usual severity: a real lever never goes quiet
-   * because the indexer was behind or the RPC failed. One block read per
-   * block, per tick.
+   * event whose block is older than {@link EVM_CHAIN_STATE_HISTORY_AGE_MS}
+   * than the chain head read in the same pass is history. Chain time, not the
+   * server clock, so a server clock that runs fast cannot quieten a new event.
+   * A warm index, an event with no block, or a head or block whose time cannot
+   * be read keeps the usual severity: a real lever never goes quiet because
+   * the indexer was behind or the RPC failed. Every downgraded event is put in
+   * `pass`, for the summary WARN. One block read per block, per tick.
    */
-  private historyCheck(client: EvmChainStateIndexerClient, caughtUpAt: Date | null): HistoryCheck {
-    if (caughtUpAt !== null || typeof client.getBlock !== 'function') return async () => false;
-    const nowMs = this.config.now();
+  private async historyCheck(
+    client: EvmChainStateIndexerClient,
+    fresh: boolean,
+    head: bigint,
+    pass: Map<string, HistoryEntry>,
+  ): Promise<HistoryCheck> {
+    if (!fresh || typeof client.getBlock !== 'function') return async () => false;
     const times = new Map<bigint, Promise<number | null>>();
+    const timeOf = (blockNumber: bigint): Promise<number | null> => {
+      let time = times.get(blockNumber);
+      if (!time) {
+        time = Promise.resolve()
+          .then(() => client.getBlock!({ blockNumber }))
+          .then((block) => Number(block.timestamp) * 1000)
+          .then((ms) => (Number.isFinite(ms) ? ms : null))
+          .catch(() => null);
+        times.set(blockNumber, time);
+      }
+      return time;
+    };
+    const headMs = await timeOf(head);
+    if (headMs === null) return async () => false;
     return async (log) => {
       if (log.blockNumber === null || log.blockNumber === undefined) return false;
-      let time = times.get(log.blockNumber);
-      if (!time) {
-        time = client.getBlock!({ blockNumber: log.blockNumber })
-          .then((block) => Number(block.timestamp) * 1000)
-          .catch(() => null);
-        times.set(log.blockNumber, time);
-      }
-      const atMs = await time;
-      return (
-        atMs !== null && Number.isFinite(atMs) && nowMs - atMs > EVM_CHAIN_STATE_HISTORY_AGE_MS
-      );
+      const atMs = await timeOf(log.blockNumber);
+      if (atMs === null || headMs - atMs <= EVM_CHAIN_STATE_HISTORY_AGE_MS) return false;
+      mergeHistory(pass, log.eventName ?? 'unknown', {
+        count: 1,
+        newestBlock: log.blockNumber,
+        newestTimeMs: atMs,
+      });
+      return true;
     };
   }
 
@@ -514,7 +654,8 @@ export class EvmChainStateIndexer {
 
   private historyNote(historical: boolean): string {
     return historical
-      ? ' (history: first read by a fresh chain-state index, more than 1 hour after its block)'
+      ? ' (history: first read by a fresh chain-state index, more than 1 hour after its block ' +
+          'by chain time; a summary WARN follows)'
       : '';
   }
 
@@ -596,6 +737,19 @@ export class EvmChainStateIndexer {
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,
     });
+  }
+}
+
+function mergeHistory(into: Map<string, HistoryEntry>, name: string, entry: HistoryEntry): void {
+  const known = into.get(name);
+  if (!known) {
+    into.set(name, { ...entry });
+    return;
+  }
+  known.count += entry.count;
+  if (entry.newestBlock > known.newestBlock) {
+    known.newestBlock = entry.newestBlock;
+    known.newestTimeMs = entry.newestTimeMs;
   }
 }
 
