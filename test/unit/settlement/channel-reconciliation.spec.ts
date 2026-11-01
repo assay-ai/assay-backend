@@ -91,6 +91,8 @@ describe('ChannelReconciliationService (v3 §5.7)', () => {
     );
     expect(breach?.severity).toBe(ReconciliationSeverity.CRITICAL);
     expect(statuses).toContainEqual(['lane', VoucherChannelStatus.DESYNC, 'RECONCILE']);
+    // The operator card clears the stop by row id (POST /operator/channels/clear-reconcile).
+    expect(breach?.details.channelRowId).toBe('lane');
   });
 
   it('a chain behind the database is CRITICAL once it persists over two passes', async () => {

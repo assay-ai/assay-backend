@@ -260,6 +260,7 @@ export class ChannelReconciliationService {
           details: {
             asset,
             key: lane.key,
+            channelRowId: lane.channelRowId,
             chainSettled: chainSettled.toString(),
             settled: lane.settled.toString(),
           },
@@ -282,6 +283,7 @@ export class ChannelReconciliationService {
           details: {
             asset,
             key: lane.key,
+            channelRowId: lane.channelRowId,
             chainSettled: chainSettled.toString(),
             accepted: lane.accepted.toString(),
             settled: lane.settled.toString(),
@@ -300,6 +302,7 @@ export class ChannelReconciliationService {
           details: {
             asset,
             key: lane.key,
+            channelRowId: lane.channelRowId,
             chainSettled: chainSettled.toString(),
             settled: lane.settled.toString(),
           },
@@ -316,6 +319,7 @@ export class ChannelReconciliationService {
           details: {
             asset,
             key: lane.key,
+            channelRowId: lane.channelRowId,
             buckets: buckets.toString(),
             held: lane.held.toString(),
           },

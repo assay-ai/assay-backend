@@ -107,6 +107,19 @@ export class OperatorProvidersController {
   }
 
   /**
+   * The lanes the reconciler stopped (DESYNC/RECONCILE) and not cleared yet,
+   * newest first, with the `channelRowId` the clear-reconcile override takes.
+   * Read only, so no override.
+   */
+  @Get('channels/stopped')
+  @RequireRoles(OperatorRole.SRE, OperatorRole.TRE, OperatorRole.OPS_ADMIN)
+  @ApiOperation({ summary: 'List the payment channels the reconciler stopped' })
+  async stoppedChannels() {
+    if (!this.drains) throw new NotFoundException();
+    return { items: await this.drains.listStopped() };
+  }
+
+  /**
    * Override `M-4`: clear a reconciler stop (DESYNC/RECONCILE) on one channel
    * after an investigation, once the chain agrees with the database again.
    * The lane goes back to ROTATED; recorded in the override register.

@@ -369,6 +369,19 @@ export class VoucherChannelRepository {
     return this.manager.findOneBy(VoucherChannelEntity, { id });
   }
 
+  /**
+   * Lanes the reconciler stopped (DESYNC / RECONCILE, `CHANNEL_STATE_BREACH`)
+   * and not cleared yet (override `M-4`), newest first, at most `limit`. The
+   * operator console's list of stops to investigate.
+   */
+  async listReconcileStopped(limit = 200): Promise<VoucherChannelEntity[]> {
+    return this.manager.find(VoucherChannelEntity, {
+      where: { status: VoucherChannelStatus.DESYNC, statusReason: 'RECONCILE' },
+      order: { updatedAt: 'DESC' },
+      take: limit,
+    });
+  }
+
   // ── Scheduler ───────────────────────────────────────────────────────────
 
   /**

@@ -26,6 +26,28 @@ export interface ClearReconcileInput {
   readonly ticketRef?: string | null;
 }
 
+/** One lane the reconciler stopped, as `GET /operator/channels/stopped` lists it. */
+export interface StoppedChannel {
+  /** The `voucher_channels` row id: what `POST /operator/channels/clear-reconcile` takes. */
+  readonly channelRowId: string;
+  readonly channelKey: string;
+  readonly chainId: string;
+  readonly assetId: string;
+  readonly providerId: string;
+  /** The payer's CAIP-10 account. */
+  readonly payer: string;
+  /**
+   * ISO-8601. When the lane row last changed, which the stop sets: the stop
+   * itself unless a settlement already in flight landed on it afterwards.
+   */
+  readonly stoppedAt: string;
+  /** `voucher_channels.status_reason`: `RECONCILE` (a reconciler stop). */
+  readonly reason: string;
+  /** Atomic decimal strings: what the platform accepted and booked as settled on the lane. */
+  readonly accepted: string;
+  readonly settled: string;
+}
+
 export interface DrainChannelsInput {
   readonly assetId: string | null;
   readonly reasonCode: string;
@@ -51,6 +73,26 @@ export class OperatorChannelDrainService {
     // harness without chains): the operator's investigation stands alone.
     @Optional() @Inject(CHANNEL_DOOR) private readonly door: ChannelDoorPort | null = null,
   ) {}
+
+  /**
+   * The lanes the reconciler stopped (DESYNC / RECONCILE) and nobody cleared
+   * yet, newest first. Read only: the operator card behind override `M-4`.
+   */
+  async listStopped(limit = 200): Promise<StoppedChannel[]> {
+    const lanes = await this.channels.listReconcileStopped(limit);
+    return lanes.map((lane) => ({
+      channelRowId: lane.id,
+      channelKey: lane.channelKey,
+      chainId: lane.chainId,
+      assetId: lane.assetId,
+      providerId: lane.providerId,
+      payer: lane.payer,
+      stoppedAt: lane.updatedAt.toISOString(),
+      reason: lane.statusReason ?? 'RECONCILE',
+      accepted: String(lane.lastAcceptedCumulative),
+      settled: String(lane.settledCumulative),
+    }));
+  }
 
   /**
    * Override `M-4` (final review 2026-11-01 backend F1 / ops F3): clears a

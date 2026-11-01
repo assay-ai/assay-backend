@@ -148,3 +148,65 @@ describe('Override M-4: clear a reconciler stop (DESYNC/RECONCILE)', () => {
     expect(values.path).toBe('channels/clear-reconcile');
   });
 });
+
+describe('GET /operator/channels/stopped: the reconciler stops to investigate', () => {
+  const stoppedLane = {
+    id: LANE,
+    channelKey: KEY,
+    chainId: 'eip155:46630',
+    assetId: ASSET,
+    providerId: '28e57af8-0000-4000-8000-000000000001',
+    payer: 'eip155:46630:0x1111111111111111111111111111111111111111',
+    status: 'DESYNC',
+    statusReason: 'RECONCILE',
+    lastAcceptedCumulative: '500',
+    settledCumulative: '300',
+    updatedAt: new Date('2026-11-01T14:10:00Z'),
+  };
+
+  it('lists each stopped lane with the channelRowId the clear override takes', async () => {
+    const listReconcileStopped = jest.fn(async () => [stoppedLane]);
+    const service = new OperatorChannelDrainService(
+      { perform: jest.fn() } as never,
+      { listReconcileStopped } as never,
+      null,
+    );
+
+    expect(await service.listStopped()).toEqual([
+      {
+        channelRowId: LANE,
+        channelKey: KEY,
+        chainId: 'eip155:46630',
+        assetId: ASSET,
+        providerId: stoppedLane.providerId,
+        payer: stoppedLane.payer,
+        stoppedAt: '2026-11-01T14:10:00.000Z',
+        reason: 'RECONCILE',
+        accepted: '500',
+        settled: '300',
+      },
+    ]);
+    expect(listReconcileStopped).toHaveBeenCalledWith(200);
+  });
+
+  it('is a read: SRE, TRE or OPS_ADMIN, no override', async () => {
+    const handler = OperatorProvidersController.prototype.stoppedChannels;
+    expect(handler).toBeDefined();
+    const values = Object.fromEntries(
+      (Reflect.getMetadataKeys(handler) as string[]).map((k) => [
+        k,
+        Reflect.getMetadata(k, handler),
+      ]),
+    );
+    expect(values.path).toBe('channels/stopped');
+    expect(values.method).toBe(0); // RequestMethod.GET
+    expect(Object.values(values)).toEqual(expect.arrayContaining([['SRE', 'TRE', 'OPS_ADMIN']]));
+    expect(Object.values(values)).not.toContain('M-4');
+
+    const listStopped = jest.fn(async () => []);
+    const controller = new OperatorProvidersController({} as never, undefined, undefined, {
+      listStopped,
+    } as never);
+    await expect(controller.stoppedChannels()).resolves.toEqual({ items: [] });
+  });
+});
