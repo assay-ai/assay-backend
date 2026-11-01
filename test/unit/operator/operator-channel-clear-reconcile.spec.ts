@@ -172,21 +172,45 @@ describe('GET /operator/channels/stopped: the reconciler stops to investigate', 
       null,
     );
 
-    expect(await service.listStopped()).toEqual([
-      {
-        channelRowId: LANE,
-        channelKey: KEY,
-        chainId: 'eip155:46630',
-        assetId: ASSET,
-        providerId: stoppedLane.providerId,
-        payer: stoppedLane.payer,
-        stoppedAt: '2026-11-01T14:10:00.000Z',
-        reason: 'RECONCILE',
-        accepted: '500',
-        settled: '300',
-      },
-    ]);
-    expect(listReconcileStopped).toHaveBeenCalledWith(200);
+    expect(await service.listStopped()).toEqual({
+      truncated: false,
+      items: [
+        {
+          channelRowId: LANE,
+          channelKey: KEY,
+          chainId: 'eip155:46630',
+          assetId: ASSET,
+          providerId: stoppedLane.providerId,
+          payer: stoppedLane.payer,
+          lastUpdatedAt: '2026-11-01T14:10:00.000Z',
+          reason: 'RECONCILE',
+          accepted: '500',
+          settled: '300',
+        },
+      ],
+    });
+    // One more than the cap, to tell a cut list from a full one.
+    expect(listReconcileStopped).toHaveBeenCalledWith(201);
+  });
+
+  it('says truncated when more lanes are stopped than the cap', async () => {
+    const lanes = Array.from({ length: 4 }, (_, index) => ({
+      ...stoppedLane,
+      id: `lane-${index}`,
+    }));
+    const listReconcileStopped = jest.fn(async (limit: number) => lanes.slice(0, limit));
+    const service = new OperatorChannelDrainService(
+      { perform: jest.fn() } as never,
+      { listReconcileStopped } as never,
+      null,
+    );
+
+    const cut = await service.listStopped(3);
+    expect(cut.truncated).toBe(true);
+    expect(cut.items.map((item) => item.channelRowId)).toEqual(['lane-0', 'lane-1', 'lane-2']);
+    const whole = await service.listStopped(4);
+    expect(whole.truncated).toBe(false);
+    expect(whole.items).toHaveLength(4);
   });
 
   it('is a read: SRE, TRE or OPS_ADMIN, no override', async () => {
@@ -203,10 +227,10 @@ describe('GET /operator/channels/stopped: the reconciler stops to investigate', 
     expect(Object.values(values)).toEqual(expect.arrayContaining([['SRE', 'TRE', 'OPS_ADMIN']]));
     expect(Object.values(values)).not.toContain('M-4');
 
-    const listStopped = jest.fn(async () => []);
+    const listStopped = jest.fn(async () => ({ items: [], truncated: false }));
     const controller = new OperatorProvidersController({} as never, undefined, undefined, {
       listStopped,
     } as never);
-    await expect(controller.stoppedChannels()).resolves.toEqual({ items: [] });
+    await expect(controller.stoppedChannels()).resolves.toEqual({ items: [], truncated: false });
   });
 });

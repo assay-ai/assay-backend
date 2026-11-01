@@ -26,6 +26,16 @@ export interface ClearReconcileInput {
   readonly ticketRef?: string | null;
 }
 
+/** Most lanes `GET /operator/channels/stopped` returns; more sets `truncated`. */
+export const STOPPED_CHANNELS_LIMIT = 200;
+
+/** `GET /operator/channels/stopped`. */
+export interface StoppedChannelList {
+  readonly items: StoppedChannel[];
+  /** `true` when more lanes are stopped than {@link STOPPED_CHANNELS_LIMIT}: the list is cut. */
+  readonly truncated: boolean;
+}
+
 /** One lane the reconciler stopped, as `GET /operator/channels/stopped` lists it. */
 export interface StoppedChannel {
   /** The `voucher_channels` row id: what `POST /operator/channels/clear-reconcile` takes. */
@@ -37,10 +47,12 @@ export interface StoppedChannel {
   /** The payer's CAIP-10 account. */
   readonly payer: string;
   /**
-   * ISO-8601. When the lane row last changed, which the stop sets: the stop
-   * itself unless a settlement already in flight landed on it afterwards.
+   * ISO-8601: `voucher_channels.updated_at`, when the lane row LAST CHANGED.
+   * Not the stop time: the stop sets it, but any later write to the row (a
+   * settlement already in flight landing, a scheduler touch) moves it later.
+   * The stop's own time is in the reconciler's `channel_state_breach` alert.
    */
-  readonly stoppedAt: string;
+  readonly lastUpdatedAt: string;
   /** `voucher_channels.status_reason`: `RECONCILE` (a reconciler stop). */
   readonly reason: string;
   /** Atomic decimal strings: what the platform accepted and booked as settled on the lane. */
@@ -76,22 +88,25 @@ export class OperatorChannelDrainService {
 
   /**
    * The lanes the reconciler stopped (DESYNC / RECONCILE) and nobody cleared
-   * yet, newest first. Read only: the operator card behind override `M-4`.
+   * yet, newest first (by last change), at most `limit`, with `truncated`
+   * when there are more. Read only: the operator card behind override `M-4`.
    */
-  async listStopped(limit = 200): Promise<StoppedChannel[]> {
-    const lanes = await this.channels.listReconcileStopped(limit);
-    return lanes.map((lane) => ({
+  async listStopped(limit = STOPPED_CHANNELS_LIMIT): Promise<StoppedChannelList> {
+    // One extra row tells a full page from a cut one, without a count query.
+    const lanes = await this.channels.listReconcileStopped(limit + 1);
+    const items = lanes.slice(0, limit).map((lane) => ({
       channelRowId: lane.id,
       channelKey: lane.channelKey,
       chainId: lane.chainId,
       assetId: lane.assetId,
       providerId: lane.providerId,
       payer: lane.payer,
-      stoppedAt: lane.updatedAt.toISOString(),
+      lastUpdatedAt: lane.updatedAt.toISOString(),
       reason: lane.statusReason ?? 'RECONCILE',
       accepted: String(lane.lastAcceptedCumulative),
       settled: String(lane.settledCumulative),
     }));
+    return { items, truncated: lanes.length > limit };
   }
 
   /**

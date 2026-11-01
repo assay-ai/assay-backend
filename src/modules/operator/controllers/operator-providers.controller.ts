@@ -109,14 +109,14 @@ export class OperatorProvidersController {
   /**
    * The lanes the reconciler stopped (DESYNC/RECONCILE) and not cleared yet,
    * newest first, with the `channelRowId` the clear-reconcile override takes.
-   * Read only, so no override.
+   * At most 200; `truncated: true` when there are more. Read only, so no override.
    */
   @Get('channels/stopped')
   @RequireRoles(OperatorRole.SRE, OperatorRole.TRE, OperatorRole.OPS_ADMIN)
   @ApiOperation({ summary: 'List the payment channels the reconciler stopped' })
   async stoppedChannels() {
     if (!this.drains) throw new NotFoundException();
-    return { items: await this.drains.listStopped() };
+    return this.drains.listStopped();
   }
 
   /**
