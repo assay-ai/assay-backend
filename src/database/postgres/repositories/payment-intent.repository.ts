@@ -313,7 +313,13 @@ export const VOIDED_SQL = `(intent.redemption_last_error LIKE 'voided:%')`;
  * same mark). Not voided by a rejecting verdict. The provider's reports name
  * it apart (BUG-R2-PRV-03).
  */
-export const REFUNDED_UPHELD_SQL = `(intent.redemption_last_error = 'voided:DISPUTE_UPHELD')`;
+/**
+ * The mark an upheld call dispute writes (`voided:DISPUTE_UPHELD`): on a held
+ * refund and on a voided debt alike.
+ */
+export const DISPUTE_REFUND_MARK = 'voided:DISPUTE_UPHELD';
+
+export const REFUNDED_UPHELD_SQL = `(intent.redemption_last_error = '${DISPUTE_REFUND_MARK}')`;
 
 /**
  * The payer's paid calls are refused while ANY of its rows matches this (raw
@@ -341,10 +347,6 @@ export const DEBT_REFUSING_SQL =
   `AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%') ` +
   `AND ("redemption_replaced_at" IS NULL OR "held_status" IS NULL))`;
 
-/** A `redemption_last_error` that closed the row for good: nothing may redeem it any more. */
-/** The mark an upheld call dispute's refund writes (`voided:DISPUTE_UPHELD`). */
-export const DISPUTE_REFUND_MARK = 'voided:DISPUTE_UPHELD';
-
 /**
  * A provider-block cause recorded on the row (`ProviderBlocked`,
  * `PayeeBlocked`, `PayeeBlockedOnChain`, with any suffix): written by the
@@ -354,6 +356,7 @@ const RECORDED_BLOCK_CAUSE_SQL = (alias: string): string =>
   `(${alias}.redemption_last_error LIKE 'ProviderBlocked%' ` +
   `OR ${alias}.redemption_last_error LIKE 'PayeeBlocked%')`;
 
+/** A `redemption_last_error` that closed the row for good: nothing may redeem it any more. */
 const CLOSED_OUTCOME_SQL = (alias: string): string =>
   `(${alias}.redemption_last_error LIKE 'provider_forfeit:%' ` +
   `OR ${alias}.redemption_last_error LIKE 'uncollected:%' ` +
