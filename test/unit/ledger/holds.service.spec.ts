@@ -136,8 +136,16 @@ describe('HoldsService.list stage (BUG-R2-BUY-01)', () => {
   it('splits settled calls: SETTLING while unsettled, ON_CHAIN_HOLD once in the on-chain hold', async () => {
     const rows = [
       holdRow({ id: 'h-check', intentId: 'i-check', createdAt: new Date('2026-11-01T13:00:04Z') }),
-      holdRow({ id: 'h-settling', intentId: 'i-settling', createdAt: new Date('2026-11-01T13:00:03Z') }),
-      holdRow({ id: 'h-bucket', intentId: 'i-bucket', createdAt: new Date('2026-11-01T13:00:02Z') }),
+      holdRow({
+        id: 'h-settling',
+        intentId: 'i-settling',
+        createdAt: new Date('2026-11-01T13:00:03Z'),
+      }),
+      holdRow({
+        id: 'h-bucket',
+        intentId: 'i-bucket',
+        createdAt: new Date('2026-11-01T13:00:02Z'),
+      }),
       holdRow({ id: 'h-debt', intentId: 'i-debt', createdAt: new Date('2026-11-01T13:00:01Z') }),
     ];
     const { service, query: sql } = withIntents(rows, [
@@ -159,7 +167,7 @@ describe('HoldsService.list stage (BUG-R2-BUY-01)', () => {
     expect(String(sql.mock.calls[0][0])).toContain(`"held_status" = 'HELD'`);
   });
 
-  it('accepts the driver\'s string booleans', async () => {
+  it("accepts the driver's string booleans", async () => {
     const { service } = withIntents(
       [holdRow({ intentId: 'i-1' })],
       [{ id: 'i-1', status: 'SETTLED', debt: 'false', onChain: 'true' } as never],

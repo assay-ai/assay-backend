@@ -17,11 +17,7 @@ import {
   isRefundedByReport,
 } from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
-import {
-  channelViewOf,
-  payoutOf,
-  voucherFormatOf,
-} from '@modules/payment/domain/payout-view';
+import { channelViewOf, payoutOf, voucherFormatOf } from '@modules/payment/domain/payout-view';
 import {
   CALL_DISPUTE_CONFIG,
   CallDisputeConfig,
