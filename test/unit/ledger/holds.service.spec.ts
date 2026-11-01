@@ -2,7 +2,7 @@ import { SortDirection } from '@shared/api';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
 import { LedgerHoldStatus } from '@modules/ledger/ports/ledger.types';
 import { ListHoldsQueryDto } from '@modules/ledger/dto/list-holds.dto';
-import { HoldsService } from '@modules/ledger/services/holds.service';
+import { HoldsService, stageOf } from '@modules/ledger/services/holds.service';
 
 import { ORG, USDC, USDC_DECIMALS } from './helpers/entries';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
@@ -116,5 +116,60 @@ describe('HoldsService.list', () => {
     expect(page.items).toHaveLength(1);
     expect(page.pageInfo.hasMore).toBe(true);
     expect(page.pageInfo.nextCursor).not.toBeNull();
+  });
+});
+
+describe('HoldsService.list stage (BUG-R2-BUY-01)', () => {
+  function withIntents(
+    rows: ReturnType<typeof holdRow>[],
+    intents: Array<{ id: string; status: string; debt?: boolean; onChain?: boolean }>,
+  ) {
+    const fake = fakeQueryBuilder(rows);
+    const query = jest.fn().mockResolvedValue(intents);
+    const holds = {
+      createQueryBuilder: jest.fn().mockReturnValue(fake.qb),
+      manager: { query },
+    } as unknown as LedgerHoldRepository;
+    return { service: new HoldsService(holds), query };
+  }
+
+  it('splits settled calls: SETTLING while unsettled, ON_CHAIN_HOLD once in the on-chain hold', async () => {
+    const rows = [
+      holdRow({ id: 'h-check', intentId: 'i-check', createdAt: new Date('2026-11-01T13:00:04Z') }),
+      holdRow({ id: 'h-settling', intentId: 'i-settling', createdAt: new Date('2026-11-01T13:00:03Z') }),
+      holdRow({ id: 'h-bucket', intentId: 'i-bucket', createdAt: new Date('2026-11-01T13:00:02Z') }),
+      holdRow({ id: 'h-debt', intentId: 'i-debt', createdAt: new Date('2026-11-01T13:00:01Z') }),
+    ];
+    const { service, query: sql } = withIntents(rows, [
+      { id: 'i-check', status: 'VERIFYING', debt: false, onChain: false },
+      { id: 'i-settling', status: 'SETTLED', debt: false, onChain: false },
+      { id: 'i-bucket', status: 'SETTLED', debt: false, onChain: true },
+      { id: 'i-debt', status: 'SETTLED', debt: true, onChain: false },
+    ]);
+
+    const page = await service.list(ORG, query());
+
+    const stages = Object.fromEntries(page.items.map((item) => [item.id, item.stage]));
+    expect(stages).toEqual({
+      'h-check': 'CHECKING',
+      'h-settling': 'SETTLING',
+      'h-bucket': 'ON_CHAIN_HOLD',
+      'h-debt': 'DEBT',
+    });
+    expect(String(sql.mock.calls[0][0])).toContain(`"held_status" = 'HELD'`);
+  });
+
+  it('accepts the driver\'s string booleans', async () => {
+    const { service } = withIntents(
+      [holdRow({ intentId: 'i-1' })],
+      [{ id: 'i-1', status: 'SETTLED', debt: 'false', onChain: 'true' } as never],
+    );
+    const page = await service.list(ORG, query());
+    expect(page.items[0].stage).toBe('ON_CHAIN_HOLD');
+  });
+
+  it('never stages a hold that is not open', () => {
+    expect(stageOf({ status: LedgerHoldStatus.COMMITTED }, 'ON_CHAIN_HOLD')).toBeNull();
+    expect(stageOf({ status: LedgerHoldStatus.OPEN }, 'ON_CHAIN_HOLD')).toBe('ON_CHAIN_HOLD');
   });
 });

@@ -116,6 +116,14 @@ export interface EscrowState {
   readonly signedLast24h?: Money | null;
   readonly withdrawableUpTo?: Money | null;
   readonly withdrawableAt?: string | null;
+  /**
+   * Calls already settled on chain into the dispute hold (a channel bucket, or
+   * the per-call hold): out of `balance`, `openHolds` and `pendingSettlement`,
+   * paid to the provider after `onChainHoldEndsAt` (BUG-R2-BUY-01).
+   */
+  readonly onChainHeld?: Money | null;
+  readonly onChainHeldCalls?: number;
+  readonly onChainHoldEndsAt?: string | null;
 }
 
 /** See {@link EscrowState.lifetime}. `spent` includes payments still in their dispute hold. */
@@ -408,6 +416,9 @@ export class EscrowAccountService {
       pendingSettlementCalls: figures.calls,
       nextSettleAt: settleBy === null ? null : new Date(settleBy).toISOString(),
       signedLast24h: MoneyUtil.of(figures.signedLast24h, asset, decimals),
+      onChainHeld: MoneyUtil.of(figures.onChainHeld ?? 0n, asset, decimals),
+      onChainHeldCalls: figures.onChainHeldCalls ?? 0,
+      onChainHoldEndsAt: figures.onChainHoldEndsAt ? figures.onChainHoldEndsAt.toISOString() : null,
       withdrawableUpTo:
         requested > 0n ? MoneyUtil.of(requested < room ? requested : room, asset, decimals) : null,
       withdrawableAt:

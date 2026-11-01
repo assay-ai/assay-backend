@@ -54,12 +54,15 @@ export class HoldDto {
   expiresAt: string | null;
 
   @ApiProperty({
-    enum: ['CHECKING', 'SETTLING', 'DEBT'],
+    enum: ['CHECKING', 'SETTLING', 'ON_CHAIN_HOLD', 'DEBT'],
     nullable: true,
     description:
       '`CHECKING`: the call is still being admitted, served or verified (minutes). `SETTLING`: it ' +
-      'passed and is being paid on chain. `DEBT`: its settlement lapsed and it is a buyer debt ' +
-      '(`GET /escrow/debts`). `null` for a hold that is not open.',
+      'passed and its on-chain settlement has not landed yet (the money is still in the escrow, ' +
+      'in `openHolds`). `ON_CHAIN_HOLD`: the settlement landed, the money left the escrow for ' +
+      'the on-chain dispute hold (a channel bucket or the per-call hold) and is paid to the ' +
+      'provider after it (not in `openHolds`). `DEBT`: its settlement lapsed and it is a buyer ' +
+      'debt (`GET /escrow/debts`). `null` for a hold that is not open.',
   })
-  stage?: 'CHECKING' | 'SETTLING' | 'DEBT' | null;
+  stage?: 'CHECKING' | 'SETTLING' | 'ON_CHAIN_HOLD' | 'DEBT' | null;
 }

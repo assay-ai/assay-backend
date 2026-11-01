@@ -241,6 +241,27 @@ export class GetEscrowResponseDto {
   withdrawableUpTo?: MoneyDto | null;
   @ApiPropertyOptional({ nullable: true })
   withdrawableAt?: string | null;
+
+  // ── BUG-R2-BUY-01 ──
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Calls whose settlement landed on chain and that sit in the dispute hold (a channel ' +
+      'bucket, or a per-call payment redeemed into the hold), not collected and not refunded. ' +
+      'Out of `balance`, `openHolds` and `pendingSettlement`; same payer scope as ' +
+      '`pendingSettlement`. These are the `GET /holds` rows with stage `ON_CHAIN_HOLD`',
+  })
+  onChainHeld?: MoneyDto | null;
+  @ApiPropertyOptional({ description: 'How many calls `onChainHeld` covers' })
+  onChainHeldCalls?: number;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'ISO-8601. The latest `collectableAt` among the `onChainHeld` calls: every one of them ' +
+      'has left the dispute hold by then (paid at the next payout after it). `null` when none',
+  })
+  onChainHoldEndsAt?: string | null;
 }
 
 /**

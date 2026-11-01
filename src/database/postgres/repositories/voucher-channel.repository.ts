@@ -1528,6 +1528,15 @@ export class VoucherChannelRepository {
     debt: bigint;
     /** When the oldest non-debt pending call was admitted, or `null`. */
     oldest: Date | null;
+    /**
+     * Calls whose settlement landed: out of the escrow balance, in the
+     * on-chain dispute hold (a channel bucket, or the per-call hold), not
+     * collected and not refunded yet (BUG-R2-BUY-01). Not in `amount`.
+     */
+    onChainHeld: bigint;
+    onChainHeldCalls: number;
+    /** The latest `collectable_at` of those calls, or `null`. */
+    onChainHoldEndsAt: Date | null;
   }> {
     const [row] = (await this.manager.query(
       `SELECT
@@ -1541,6 +1550,12 @@ export class VoucherChannelRepository {
                    AND "held_status" IS NULL), 0)::text AS "pending",
          COUNT(*) FILTER (WHERE "hold_id" IS NOT NULL AND "hold_released_at" IS NULL
                    AND "held_status" IS NULL)::int AS "calls",
+         COALESCE(SUM("price_amount") FILTER (WHERE "held_status" = 'HELD'
+                   AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL), 0)::text AS "onChainHeld",
+         COUNT(*) FILTER (WHERE "held_status" = 'HELD'
+                   AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL)::int AS "onChainHeldCalls",
+         MAX("collectable_at") FILTER (WHERE "held_status" = 'HELD'
+                   AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL) AS "onChainHoldEndsAt",
          COALESCE(SUM("price_amount") FILTER (WHERE "created_at" > now() - interval '24 hours'
                    AND "hold_id" IS NOT NULL
                    AND "status" IN ('FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING', 'SETTLED')), 0)::text AS "signed"
@@ -1555,6 +1570,9 @@ export class VoucherChannelRepository {
       signedLast24h: BigInt(String(row?.signed ?? '0')),
       debt: BigInt(String(row?.debt ?? '0')),
       oldest: row?.oldest ? new Date(row.oldest as string) : null,
+      onChainHeld: BigInt(String(row?.onChainHeld ?? '0')),
+      onChainHeldCalls: Number(row?.onChainHeldCalls ?? 0),
+      onChainHoldEndsAt: row?.onChainHoldEndsAt ? new Date(row.onChainHoldEndsAt as string) : null,
     };
   }
 

@@ -81,7 +81,12 @@ describe('channel payer and lane lookups, against a real database', () => {
     return { id: row.id, key, channelId };
   }
 
-  async function pendingCall(agentAccount: string, price: number): Promise<void> {
+  async function pendingCall(
+    agentAccount: string,
+    price: number,
+    held: { status: 'HELD' | 'COLLECTED' | 'REFUNDED'; collectableAt: Date } | null = null,
+  ): Promise<string> {
+    const id = randomUUID();
     const channel = await lane(agentAccount);
     await ds.query(
       `INSERT INTO payment_intents (
@@ -92,7 +97,7 @@ describe('channel payer and lane lookups, against a real database', () => {
        VALUES ($1, $2, 'SETTLED', $3, $4, $5, $6, $7, 'RAIL_B_VOUCHER', $8, 'PAID', $9, 6, $10, $10,
                0, $11, $12, now(), $13, 'CHANNEL', $14, $10, 1, now() - interval '1 hour')`,
       [
-        randomUUID(),
+        id,
         randomUUID(),
         randomUUID(),
         agentAccount,
@@ -108,6 +113,16 @@ describe('channel payer and lane lookups, against a real database', () => {
         channel.id,
       ],
     );
+    if (held) {
+      await ds.query(
+        `UPDATE payment_intents
+            SET held_status = $2::varchar, held_at = now(), collectable_at = $3,
+                hold_released_at = CASE WHEN $2::varchar = 'HELD' THEN NULL ELSE now() END
+          WHERE id = $1`,
+        [id, held.status, held.collectableAt],
+      );
+    }
+    return id;
   }
 
   it('payerPending compares the stored agent_account spelling exactly (as the reservation guard)', async () => {
@@ -122,6 +137,29 @@ describe('channel payer and lane lookups, against a real database', () => {
     // (`agent_account = $1`); the escrow figure follows the same rule.
     const other = await channels.payerPending(w.lower, ASSET);
     expect(other).toMatchObject({ amount: 0n, calls: 0 });
+  });
+
+  it('payerPending splits calls in the on-chain hold from the unsettled ones (BUG-R2-BUY-01)', async () => {
+    const w = wallet();
+    const early = new Date(Date.now() + 30 * 60_000);
+    const late = new Date(Date.now() + 90 * 60_000);
+    await pendingCall(w.checksummed, 10_000);
+    await pendingCall(w.checksummed, 20_000, { status: 'HELD', collectableAt: early });
+    await pendingCall(w.checksummed, 30_000, { status: 'HELD', collectableAt: late });
+    await pendingCall(w.checksummed, 40_000, { status: 'COLLECTED', collectableAt: early });
+    await pendingCall(w.checksummed, 50_000, { status: 'REFUNDED', collectableAt: early });
+
+    const figures = await channels.payerPending(w.checksummed, ASSET);
+    expect(figures).toMatchObject({
+      amount: 10_000n,
+      calls: 1,
+      onChainHeld: 50_000n,
+      onChainHeldCalls: 2,
+    });
+    expect(figures.onChainHoldEndsAt?.getTime()).toBe(late.getTime());
+
+    const none = await channels.payerPending(wallet().checksummed, ASSET);
+    expect(none).toMatchObject({ onChainHeld: 0n, onChainHeldCalls: 0, onChainHoldEndsAt: null });
   });
 
   it('lockLane finds the lane by (chain_id, channel_key) whatever spelling the caller holds', async () => {

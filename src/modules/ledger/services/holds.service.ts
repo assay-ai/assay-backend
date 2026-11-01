@@ -61,32 +61,52 @@ export class HoldsService {
     if (intentIds.length === 0 || typeof this.holds.manager?.query !== 'function') return new Map();
     const rows = (await this.holds.manager.query(
       `SELECT "id", "status",
-              ("redemption_lapsed_at" IS NOT NULL AND "redemption_replaced_at" IS NULL) AS "debt"
+              ("redemption_lapsed_at" IS NOT NULL AND "redemption_replaced_at" IS NULL) AS "debt",
+              ("held_status" = 'HELD') AS "onChain"
          FROM "payment_intents"
         WHERE "organization_id" = $1 AND "id" = ANY($2::uuid[])`,
       [organizationId, [...intentIds]],
-    )) as { id: string; status: string; debt?: boolean | string }[];
+    )) as { id: string; status: string; debt?: boolean | string; onChain?: boolean | string }[];
     // A lapsed call's hold is a buyer debt, not a payment in progress (M10).
+    // A call already in the escrow's on-chain hold (a landed channel settle's
+    // bucket, or a per-call redeem into the hold) is out of the buyer's escrow:
+    // not "settling" any more (BUG-R2-BUY-01).
     return new Map(
-      rows.map((row) => [row.id, row.debt === true || row.debt === 'true' ? 'DEBT' : row.status]),
+      rows.map((row) => [
+        row.id,
+        row.debt === true || row.debt === 'true'
+          ? 'DEBT'
+          : row.onChain === true || row.onChain === 'true'
+            ? ON_CHAIN_HOLD
+            : row.status,
+      ]),
     );
   }
 }
 
+const ON_CHAIN_HOLD = 'ON_CHAIN_HOLD';
+
 /**
  * `CHECKING` while the call is still being admitted, served or verified;
  * `SETTLING` once it passed and only the on-chain settlement (redemption or
- * channel settle, then the hold) remains; `DEBT` when that settlement lapsed
- * and the buyer owes it (settled only by re-signing); `null` for a hold that
- * is not open.
+ * channel settle) remains, the money still in the buyer's escrow;
+ * `ON_CHAIN_HOLD` once that settlement landed: the money left the escrow
+ * for the on-chain dispute hold (a channel bucket, or the per-call hold) and
+ * waits for the collect (not in `openHolds`); `DEBT` when the settlement
+ * lapsed and the buyer owes it (settled only by re-signing); `null` for a
+ * hold that is not open.
  */
-function stageOf(row: LedgerHoldEntity, intentStatus: string | undefined): HoldStage | null {
+export function stageOf(
+  row: Pick<LedgerHoldEntity, 'status'>,
+  intentStatus: string | undefined,
+): HoldStage | null {
   if (row.status !== LedgerHoldStatus.OPEN || !intentStatus) return null;
   if (intentStatus === 'DEBT') return 'DEBT';
+  if (intentStatus === ON_CHAIN_HOLD) return 'ON_CHAIN_HOLD';
   return intentStatus === 'SETTLED' ? 'SETTLING' : 'CHECKING';
 }
 
-export type HoldStage = 'CHECKING' | 'SETTLING' | 'DEBT';
+export type HoldStage = 'CHECKING' | 'SETTLING' | 'ON_CHAIN_HOLD' | 'DEBT';
 
 function toHoldDto(row: LedgerHoldEntity): HoldDto {
   const money = MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals);

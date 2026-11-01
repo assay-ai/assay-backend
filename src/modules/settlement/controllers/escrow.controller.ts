@@ -507,6 +507,9 @@ function toGetEscrowResponseDto(state: EscrowState): GetEscrowResponseDto {
     withdrawableUpTo:
       state.withdrawableUpTo === undefined ? undefined : moneyOrNull(state.withdrawableUpTo),
     withdrawableAt: state.withdrawableAt,
+    onChainHeld: state.onChainHeld === undefined ? undefined : moneyOrNull(state.onChainHeld),
+    onChainHeldCalls: state.onChainHeldCalls,
+    onChainHoldEndsAt: state.onChainHoldEndsAt,
   };
 }
 
