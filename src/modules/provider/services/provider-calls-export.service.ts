@@ -181,6 +181,10 @@ export const CSV_HEADER: readonly string[] = Object.freeze([
   'price_amount',
   'asset',
   'decimals',
+  // Appended in W2 (SPEC-W2 §11): never reorder the columns above.
+  'collectable_at',
+  'collected_at',
+  'payout_tx_ref',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -245,6 +249,9 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.priceAmount,
     row.asset,
     row.decimals,
+    row.collectableAt ? row.collectableAt.toISOString() : null,
+    row.collectedAt ? row.collectedAt.toISOString() : null,
+    row.payoutTxRef ?? null,
   ];
 }
 

@@ -306,6 +306,60 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     implemented: true,
   }),
 
+  /**
+   * Drain the payment channels (W2, v3 §5.4.9): every channel with value to
+   * settle gets an urgent round now — before a redeemer rotation, a take-rate
+   * change or a domain-changing upgrade. It only settles sooner what the buyers
+   * signed, moves nothing anywhere else, and is idempotent, so one operator.
+   */
+  'M-2': define({
+    code: 'M-2',
+    family: OverrideFamily.MONEY,
+    action: 'channels.drain_requested',
+    label: 'Settle every pending payment channel now',
+    roles: [OperatorRole.SRE, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+
+  /**
+   * Claim the payouts the escrow set aside for one address after the token
+   * refused the transfer (W2, an issuer freeze on a provider or the treasury,
+   * review 2026-10-31 M4): the scheduler sends `claimUnpaid(address)` on its
+   * next tick, once the freeze has lifted. It pays only what the chain already
+   * owes that very address, to it, and is idempotent, so one operator.
+   */
+  'M-3': define({
+    code: 'M-3',
+    family: OverrideFamily.MONEY,
+    action: 'channels.unpaid_claim_requested',
+    label: 'Claim unpaid channel payouts for an address',
+    roles: [OperatorRole.SRE, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+
+  /**
+   * Clear a reconciler stop on one payment channel (final review 2026-11-01
+   * backend F1 / ops F3): a lane the reconciler stopped as DESYNC/RECONCILE
+   * goes back to ROTATED once an operator has investigated it and the chain
+   * agrees with the database again (re-checked when the door is wired). It
+   * moves no money: the lane takes no new voucher, and its already-signed
+   * value can settle again. One operator, as M-2.
+   */
+  'M-4': define({
+    code: 'M-4',
+    family: OverrideFamily.MONEY,
+    action: 'channels.reconcile_cleared',
+    label: 'Clear a reconciler stop on a payment channel',
+    roles: [OperatorRole.SRE, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+
   // ── V · Verification and quality ─────────────────────────────────────────
   'V-3': define({
     code: 'V-3',

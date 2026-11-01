@@ -212,6 +212,13 @@ export interface PaymentIntent {
   readonly heldAttempts?: number;
   /** `OPEN` while a guaranteed dispute holds the voucher, then `UPHELD` | `REJECTED`. */
   readonly disputeOutcome?: string | null;
+  /** Which voucher door pays this call: `PER_CALL` (default) or `CHANNEL`. */
+  readonly voucherFormat?: VoucherFormat;
+  /** A channel call's position: its channel row and the cumulative its voucher signed. */
+  readonly channelRowId?: string | null;
+  readonly channelCumulative?: string | null;
+  readonly channelCalls?: number | null;
+  readonly channelSettlementId?: string | null;
 
   /** Written by the response classifier; typed as a string until that vocabulary lands. */
   readonly classification: string | null;
@@ -220,6 +227,12 @@ export interface PaymentIntent {
 
   readonly createdAt: Date;
   readonly updatedAt: Date;
+}
+
+/** The two voucher doors (`payment_intents.voucher_format`). */
+export enum VoucherFormat {
+  PER_CALL = 'PER_CALL',
+  CHANNEL = 'CHANNEL',
 }
 
 export interface CreatePaymentIntentInput {
@@ -280,6 +293,14 @@ export interface CreatePaymentIntentInput {
   readonly credentialId?: string | null;
   /** Defaults to `PAYMENT_INTENT_TTL_MS` from now. */
   readonly expiresAt?: Date;
+  /**
+   * A CHANNEL call (spec P2 v3.1 §5.1): no seq, no per-call signature; the
+   * channel row and position are set by the admission hook under the payer's
+   * lock (`VoucherAdmission.withinLock`).
+   */
+  readonly voucherFormat?: VoucherFormat;
+  readonly channelCumulative?: string | null;
+  readonly channelCalls?: number | null;
   /**
    * Which version of the agent's spend policy governed this call, as returned
    * by `SpendPolicyEnforcementService.assertCallAllowed`.

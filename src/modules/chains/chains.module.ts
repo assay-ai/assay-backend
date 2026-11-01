@@ -109,6 +109,8 @@ import { EvmStakeIntentBuilder } from './evm/evm-stake-intent-builder.service';
 import { EvmVaultService } from './evm/evm-vault.service';
 import { EvmVerifierRegistryService } from './evm/evm-verifier-registry.service';
 import { EvmHeldPayments } from './evm/evm-held-payments.service';
+import { EvmChannelDoor } from './evm/evm-channel-door.service';
+import { CHANNEL_DOOR } from '@modules/payment/ports/channel-door.port';
 import { EvmEscrowDepositLogs } from './evm/evm-escrow-deposit-logs.service';
 import { ESCROW_DEPOSIT_LOGS } from './ports/escrow-deposit-logs.port';
 import { EvmVoucherRedeemer } from './evm/evm-voucher-redeemer.service';
@@ -570,6 +572,8 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
       useFactory: (evm: EvmHeldPayments) => new NamespaceHeldPayments(evm),
       inject: [EvmHeldPayments],
     },
+    // The channel door (W2), eip155 only.
+    { provide: CHANNEL_DOOR, useExisting: EvmChannelDoor },
     // A2: deposits into one escrow, read-only; `null` for a non-eip155 asset.
     { provide: ESCROW_DEPOSIT_LOGS, useExisting: EvmEscrowDepositLogs },
 
@@ -617,6 +621,7 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
     SLASH_DISPUTE_INTENTS,
     VOUCHER_REDEEMER,
     HELD_PAYMENTS,
+    CHANNEL_DOOR,
     ESCROW_DEPOSIT_LOGS,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,

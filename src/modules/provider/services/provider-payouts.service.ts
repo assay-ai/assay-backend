@@ -75,6 +75,7 @@ interface PaymentRow {
   readonly decimals: string | number;
   readonly chainTxRef: string | null;
   readonly calls: string | number | null;
+  readonly buyers?: string | number | null;
   readonly createdAt: Date | string;
   /** `createdAt` at full microsecond precision, for the cursor. */
   readonly at: string;
@@ -145,6 +146,12 @@ export class ProviderPayoutsService {
         'chainTxRef',
       )
       .addSelect('COUNT(*)', 'calls')
+      // "Paid for N calls (from M buyers) in one transfer" (SPEC-W2 §11).
+      .addSelect(
+        `(SELECT COUNT(DISTINCT i.agent_account) FROM payment_intents i
+           WHERE i.id = ANY(array_agg(entry.intent_id)))`,
+        'buyers',
+      )
       .addSelect(groupAt, 'createdAt')
       .addSelect(exactInstantSql('MIN(entry.created_at)'), 'at')
       .where('entry.organizationId = :organizationId', { organizationId })
@@ -246,6 +253,7 @@ function toPayoutDto(row: PaymentRow): ProviderPayoutDto {
     amount: { amount: String(row.amount), asset: row.asset, decimals: Number(row.decimals) },
     chainTxRef: row.chainTxRef,
     calls: row.calls === null || row.calls === undefined ? null : Number(row.calls),
+    buyers: row.buyers === null || row.buyers === undefined ? null : Number(row.buyers),
     createdAt: new Date(row.createdAt),
   };
 }

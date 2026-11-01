@@ -1,3 +1,7 @@
+import {
+  ChannelVoucherMessage,
+  hashChannelVoucher,
+} from '@modules/chains/evm/eip712/channel-voucher';
 import { Injectable } from '@nestjs/common';
 import {
   decodeEventLog,
@@ -662,6 +666,31 @@ export class EvmChainAdapter implements ChainAdapter {
       signature,
       nowSeconds,
     );
+  }
+
+  async authorizeChannelSigner(
+    payer: AccountId,
+    message: ChannelVoucherMessage,
+    signature: string,
+    nowSeconds: number,
+  ): Promise<VoucherAuthorityAnswer> {
+    const { chainId, address } = this.parseAccountId(payer);
+    const escrow = getAddress(this.deploymentFor(chainId).escrow);
+    if (getAddress(message.payer) !== getAddress(address)) {
+      return { kind: 'REFUSED', reason: VoucherAuthorityRefusal.NOT_PAYER, signer: null };
+    }
+    const digest = hashChannelVoucher(message, evmDomain(chainId, escrow));
+    return this.voucherAuthority(chainId, escrow).authorize(
+      getAddress(address),
+      digest,
+      signature,
+      nowSeconds,
+    );
+  }
+
+  /** The escrow's EIP-712 domain, which channel vouchers are signed under (I9). */
+  channelDomain(chainId: ChainId): ReturnType<typeof evmDomain> {
+    return evmDomain(chainId, getAddress(this.deploymentFor(chainId).escrow));
   }
 
   /**

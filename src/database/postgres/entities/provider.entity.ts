@@ -165,4 +165,20 @@ export class ProviderEntity extends OrganizationScopedEntityWithoutSoftDelete {
 
   @Column({ name: 'verification_evidence_url', type: 'varchar', length: 2048, nullable: true })
   verificationEvidenceUrl: string | null;
+
+  /**
+   * When per-call holds and idle channels are paid out (SPEC-W2 §8):
+   * `HOURLY` (only when at least $25 is ready, else on the 6-hour grid) or
+   * `EVERY_6_HOURS` (00/06/12/18 UTC, the default). Active channels are
+   * collected before each settle whatever this says.
+   */
+  @Column({ name: 'payout_cadence', type: 'varchar', length: 16, default: 'EVERY_6_HOURS' })
+  payoutCadence: string;
+
+  @Column({ name: 'payout_cadence_changed_at', type: 'timestamptz', nullable: true })
+  payoutCadenceChangedAt: Date | null;
+
+  /** The last payout run that collected anything for this provider. */
+  @Column({ name: 'last_payout_at', type: 'timestamptz', nullable: true })
+  lastPayoutAt: Date | null;
 }

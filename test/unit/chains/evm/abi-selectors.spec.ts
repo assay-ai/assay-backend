@@ -534,18 +534,33 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x3e5b55ad', 'HeldNotYetCollectable'],
   ['0xe8824463', 'HeldRefundWindowClosed'],
   ['0xb2db24e8', 'InvalidCollectHold'],
+  // W1 channel door: `cast sig '<Name>()'`.
+  ['0x63f06455', 'ChannelNothingToSettle'],
+  ['0x13feee40', 'ChannelChargeTooLarge'],
+  ['0x8fdb8347', 'ChannelValueOutOfRange'],
+  ['0x7aa6af15', 'TransferGasTooLow'],
+  ['0x90b8ec18', 'TransferFailed'],
   // OpenZeppelin `Ownable2StepUpgradeable`, raised by AssayConfig's owner doors
   // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
   // and `cast sig 'OwnableInvalidOwner(address)'`.
   ['0x118cdaa7', 'OwnableUnauthorizedAccount'],
   ['0x1e4fbdf7', 'OwnableInvalidOwner'],
+  // OpenZeppelin `SafeERC20`, raised by a per-call `collectHeld` / `withdraw`
+  // transfer to a frozen address (final review 2026-11-01 X-9).
+  // `cast sig 'SafeERC20FailedOperation(address)'`.
+  ['0x5274afe7', 'SafeERC20FailedOperation'],
 ];
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    // 94 from Errors.sol plus OpenZeppelin's two Ownable errors.
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(96);
-    expect(ERROR_PINS).toHaveLength(96);
+    // 99 from Errors.sol plus OpenZeppelin's two Ownable errors and SafeERC20FailedOperation.
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(102);
+    expect(ERROR_PINS).toHaveLength(102);
+  });
+
+  it('pins SafeERC20FailedOperation(address) to 0x5274afe7 (X-9)', () => {
+    expect(toFunctionSelector('SafeERC20FailedOperation(address)')).toBe('0x5274afe7');
+    expect(evmErrorName(`0x5274afe7${'0'.repeat(64)}`)).toBe('SafeERC20FailedOperation');
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {

@@ -71,7 +71,13 @@ export interface EvmRelayedCall {
    * timeout, a restart) is found on chain rather than closed and charged twice
    * (review 2026-10-15 P-1).
    */
-  readonly beforeBroadcast?: (hash: `0x${string}`) => Promise<void>;
+  readonly beforeBroadcast?: (hash: `0x${string}`, sent?: EvmSignedTxMeta) => Promise<void>;
+}
+
+/** Who signed a transaction and at which nonce, handed to `beforeBroadcast` with its hash. */
+export interface EvmSignedTxMeta {
+  readonly from: `0x${string}`;
+  readonly nonce: bigint;
 }
 
 /** A bare value transfer. NOTE THE ABSENCE OF A CALLDATA FIELD. */

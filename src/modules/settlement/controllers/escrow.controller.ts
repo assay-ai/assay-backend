@@ -499,6 +499,14 @@ function toGetEscrowResponseDto(state: EscrowState): GetEscrowResponseDto {
     lifetime: state.lifetime,
     uncreditedOnChain: state.uncreditedOnChain,
     withdrawalsFrozen: state.withdrawalsFrozen,
+    pendingSettlement:
+      state.pendingSettlement === undefined ? undefined : moneyOrNull(state.pendingSettlement),
+    pendingSettlementCalls: state.pendingSettlementCalls,
+    nextSettleAt: state.nextSettleAt,
+    signedLast24h: state.signedLast24h === undefined ? undefined : moneyOrNull(state.signedLast24h),
+    withdrawableUpTo:
+      state.withdrawableUpTo === undefined ? undefined : moneyOrNull(state.withdrawableUpTo),
+    withdrawableAt: state.withdrawableAt,
   };
 }
 
@@ -515,4 +523,10 @@ function toRelayedResponseDto(
     gasUsed: result.submission.gasUsed,
     escrow: toGetEscrowResponseDto(result.escrow),
   };
+}
+
+function moneyOrNull(money: { amount: string; asset: string; decimals: number } | null) {
+  return money === null
+    ? null
+    : { amount: money.amount, asset: money.asset, decimals: money.decimals };
 }

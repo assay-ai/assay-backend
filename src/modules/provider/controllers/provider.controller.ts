@@ -1,9 +1,24 @@
+import { Body, NotFoundException, Optional, Put } from '@nestjs/common';
+import { IsString } from 'class-validator';
+
+import {
+  PayoutCadenceView,
+  ProviderPayoutStagesService,
+} from '../services/provider-payout-stages.service';
+
+/** `PUT /providers/me/payout-cadence`. */
+export class SetPayoutCadenceDto {
+  // Checked by the service, so a wrong value answers PROVIDER_PAYOUT_CADENCE_INVALID.
+  @IsString()
+  cadence: string;
+}
+
 import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 
 import { NoCacheHeader } from '@shared/decorators/cache-header.decorator';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { callsExportFilename } from '../domain/csv';
@@ -41,6 +56,8 @@ export class ProviderController {
     private readonly earnings: ProviderEarningsService,
     private readonly stake: ProviderStakeService,
     private readonly callsExport: ProviderCallsExportService,
+    // W2 payout stages and cadence. Optional: a harness that tests the other routes needs none.
+    @Optional() private readonly payoutStages?: ProviderPayoutStagesService,
   ) {}
 
   @Get()
@@ -60,7 +77,35 @@ export class ProviderController {
     @CurrentSession() session: McpSession,
     @Query() query: GetProviderEarningsQueryDto,
   ): Promise<GetProviderEarningsResponseDto> {
-    return this.earnings.getEarnings(session.organizationId, query);
+    const [earnings, stages] = await Promise.all([
+      this.earnings.getEarnings(session.organizationId, query),
+      this.payoutStages
+        ? this.payoutStages.stages(session.organizationId, query.asset ?? null)
+        : {},
+    ]);
+    return { ...earnings, ...stages };
+  }
+
+  @Get('payout-cadence')
+  @ApiOperation({ summary: 'How often per-call holds and idle channels are paid out (SPEC-W2 §8)' })
+  async getPayoutCadence(@CurrentSession() session: McpSession): Promise<PayoutCadenceView> {
+    if (!this.payoutStages) throw new NotFoundException();
+    return this.payoutStages.getCadence(session.organizationId);
+  }
+
+  // A person's decision about their money, never an agent credential's (review A-1).
+  @Put('payout-cadence')
+  @UseGuards(HumanSessionGuard)
+  @ApiOperation({
+    summary: 'Set HOURLY (only when $25 is ready) or EVERY_6_HOURS; applies from the next run',
+  })
+  @ApiResponse({ status: 400, description: 'PROVIDER_PAYOUT_CADENCE_INVALID' })
+  async setPayoutCadence(
+    @CurrentSession() session: McpSession,
+    @Body() body: SetPayoutCadenceDto,
+  ): Promise<PayoutCadenceView> {
+    if (!this.payoutStages) throw new NotFoundException();
+    return this.payoutStages.setCadence(session.organizationId, body?.cadence);
   }
 
   @Get('stake')

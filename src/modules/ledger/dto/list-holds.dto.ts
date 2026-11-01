@@ -52,4 +52,14 @@ export class HoldDto {
     description: 'After this, the sweeper releases the hold. `null` if the hold does not expire',
   })
   expiresAt: string | null;
+
+  @ApiProperty({
+    enum: ['CHECKING', 'SETTLING', 'DEBT'],
+    nullable: true,
+    description:
+      '`CHECKING`: the call is still being admitted, served or verified (minutes). `SETTLING`: it ' +
+      'passed and is being paid on chain. `DEBT`: its settlement lapsed and it is a buyer debt ' +
+      '(`GET /escrow/debts`). `null` for a hold that is not open.',
+  })
+  stage?: 'CHECKING' | 'SETTLING' | 'DEBT' | null;
 }

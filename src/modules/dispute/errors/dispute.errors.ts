@@ -139,7 +139,13 @@ export const DisputeErrors = createDomainErrorFactory('DISPUTE', {
   collectionInProgress: {
     code: DisputeErrorCode.DISPUTE_COLLECTION_IN_PROGRESS,
     statusCode: 409,
-    message: (_context?: Record<string, any>) =>
-      "The call's payment is still being collected; decide again once it has finished",
+    publicContext: ['channel', 'settleWithinMinutes'],
+    message: (context?: Record<string, any>) =>
+      context?.channel
+        ? 'The call was paid on a payment channel that has not settled yet; the dispute keeps the ' +
+          'payment in the dispute hold when it settles (usually within ' +
+          `${Number(context?.settleWithinMinutes) > 0 ? Number(context.settleWithinMinutes) : 30} ` +
+          'minutes). Decide again then: an upheld decision refunds it on chain'
+        : "The call's payment is still being collected; decide again once it has finished",
   },
 });

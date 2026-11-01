@@ -43,9 +43,50 @@ export class HoldsService {
     }
 
     const page = await paginate(qb, query, HOLD_LIST);
-    return page.map(toHoldDto);
+    const stages = await this.stagesOf(
+      organizationId,
+      page.items.map((row) => row.intentId).filter((id): id is string => !!id),
+    );
+    return page.map((row) => ({
+      ...toHoldDto(row),
+      stage: stageOf(row, stages.get(row.intentId)),
+    }));
+  }
+
+  /** The call's status behind each hold, in one read (SPEC-H H-2: split "checking" from "settling"). */
+  private async stagesOf(
+    organizationId: string,
+    intentIds: readonly string[],
+  ): Promise<Map<string, string>> {
+    if (intentIds.length === 0 || typeof this.holds.manager?.query !== 'function') return new Map();
+    const rows = (await this.holds.manager.query(
+      `SELECT "id", "status",
+              ("redemption_lapsed_at" IS NOT NULL AND "redemption_replaced_at" IS NULL) AS "debt"
+         FROM "payment_intents"
+        WHERE "organization_id" = $1 AND "id" = ANY($2::uuid[])`,
+      [organizationId, [...intentIds]],
+    )) as { id: string; status: string; debt?: boolean | string }[];
+    // A lapsed call's hold is a buyer debt, not a payment in progress (M10).
+    return new Map(
+      rows.map((row) => [row.id, row.debt === true || row.debt === 'true' ? 'DEBT' : row.status]),
+    );
   }
 }
+
+/**
+ * `CHECKING` while the call is still being admitted, served or verified;
+ * `SETTLING` once it passed and only the on-chain settlement (redemption or
+ * channel settle, then the hold) remains; `DEBT` when that settlement lapsed
+ * and the buyer owes it (settled only by re-signing); `null` for a hold that
+ * is not open.
+ */
+function stageOf(row: LedgerHoldEntity, intentStatus: string | undefined): HoldStage | null {
+  if (row.status !== LedgerHoldStatus.OPEN || !intentStatus) return null;
+  if (intentStatus === 'DEBT') return 'DEBT';
+  return intentStatus === 'SETTLED' ? 'SETTLING' : 'CHECKING';
+}
+
+export type HoldStage = 'CHECKING' | 'SETTLING' | 'DEBT';
 
 function toHoldDto(row: LedgerHoldEntity): HoldDto {
   const money = MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals);

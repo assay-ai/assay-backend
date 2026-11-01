@@ -199,6 +199,24 @@ class FakePaymentIntents {
     this.voided.push({ id, outcome });
     return true;
   }
+
+  /** Channel calls `T_term` settled unverified, not charged yet (B-6). */
+  readonly unchargedChannel = new Set<string>();
+  readonly channelVoided: Array<{ id: string; outcome: string }> = [];
+
+  /** `PaymentIntentService.voidUnchargedChannelCall`: free while no settlement charged it. */
+  async voidUnchargedChannelCall(
+    organizationId: string,
+    id: string,
+    outcome: string,
+  ): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (!row || !this.unchargedChannel.has(id) || !row.holdId) return false;
+    await this.ledger.releaseHold(organizationId, row.holdId);
+    this.rows.set(id, { ...row, holdReleasedAt: new Date() });
+    this.channelVoided.push({ id, outcome });
+    return true;
+  }
 }
 
 /** Only `update()` — the one method the repair path calls directly. */
@@ -961,6 +979,34 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     expect(ledger.appliedReleases).toBe(1);
     expect(ledger.appliedCommits).toBe(0);
     expect(intents.rows.get(INTENT_ID)?.status).toBe(PaymentIntentStatus.SETTLED);
+  });
+
+  it('B-6: a late REFUND on a channel call T_term settled, not charged yet, voids it while free', async () => {
+    const { service, ledger, intents, records } = harness();
+    intents.seed(
+      baseIntent({
+        status: PaymentIntentStatus.SETTLED,
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        holdReleasedAt: null,
+      }),
+    );
+    intents.unchargedChannel.add(INTENT_ID);
+    records.seedPending(INTENT_ID, {
+      state: VerificationRecordState.JUDGED,
+      verdictStatus: VerdictStatus.FAIL,
+      decisionPolicyId: 'decision-1',
+      decisionPolicyVersion: 1,
+      evaluatedAt: new Date(),
+      stages: [],
+      settlementOutcome: VerdictOutcome.REFUND,
+    });
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(intents.voided).toEqual([]);
+    expect(intents.channelVoided).toEqual([{ id: INTENT_ID, outcome: VerdictOutcome.REFUND }]);
+    expect(ledger.appliedReleases).toBe(1);
+    expect(ledger.appliedCommits).toBe(0);
   });
 
   it('M2: a late PASS for a debt is not a void — the buyer still owes the served call', async () => {

@@ -1,3 +1,15 @@
+import { VoucherChannelRepository } from '@database/postgres/repositories/voucher-channel.repository';
+import {
+  CHANNEL_POLICY,
+  channelPolicyFromEnv,
+  settleBoundSeconds,
+} from '@modules/payment/constants/channel.constants';
+import {
+  GatheringPolicy,
+  REDEEM_GATHERING,
+  REDEEM_GATHERING_FROM_ENV,
+} from '@modules/payment/constants/settlement-gathering.constants';
+import type { ChannelPolicy } from '@modules/payment/domain/channel/channel-policy';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
@@ -92,6 +104,18 @@ export interface EscrowState {
   readonly uncreditedOnChain: Money | null;
   /** The withdrawal freeze (`ReconciliationService.isFrozen`). `null` when unknown. */
   readonly withdrawalsFrozen: boolean | null;
+  /**
+   * W2 (API-W2 §3.3): calls admitted on either door whose money is still in
+   * the escrow balance, what was signed in the last 24 h (settled or not), and
+   * what a pending withdrawal will pay at most: min(requested, balance −
+   * pending). `null` when not known.
+   */
+  readonly pendingSettlement?: Money | null;
+  readonly pendingSettlementCalls?: number;
+  readonly nextSettleAt?: string | null;
+  readonly signedLast24h?: Money | null;
+  readonly withdrawableUpTo?: Money | null;
+  readonly withdrawableAt?: string | null;
 }
 
 /** See {@link EscrowState.lifetime}. `spent` includes payments still in their dispute hold. */
@@ -174,6 +198,14 @@ export class EscrowAccountService {
     @Optional() private readonly balances: AccountBalanceRepository | null = null,
     @Optional() private readonly intents: PaymentIntentRepository | null = null,
     @Optional() private readonly reconciliation: ReconciliationService | null = null,
+    @Optional() private readonly channels: VoucherChannelRepository | null = null,
+    // The configured cadences behind `nextSettleAt` (e2e B-2), never the defaults.
+    @Optional()
+    @Inject(CHANNEL_POLICY)
+    private readonly channelPolicy: ChannelPolicy = channelPolicyFromEnv(),
+    @Optional()
+    @Inject(REDEEM_GATHERING)
+    private readonly redeemGathering: GatheringPolicy = REDEEM_GATHERING_FROM_ENV,
   ) {}
 
   /**
@@ -333,6 +365,53 @@ export class EscrowAccountService {
       uncreditedOnChain:
         uncreditedAtomic === null ? null : MoneyUtil.of(uncreditedAtomic, asset, decimals),
       withdrawalsFrozen,
+      ...(await this.pending(account, asset, decimals, chainAtomic, reading)),
+    };
+  }
+
+  /** The W2 pending-settlement figures (API-W2 §3.3); empty when not wired. */
+  private async pending(
+    account: AccountId,
+    asset: AssetId,
+    decimals: number,
+    chainAtomic: bigint,
+    reading: EscrowChainBalance,
+  ): Promise<Partial<EscrowState>> {
+    if (!this.channels) return {};
+    let figures: Awaited<ReturnType<VoucherChannelRepository['payerPending']>>;
+    try {
+      figures = await this.channels.payerPending(account, asset);
+    } catch {
+      return {};
+    }
+    const requested = reading.withdrawRequested;
+    // An open buyer debt is never settled from the escrow unless it is
+    // renewed: it does not reduce what a withdrawal pays (review 2026-10-31
+    // M10), so "up to" is min(requested, balance − pending that WILL settle).
+    const settling: bigint = figures.amount > figures.debt ? figures.amount - figures.debt : 0n;
+    const room = chainAtomic > settling ? chainAtomic - settling : 0n;
+    // Upper bound for the OLDEST pending call: its admission plus the longer
+    // of the per-call door's maximum wait and the channel age trigger.
+    const settleBy = figures.oldest
+      ? Math.max(
+          Date.now(),
+          figures.oldest.getTime() +
+            settleBoundSeconds(
+              this.channelPolicy.tAgeSeconds,
+              this.redeemGathering.maxWaitSeconds,
+            ) *
+              1000,
+        )
+      : null;
+    return {
+      pendingSettlement: MoneyUtil.of(figures.amount, asset, decimals),
+      pendingSettlementCalls: figures.calls,
+      nextSettleAt: settleBy === null ? null : new Date(settleBy).toISOString(),
+      signedLast24h: MoneyUtil.of(figures.signedLast24h, asset, decimals),
+      withdrawableUpTo:
+        requested > 0n ? MoneyUtil.of(requested < room ? requested : room, asset, decimals) : null,
+      withdrawableAt:
+        requested > 0n ? new Date(reading.withdrawAvailableAt * 1000).toISOString() : null,
     };
   }
 

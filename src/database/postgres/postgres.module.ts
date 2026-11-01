@@ -11,6 +11,12 @@ import { EvmGasGrantEntity } from './entities/evm-gas-grant.entity';
 import { LedgerEntryEntity } from './entities/ledger-entry.entity';
 import { LedgerHoldEntity } from './entities/ledger-hold.entity';
 import { PaymentIntentEntity } from './entities/payment-intent.entity';
+import {
+  ChannelSettlementEntity,
+  ChannelVoucherEntity,
+  VoucherChannelEntity,
+} from './entities/voucher-channel.entity';
+import { VoucherChannelRepository } from './repositories/voucher-channel.repository';
 import { ReconciliationRunEntity } from './entities/reconciliation-run.entity';
 import { StakeSnapshotEntity } from './entities/stake-snapshot.entity';
 import { VerificationPolicyEntity } from './entities/verification-policy.entity';
@@ -146,6 +152,9 @@ export const entities = [
   AccountBalanceEntity,
   BuyerEscrowEntity,
   PaymentIntentEntity,
+  VoucherChannelEntity,
+  ChannelVoucherEntity,
+  ChannelSettlementEntity,
   DepositIntentEntity,
   EvmGasGrantEntity,
   ReconciliationRunEntity,
@@ -213,6 +222,7 @@ export const repositories = [
   AccountBalanceRepository,
   BuyerEscrowRepository,
   PaymentIntentRepository,
+  VoucherChannelRepository,
   DepositIntentRepository,
   EvmGasGrantRepository,
   ReconciliationRunRepository,

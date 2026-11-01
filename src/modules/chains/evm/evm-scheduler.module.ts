@@ -17,6 +17,7 @@ import {
 import { RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EvmChainClockMonitor } from './evm-chain-clock.monitor';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
+import { EvmRedeemerReserveMonitor } from './evm-redeemer-reserve.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
 import { EvmEscrowWithdrawalIndexer } from './evm-escrow-withdrawal.indexer';
 import { EvmModule, readPositiveInt } from './evm.module';
@@ -111,6 +112,8 @@ function readConfirmations(raw: string | undefined): number {
       inject: [ConfigService, ENABLED_CHAINS],
     },
     EvmRelayerFloatMonitor,
+    // G6, the monitor half: the redeemer float against two peak hours of its own spend.
+    EvmRedeemerReserveMonitor,
     // The chain clock check (L-4), run on the float monitor's pass.
     EvmChainClockMonitor,
     // The writer half of the paid-call pause on a dry redeemer; `PaymentModule`

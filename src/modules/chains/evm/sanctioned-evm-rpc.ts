@@ -103,6 +103,51 @@ function boundedRevertData(data: unknown): `0x${string}` | null {
 export function createSanctionedEvmClient(url: string, httpClient: EgressHttpClient, chain: Chain) {
   let id = 0;
 
+  /**
+   * Several JSON-RPC calls in ONE HTTP request (a JSON-RPC batch), answered
+   * in call order. One request reaches one node behind a load balancer, so
+   * reads that must agree (a sender's nonce and a receipt, sec-audit
+   * 2026-11-01 M-1) come from the same chain view. Any error in the batch
+   * rejects the whole call; the caller then reads one by one.
+   */
+  async function rpcBatch(
+    calls: readonly { method: string; params: readonly unknown[] }[],
+  ): Promise<unknown[]> {
+    if (calls.length === 0) return [];
+    const first = id + 1;
+    id += calls.length;
+    const response = await httpClient.request({
+      url,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(
+        calls.map((call, i) => ({
+          jsonrpc: '2.0',
+          id: first + i,
+          method: call.method,
+          params: call.params,
+        })),
+      ),
+      policy: INTERNAL_EGRESS_POLICY,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`EVM RPC batch failed: HTTP ${response.status}`);
+    }
+    const reply = JSON.parse(response.body) as unknown;
+    if (!Array.isArray(reply)) throw new Error('EVM RPC batch refused by the node');
+    const byId = new Map<number, { result?: unknown; error?: { code: number } }>();
+    for (const item of reply as { id?: unknown; result?: unknown; error?: { code: number } }[]) {
+      if (typeof item?.id === 'number') byId.set(item.id, item);
+    }
+    return calls.map((call, i) => {
+      const item = byId.get(first + i);
+      if (!item) throw new Error(`EVM RPC batch: no answer for ${call.method}`);
+      // The node's numeric code only, never its prose (see `request` below).
+      if (item.error) throw new Error(`EVM RPC ${call.method} failed: code ${item.error.code}`);
+      return item.result ?? null;
+    });
+  }
+
   return createPublicClient({
     // Without this, viem has no multicall address and refuses every batched
     // `readContract` with `client chain not configured`. The reader batches by
@@ -199,7 +244,7 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
       },
       { retryCount: 0 },
     ),
-  });
+  }).extend(() => ({ rpcBatch }));
 }
 
 /**

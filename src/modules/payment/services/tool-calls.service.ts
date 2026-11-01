@@ -451,10 +451,37 @@ export class ToolCallsService {
       refundedByReport: settled && isRefundedByReport(intent),
       collectableAt: intent.collectableAt ?? null,
       disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
+      collectedAt: intent.heldStatus === 'COLLECTED' ? (intent.holdReleasedAt ?? null) : null,
+      voucherFormat: intent.voucherFormat === 'CHANNEL' ? 'CHANNEL' : 'PER_CALL',
+      channel:
+        intent.voucherFormat === 'CHANNEL'
+          ? {
+              cumulative: String(intent.channelCumulative),
+              calls: Number(intent.channelCalls),
+              settled: intent.heldAt !== null && intent.heldAt !== undefined,
+              bucketMaturesAt: intent.collectableAt ?? null,
+              refundWindowExtended: foldedLater(intent.heldAt, intent.collectableAt),
+            }
+          : null,
       verdict,
       createdAt: intent.createdAt,
     };
   }
+}
+
+/**
+ * Whether a channel bucket's maturity moved past where this call's own hold
+ * put it (a later settlement folded into the bucket, `ChannelBucketDeferred`):
+ * the receipt then says "refund window extended". The call's own maturity is
+ * the next full hour after `heldAt` + the 1-hour hold.
+ */
+function foldedLater(
+  heldAt: Date | null | undefined,
+  collectableAt: Date | null | undefined,
+): boolean {
+  if (!heldAt || !collectableAt) return false;
+  const own = Math.ceil((heldAt.getTime() / 1000 + 3_600) / 3_600) * 3_600;
+  return collectableAt.getTime() / 1000 > own;
 }
 
 function toMoneyDto(money: Money): ToolCallDto['price'] {

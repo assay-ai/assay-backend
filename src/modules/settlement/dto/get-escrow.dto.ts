@@ -212,6 +212,35 @@ export class GetEscrowResponseDto {
       'be read).',
   })
   withdrawalsFrozen: boolean | null;
+
+  // ── W2 (API-W2 §3.3) ──
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Calls admitted (both doors) still settling',
+  })
+  pendingSettlement?: MoneyDto | null;
+  @ApiPropertyOptional()
+  pendingSettlementCalls?: number;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Upper bound by which the OLDEST pending call (not a debt) is settled on chain; usually sooner',
+  })
+  nextSettleAt?: string | null;
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Signed in the last 24 h, including not yet settled',
+  })
+  signedLast24h?: MoneyDto | null;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'min(requested, balance − the pending calls that will settle); open buyer debts are not ' +
+      'taken off: they settle from the escrow only if renewed',
+  })
+  withdrawableUpTo?: MoneyDto | null;
+  @ApiPropertyOptional({ nullable: true })
+  withdrawableAt?: string | null;
 }
 
 /**

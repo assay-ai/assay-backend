@@ -171,6 +171,7 @@ describe('PaymentIntentService — the guarded write-off and void', () => {
     const repo = {
       markWrittenOff: jest.fn(async () => marked),
       markDebtVoided: jest.fn(async () => marked),
+      markChannelCallVoided: jest.fn(async () => marked),
       findOneBy: jest.fn(async () => ({
         id: 'debt-1',
         organizationId: 'org-1',
@@ -220,6 +221,60 @@ describe('PaymentIntentService — the guarded write-off and void', () => {
     const { service, repo, runner } = serviceBuild(true);
     await expect(service.voidDebt('org-1', 'debt-1', 'REFUND')).resolves.toBe(true);
     expect(repo.markDebtVoided).toHaveBeenCalledWith(runner, target, 'voided:REFUND');
+  });
+
+  describe('B-6 (sec-audit 2026-11-01): a late REFUND/VOID on an uncharged T_term channel call', () => {
+    const channelRow = (overrides: Record<string, unknown> = {}) => ({
+      voucherFormat: 'CHANNEL',
+      channelRowId: 'lane-1',
+      statusReason: 'channel_terminal_timeout_unverified',
+      ...overrides,
+    });
+    const withRow = (
+      built: ReturnType<typeof serviceBuild>,
+      overrides: Record<string, unknown>,
+    ) => {
+      const base = built.repo.findOneBy.getMockImplementation()!;
+      (built.repo.findOneBy as jest.Mock).mockImplementation(async () => ({
+        ...(await (base as () => Promise<Record<string, unknown>>)()),
+        ...overrides,
+      }));
+      return built;
+    };
+
+    it('voids it in the guarded release, under the lane lock the SQL takes', async () => {
+      const { service, repo, runner } = withRow(serviceBuild(true), channelRow());
+      await expect(service.voidUnchargedChannelCall('org-1', 'debt-1', 'REFUND')).resolves.toBe(
+        true,
+      );
+      expect(repo.markChannelCallVoided).toHaveBeenCalledWith(
+        runner,
+        { ...target, channelRowId: 'lane-1' },
+        'voided:REFUND',
+        'channel_terminal_timeout_unverified',
+      );
+    });
+
+    it('no longer free (bound, charged or a debt: the guarded SQL matches nothing): not voided', async () => {
+      const { service, ledger } = withRow(serviceBuild(false), channelRow());
+      await expect(service.voidUnchargedChannelCall('org-1', 'debt-1', 'VOID')).resolves.toBe(
+        false,
+      );
+      expect(ledger.releaseHold).not.toHaveBeenCalled();
+    });
+
+    it('a per-call intent, or a channel call settled by its verdict, is never touched here', async () => {
+      for (const overrides of [
+        { voucherFormat: 'PER_CALL', channelRowId: null },
+        channelRow({ statusReason: 'verification_settled' }),
+      ]) {
+        const { service, repo } = withRow(serviceBuild(true), overrides);
+        await expect(service.voidUnchargedChannelCall('org-1', 'debt-1', 'REFUND')).resolves.toBe(
+          false,
+        );
+        expect(repo.markChannelCallVoided).not.toHaveBeenCalled();
+      }
+    });
   });
 });
 
@@ -352,10 +407,11 @@ describe('PaymentIntentRepository — the debt SQL', () => {
     );
   });
 
-  it('H1: a written-off debt keeps refusing paid calls; a voided or collected one does not', () => {
+  it('H1: a written-off debt keeps refusing paid calls; a voided or collected one does not; a replacement HELD on chain does not (owner decision 2026-10-31)', () => {
     expect(DEBT_REFUSING_SQL).toBe(
       `("redemption_lapsed_at" IS NOT NULL ` +
-        `AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%'))`,
+        `AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%') ` +
+        `AND ("redemption_replaced_at" IS NULL OR "held_status" IS NULL))`,
     );
   });
 

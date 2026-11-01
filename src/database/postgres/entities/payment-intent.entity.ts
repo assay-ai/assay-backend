@@ -365,4 +365,32 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
 
   @Column({ name: 'held_last_error', type: 'text', nullable: true })
   heldLastError: string | null;
+
+  /**
+   * Which voucher door pays this call (SPEC P2 v3.1 §5.1): `PER_CALL` (one
+   * voucher, `voucher_seq`) or `CHANNEL` (a step of a cumulative channel
+   * voucher, `channel_row_id` + `channel_cumulative`). Immutable (trigger):
+   * redemption, collect and refund are routed by it, never by probing the chain.
+   */
+  @Column({ name: 'voucher_format', type: 'varchar', length: 10, default: 'PER_CALL' })
+  voucherFormat: string;
+
+  /** `voucher_channels.id` for a channel call. */
+  @Column({ name: 'channel_row_id', type: 'uuid', nullable: true })
+  channelRowId: string | null;
+
+  /** The channel's cumulative total this call's voucher signed (exact decimal). */
+  @Column({ name: 'channel_cumulative', type: 'numeric', precision: 20, scale: 0, nullable: true })
+  channelCumulative: string | null;
+
+  @Column({ name: 'channel_calls', type: 'int', nullable: true })
+  channelCalls: number | null;
+
+  /** The `channel_settlements` row that charged (or waived) this call. */
+  @Column({ name: 'channel_settlement_id', type: 'uuid', nullable: true })
+  channelSettlementId: string | null;
+
+  /** Why a channel call was waived at settlement (refunded, voided, upheld before the round). */
+  @Column({ name: 'waived_reason', type: 'varchar', length: 32, nullable: true })
+  waivedReason: string | null;
 }

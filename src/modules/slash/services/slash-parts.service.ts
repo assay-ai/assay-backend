@@ -1,3 +1,4 @@
+import { ChannelSlashGuard } from '@modules/payment/services/channel-slash-guard.service';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
@@ -144,6 +145,8 @@ export class SlashPartsService {
     @Inject(SLASH_PRORATA_CONFIG) private readonly config: ProRataSlashConfig,
     @Optional() @Inject(SLASH_CAPS_READER) private readonly caps: SlashCapsReaderPort | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
+    // v3 §5.4.7: the provider's payment channels settle before the stake is reserved.
+    @Optional() private readonly channelGuard: ChannelSlashGuard | null = null,
   ) {}
 
   /**
@@ -190,6 +193,12 @@ export class SlashPartsService {
       // Review 2026-10-23 M-1 / 2026-10-24 F-M1: no more signed against this
       // provider than its free stake can pay and its window can execute.
       await this.assertWithinProviderDailyBudget(proposal, provider, chainId, todo, now);
+      // Last before signing: a channel still settling puts the proposal back.
+      await this.channelGuard?.beforePropose({
+        proposalId: proposal.id,
+        providerId: proposal.providerId,
+        chainId,
+      });
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
           chainId,

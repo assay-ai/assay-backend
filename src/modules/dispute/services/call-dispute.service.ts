@@ -26,6 +26,7 @@ import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { channelPolicyFromEnv } from '@modules/payment/constants/channel.constants';
 import { DISPUTE_FILING_GUARD_SECONDS } from '@modules/payment/constants/collection-hold.constants';
 
 import {
@@ -588,7 +589,16 @@ export class CallDisputeService {
     if (input.decision === CallDisputeDecision.UPHOLD) {
       state = DisputeState.UPHELD;
       refund = refundColumnsFor(planRefund(intent));
-      if (!refund) throw DisputeErrors.collectionInProgress({});
+      if (!refund) {
+        // A channel call waits for its settle round (≤ CHANNEL_T_AGE_SECONDS): the
+        // dispute kept it, so the round charges it INTO the dispute hold, and the
+        // decision taken then refunds it on chain (e2e B-3, `refundHeldForDispute`).
+        throw DisputeErrors.collectionInProgress({
+          channel: intent.voucherFormat === 'CHANNEL',
+          // The configured T_age, not a fixed figure (e2e R-3).
+          settleWithinMinutes: Math.ceil(channelPolicyFromEnv().tAgeSeconds / 60),
+        });
+      }
     } else {
       state = DisputeState.REJECTED;
       // Refunded already (a blocked provider's held payment): rejecting the

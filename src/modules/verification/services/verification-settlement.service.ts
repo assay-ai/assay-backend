@@ -471,7 +471,9 @@ export class VerificationSettlementService {
    * is credited, the buyer is not charged and its paid calls are no longer
    * refused for it (review-buyer-debt M2). A row still awaiting redemption is
    * left as it is (the rule a failed verification enqueue already follows),
-   * and so is a debt whose replacement is being collected.
+   * and so is a debt whose replacement is being collected — except a CHANNEL
+   * call no settlement has charged yet, which is voided while that is free
+   * (sec-audit 2026-11-01 B-6).
    */
   private async voidLateRejectedDebt(
     organizationId: string,
@@ -485,7 +487,10 @@ export class VerificationSettlementService {
     ) {
       return;
     }
-    await this.intents.voidDebt(organizationId, intent.id, outcome);
+    if (await this.intents.voidDebt(organizationId, intent.id, outcome)) return;
+    // A channel call `T_term` settled unverified and no settlement charged
+    // yet: cancelling it is free, so it is voided (sec-audit B-6).
+    await this.intents.voidUnchargedChannelCall(organizationId, intent.id, outcome);
   }
 
   /**

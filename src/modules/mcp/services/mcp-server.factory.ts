@@ -1,3 +1,10 @@
+import {
+  ASSAY_CHANNEL_REQUIRED,
+  ASSAY_CHANNEL_VOUCHER,
+  ASSAY_PAYMENT_SCHEMES,
+} from '@modules/payment/constants/channel.constants';
+import { ChannelVoucherEnvelope } from '@modules/payment/services/channel-admission.service';
+import { ChannelErrorCode } from '@modules/payment/errors/channel.errors';
 import { listMetaOf } from '@modules/toolset/domain/view';
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger, Optional } from '@nestjs/common';
@@ -390,8 +397,20 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
         ? PaymentRail.RAIL_B_VOUCHER
         : null;
 
+  const schemesRaw = meta?.[ASSAY_PAYMENT_SCHEMES];
+  const schemes = Array.isArray(schemesRaw)
+    ? schemesRaw.filter((value): value is string => typeof value === 'string').slice(0, 8)
+    : [];
+  const channel = channelPaymentOf(meta?.[ASSAY_CHANNEL_VOUCHER]);
+
   const raw = meta?.[ASSAY_VOUCHER];
-  if (raw === undefined || raw === null) return { rail, voucher: null };
+  if (raw === undefined || raw === null) return { rail, voucher: null, channel, schemes };
+  if (channel !== null) {
+    throw PaymentErrors.voucherMalformed({
+      field: ASSAY_CHANNEL_VOUCHER,
+      reason: `send either ${ASSAY_VOUCHER} or ${ASSAY_CHANNEL_VOUCHER}, not both`,
+    });
+  }
 
   const envelope = raw as Record<string, unknown>;
   if (
@@ -424,6 +443,8 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
   }
   return {
     rail,
+    schemes,
+    channel: null,
     voucher: {
       signed: { voucher: envelope.voucher as never, signature: envelope.signature },
       providerId: envelope.providerId,
@@ -431,6 +452,48 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
     },
   };
 }
+/**
+ * `assay/channelVoucher` → the channel door's envelope (API-W2 §1.3). Only the
+ * envelope here; `ChannelAdmissionService` judges every field inside it.
+ */
+function channelPaymentOf(raw: unknown): ChannelVoucherEnvelope | null {
+  if (raw === undefined || raw === null) return null;
+  const envelope = raw as Record<string, unknown>;
+  if (
+    typeof raw !== 'object' ||
+    typeof envelope.voucher !== 'object' ||
+    envelope.voucher === null ||
+    typeof envelope.signature !== 'string' ||
+    typeof envelope.providerId !== 'string'
+  ) {
+    throw PaymentErrors.voucherMalformed({
+      field: ASSAY_CHANNEL_VOUCHER,
+      reason: 'expected { voucher: object, signature: string, providerId: string }',
+    });
+  }
+  const contractVersion = envelope.contractVersion;
+  if (
+    contractVersion !== undefined &&
+    contractVersion !== null &&
+    !(
+      typeof contractVersion === 'number' &&
+      Number.isInteger(contractVersion) &&
+      contractVersion >= 1
+    )
+  ) {
+    throw PaymentErrors.voucherMalformed({
+      field: ASSAY_CHANNEL_VOUCHER,
+      reason: 'contractVersion, when present, is a positive integer',
+    });
+  }
+  return {
+    voucher: envelope.voucher,
+    signature: envelope.signature,
+    providerId: envelope.providerId,
+    ...(typeof contractVersion === 'number' ? { contractVersion } : {}),
+  };
+}
+
 export const MCP_SERVER_VERSION = '0.1.0';
 
 function viewerOf(session: McpSession): McpCatalogueViewer {
@@ -527,7 +590,7 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
  * and sometimes a sibling of it would reasonably read neither.
  */
 export function errorResult(message: string, meta: Record<string, unknown>): CallToolResult {
-  const { paymentRequired, notReviewed, ...error } = meta;
+  const { paymentRequired, channelRequired, notReviewed, ...error } = meta;
 
   return {
     isError: true,
@@ -535,6 +598,7 @@ export function errorResult(message: string, meta: Record<string, unknown>): Cal
     _meta: {
       [ASSAY_ERROR]: error,
       ...(paymentRequired ? { [X402_PAYMENT_REQUIRED]: paymentRequired } : {}),
+      ...(channelRequired ? { [ASSAY_CHANNEL_REQUIRED]: channelRequired } : {}),
       // A provider tool no operator reviewed says so where payment is asked (§7.6).
       ...(paymentRequired && notReviewed === true ? { [ASSAY_NOT_REVIEWED]: true } : {}),
     },
@@ -583,4 +647,10 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // A seq never used but passed by a parallel call of the same payer (final
   // review N-6). Nothing was charged; the call passes with a fresh seq.
   PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
+  // The channel door (API-W2 §2). Nothing was charged in any of them:
+  // earlier payments are settling (retry after `retryAfter`), the lane must be
+  // replaced by a new one, or the payer waits for a free lane.
+  PaymentErrorCode.PAYMENT_UNSETTLED_LIMIT,
+  ChannelErrorCode.CHANNEL_ROTATE,
+  ChannelErrorCode.CHANNEL_LIMIT,
 ]);

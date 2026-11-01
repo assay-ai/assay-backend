@@ -200,6 +200,18 @@ export class EvmHourlyWeiWindow {
    * The charge of `ticket` becomes `actualWei`, and each further part the same
    * proportion of it. Best effort: never throws.
    */
+  /** Wei spent under `key` in the sliding hour (each member is `<ms>:<id>:<wei>`). Read only. */
+  async spent(key: string): Promise<bigint> {
+    const since = Date.now() - EVM_HOURLY_WEI_WINDOW_SECONDS * 1000;
+    const members = (await withRedisTimeout(() =>
+      this.cache.getRedisClient().zrangebyscore(key, since, '+inf'),
+    )) as string[];
+    return members.reduce((sum, member) => {
+      const wei = /:(\d+)$/.exec(member)?.[1];
+      return wei ? sum + BigInt(wei) : sum;
+    }, 0n);
+  }
+
   async settle(ticket: EvmWeiBudgetTicket, actualWei: bigint): Promise<void> {
     const actual = actualWei < 0n ? 0n : actualWei;
     const whole = ticket.parts[0]?.wei ?? 0n;

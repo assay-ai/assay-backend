@@ -1,4 +1,4 @@
-import { encodeAbiParameters, keccak256, parseTransaction } from 'viem';
+import { createPublicClient, custom, encodeAbiParameters, keccak256, parseTransaction } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
 import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -415,6 +415,42 @@ describe('EvmRelayer', () => {
    * exactly them — the receipt timeout passed to viem explicitly, and the queue
    * wait bounded for a send that asks for it.
    */
+  describe('a hidden receipt (sec-audit 2026-11-01 E-2)', () => {
+    it('stops polling once its receipt timeout passed', async () => {
+      // A transaction the node never shows (no receipt, no transaction). viem
+      // 2.21's `waitForTransactionReceipt` rejects at its timeout but leaves its
+      // block watcher running, polling the hash until a receipt appears.
+      let lookups = 0;
+      const hidden = createPublicClient({
+        pollingInterval: 10,
+        transport: custom({
+          request: async ({ method }: { method: string }) => {
+            if (method === 'eth_blockNumber') return '0x1';
+            if (method === 'eth_chainId') return '0xb626';
+            if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') {
+              lookups += 1;
+              return null;
+            }
+            throw new Error(`unexpected ${method}`);
+          },
+        }),
+      });
+      const { relayer, node } = build({ timing: { receiptTimeoutMs: 100, maxQueueWaitMs: 1_000 } });
+      Object.assign(node, {
+        waitForTransactionReceipt: (args: { hash: `0x${string}`; timeout?: number }) =>
+          hidden.waitForTransactionReceipt(args),
+        getTransactionReceipt: (args: { hash: `0x${string}` }) =>
+          hidden.getTransactionReceipt(args),
+      });
+
+      await expect(relayer.sendCall(call())).rejects.toThrow();
+      const atTimeout = lookups;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      // At most one lookup already in flight when the timeout hit.
+      expect(lookups - atTimeout).toBeLessThanOrEqual(1);
+    });
+  });
+
   describe('timing (BUG-D1-07 review)', () => {
     it('passes its receipt timeout to viem explicitly, from config or the default', async () => {
       const configured = build({ timing: { receiptTimeoutMs: 42_000, maxQueueWaitMs: 1_000 } });

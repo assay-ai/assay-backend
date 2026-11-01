@@ -17,6 +17,15 @@ import { DepositService } from './services/deposit.service';
 import { PaymentIntentExpiryService } from './services/payment-intent-expiry.service';
 import { HeldCollectionService } from './services/held-collection.service';
 import { PaymentIntentService } from './services/payment-intent.service';
+import { ChannelAdmissionService } from './services/channel-admission.service';
+import { ChannelRefundService } from './services/channel-refund.service';
+import {
+  CHANNEL_LIVE_CHAINS,
+  CHANNEL_POLICY,
+  EVM_CHANNELS_LIVE_CHAINS_ENV,
+  loadChannelPolicy,
+  parseChannelLiveChains,
+} from './constants/channel.constants';
 import { PaymentKeyFirstSpendService } from './services/payment-key-first-spend.service';
 import { ToolCallsService } from './services/tool-calls.service';
 import { VoucherService } from './services/voucher.service';
@@ -56,6 +65,16 @@ import { VoucherService } from './services/voucher.service';
   // `AuditLogModule`: `DepositFinalityService` logs each deposit it resolves.
   imports: [LedgerModule, ChainsModule, NotificationModule, BlocklistModule, AuditLogModule],
   providers: [
+    // The channel door (W2), off unless `EVM_CHANNELS_LIVE_CHAINS` names a
+    // chain. The policy factory IS the boot check (SPEC-W2 §6): a slow cadence
+    // without every safety on refuses to start.
+    { provide: CHANNEL_POLICY, useFactory: () => loadChannelPolicy(process.env) },
+    {
+      provide: CHANNEL_LIVE_CHAINS,
+      useFactory: () => parseChannelLiveChains(process.env[EVM_CHANNELS_LIVE_CHAINS_ENV]),
+    },
+    ChannelAdmissionService,
+    ChannelRefundService,
     // Boot refuses a schema without the buyer-debt columns (review-buyer-debt H2).
     BuyerDebtSchemaCheck,
     PaymentIntentService,
@@ -84,6 +103,10 @@ import { VoucherService } from './services/voucher.service';
   ],
   exports: [
     PaymentIntentService,
+    ChannelAdmissionService,
+    ChannelRefundService,
+    CHANNEL_POLICY,
+    CHANNEL_LIVE_CHAINS,
     BuyerDebtSpikeMonitor,
     HeldCollectionService,
     PaymentIntentExpiryService,

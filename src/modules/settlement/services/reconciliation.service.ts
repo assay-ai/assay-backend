@@ -42,6 +42,7 @@ import {
   RECONCILIATION_WARN_ALERT_WINDOW_SECONDS,
 } from '../constants/reconciliation.constants';
 import { LedgerLiabilities, foldLiabilities, vaultLiabilities } from '../domain/ledger-book';
+import { ChannelReconciliationService } from './channel-reconciliation.service';
 import {
   ReconciliationFinding,
   ReconciliationFindingCode,
@@ -126,6 +127,9 @@ export class ReconciliationService {
     @Optional()
     @Inject(ESCROW_DEPOSIT_LOGS)
     private readonly depositLogs: EscrowDepositLogsPort | null = null,
+    // The channel door (SPEC-W2 §1.2): its buckets and set-aside payouts are
+    // in the escrow too. Optional: without it there is no channel money.
+    @Optional() private readonly channelBooks: ChannelReconciliationService | null = null,
   ) {}
 
   /**
@@ -205,7 +209,13 @@ export class ReconciliationService {
     const snapshotTotal = snapshot.available + snapshot.held + snapshot.pending;
 
     const vaultAtomic = MoneyUtil.toAtomic(vaultBalance);
-    const difference = vaultAtomic - liabilities.total;
+    // The channel door (SPEC-W2 §1.2): buckets are in no buyer balance, and
+    // `totalUnpaid` is money the ledger booked as paid out that the chain set
+    // aside for a recipient whose transfer failed — the vault must hold it.
+    const channel = this.channelBooks
+      ? await this.channelBooks.read(asset)
+      : { held: 0n, totalUnpaid: 0n, readable: false, findings: [] };
+    const difference = vaultAtomic - liabilities.total - channel.totalUnpaid;
 
     const escrows = await this.walkEscrows(asset, decimals);
     // The vault IS the escrow contract, so what it holds beyond the buyer
@@ -215,7 +225,9 @@ export class ReconciliationService {
     const totalHeld = await this.readTotalHeld(asset);
     const mirroredHeld = this.intents ? await this.intents.sumHeldOnChain(asset) : 0n;
     const outsideEscrows =
-      escrows.unreadable === 0 ? vaultAtomic - escrows.total - (totalHeld ?? 0n) : null;
+      escrows.unreadable === 0
+        ? vaultAtomic - escrows.total - (totalHeld ?? 0n) - channel.held - channel.totalUnpaid
+        : null;
 
     const findings = [
       ...this.checkReserves(
@@ -231,6 +243,7 @@ export class ReconciliationService {
       ...this.checkBooks(decimals, asset, books),
       ...escrows.findings,
       ...this.checkHeld(asset, decimals, totalHeld, mirroredHeld),
+      ...channel.findings,
     ];
 
     const finishedAt = new Date();
@@ -1295,6 +1308,14 @@ function alertNameOf(code: ReconciliationFindingCode): string {
       return RECONCILIATION_ALERTS.ESCROW_SEQ_REALIGNED;
     case ReconciliationFindingCode.RECONCILIATION_SCAN_TIMEOUT:
       return RECONCILIATION_ALERTS.RECONCILIATION_SCAN_TIMEOUT;
+    case ReconciliationFindingCode.CHANNEL_STATE_BREACH:
+      return RECONCILIATION_ALERTS.CHANNEL_STATE_BREACH;
+    case ReconciliationFindingCode.CHANNEL_MIRROR_DRIFT:
+      return RECONCILIATION_ALERTS.CHANNEL_MIRROR_DRIFT;
+    case ReconciliationFindingCode.CHANNEL_UNPAID:
+      return RECONCILIATION_ALERTS.CHANNEL_UNPAID;
+    case ReconciliationFindingCode.CHANNEL_FOREIGN_TX:
+      return RECONCILIATION_ALERTS.CHANNEL_FOREIGN_TX;
     default:
       return RECONCILIATION_ALERTS.RECONCILIATION_FAILED;
   }
@@ -1311,7 +1332,7 @@ function alertNameOf(code: ReconciliationFindingCode): string {
  */
 function dedupeKeyOf(finding: ReconciliationFinding): string {
   const asset = finding.details.asset ?? 'unknown';
-  const grain = finding.details.book ?? finding.details.account;
+  const grain = finding.details.book ?? finding.details.account ?? finding.details.key;
   // A2: one alert per orphan hold and per uncredited deposit, not one per payer.
   const item = finding.details.seq ?? finding.details.txHash;
   if (grain === undefined) return `${asset}`;

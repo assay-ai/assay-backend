@@ -1,3 +1,8 @@
+import { ChannelVouchers1793404800000 } from '@database/postgres/migrations/1793404800000-channel-vouchers';
+import { ChannelVoucherIndexes1793404800010 } from '@database/postgres/migrations/1793404800010-channel-voucher-indexes';
+import { DebtGuardHeldReplacement1793404800020 } from '@database/postgres/migrations/1793404800020-debt-guard-held-replacement';
+import { ChannelDebtPerCallReplacement1793404800030 } from '@database/postgres/migrations/1793404800030-channel-debt-per-call-replacement';
+import { ChannelReplacementCheckValidate1793404800040 } from '@database/postgres/migrations/1793404800040-channel-replacement-check-validate';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -160,6 +165,11 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
       // `ProviderEntity` stopped mapping it — and the constraints spec was
       // re-aimed at the enrolment, so the divergence is inert today.
       CreateProviderChainEnrolments1759300000001,
+      ChannelVouchers1793404800000,
+      ChannelVoucherIndexes1793404800010,
+      DebtGuardHeldReplacement1793404800020,
+      ChannelDebtPerCallReplacement1793404800030,
+      ChannelReplacementCheckValidate1793404800040,
     ],
     synchronize: false,
     logging: process.env.PROVIDER_PAYOUT_TEST_LOGGING === 'true',
@@ -168,7 +178,8 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
 
   await dataSource.initialize();
   await resetSchemaIfMigrationsChanged(dataSource);
-  await dataSource.runMigrations();
+  // One transaction per migration: the channel indexes build CONCURRENTLY (`transaction = false`).
+  await dataSource.runMigrations({ transaction: 'each' });
 
   const entryRepository = new LedgerEntryRepository(dataSource);
   const holdRepository = new LedgerHoldRepository(dataSource);

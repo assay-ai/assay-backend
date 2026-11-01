@@ -773,3 +773,82 @@ export class ArbiterTermsQueryDto {
   @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
   chainId: string;
 }
+
+/** `POST /operator/channels/drain` (override `M-2`). */
+export class DrainChannelsBodyDto {
+  @ApiPropertyOptional({ description: 'CAIP-19 asset; absent drains every asset' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  assetId?: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 2048)
+  note: string;
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `POST /operator/channels/clear-reconcile` (override `M-4`). */
+export class ClearReconcileBodyDto {
+  @ApiProperty({ description: 'The voucher_channels row the reconciler stopped' })
+  @IsUUID()
+  channelRowId: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 2048)
+  note: string;
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `POST /operator/channels/claim-unpaid` (override `M-3`). */
+export class ClaimUnpaidBodyDto {
+  @ApiProperty({ description: 'CAIP-19 asset' })
+  @IsString()
+  @MaxLength(256)
+  assetId: string;
+
+  @ApiProperty({ description: 'The payout address (0x hex) the escrow set money aside for' })
+  @Matches(/^0x[0-9a-fA-F]{40}$/, { message: 'address must be a 0x hex address' })
+  address: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 2048)
+  note: string;
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}

@@ -180,4 +180,84 @@ export class GetProviderEarningsResponseDto {
       'and no `asset` filter narrowed it.',
   })
   asset: string | null;
+
+  // ── Payout stages (SPEC-W2 §11, API-W2 §3.2): current state, not windowed ──
+
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description: 'Passed, being recorded on chain',
+  })
+  awaitingSettlement?: MoneyDto | null;
+
+  @ApiPropertyOptional()
+  awaitingSettlementCalls?: number;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Upper bound (ISO) by which the OLDEST call awaiting settlement is settled on chain: its ' +
+      "admission plus the longer of the two doors' maximum waits. Usually sooner.",
+  })
+  nextSettleAt?: string | null;
+
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description: 'On chain, in the dispute hold',
+  })
+  inDisputeHold?: MoneyDto | null;
+
+  @ApiPropertyOptional()
+  inDisputeHoldCalls?: number;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Earliest end of a dispute hold among those (ISO)',
+  })
+  disputeHoldEndsAt?: string | null;
+
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description: 'Hold ended, paid in the next payout',
+  })
+  readyForPayout?: MoneyDto | null;
+
+  @ApiPropertyOptional()
+  readyForPayoutCalls?: number;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Estimated next payout (ISO): the earliest over both payment doors, never before the ' +
+      'earliest hold end. Per-call holds: an upper bound (64 items or the maximum wait).',
+  })
+  nextPayoutAt?: string | null;
+
+  @ApiPropertyOptional({ enum: ['HOURLY', 'EVERY_6_HOURS'] })
+  payoutCadence?: 'HOURLY' | 'EVERY_6_HOURS';
+
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Paid out, but set aside by the escrow because the token refused the transfer (an issuer ' +
+      'freeze on the payout address): NOT in your wallet yet. Paid once the freeze lifts and the ' +
+      'platform claims it.',
+  })
+  unpaid?: MoneyDto | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Since when the oldest unpaid payout waits (ISO)',
+  })
+  unpaidSince?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'The unpaid payouts per asset, every asset whatever `asset` asked for: `{ amount, since }` ' +
+      'each. Empty with nothing unpaid.',
+  })
+  unpaidByAsset?: Array<{ amount: MoneyDto; since: string | null }>;
 }

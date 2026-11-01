@@ -51,6 +51,13 @@ export class ProviderPayoutDto {
   })
   calls: number | null;
 
+  @ApiProperty({
+    nullable: true,
+    required: false,
+    description: 'Distinct buyers whose calls this payment paid for',
+  })
+  buyers?: number | null;
+
   @ApiProperty({ description: 'When the money was sent (a redemption: its last credit)' })
   createdAt: Date;
 }

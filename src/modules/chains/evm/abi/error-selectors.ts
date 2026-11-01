@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 94 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 99 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -27,7 +27,9 @@ import { toFunctionSelector } from 'viem';
  * `InvalidArbiter`) and `VerifierDailyCapExceeded` (now
  * `SlashWindowNotDrained`: execution is all or wait). Redeem into hold
  * (3d8fc8e) appended `HeldPaymentNotHeld`, `HeldNotYetCollectable`,
- * `HeldRefundWindowClosed` and `InvalidCollectHold`. The clean-up before the
+ * `HeldRefundWindowClosed` and `InvalidCollectHold`. The W1 channel door appended
+ * `ChannelNothingToSettle`, `ChannelChargeTooLarge`, `ChannelValueOutOfRange`,
+ * `TransferGasTooLow` and `TransferFailed`. The clean-up before the
  * fresh deploy (D-22) removed `AdminChangeRequiresOwner` with
  * `updateConfig`'s `newAdmin` argument. Per-seq replay (D-23) replaced
  * `VoucherSeqNotIncreasing` with `VoucherSeqUsed` at the same position, so the
@@ -134,6 +136,12 @@ const NAMES: readonly string[] = [
   'HeldNotYetCollectable',
   'HeldRefundWindowClosed',
   'InvalidCollectHold',
+  // P2 channel door (W1, D-28..D-30), in Errors.sol's order.
+  'ChannelNothingToSettle',
+  'ChannelChargeTooLarge',
+  'ChannelValueOutOfRange',
+  'TransferGasTooLow',
+  'TransferFailed',
 ];
 
 /**
@@ -147,6 +155,9 @@ const NAMES: readonly string[] = [
 const PARAMETERISED_SIGNATURES: readonly string[] = [
   'OwnableUnauthorizedAccount(address)',
   'OwnableInvalidOwner(address)',
+  // OpenZeppelin `SafeERC20`: a per-call `collectHeld` / `withdraw` transfer
+  // the token refused (e.g. to a frozen address), final review 2026-11-01 X-9.
+  'SafeERC20FailedOperation(address)',
 ];
 
 /** 4-byte selector (lower-case, `0x`-prefixed) → the error's name. */
@@ -195,9 +206,14 @@ export function evmErrorName(revertData: string | null | undefined): string {
 export function revertDataOf(error: unknown): string | null {
   let current = error;
   for (let depth = 0; depth < 5 && current; depth += 1) {
-    const data = (current as { data?: unknown }).data;
-    if (typeof data === 'string' && /^0x[0-9a-f]{8,}$/i.test(data)) {
-      return data.toLowerCase();
+    // viem's `ContractFunctionRevertedError` for an ABI without error entries
+    // keeps the revert bytes in `raw` and the selector in `signature`, never in
+    // `data`, so a custom error would otherwise decode as UNKNOWN_REVERT.
+    const node = current as { data?: unknown; raw?: unknown; signature?: unknown };
+    for (const candidate of [node.data, node.raw, node.signature]) {
+      if (typeof candidate === 'string' && /^0x[0-9a-f]{8,}$/i.test(candidate)) {
+        return candidate.toLowerCase();
+      }
     }
     current = (current as { cause?: unknown }).cause;
   }

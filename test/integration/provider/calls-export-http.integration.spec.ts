@@ -153,7 +153,8 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
 
     expect(lines).toHaveLength(3); // header + 2 rows
     expect(lines[0]).toBe(
-      'call_id,intent_id,created_at,tool_id,status,classification,reason,verification_verdict,provider_amount,platform_fee,price_amount,asset,decimals',
+      // W2 appends three columns at the end (SPEC-W2 §11); the first 13 never move.
+      'call_id,intent_id,created_at,tool_id,status,classification,reason,verification_verdict,provider_amount,platform_fee,price_amount,asset,decimals,collectable_at,collected_at,payout_tx_ref',
     );
     // The comma-and-quote-bearing reason round-trips correctly (RFC 4180).
     expect(lines[1]).toContain('"a ""quoted"" reason, with a comma"');
