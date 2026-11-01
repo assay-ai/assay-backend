@@ -32,6 +32,8 @@ function build(options: {
   known?: string[];
   state?: Partial<FakeState>;
   chain?: { paused?: boolean; blocked?: string[] };
+  /** Block number → timestamp (seconds); absent: the client has no `getBlock`. */
+  blockTimes?: Map<bigint, bigint>;
 }) {
   let state: FakeState | null = options.state
     ? {
@@ -116,6 +118,15 @@ function build(options: {
       }
       throw new Error(functionName);
     },
+    ...(options.blockTimes
+      ? {
+          getBlock: async ({ blockNumber }: { blockNumber: bigint }) => {
+            const timestamp = options.blockTimes!.get(blockNumber);
+            if (timestamp === undefined) throw new Error('no block');
+            return { timestamp };
+          },
+        }
+      : {}),
   };
   const indexer = new EvmChainStateIndexer(
     new Map([[CHAIN, client]]) as never,
@@ -396,5 +407,69 @@ describe('EvmChainStateIndexer', () => {
     });
     await indexer.tick();
     expect(alerts.map((alert) => alert.name)).toContain(EVM_CHAIN_STATE_ALERTS.ARBITER_BLOCK);
+  });
+
+  describe('history on a fresh index (BUG-R2-OPS-02)', () => {
+    const nowSeconds = BigInt(NOW / 1000);
+    const old = nowSeconds - 3n * 7n * 24n * 3600n; // three weeks ago
+    const fresh = nowSeconds - 120n; // two minutes ago
+
+    it('records levers older than 1 hour as INFO during the first catch-up, new ones stay CRITICAL', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [100n, old],
+          [101n, old],
+          [250n, fresh],
+        ]),
+        logs: [
+          log('VerifierRegistered', { verifier: VICTIM, admin: CONFIG }, 100n, 0),
+          log('ArbiterSet', { previousArbiter: CONFIG, newArbiter: ARBITER }, 101n, 0),
+          log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 250n, 0),
+          // No readable block time: never quietened.
+          log('ConfigUpdated', { treasury: VICTIM }, 260n, 0),
+        ],
+      });
+      await indexer.tick();
+      const levers = alerts.filter((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER);
+      expect(levers.map((alert) => [alert.severity, alert.details.event])).toEqual([
+        [AlertSeverity.INFO, 'VerifierRegistered'],
+        [AlertSeverity.INFO, 'ArbiterSet'],
+        [AlertSeverity.CRITICAL, 'AdminSet'],
+        [AlertSeverity.CRITICAL, 'ConfigUpdated'],
+      ]);
+      expect(levers[0].details.history).toBe('fresh-index catch-up');
+      expect(levers[2].details.history).toBeUndefined();
+    });
+
+    it('downgrades an old proxy upgrade on a fresh index too', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([[120n, old]]),
+        proxyLogs: [{ ...log('Upgraded', { implementation: VICTIM }, 120n, 0), address: ESCROW }],
+      });
+      await indexer.tick();
+      expect(
+        alerts.find((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.PROXY_UPGRADED)?.severity,
+      ).toBe(AlertSeverity.INFO);
+    });
+
+    it('keeps an old event CRITICAL once the index has caught up before (a warm index that fell behind)', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        state: {
+          cursorBlock: '99',
+          caughtUpAt: new Date(NOW - 3 * 3600_000),
+          reconciledAt: new Date(NOW),
+        },
+        blockTimes: new Map([[100n, old]]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      const levers = alerts.filter((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER);
+      expect(levers.map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+    });
   });
 });

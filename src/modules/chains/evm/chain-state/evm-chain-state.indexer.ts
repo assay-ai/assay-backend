@@ -25,6 +25,12 @@ export const EVM_CHAIN_STATE_CRON = '0 * * * * *';
 export const EVM_CHAIN_STATE_MAX_BLOCKS = 10_000n;
 /** Blocks per `eth_getLogs` call. */
 export const EVM_CHAIN_STATE_CHUNK = 2_000n;
+/**
+ * An event older than this when a FRESH index (one that never caught up)
+ * first reads it is history, not a key being used now: its alert is recorded
+ * at INFO instead of paging (BUG-R2-OPS-02).
+ */
+export const EVM_CHAIN_STATE_HISTORY_AGE_MS = 60 * 60 * 1000;
 /** Default `EVM_CHAIN_STATE_CONFIRMATIONS`: blocks behind the head the index stops at. */
 export const DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS = 12;
 
@@ -87,7 +93,12 @@ export interface EvmChainStateIndexerClient {
     functionName: string;
     args: readonly unknown[];
   }): Promise<unknown>;
+  /** The block's timestamp (seconds), to tell a fresh index's history from a new event. */
+  getBlock?(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }>;
 }
+
+/** Whether an event's alert is history (INFO) rather than news (its usual severity). */
+type HistoryCheck = (log: EvmConfigEventLog) => Promise<boolean>;
 
 /**
  * Indexes `AssayConfig`'s pause and blocklist into Postgres, with a cursor per
@@ -178,6 +189,7 @@ export class EvmChainStateIndexer {
     const safeHead = head > confirmations ? head - confirmations : 0n;
     const state = await this.repository.findState(chainId);
     const now = new Date(this.config.now());
+    const historical = this.historyCheck(client, state?.caughtUpAt ?? null);
     let start: bigint;
     if (state?.cursorBlock !== null && state?.cursorBlock !== undefined) {
       start = BigInt(state.cursorBlock) + 1n;
@@ -218,7 +230,7 @@ export class EvmChainStateIndexer {
         fromBlock: from,
         toBlock: to,
       })) {
-        await this.alertUpgraded(chainId, log);
+        await this.alertUpgraded(chainId, log, await historical(log));
       }
     }
     logs.sort(
@@ -254,6 +266,7 @@ export class EvmChainStateIndexer {
           await this.alertWarn(
             chainId,
             log,
+            await historical(log),
             EVM_CHAIN_STATE_ALERTS.PAUSE_TOGGLED,
             `AssayConfig on ${chainId} was ${paused ? 'PAUSED' : 'unpaused'} by ` +
               `${String(log.args.admin)}: confirm it was intended`,
@@ -274,12 +287,13 @@ export class EvmChainStateIndexer {
             await this.alertWarn(
               chainId,
               log,
+              await historical(log),
               EVM_CHAIN_STATE_ALERTS.ADMIN_UNBLOCK,
               `${String(log.args.account)} was UNBLOCKED on chain on ${chainId} by ` +
                 `${String(log.args.by)}: confirm the unblock was intended`,
             );
           } else if (by && knownArbiter && by === knownArbiter) {
-            await this.alertArbiterBlock(chainId, log);
+            await this.alertArbiterBlock(chainId, log, await historical(log));
           }
           break;
         }
@@ -288,23 +302,23 @@ export class EvmChainStateIndexer {
           if (arbiter && BigInt(arbiter) === 0n) arbiter = null;
           knownArbiter = arbiter;
           paramsChanged = true;
-          await this.alertLever(chainId, log);
+          await this.alertLever(chainId, log, await historical(log));
           break;
         case 'SlashDelaySet':
           slashDelaySeconds = Number(log.args.newDelay);
           paramsChanged = true;
-          await this.alertLever(chainId, log);
+          await this.alertLever(chainId, log, await historical(log));
           break;
         case 'ConfigUpdated':
         case 'CollectHoldSet':
           // Every process re-reads the on-chain params when it sees the stamp.
           paramsChanged = true;
-          await this.alertLever(chainId, log);
+          await this.alertLever(chainId, log, await historical(log));
           break;
         case 'VerifierRegistered':
         case 'AdminSet':
         case 'VerifierRevokedEvent':
-          await this.alertLever(chainId, log);
+          await this.alertLever(chainId, log, await historical(log));
           break;
         default:
           break;
@@ -464,29 +478,82 @@ export class EvmChainStateIndexer {
     });
   }
 
-  private async alertLever(chainId: ChainId, log: EvmConfigEventLog): Promise<void> {
+  /**
+   * The history rule (BUG-R2-OPS-02): only while the index has NEVER caught up
+   * (the first catch-up of a fresh index, e.g. from the deploy block), an
+   * event whose block is older than {@link EVM_CHAIN_STATE_HISTORY_AGE_MS} is
+   * history. A warm index, an event with no block, or a block whose time
+   * cannot be read keeps the usual severity: a real lever never goes quiet
+   * because the indexer was behind or the RPC failed. One block read per
+   * block, per tick.
+   */
+  private historyCheck(client: EvmChainStateIndexerClient, caughtUpAt: Date | null): HistoryCheck {
+    if (caughtUpAt !== null || typeof client.getBlock !== 'function') return async () => false;
+    const nowMs = this.config.now();
+    const times = new Map<bigint, Promise<number | null>>();
+    return async (log) => {
+      if (log.blockNumber === null || log.blockNumber === undefined) return false;
+      let time = times.get(log.blockNumber);
+      if (!time) {
+        time = client.getBlock!({ blockNumber: log.blockNumber })
+          .then((block) => Number(block.timestamp) * 1000)
+          .catch(() => null);
+        times.set(log.blockNumber, time);
+      }
+      const atMs = await time;
+      return (
+        atMs !== null && Number.isFinite(atMs) && nowMs - atMs > EVM_CHAIN_STATE_HISTORY_AGE_MS
+      );
+    };
+  }
+
+  /** INFO, and a history note in the summary, for an event a fresh index replays. */
+  private severityOf(usual: AlertSeverity, historical: boolean): AlertSeverity {
+    return historical ? AlertSeverity.INFO : usual;
+  }
+
+  private historyNote(historical: boolean): string {
+    return historical
+      ? ' (history: first read by a fresh chain-state index, more than 1 hour after its block)'
+      : '';
+  }
+
+  private async alertLever(
+    chainId: ChainId,
+    log: EvmConfigEventLog,
+    historical = false,
+  ): Promise<void> {
     await this.alerts.emit({
-      severity: AlertSeverity.CRITICAL,
+      severity: this.severityOf(AlertSeverity.CRITICAL, historical),
       name: EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER,
       summary:
         `AssayConfig on ${chainId} emitted ${log.eventName}. This is a lever a stolen admin key ` +
         `pulls (admin, treasury, bps, caps, arbiter, slash delay, collect hold, verifier ` +
-        `registry): confirm it was intended`,
-      details: { chainId, event: log.eventName, ...stringArgs(log) },
+        `registry): confirm it was intended${this.historyNote(historical)}`,
+      details: { chainId, event: log.eventName, ...historyDetail(historical), ...stringArgs(log) },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,
     });
   }
 
-  private async alertUpgraded(chainId: ChainId, log: EvmConfigEventLog): Promise<void> {
+  private async alertUpgraded(
+    chainId: ChainId,
+    log: EvmConfigEventLog,
+    historical = false,
+  ): Promise<void> {
     await this.alerts.emit({
-      severity: AlertSeverity.CRITICAL,
+      severity: this.severityOf(AlertSeverity.CRITICAL, historical),
       name: EVM_CHAIN_STATE_ALERTS.PROXY_UPGRADED,
       summary:
         `A settlement proxy on ${chainId} (${String(log.address ?? 'unknown')}) was upgraded to ` +
         `${String(log.args.implementation)}. Only the owner key can do this: confirm it was ` +
-        `intended, and record the implementation`,
-      details: { chainId, proxy: String(log.address ?? 'unknown'), ...stringArgs(log) },
+        `intended, and record the implementation${this.historyNote(historical)}`,
+      details: {
+        chainId,
+        proxy: String(log.address ?? 'unknown'),
+        ...historyDetail(historical),
+        ...stringArgs(log),
+      },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,
     });
@@ -495,29 +562,45 @@ export class EvmChainStateIndexer {
   private async alertWarn(
     chainId: ChainId,
     log: EvmConfigEventLog,
+    historical: boolean,
     name: string,
     summary: string,
   ): Promise<void> {
     await this.alerts.emit({
-      severity: AlertSeverity.WARN,
+      severity: this.severityOf(AlertSeverity.WARN, historical),
       name,
-      summary,
-      details: { chainId, event: log.eventName ?? 'unknown', ...stringArgs(log) },
+      summary: `${summary}${this.historyNote(historical)}`,
+      details: {
+        chainId,
+        event: log.eventName ?? 'unknown',
+        ...historyDetail(historical),
+        ...stringArgs(log),
+      },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,
     });
   }
 
-  private async alertArbiterBlock(chainId: ChainId, log: EvmConfigEventLog): Promise<void> {
+  private async alertArbiterBlock(
+    chainId: ChainId,
+    log: EvmConfigEventLog,
+    historical = false,
+  ): Promise<void> {
     await this.alerts.emit({
-      severity: AlertSeverity.WARN,
+      severity: this.severityOf(AlertSeverity.WARN, historical),
       name: EVM_CHAIN_STATE_ALERTS.ARBITER_BLOCK,
-      summary: `The arbiter set the on-chain block of ${String(log.args.account)} on ${chainId}`,
-      details: { chainId, ...stringArgs(log) },
+      summary:
+        `The arbiter set the on-chain block of ${String(log.args.account)} on ${chainId}` +
+        this.historyNote(historical),
+      details: { chainId, ...historyDetail(historical), ...stringArgs(log) },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: `${chainId}:${log.transactionHash}:${log.logIndex}`,
     });
   }
+}
+
+function historyDetail(historical: boolean): Record<string, string> {
+  return historical ? { history: 'fresh-index catch-up' } : {};
 }
 
 /** `now − caught_up_at` in ms, or `null` when the index never caught up. */
