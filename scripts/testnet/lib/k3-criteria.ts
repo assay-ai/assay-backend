@@ -87,7 +87,7 @@ export const K3_CRITERIA: readonly K3Criterion[] = [
   {
     id: 'E2',
     chain: 'eip155:46630',
-    text: 'A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it, and the',
+    text: 'A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it into the',
     needs: [
       'a 46630 deployment',
       'a registered EVM verifier key',
