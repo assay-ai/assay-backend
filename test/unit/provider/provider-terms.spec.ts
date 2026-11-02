@@ -112,7 +112,7 @@ describe('loadProviderTerms — from the chain', () => {
   it('words the hold captions and the unbonding row from the chain', () => {
     expect(row('payouts')?.caption).toBe('on chain, after a dispute hold of at least 2 hours');
     expect(row('reserveHeld')?.caption).toBe(
-      'no standing reserve; each paid call is held 2 hours for buyer reports',
+      'no standing reserve; each paid call is held at least 2 hours for buyer reports',
     );
     expect(row('unbondingPeriod')?.value).toBe('14 days');
   });

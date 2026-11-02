@@ -158,7 +158,7 @@ export function loadProviderTerms(
         key: 'reserveHeld',
         label: 'Reserve held',
         value: `$${reserveHeldUsd}`,
-        caption: `no standing reserve; each paid call is held ${hold} for buyer reports`,
+        caption: `no standing reserve; each paid call is held at least ${hold} for buyer reports`,
       },
       {
         key: 'clawback',
