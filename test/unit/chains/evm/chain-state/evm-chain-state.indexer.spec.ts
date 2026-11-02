@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 
 import {
   EVM_CHAIN_STATE_ALERTS,
+  EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES,
   EvmChainStateIndexer,
 } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 import { Alert, AlertSeverity } from '@shared/alerting';
@@ -32,6 +33,10 @@ function build(options: {
   known?: string[];
   state?: Partial<FakeState>;
   chain?: { paused?: boolean; blocked?: string[] };
+  /** Block number → timestamp (seconds); absent: the client has no `getBlock`. */
+  blockTimes?: Map<bigint, bigint>;
+  /** The node returns logs with no block number (pending-style logs). */
+  noBlockNumbers?: boolean;
 }) {
   let state: FakeState | null = options.state
     ? {
@@ -105,7 +110,8 @@ function build(options: {
         return proxyReads.length === 1 ? (options.proxyLogs ?? []) : [];
       }
       ranges.push([args.fromBlock, args.toBlock]);
-      return ranges.length === 1 ? (options.logs ?? []) : [];
+      const logs = ranges.length === 1 ? (options.logs ?? []) : [];
+      return options.noBlockNumbers ? logs.map((entry) => ({ ...entry, blockNumber: null })) : logs;
     },
     readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {
       if (functionName === 'paused') return chain.paused ?? false;
@@ -116,6 +122,15 @@ function build(options: {
       }
       throw new Error(functionName);
     },
+    ...(options.blockTimes
+      ? {
+          getBlock: async ({ blockNumber }: { blockNumber: bigint }) => {
+            const timestamp = options.blockTimes!.get(blockNumber);
+            if (timestamp === undefined) throw new Error('no block');
+            return { timestamp };
+          },
+        }
+      : {}),
   };
   const indexer = new EvmChainStateIndexer(
     new Map([[CHAIN, client]]) as never,
@@ -396,5 +411,222 @@ describe('EvmChainStateIndexer', () => {
     });
     await indexer.tick();
     expect(alerts.map((alert) => alert.name)).toContain(EVM_CHAIN_STATE_ALERTS.ARBITER_BLOCK);
+  });
+
+  describe('history on a fresh index (BUG-R2-OPS-02)', () => {
+    const nowSeconds = BigInt(NOW / 1000);
+    const old = nowSeconds - 3n * 7n * 24n * 3600n; // three weeks ago
+    const fresh = nowSeconds - 120n; // two minutes ago
+    const levers = (alerts: Alert[]) =>
+      alerts.filter((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER);
+    const summaries = (alerts: Alert[]) =>
+      alerts.filter((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.HISTORY_REPLAYED);
+
+    it('records levers older than 1 hour as INFO during the first catch-up, new ones stay CRITICAL', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [100n, old],
+          [101n, old],
+          [250n, fresh],
+          [300n, nowSeconds],
+        ]),
+        logs: [
+          log('VerifierRegistered', { verifier: VICTIM, admin: CONFIG }, 100n, 0),
+          log('ArbiterSet', { previousArbiter: CONFIG, newArbiter: ARBITER }, 101n, 0),
+          log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 250n, 0),
+          // No readable block time: never quietened.
+          log('ConfigUpdated', { treasury: VICTIM }, 260n, 0),
+        ],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => [alert.severity, alert.details.event])).toEqual([
+        [AlertSeverity.INFO, 'VerifierRegistered'],
+        [AlertSeverity.INFO, 'ArbiterSet'],
+        [AlertSeverity.CRITICAL, 'AdminSet'],
+        [AlertSeverity.CRITICAL, 'ConfigUpdated'],
+      ]);
+      expect(levers(alerts)[0].details.history).toBe('fresh-index catch-up');
+      expect(levers(alerts)[2].details.history).toBeUndefined();
+    });
+
+    it('sends ONE summary WARN naming every downgraded event when the first catch-up completes', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [100n, old],
+          [101n, old + 60n],
+          [120n, old + 120n],
+          [300n, nowSeconds],
+        ]),
+        logs: [
+          log('ArbiterSet', { previousArbiter: CONFIG, newArbiter: ARBITER }, 100n, 0),
+          log('ArbiterSet', { previousArbiter: ARBITER, newArbiter: VICTIM }, 101n, 0),
+          log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 101n, 1),
+        ],
+        proxyLogs: [{ ...log('Upgraded', { implementation: VICTIM }, 120n, 0), address: ESCROW }],
+      });
+      await indexer.tick();
+      expect(levers(alerts).every((alert) => alert.severity === AlertSeverity.INFO)).toBe(true);
+      const summary = summaries(alerts);
+      expect(summary).toHaveLength(1);
+      expect(summary[0].severity).toBe(AlertSeverity.WARN);
+      expect(summary[0].details).toMatchObject({
+        events: 4,
+        caughtUp: 'true',
+        fromBlock: '100',
+        toBlock: '300',
+        'ArbiterSet.count': 2,
+        'ArbiterSet.newestBlock': '101',
+        'ArbiterSet.newestTime': new Date(Number(old + 60n) * 1000).toISOString(),
+        'AdminSet.count': 1,
+        'Upgraded.count': 1,
+        'Upgraded.newestBlock': '120',
+      });
+      expect(summary[0].summary).toContain('ArbiterSet x2');
+
+      // The next tick is warm: no second summary.
+      await indexer.tick();
+      expect(summaries(alerts)).toHaveLength(1);
+    });
+
+    it('sends no summary when nothing was downgraded', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [250n, fresh],
+          [300n, nowSeconds],
+        ]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 250n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+      expect(summaries(alerts)).toEqual([]);
+    });
+
+    it('sends the summary while still catching up, every N passes', async () => {
+      const head = 100n + 10_000n * BigInt(EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES + 2);
+      const { indexer, alerts } = build({
+        head,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [100n, old],
+          [head, nowSeconds],
+        ]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      for (let pass = 1; pass < EVM_CHAIN_STATE_HISTORY_SUMMARY_PASSES; pass += 1) {
+        await indexer.tick();
+      }
+      expect(summaries(alerts)).toEqual([]);
+      await indexer.tick();
+      const summary = summaries(alerts);
+      expect(summary).toHaveLength(1);
+      expect(summary[0].severity).toBe(AlertSeverity.WARN);
+      expect(summary[0].details).toMatchObject({ caughtUp: 'false', 'AdminSet.count': 1 });
+      expect(summary[0].summary).toContain('still catching up');
+    });
+
+    it('downgrades an old proxy upgrade on a fresh index too', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [120n, old],
+          [300n, nowSeconds],
+        ]),
+        proxyLogs: [{ ...log('Upgraded', { implementation: VICTIM }, 120n, 0), address: ESCROW }],
+      });
+      await indexer.tick();
+      expect(
+        alerts.find((alert) => alert.name === EVM_CHAIN_STATE_ALERTS.PROXY_UPGRADED)?.severity,
+      ).toBe(AlertSeverity.INFO);
+    });
+
+    it('keeps an old event CRITICAL once the index has caught up before (a warm index that fell behind)', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        state: {
+          cursorBlock: '99',
+          caughtUpAt: new Date(NOW - 3 * 3600_000),
+          reconciledAt: new Date(NOW),
+        },
+        blockTimes: new Map([
+          [100n, old],
+          [300n, nowSeconds],
+        ]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+      expect(summaries(alerts)).toEqual([]);
+    });
+
+    it('uses chain time, not the server clock: a fast server clock does not quieten a new event', async () => {
+      // The server clock says three weeks later; the chain head is 1 minute after the event.
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([
+          [100n, old],
+          [300n, old + 60n],
+        ]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+    });
+
+    it('keeps the usual severity when the head time cannot be read', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([[100n, old]]), // no time for the head
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+      expect(summaries(alerts)).toEqual([]);
+    });
+
+    it('keeps the usual severity when getBlock rejects for the event block', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        blockTimes: new Map([[300n, nowSeconds]]), // the event block's read throws
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+    });
+
+    it('keeps the usual severity for a log with no block number', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        noBlockNumbers: true,
+        blockTimes: new Map([
+          [100n, old],
+          [300n, nowSeconds],
+        ]),
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+    });
+
+    it('keeps the usual severity when the client has no getBlock', async () => {
+      const { indexer, alerts } = build({
+        head: 300n,
+        fromBlock: 100n,
+        logs: [log('AdminSet', { previousAdmin: CONFIG, newAdmin: VICTIM }, 100n, 0)],
+      });
+      await indexer.tick();
+      expect(levers(alerts).map((alert) => alert.severity)).toEqual([AlertSeverity.CRITICAL]);
+      expect(summaries(alerts)).toEqual([]);
+    });
   });
 });

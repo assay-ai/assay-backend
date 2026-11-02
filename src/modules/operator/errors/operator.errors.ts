@@ -35,6 +35,7 @@ export enum OperatorErrorCode {
   OPERATOR_APPROVAL_PAYLOAD_MISMATCH = 'OPERATOR_APPROVAL_PAYLOAD_MISMATCH',
   OPERATOR_APPROVAL_CALL_STALE = 'OPERATOR_APPROVAL_CALL_STALE',
   OPERATOR_DEBT_VOID_INVALID = 'OPERATOR_DEBT_VOID_INVALID',
+  OPERATOR_CHANNEL_CLEAR_REFUSED = 'OPERATOR_CHANNEL_CLEAR_REFUSED',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -294,5 +295,18 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     publicContext: ['detail', 'intentIds'],
     message: (context?: Record<string, any>) =>
       `The bulk void cannot be requested${context?.detail ? `: ${context.detail}` : ''}`,
+  },
+
+  /**
+   * Override `M-4` refused: the lane is not stopped by the reconciler
+   * (DESYNC/RECONCILE), it changed meanwhile, or the chain still disagrees
+   * with the database. `detail` says which.
+   */
+  channelClearRefused: {
+    code: OperatorErrorCode.OPERATOR_CHANNEL_CLEAR_REFUSED,
+    statusCode: 409,
+    publicContext: ['detail', 'channelRowId'],
+    message: (context?: Record<string, any>) =>
+      `The channel's reconciler stop cannot be cleared${context?.detail ? `: ${context.detail}` : ''}`,
   },
 });

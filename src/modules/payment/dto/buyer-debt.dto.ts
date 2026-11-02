@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsObject, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
@@ -73,6 +73,37 @@ export class BuyerDebtDto {
 
   @ApiProperty({ description: 'When the call was made (ISO 8601).' })
   createdAt: string;
+
+  @ApiPropertyOptional({
+    enum: ['PER_CALL', 'CHANNEL'],
+    description:
+      '`CHANNEL`: paid on a payment channel — settle it with `channelVoucher` (a renew of ' +
+      '`channel`); a voucher-intent is offered only once `settleInPortal` is true.',
+  })
+  voucherFormat?: 'PER_CALL' | 'CHANNEL';
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'A `CHANNEL` debt: the stored `{ cumulative, calls }` pair to renew, and `channelId`, the lane ' +
+      '(on-chain channel id) the renew must be signed on.',
+  })
+  channel?: { cumulative: string; calls: number; channelId: string | null } | null;
+
+  @ApiPropertyOptional({
+    description:
+      'A `CHANNEL` debt: `true` once no voucher of its lane can still settle it on chain. It can ' +
+      'then also be settled like a per-call debt (voucher-intent, then a signed per-call voucher ' +
+      'of the same amount to the same provider); the call moves to the per-call door and a later ' +
+      'renew of it is refused. Absent on a `PER_CALL` debt.',
+  })
+  settleInPortal?: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'A `CHANNEL` debt: from when `settleInPortal` is true (ISO 8601).',
+  })
+  settleInPortalFrom?: string | null;
 }
 
 export class GetBuyerDebtsResponseDto {
@@ -143,14 +174,26 @@ export class SettleDebtBodyDto {
     type: Object,
     description: 'The voucher `POST /escrow/debts/:intentId/voucher-intent` answered, unchanged.',
   })
+  // Required unless the body renews a channel debt (`channelVoucher`).
+  @ValidateIf((body: SettleDebtBodyDto) => !body.channelVoucher)
   @IsObject()
   voucher: Record<string, unknown>;
 
   @ApiProperty({ description: 'The payer’s (or a bound delegate’s) signature over it.' })
+  @ValidateIf((body: SettleDebtBodyDto) => !body.channelVoucher)
   @IsString()
   @IsNotEmpty()
   @MaxLength(512)
   signature: string;
+
+  @ApiPropertyOptional({
+    description:
+      'A CHANNEL debt: a renew of the exact (cumulative, calls) pair, fresh times, ' +
+      '`{ voucher, signature }` as in `assay/channelVoucher` (API-W2 §3.3). Instead of `voucher`.',
+  })
+  @IsOptional()
+  @IsObject()
+  channelVoucher?: { voucher: Record<string, unknown>; signature: string };
 }
 
 export class SettleDebtResponseDto {

@@ -212,6 +212,56 @@ export class GetEscrowResponseDto {
       'be read).',
   })
   withdrawalsFrozen: boolean | null;
+
+  // ── W2 (API-W2 §3.3) ──
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Calls admitted (both doors) still settling',
+  })
+  pendingSettlement?: MoneyDto | null;
+  @ApiPropertyOptional()
+  pendingSettlementCalls?: number;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Upper bound by which the OLDEST pending call (not a debt) is settled on chain; usually sooner',
+  })
+  nextSettleAt?: string | null;
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Signed in the last 24 h, including not yet settled',
+  })
+  signedLast24h?: MoneyDto | null;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'min(requested, balance − the pending calls that will settle); open buyer debts are not ' +
+      'taken off: they settle from the escrow only if renewed',
+  })
+  withdrawableUpTo?: MoneyDto | null;
+  @ApiPropertyOptional({ nullable: true })
+  withdrawableAt?: string | null;
+
+  // ── BUG-R2-BUY-01 ──
+  @ApiPropertyOptional({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Calls whose settlement landed on chain and that sit in the dispute hold (a channel ' +
+      'bucket, or a per-call payment redeemed into the hold), not collected and not refunded. ' +
+      'Out of `balance`, `openHolds` and `pendingSettlement`; same payer scope as ' +
+      '`pendingSettlement`. These are the `GET /holds` rows with stage `ON_CHAIN_HOLD`',
+  })
+  onChainHeld?: MoneyDto | null;
+  @ApiPropertyOptional({ description: 'How many calls `onChainHeld` covers' })
+  onChainHeldCalls?: number;
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'ISO-8601. The latest `collectableAt` among the `onChainHeld` calls: every one of them ' +
+      'has left the dispute hold by then (paid at the next payout after it). `null` when none',
+  })
+  onChainHoldEndsAt?: string | null;
 }
 
 /**

@@ -717,6 +717,8 @@ describe('provider_chain_enrolments', () => {
       const rows = (await context.dataSource.query(
         `SELECT column_name FROM information_schema.columns
           WHERE table_name = 'providers' AND column_name LIKE 'payout%'
+            -- W2's payout cadence is not one of the columns this migration moved.
+            AND column_name NOT LIKE 'payout\\_cadence%'
           ORDER BY column_name`,
       )) as { column_name: string }[];
       return rows.map((row) => row.column_name);

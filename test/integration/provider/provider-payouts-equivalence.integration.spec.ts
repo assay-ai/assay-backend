@@ -95,6 +95,14 @@ describe('ProviderPayoutsService — lower bounds in WHERE match HAVING (B6)', (
 
   type Query = Parameters<ProviderPayoutsService['listPayouts']>[1];
 
+  /** Pages with W2's `buyers` (API-W2 §3.6) taken off each item. */
+  function withoutBuyers(pages: unknown[]): unknown[] {
+    return (pages as Array<{ items: Array<Record<string, unknown>> }>).map((page) => ({
+      ...page,
+      items: page.items.map(({ buyers: _buyers, ...rest }) => rest),
+    }));
+  }
+
   async function walk(
     service: { listPayouts: ProviderPayoutsService['listPayouts'] },
     query: Query,
@@ -131,7 +139,8 @@ describe('ProviderPayoutsService — lower bounds in WHERE match HAVING (B6)', (
             if (from && to && from >= to) continue;
             const query = { limit, order, from, to } as unknown as Query;
             const [before, after] = [await walk(legacy, query), await walk(current, query)];
-            expect(after).toEqual(before);
+            // `buyers` is W2's addition (API-W2 §3.6): everything else is unchanged.
+            expect(withoutBuyers(after)).toEqual(before);
             compared += before.length;
           }
         }

@@ -113,6 +113,7 @@ describe('ProviderPayoutsService — rail-B redemptions are payments (D18)', () 
         amount: { amount: '180000', asset: USDC, decimals: 6 },
         chainTxRef: '0xaaa',
         calls: 2,
+        buyers: null,
         createdAt: new Date('2026-08-11T00:00:00.000Z'),
       },
       expect.objectContaining({ chainTxRef: '0xbbb', calls: 1 }),

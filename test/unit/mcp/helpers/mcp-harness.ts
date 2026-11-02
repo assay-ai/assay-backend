@@ -821,6 +821,8 @@ export interface McpHarnessOptions {
   readonly redeemerFloat?: Pick<RedeemerFloatGate, 'isPaused'>;
   /** The paid-call minimum; absent, the suite's env value (off, `test/setup-env.ts`). */
   readonly paidPriceFloor?: PaidPriceFloor;
+  /** The channel door (`ChannelAdmissionService`); absent, no channel is offered. */
+  readonly channelAdmission?: unknown;
 }
 
 export interface McpHarness {
@@ -930,6 +932,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
           }),
         } as never),
     options.paidPriceFloor,
+    options.channelAdmission as never,
   );
 
   return {

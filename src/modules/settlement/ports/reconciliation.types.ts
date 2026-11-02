@@ -71,6 +71,18 @@ export enum ReconciliationFindingCode {
    * budget this pass. WARN, never CRITICAL: the run's own figures are recorded.
    */
   RECONCILIATION_SCAN_TIMEOUT = 'RECONCILIATION_SCAN_TIMEOUT',
+  /**
+   * A channel's on-chain `settled` is above what the platform accepted, or
+   * below what it recorded as settled (v3 §5.7). CRITICAL: the channel stops
+   * admitting at once.
+   */
+  CHANNEL_STATE_BREACH = 'CHANNEL_STATE_BREACH',
+  /** A channel's buckets or settled value and the mirror disagree. WARN, transient while booking. */
+  CHANNEL_MIRROR_DRIFT = 'CHANNEL_MIRROR_DRIFT',
+  /** A channel-door transaction not sent by our redeemer (v3 §5.7); paged CRITICAL for settle/refund. */
+  CHANNEL_FOREIGN_TX = 'CHANNEL_FOREIGN_TX',
+  /** Payouts set aside in `unpaid` after a failed transfer (a frozen recipient). WARN. */
+  CHANNEL_UNPAID = 'CHANNEL_UNPAID',
   /** The pass could not complete; the figures are unknown, not healthy. */
   RECONCILIATION_FAILED = 'RECONCILIATION_FAILED',
   /** Enough consecutive failures that nobody has checked the money in a while. */

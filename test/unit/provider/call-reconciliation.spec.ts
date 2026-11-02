@@ -66,6 +66,18 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_UNCREDITED,
     },
     {
+      // BUG-R2-PRV-03: passed, refunded after an upheld buyer report.
+      name: 'PAID + SETTLED, refunded after an upheld buyer report → REFUNDED_UPHELD',
+      input: {
+        callClass: 'PAID',
+        status: 'SETTLED',
+        voided: true,
+        refundedUpheld: true,
+        credited: false,
+      },
+      expected: CallReconciliationClass.REFUNDED_UPHELD,
+    },
+    {
       name: 'PAID + SETTLED, voucher lapsed into buyer debt → PAID_BUYER_DEBT',
       input: { callClass: 'PAID', status: 'SETTLED', debtOutstanding: true, credited: false },
       expected: CallReconciliationClass.PAID_BUYER_DEBT,
@@ -211,11 +223,12 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     expect(Object.values(ResponseClass)).toContain('REQUEST_ERROR');
   });
 
-  it('isNotCredited is exactly a failed check, an endpoint error or a refused request (D17)', () => {
+  it('isNotCredited is exactly a failed check, an upheld-report refund, an endpoint error or a refused request (D17)', () => {
     const notCredited = Object.values(CallReconciliationClass).filter(isNotCredited).sort();
     expect(notCredited).toEqual(
       [
         CallReconciliationClass.PAID_UNCREDITED,
+        CallReconciliationClass.REFUNDED_UPHELD,
         CallReconciliationClass.REQUEST_ERROR,
         CallReconciliationClass.SYSTEM_ERROR,
       ].sort(),

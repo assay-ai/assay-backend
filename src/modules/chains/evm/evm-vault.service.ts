@@ -211,12 +211,19 @@ export class EvmVaultService implements VaultPort {
       slot: ERC1967_IMPLEMENTATION_SLOT,
     });
     const implementation = addressFromWord(slot);
-    if (implementation !== getAddress(deployment.escrowImplementation).toLowerCase()) {
+    // A SET (final review 2026-11-01 ops F1): the current implementation and
+    // any the record still accepts while an upgrade is staged.
+    const accepted = [
+      deployment.escrowImplementation,
+      ...(deployment.previousEscrowImplementations ?? []),
+    ].map((address) => getAddress(address).toLowerCase());
+    if (implementation === null || !accepted.includes(implementation)) {
       throw ChainErrors.vaultControlUnverified({
         reason:
           `escrow proxy ${escrow} delegates to implementation ${implementation ?? 'nothing'}, ` +
-          `not the ${deployment.escrowImplementation} the deployment record names — an upgrade ` +
-          `nobody recorded, or the wrong address`,
+          `not the ${deployment.escrowImplementation} the deployment record names` +
+          (accepted.length > 1 ? ` (nor a listed previous implementation)` : '') +
+          ` — an upgrade nobody recorded, or the wrong address`,
       });
     }
 

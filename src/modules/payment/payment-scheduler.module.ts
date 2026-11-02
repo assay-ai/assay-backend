@@ -13,6 +13,9 @@ import { HeldCollectionJob } from './jobs/held-collection.job';
 import { VoucherRedemptionJob } from './jobs/voucher-redemption.job';
 import { PaymentModule } from './payment.module';
 import { VoucherRedemptionService } from './services/voucher-redemption.service';
+import { ChannelSettlementService } from './services/channel-settlement.service';
+import { ChannelSettlementJob } from './jobs/channel-settlement.job';
+import { RefundAnomalyMonitor } from './services/refund-anomaly.monitor';
 
 /**
  * Scheduler-only half of the payment domain.
@@ -61,6 +64,11 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
     VoucherRedemptionJob,
     // Collects held payments past their dispute window (G3.B1).
     HeldCollectionJob,
+    // The channel door (W2): collect-first, rounds, landing. Idle unless a chain is live.
+    ChannelSettlementService,
+    ChannelSettlementJob,
+    // SPEC-W2 §7: refunds out of the dispute hold far above what disputes explain.
+    RefundAnomalyMonitor,
   ],
 })
 export class PaymentSchedulerModule {}

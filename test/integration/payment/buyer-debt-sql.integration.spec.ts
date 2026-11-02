@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { DataSource } from 'typeorm';
 
+import { VoucherChannelRepository } from '@database/postgres/repositories/voucher-channel.repository';
+
 import {
   DEBT_REFUSING_SQL,
   LapsedVoucherReplacement,
@@ -240,6 +242,122 @@ describe('buyer debt SQL, against a real database', () => {
     expect(await awaiting()).toHaveLength(0);
   });
 
+  describe('H-1 guard relaxed (owner decision 2026-10-31): a replacement HELD on chain stops refusing', () => {
+    it('per call: refuses while the replacement is pending, allows once HELD, stays clear on a refund', async () => {
+      const { id } = await seedSettled(1);
+      await payments.lapseRedemption(org, id, 'VoucherExpired');
+      expect(await replace(id, 2)).toBe(true);
+      // Sent, not landed (a pending or unknown redemption): still refusing.
+      await dataSource.query(
+        `UPDATE payment_intents SET "redemption_tx_refs" = ARRAY['0xpending'] WHERE "id" = $1`,
+        [id],
+      );
+      expect(await admissionDebts()).toBe(1);
+
+      // Confirmed into the hold (`markHeld`, from the classified receipt): refusal ends.
+      expect(await payments.markHeld(org, id, new Date(), new Date(Date.now() + 3_600_000))).toBe(
+        true,
+      );
+      expect(await admissionDebts()).toBe(0);
+      expect(await payments.findOutstandingDebts(org, payer)).toEqual([]);
+      expect(await payments.findOutstandingDebt(payer, id)).toBeNull();
+
+      // Refunded out of the hold later (dispute upheld / provider blocked): stays clear.
+      await dataSource.query(
+        `UPDATE payment_intents SET "held_status" = 'REFUNDED', "hold_released_at" = now() WHERE "id" = $1`,
+        [id],
+      );
+      expect(await admissionDebts()).toBe(0);
+    });
+
+    it('per call: a replacement that fails is lapsed again and the refusal resumes', async () => {
+      const { id } = await seedSettled(1);
+      await payments.lapseRedemption(org, id, 'VoucherExpired');
+      expect(await replace(id, 2)).toBe(true);
+      expect(await admissionDebts()).toBe(1);
+      // Dropped / refused on chain: the redemption job lapses it again.
+      await payments.lapseRedemption(org, id, 'VoucherSeqUsed');
+      expect(await admissionDebts()).toBe(1);
+      expect((await payments.findOutstandingDebts(org, payer))[0]).toMatchObject({
+        id,
+        replacedAt: null,
+      });
+    });
+
+    it('channel: a renewed debt refuses until its settlement lands and books the row HELD', async () => {
+      const lane = randomUUID();
+      await dataSource.query(
+        `INSERT INTO voucher_channels (id, chain_id, asset_id, payer, signer, provider_account, provider_id,
+           channel_id, channel_key, organization_id, agent_id, last_accepted_cumulative, last_accepted_calls)
+         VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, 1000, 1)`,
+        [
+          lane,
+          CHAIN,
+          ASSET,
+          payer,
+          PAYEE,
+          randomUUID(),
+          `0x${randomUUID().replace(/-/g, '').padEnd(64, '0')}`,
+          `0x${randomUUID().replace(/-/g, '').padEnd(64, '3')}`,
+          org,
+          randomUUID(),
+        ],
+      );
+      const id = randomUUID();
+      await dataSource.query(
+        `INSERT INTO payment_intents (
+           id, organization_id, status, agent_id, agent_account, provider_id, provider_account,
+           tool_id, rail, call_id, call_class, asset_id, decimals, price_amount, provider_amount,
+           platform_fee, request_hash, chain_id, expires_at, hold_id, voucher_format,
+           channel_row_id, channel_cumulative, channel_calls)
+         VALUES ($1, $2, 'SETTLED', $3, $4, $5, $6, $7, 'RAIL_B_VOUCHER', $8, 'PAID', $9, 6, 1000, 900,
+                 100, $10, $11, now(), $12, 'CHANNEL', $13, 1000, 1)`,
+        [
+          id,
+          org,
+          randomUUID(),
+          payer,
+          randomUUID(),
+          PAYEE,
+          randomUUID(),
+          randomUUID(),
+          ASSET,
+          `sha256:${'ab'.repeat(32)}`,
+          CHAIN,
+          randomUUID(),
+          lane,
+        ],
+      );
+      const channels = new VoucherChannelRepository(dataSource);
+      expect(await channels.lapse(lane, [id], 'ChannelVoucherExpired:Balance')).toBe(1);
+      expect(await admissionDebts()).toBe(1);
+      // Renewed: back to settlement, still refusing until it lands.
+      expect(await channels.markReplaced(lane, 1000n)).toBe(1);
+      expect(await admissionDebts()).toBe(1);
+      // The settlement LANDED: the row is booked HELD — the refusal ends.
+      expect(
+        await dataSource.transaction((manager) =>
+          channels.bookCharged(
+            manager,
+            lane,
+            [id],
+            new Date(),
+            new Date(Date.now() + 3_600_000),
+            1_000,
+          ),
+        ),
+      ).toBe(1);
+      expect(await admissionDebts()).toBe(0);
+      // A renew that is lapsed again (the settle did not land) refuses again.
+      await dataSource.query(
+        `UPDATE payment_intents SET "held_status" = NULL, "held_at" = NULL WHERE "id" = $1`,
+        [id],
+      );
+      expect(await channels.lapse(lane, [id], 'ChannelVoucherExpired:Balance')).toBe(1);
+      expect(await admissionDebts()).toBe(1);
+    });
+  });
+
   it('a replacement that lapses again is plain debt and keeps its first lapse', async () => {
     const { id } = await seedSettled(1);
     await payments.lapseRedemption(org, id, 'VoucherExpired');
@@ -472,6 +590,9 @@ describe('buyer debt SQL, against a real database', () => {
     )) as Array<{ indexdef: string }>;
     expect(index.indexdef).toContain('redemption_lapsed_at IS NOT NULL');
     expect(index.indexdef).toContain("'uncollected:%'");
+    // The relaxed H-1 guard (1793404800020): a replacement held on chain is out.
+    expect(index.indexdef).toContain('redemption_replaced_at IS NULL');
+    expect(index.indexdef).toContain('held_status IS NULL');
 
     const plan = await dataSource.transaction(async (manager) => {
       await manager.query(`SET LOCAL enable_seqscan = off`);
@@ -531,6 +652,12 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'ChannelRefundPieces1793404800050',
+      'ChannelReplacementCheckValidate1793404800040',
+      'ChannelDebtPerCallReplacement1793404800030',
+      'DebtGuardHeldReplacement1793404800020',
+      'ChannelVoucherIndexes1793404800010',
+      'ChannelVouchers1793404800000',
       'OperatorApprovalResult1793318400010',
       'OrganizationReceiptsPublic1793318400000',
       'ProtocolAnalyticsReadIndexes1793232000000',

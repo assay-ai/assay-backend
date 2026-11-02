@@ -1,3 +1,9 @@
+import { ChannelSlashGuard } from '@modules/payment/services/channel-slash-guard.service';
+import {
+  CHANNEL_LIVE_CHAINS,
+  EVM_CHANNELS_LIVE_CHAINS_ENV,
+  parseChannelLiveChains,
+} from '@modules/payment/constants/channel.constants';
 import { Module } from '@nestjs/common';
 
 import { ChainsModule } from '@modules/chains/chains.module';
@@ -116,6 +122,12 @@ import { SlashProposalService } from './services/slash-proposal.service';
     // Writes SLASH_DISTRIBUTION and raises the agent-side notification.
     SlashCompensationService,
     SlashPartsService,
+    // v3 §5.4.7: settle the provider's channels before its slash is proposed.
+    ChannelSlashGuard,
+    {
+      provide: CHANNEL_LIVE_CHAINS,
+      useFactory: () => parseChannelLiveChains(process.env[EVM_CHANNELS_LIVE_CHAINS_ENV]),
+    },
     SlashExecutionService,
     // B18: the operator's manual actions on a case stuck behind a cancel.
     SlashStuckCaseService,

@@ -12,8 +12,10 @@
  *   2. `list` reads the delegation back from the chain;
  *   3. a voucher built by the assay-mcp signer and signed by the DELEGATE key is
  *      accepted by `EvmChainAdapter.authorizeVoucherSigner` (the off-chain
- *      mirror) and redeemed on chain by `EvmVoucherRedeemer`; the provider is
- *      paid and the delegate's own window counts it;
+ *      mirror) and redeemed on chain by `EvmVoucherRedeemer` into the dispute
+ *      hold (the provider is not paid at the redemption); after the hold the
+ *      redeemer collects it and the provider is paid; the delegate's own window
+ *      counts it;
  *   4. the chain refuses a delegate voucher over the delegate's cap — and the
  *      off-chain terms name that same cap;
  *   5. the payer revokes (relayed); the mirror answers DELEGATE_REVOKED and the
@@ -22,6 +24,11 @@
  * Setup on the FORK only (never testnet): the config admin is impersonated to
  * point the redeemer at an anvil key, and the mock USDG is minted to a fresh
  * payer. Nothing here sends a transaction to a real network.
+ *
+ * The addresses default to the dev testnet deployment; a local chain with its own
+ * deployment overrides them with E2_CONFIG, E2_STAKE, E2_ADMIN, E2_OWNER,
+ * E2_ESCROW_IMPLEMENTATION and E2_PROVIDER (the escrow and asset still come from
+ * the assay-mcp deployments file, E2_ASSAY_MCP_DEPLOYMENTS).
  *
  *   anvil --fork-url https://rpc.testnet.chain.robinhood.com --port 8547
  *   (assay-backend) E2_RPC_URL=http://127.0.0.1:8547 \
@@ -61,6 +68,7 @@ import { Voucher } from '@modules/chains/ports/x402.types';
 import { EscrowDelegationKind } from '@modules/settlement/ports/escrow-delegation.port';
 import { RelayedEscrowIntent } from '@modules/settlement/ports/relayed-escrow-intent.port';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
 
 const RPC = process.env.E2_RPC_URL ?? 'http://127.0.0.1:8547';
 // Defaults assume the e2e workspace sits next to this repo; override with the env vars.
@@ -88,18 +96,21 @@ if (!ANVIL_NET) throw new Error(`no anvil entry for ${CHAIN} in ${MCP_DEPLOYMENT
 const caipAddress = (caip: string): string => caip.slice(caip.lastIndexOf(':') + 1);
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
-  config: '0x7d4F60198a1519074ce1E316911E2f130643231c',
-  stake: '0xAfe1e699d188Ab5042B693978E889D7c5085F710',
+  config: process.env.E2_CONFIG || '0x7d4F60198a1519074ce1E316911E2f130643231c',
+  stake: process.env.E2_STAKE || '0xAfe1e699d188Ab5042B693978E889D7c5085F710',
   escrow: caipAddress(ANVIL_NET.escrow),
   asset: caipAddress(ANVIL_NET.asset),
-  escrowImplementation: '0xB2DD7cC50D95c3F1B4Cce9613dD4B6308876bD82',
-  admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
+  escrowImplementation:
+    process.env.E2_ESCROW_IMPLEMENTATION || '0xB2DD7cC50D95c3F1B4Cce9613dD4B6308876bD82',
+  admin: process.env.E2_ADMIN || '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
-  owner: '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
+  owner: process.env.E2_OWNER || '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
   multicall3: MULTICALL3,
 } as EvmDeployment;
 /** The testnet provider. It must bond above the stake floor on the current stake contract first. */
-const PROVIDER = getAddress('0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
+const PROVIDER = getAddress(
+  process.env.E2_PROVIDER || '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4',
+);
 const USDG = `${CHAIN}/erc20:${DEPLOYMENT.asset}`;
 /**
  * The fork's relayer AND redeemer: anvil's account #0, DERIVED from anvil's
@@ -426,6 +437,33 @@ async function main(): Promise<void> {
     args: [PROVIDER],
   })) as bigint;
   const outcome = await redeem(paid.voucher, paid.signature);
+  const providerAtRedeem = (await publicClient.readContract({
+    address: DEPLOYMENT.asset as `0x${string}`,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: [PROVIDER],
+  })) as bigint;
+  // Redeem-into-hold: nobody is paid at the redemption. Past the record's own
+  // `collectableAt` the redeemer collects it, and the provider is paid.
+  const record = (await publicClient.readContract({
+    address: DEPLOYMENT.escrow as `0x${string}`,
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    functionName: 'held',
+    args: [payer.address, BigInt(paid.voucher.seq)],
+  })) as { collectableAt: bigint };
+  const gap = Number(record.collectableAt) - Number(await chainNow()) + 1;
+  if (gap > 0) await testClient.increaseTime({ seconds: gap });
+  await testClient.mine({ blocks: 1 });
+  const collectHash = await relayerWallet.writeContract({
+    address: DEPLOYMENT.escrow as `0x${string}`,
+    abi: ASSAY_ESCROW_HOLD_ABI,
+    functionName: 'collectHeld',
+    args: [payer.address, BigInt(paid.voucher.seq)],
+    account: relayer,
+    chain,
+  } as never);
+  const collectReceipt = await publicClient.waitForTransactionReceipt({ hash: collectHash });
+  assert(collectReceipt.status === 'success', `collectHeld reverted: ${collectHash}`);
   const providerAfter = (await publicClient.readContract({
     address: DEPLOYMENT.asset as `0x${string}`,
     abi: ERC20_ABI,
@@ -448,7 +486,11 @@ async function main(): Promise<void> {
     outcome.kind === 'REDEEMED',
     `redeem outcome ${outcome.kind} ${outcome.programError ?? ''}`,
   );
-  assert(providerAfter - providerBefore === 225_000n, 'provider not paid 0.25 - 10%');
+  assert(providerAtRedeem === providerBefore, 'provider paid at the redemption (no hold?)');
+  assert(
+    providerAfter - providerBefore === 225_000n,
+    'provider not paid 0.25 - 10% at the collect',
+  );
   assert(
     grant.spentInWindow === 250_000n && escrow.balance === 19_750_000n && escrow.seqHigh === 1n,
     'counters',
@@ -458,6 +500,7 @@ async function main(): Promise<void> {
     stranger: strangerAuthority,
     redeem: outcome,
     providerPaid: (providerAfter - providerBefore).toString(),
+    collect: collectHash,
     delegateSpentInWindow: grant.spentInWindow,
     payerEscrow: escrow,
   });

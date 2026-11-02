@@ -1,3 +1,5 @@
+import { Optional } from '@nestjs/common';
+import { ChannelAdmissionService } from '../services/channel-admission.service';
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
@@ -35,6 +37,8 @@ export class EscrowController {
   constructor(
     private readonly nextSeqs: NextSeqService,
     private readonly debts: BuyerDebtService,
+    // The channel door's renew (W2). Optional: absent, a channel debt cannot be renewed here.
+    @Optional() private readonly channelAdmission?: ChannelAdmissionService,
   ) {}
 
   /**
@@ -127,6 +131,25 @@ export class EscrowController {
     @Param('intentId', new ParseUUIDPipe()) intentId: string,
     @Body() body: SettleDebtBodyDto,
   ): Promise<SettleDebtResponseDto> {
+    if (body.channelVoucher && !this.channelAdmission) this.debts.refuseChannelRenew();
+    if (body.channelVoucher && this.channelAdmission) {
+      await this.channelAdmission.renew({
+        organizationId: session.organizationId,
+        agentId: session.agentId,
+        intentId,
+        agentAccount: session.agentAccount,
+        boundDelegate: session.delegateAccount ?? null,
+        envelope: body.channelVoucher,
+      });
+      const remaining = (await this.debts.list(session)).filter((d) => d.state !== 'REPLACING');
+      // A channel renew has no seq: `seq` is the renewed pair's cumulative, by convention.
+      return {
+        intentId,
+        status: 'REPLACING',
+        seq: `channel:${(body.channelVoucher.voucher as { cumulative?: string }).cumulative ?? ''}`,
+        remainingDebts: remaining.length,
+      } as SettleDebtResponseDto;
+    }
     const settled = await this.debts.settle(session, intentId, {
       voucher: body.voucher as unknown as Voucher,
       signature: body.signature,

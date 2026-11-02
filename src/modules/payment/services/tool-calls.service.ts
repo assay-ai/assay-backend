@@ -44,6 +44,7 @@ import {
   ToolCallDto,
   ToolCallListItemDto,
 } from '../dto/list-tool-calls.dto';
+import { channelViewOf, payoutOf, voucherFormatOf } from '../domain/payout-view';
 import { PaymentErrors } from '../errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
 import { containsLikePattern } from '@shared/utils/like-pattern.util';
@@ -451,6 +452,9 @@ export class ToolCallsService {
       refundedByReport: settled && isRefundedByReport(intent),
       collectableAt: intent.collectableAt ?? null,
       disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
+      ...payoutOf(intent),
+      voucherFormat: voucherFormatOf(intent),
+      channel: channelViewOf(intent),
       verdict,
       createdAt: intent.createdAt,
     };

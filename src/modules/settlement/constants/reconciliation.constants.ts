@@ -95,6 +95,10 @@ export const RECONCILIATION_ALERTS = {
   ESCROW_SURPLUS_UNEXPLAINED: 'escrow_surplus_unexplained',
   ESCROW_SEQ_REALIGNED: 'escrow_seq_realigned',
   RECONCILIATION_SCAN_TIMEOUT: 'reconciliation_scan_timeout',
+  CHANNEL_STATE_BREACH: 'channel_state_breach',
+  CHANNEL_MIRROR_DRIFT: 'channel_mirror_drift',
+  CHANNEL_UNPAID: 'channel_unpaid',
+  CHANNEL_FOREIGN_TX: 'channel_foreign_tx',
 } as const;
 
 /**

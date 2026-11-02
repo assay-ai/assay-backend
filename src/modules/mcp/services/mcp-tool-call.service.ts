@@ -1,3 +1,9 @@
+import { ChannelErrors } from '@modules/payment/errors/channel.errors';
+import { CHANNEL_SCHEME } from '@modules/payment/constants/channel.constants';
+import {
+  ChannelAdmissionService,
+  ChannelVoucherEnvelope,
+} from '@modules/payment/services/channel-admission.service';
 import { AuthErrors } from '@modules/auth/errors/auth.errors';
 import { AgentScope } from '@shared/auth/agent-scope';
 import { randomUUID } from 'node:crypto';
@@ -211,6 +217,9 @@ export class McpToolCallService {
     @Optional()
     @Inject(PAID_PRICE_FLOOR)
     private readonly priceFloor: PaidPriceFloor = PAID_PRICE_FLOOR_FROM_ENV,
+    // The channel door (W2). Optional: absent, no channel is offered and a
+    // channel voucher is refused (`CHANNEL_NOT_OFFERED`).
+    @Optional() private readonly channelAdmission?: ChannelAdmissionService,
   ) {}
 
   /**
@@ -682,11 +691,21 @@ export class McpToolCallService {
       chooseRail(
         session.chainId,
         payment.rail,
-        payment.voucher !== null,
+        payment.voucher !== null || (payment.channel ?? null) !== null,
         session.paymentsAllowed === true,
       ) === PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, args, callId, payment.voucher, idempotencyKey, plan);
+      return this.callOnRailB(
+        session,
+        tool,
+        args,
+        callId,
+        payment.voucher,
+        idempotencyKey,
+        plan,
+        payment.channel ?? null,
+        payment.schemes ?? [],
+      );
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -853,8 +872,13 @@ export class McpToolCallService {
     payment: McpVoucherPayment | null,
     idempotencyKey: string | null,
     plan: CallPlan = UNSCOPED_PLAN,
+    channelPayment: ChannelVoucherEnvelope | null = null,
+    schemes: readonly string[] = [],
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    // The paid retry's echo, whichever door it pays through: it only chooses the re-draw.
+    const pinned: { providerId: string; contractVersion?: number } | null =
+      payment ?? channelPayment;
     // A payer that owes for served calls whose vouchers lapsed gets no paid
     // call — not even a requirement — until it signs the replacements
     // (`PAYMENT_DEBT_OUTSTANDING`, no-platform-debt design step 9). Free calls
@@ -874,12 +898,12 @@ export class McpToolCallService {
     // `providerId`, it proves nothing and only chooses the re-draw; a version
     // no longer servable refuses the retry before anything is charged.
     const contract =
-      payment?.contractVersion !== undefined
-        ? { ...(plan.contract ?? NO_CONTRACT_REQUEST), version: payment.contractVersion }
+      pinned?.contractVersion !== undefined
+        ? { ...(plan.contract ?? NO_CONTRACT_REQUEST), version: pinned.contractVersion }
         : plan.contract;
     const context: RoutingContext = {
       ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules, contract),
-      onlyProviderId: payment?.providerId,
+      onlyProviderId: pinned?.providerId,
       callClass: 'PAID',
       // The router draws among bindings at or above the paid-call minimum while
       // any can serve; the check after the offer refuses only when none can.
@@ -951,7 +975,7 @@ export class McpToolCallService {
     });
     const { escrowPda } = await this.escrow.escrowAddresses(session.agentAccount, asset);
 
-    if (!payment) {
+    if (!payment && !channelPayment) {
       const { seq } = await allocateOfferSeq(
         { seqs: this.seqs, escrow: this.escrow },
         session,
@@ -1001,6 +1025,25 @@ export class McpToolCallService {
         detail: {
           ...(keyNotice.fixUrl ? { fixUrl: keyNotice.fixUrl } : {}),
           paymentRequired: requirement,
+          // The channel door's offer, beside the per-call one (API-W2 §1.2):
+          // only when the client offered `channel-v1` and a channel is open to it.
+          ...(schemes.includes(CHANNEL_SCHEME) && this.channelAdmission
+            ? await this.channelAdmission
+                .requirement({
+                  chainId: session.chainId,
+                  asset,
+                  payer: session.agentAccount,
+                  provider: offer.providerAccount,
+                  providerId: offer.providerId,
+                  price,
+                  ...(offer.contractVersion !== undefined
+                    ? { contractVersion: offer.contractVersion }
+                    : {}),
+                  delegate: session.delegateAccount ?? null,
+                })
+                .then((channelRequired) => (channelRequired ? { channelRequired } : {}))
+                .catch(() => ({}))
+            : {}),
           ...(isNotReviewed(tool) ? { notReviewed: true } : {}),
           ...(escrowNotice ?? {}),
         },
@@ -1020,7 +1063,33 @@ export class McpToolCallService {
       });
 
       try {
+        if (channelPayment) {
+          if (!this.channelAdmission) {
+            throw ChannelErrors.notOffered({ reason: 'channels are not enabled' });
+          }
+          const channel = await this.channelAdmission.admit({
+            organizationId: session.organizationId,
+            agentId: session.agentId,
+            agentAccount: session.agentAccount,
+            chainId: session.chainId,
+            providerId: offer.providerId,
+            providerAccount: offer.providerAccount,
+            toolId: tool.id,
+            requestHash,
+            resource: call.path,
+            price,
+            platformFee: this.platformFee(price),
+            envelope: channelPayment,
+            boundDelegate: session.delegateAccount ?? null,
+            credentialId: credentialOf(session),
+            escrow: reading,
+            idempotencyKey,
+            beforeHold: held,
+          });
+          return { intent: channel.intent, unaffordable: null, replayed: channel.replayed };
+        }
         return {
+          replayed: false,
           intent: await this.vouchers.redeem({
             organizationId: session.organizationId,
             signed: payment.signed,
@@ -1052,7 +1121,11 @@ export class McpToolCallService {
         if (!unaffordableOnRedeem(error)) throw error;
         // The intent exists in `CREATED` with nothing reserved; the expiry sweep
         // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
-        return { intent: null, unaffordable: await this.insufficientFunds(session, null, price) };
+        return {
+          intent: null,
+          replayed: false,
+          unaffordable: await this.insufficientFunds(session, null, price),
+        };
       }
     });
     if (admitted.intent === null) return admitted.unaffordable;
@@ -1061,7 +1134,8 @@ export class McpToolCallService {
 
     // `redeem` answered with an earlier attempt's intent (another seq): this
     // voucher was neither held nor recorded, and will never be redeemed.
-    if (idempotencyKey && intent.voucherSeq !== payment.signed.voucher.seq) {
+    if (admitted.replayed) return this.replayedIntent(session, intent);
+    if (payment && idempotencyKey && intent.voucherSeq !== payment.signed.voucher.seq) {
       return this.replayedIntent(session, intent);
     }
 
@@ -2206,6 +2280,10 @@ export interface McpPayment {
   readonly rail: PaymentRail | null;
   /** `assay/voucher` — present only on the paid retry of rail B. */
   readonly voucher: McpVoucherPayment | null;
+  /** `assay/channelVoucher` — the paid retry on the channel door (API-W2 §1.3). */
+  readonly channel?: ChannelVoucherEnvelope | null;
+  /** `assay/paymentSchemes` — what the client can pay with, its preference first. */
+  readonly schemes?: readonly string[];
 }
 
 export interface McpVoucherPayment {

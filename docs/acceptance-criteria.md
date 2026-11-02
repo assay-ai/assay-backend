@@ -22,8 +22,9 @@ together.
 - Foundry suite: parity with the ~240 Anchor tests that have a behavioural analogue, plus
   invariant tests for the three accounting identities (`escrow.balance` conservation,
   `total_staked == deposited − withdrawn − slashed`, `vault >= total_staked`).
-- A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it, and the
-  provider's USDG balance increases by `amount − fee` in one transaction.
+- A buyer funds USDG, sets limits, signs an EIP-712 voucher, the platform redeems it into the
+  dispute hold (the provider is not paid at the redemption), and after the hold the platform's
+  collect transaction raises the provider's USDG balance by `amount − fee`.
 - A voucher whose `(payer, seq)` was already redeemed reverts, in any order (D-23). A voucher malleated to high-s reverts. A voucher with
   mainnet's `chainId` in its domain reverts on testnet.
 - A full two-phase slash: propose → 72 h (warped) → execute, and a second run where

@@ -58,6 +58,9 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
   PAYMENT_VOUCHER_SEQ_STALE = 'PAYMENT_VOUCHER_SEQ_STALE',
+
+  // ── The channel door: refused only because earlier payments still settle.
+  PAYMENT_UNSETTLED_LIMIT = 'PAYMENT_UNSETTLED_LIMIT',
   PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
   PAYMENT_NEXT_SEQ_RATE_LIMITED = 'PAYMENT_NEXT_SEQ_RATE_LIMITED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
@@ -87,6 +90,8 @@ export enum PaymentErrorCode {
   PAYMENT_DEBT_NOT_YET_REPLACEABLE = 'PAYMENT_DEBT_NOT_YET_REPLACEABLE',
   /** The database refused the replacement (the debt changed meanwhile); nothing was changed. */
   PAYMENT_DEBT_REPLACEMENT_REFUSED = 'PAYMENT_DEBT_REPLACEMENT_REFUSED',
+  /** A channel refund was held back (an earlier send unresolved, or its drop being confirmed); retried. */
+  PAYMENT_CHANNEL_REFUND_NOT_SENT = 'PAYMENT_CHANNEL_REFUND_NOT_SENT',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -130,6 +135,18 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `Illegal payment intent transition${context?.from && context?.to ? `: ${context.from} → ${context.to}` : ''}` +
       `${context?.actual ? ` (intent is ${context.actual})` : ''}` +
       `${context?.allowed ? `; ${context.from} may only move to: ${context.allowed}` : ''}` +
+      `${context?.intentId ? ` [intent ${context.intentId}]` : ''}`,
+  },
+  /**
+   * `ChannelRefundService.refund` did not send (an earlier refund of the call
+   * is unresolved, or its drop is being confirmed): nothing moved, the refund
+   * is retried on the next pass. Not a state-machine refusal (W2 rerun R-5).
+   */
+  channelRefundNotSent: {
+    code: PaymentErrorCode.PAYMENT_CHANNEL_REFUND_NOT_SENT,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `channel refund not sent yet: ${context?.reason ?? 'unknown'}; retried` +
       `${context?.intentId ? ` [intent ${context.intentId}]` : ''}`,
   },
   idempotencyKeyReused: {
@@ -239,9 +256,12 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     code: PaymentErrorCode.PAYMENT_DEBT_NOT_YET_REPLACEABLE,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `Debt ${context?.intentId ?? ''} cannot be settled yet: its original voucher is still ` +
-      `inside its on-chain redemption window. Settle it after ` +
-      `${context?.replaceableAt ?? 'the window closes'}; nothing was changed`,
+      context?.reason
+        ? `Debt ${context?.intentId ?? ''} cannot be settled yet: ${context.reason}. Try again ` +
+          `in a few minutes; nothing was changed`
+        : `Debt ${context?.intentId ?? ''} cannot be settled yet: its original voucher is still ` +
+          `inside its on-chain redemption window. Settle it after ` +
+          `${context?.replaceableAt ?? 'the window closes'}; nothing was changed`,
   },
   /**
    * The database refused the replacement write (for example the debt's row
@@ -775,6 +795,22 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
   },
 
   /**
+   * A channel call refused only because earlier payments are still settling
+   * on chain (SPEC-W2 §4): the channel's pending value would pass `A_cap`.
+   * Nothing was charged and the lane did not advance; a settle round has been
+   * started, and the same call passes after `retryAfter` (seconds). 429, not
+   * 503: the buyer's own unsettled spend, not the platform, is the limit.
+   */
+  unsettledLimit: {
+    code: PaymentErrorCode.PAYMENT_UNSETTLED_LIMIT,
+    statusCode: 429,
+    publicContext: ['retryAfter', 'reason'],
+    message: (context?: Record<string, any>) =>
+      `Waiting for earlier payments to settle on chain; retry in about ` +
+      `${Math.max(1, Math.ceil(Number(context?.retryAfter ?? 60) / 60))} minutes. Nothing was charged.`,
+  },
+
+  /**
    * The buyer has a standing `request_withdraw`. New vouchers are refused while
    * it is open so the platform is not still taking money out of an escrow whose
    * owner has announced they are leaving. Vouchers already accepted are still
@@ -790,7 +826,9 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `A withdrawal is pending on the payer's escrow` +
       `${context?.chains?.length ? ` on ${context.chains.join(', ')}` : ''}` +
-      `${context?.availableAt ? `, available at ${context.availableAt}` : ''}` +
-      `; paid calls are refused until then — the escrow owner must cancel or complete it`,
+      `${context?.availableAt ? ` (claimable at ${context.availableAt})` : ''}` +
+      `. Paid calls are paused while it is pending; free calls keep working. ` +
+      `To resume paid calls, the escrow owner can cancel the withdrawal on the Funding page ` +
+      `of the portal (or claim it once it is claimable)`,
   },
 });

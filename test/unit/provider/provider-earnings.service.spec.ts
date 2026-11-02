@@ -77,6 +77,7 @@ interface ClassRow {
   debtOutstanding: boolean | string | null;
   forfeited: boolean | string | null;
   voided: boolean | string | null;
+  refundedUpheld?: boolean | string | null;
   calls: string;
   providerAmount: string;
 }
@@ -385,12 +386,48 @@ describe('ProviderEarningsService — not credited is the export classifier, hel
     const money = (amount: string) => ({ amount, asset: USDC, decimals: 6 });
     expect(earnings.totals.withheldByClass).toEqual([
       { class: CallReconciliationClass.PAID_UNCREDITED, calls: 13, amount: money('398000') },
+      { class: CallReconciliationClass.REFUNDED_UPHELD, calls: 0, amount: money('0') },
       { class: CallReconciliationClass.SYSTEM_ERROR, calls: 9, amount: money('306000') },
       { class: CallReconciliationClass.REQUEST_ERROR, calls: 2, amount: money('90000') },
     ]);
     expect(earnings.totals.withheldCalls).toBe(24);
     expect(earnings.totals.withheld).toEqual(money('794000'));
     expect(earnings.groups[0].withheldCalls).toBe(24);
+  });
+
+  it('names an upheld-report refund apart from a failed check, and the total stays the same (BUG-R2-PRV-03)', async () => {
+    const { service, classFake } = build(
+      [row({ key: 'tool-1', calls: '3' })],
+      [
+        classRow({ status: 'REFUNDED', calls: '1', providerAmount: '9000' }),
+        classRow({
+          status: 'SETTLED',
+          voided: true,
+          refundedUpheld: true,
+          calls: '2',
+          providerAmount: '18000',
+        }),
+      ],
+    );
+
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+
+    const money = (amount: string) => ({ amount, asset: USDC, decimals: 6 });
+    expect(earnings.totals.withheldByClass).toEqual([
+      { class: CallReconciliationClass.PAID_UNCREDITED, calls: 1, amount: money('9000') },
+      { class: CallReconciliationClass.REFUNDED_UPHELD, calls: 2, amount: money('18000') },
+      { class: CallReconciliationClass.SYSTEM_ERROR, calls: 0, amount: money('0') },
+      { class: CallReconciliationClass.REQUEST_ERROR, calls: 0, amount: money('0') },
+    ]);
+    expect(earnings.totals.withheldCalls).toBe(3);
+    expect(earnings.totals.withheld).toEqual(money('27000'));
+    // The classifier input is read and grouped from the row's own mark.
+    const upheld = classFake.selects.find((select) => select.alias === 'refundedUpheld');
+    expect(upheld?.expr).toContain(`'voided:DISPUTE_UPHELD'`);
+    expect(classFake.groups).toContain(upheld?.expr);
   });
 
   it('agrees with classifyForReconciliation call for call over the fixture set', async () => {
@@ -411,6 +448,7 @@ describe('ProviderEarningsService — not credited is the export classifier, hel
         debtOutstanding: c.debtOutstanding === true || c.debtOutstanding === 'true',
         forfeited: c.forfeited === true || c.forfeited === 'true',
         voided: c.voided === true || c.voided === 'true',
+        refundedUpheld: c.refundedUpheld === true || c.refundedUpheld === 'true',
       });
       if (isNotCredited(cls)) expected.set(cls, (expected.get(cls) ?? 0) + Number(c.calls));
     }

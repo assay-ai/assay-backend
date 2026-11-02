@@ -1,3 +1,4 @@
+import { DisputeErrors } from '@modules/dispute/errors/dispute.errors';
 import {
   DEFAULT_CALL_DISPUTE_CONFIG,
   loadCallDisputeConfig,
@@ -248,5 +249,17 @@ describe('the dispute hold window', () => {
     const at = new Date('2026-10-18T12:00:00Z');
     expect(disputeWindowEndOf(at)?.toISOString()).toBe('2026-10-18T11:59:00.000Z');
     expect(disputeWindowEndOf(null)).toBeNull();
+  });
+});
+
+describe('DISPUTE_COLLECTION_IN_PROGRESS on a channel call (e2e R-3)', () => {
+  it('names the configured settle time, not a fixed 30 minutes', () => {
+    const error = DisputeErrors.collectionInProgress({ channel: true, settleWithinMinutes: 5 });
+    expect(error.message).toContain('usually within 5 minutes');
+    expect(error.message).not.toContain('30 minutes');
+    // Without the figure (an older caller): the default T_age.
+    expect(DisputeErrors.collectionInProgress({ channel: true }).message).toContain(
+      'within 30 minutes',
+    );
   });
 });

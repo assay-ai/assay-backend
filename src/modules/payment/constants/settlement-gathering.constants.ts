@@ -143,6 +143,64 @@ export function loadCollectGathering(env: NodeJS.ProcessEnv = process.env): Gath
 }
 
 export const REDEEM_GATHERING_FROM_ENV: GatheringPolicy = loadRedeemGathering();
+
+/**
+ * Debt replacement settles at once (SPEC H-1): a buyer with a debt has every
+ * paid call refused until the replacement voucher it signed is redeemed, so
+ * that voucher does not wait for a full batch or the maximum wait. The pass
+ * still goes through the redeemer, so the fee-spike deferral and the hourly
+ * gas budget apply unchanged; only gathering is skipped.
+ *
+ * Bounded to one such urgent pass per asset per
+ * `REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS` (60–3,600, default 300), so
+ * repeated replacements cannot force a stream of single-item transactions. A
+ * pass that gathering would have run anyway does not use the allowance.
+ */
+export const DEFAULT_URGENT_REPLACEMENT_INTERVAL_SECONDS = 300;
+export const URGENT_REPLACEMENT_LIMITER = 'URGENT_REPLACEMENT_LIMITER';
+
+export function loadUrgentReplacementIntervalSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  return integer(
+    env,
+    'REDEEM_URGENT_REPLACEMENT_INTERVAL_SECONDS',
+    DEFAULT_URGENT_REPLACEMENT_INTERVAL_SECONDS,
+    60,
+    3_600,
+  );
+}
+
+/**
+ * At most one urgent pass per key per interval. In memory: the redemption
+ * pass runs in the one scheduler process, and a restart at worst allows one
+ * extra urgent pass.
+ */
+export class UrgentPassLimiter {
+  private readonly lastAt = new Map<string, number>();
+
+  constructor(private readonly intervalSeconds: number) {}
+
+  /** Takes the allowance for `key` at `nowMs`; `false` when it was used less than an interval ago. */
+  tryTake(key: string, nowMs: number): boolean {
+    const last = this.lastAt.get(key);
+    if (last !== undefined && nowMs - last < this.intervalSeconds * 1000) return false;
+    this.lastAt.set(key, nowMs);
+    return true;
+  }
+
+  /** When `key` may next run an urgent pass (ms), or `null` when it may now. */
+  nextAllowedAt(key: string, nowMs: number): number | null {
+    const last = this.lastAt.get(key);
+    if (last === undefined) return null;
+    const next = last + this.intervalSeconds * 1000;
+    return next > nowMs ? next : null;
+  }
+}
+
+export function urgentReplacementLimiterFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): UrgentPassLimiter {
+  return new UrgentPassLimiter(loadUrgentReplacementIntervalSeconds(env));
+}
 export const COLLECT_GATHERING_FROM_ENV: GatheringPolicy = loadCollectGathering();
 
 /** What the count query reports about one asset's waiting items. */
@@ -182,7 +240,12 @@ export interface AwaitingRedemptionSummarySource {
     settledStatus: string,
     rail: string,
     options?: { readonly orderedBySeq?: boolean; readonly exclude?: RedemptionExclusions },
-  ): Promise<{ count: number; oldestIssuedAt: Date | null; earliestExpiresAt: Date | null }>;
+  ): Promise<{
+    count: number;
+    oldestIssuedAt: Date | null;
+    earliestExpiresAt: Date | null;
+    replacementCount?: number;
+  }>;
 }
 
 /**
@@ -207,6 +270,9 @@ export async function redemptionPassReady(input: {
   readonly graceSeconds: number;
   readonly urgentWithinSeconds: number;
   readonly nowMs: number;
+  /** Debt replacements skip gathering, bounded by this limiter (SPEC H-1). Absent: no urgent pass. */
+  readonly urgentReplacements?: UrgentPassLimiter;
+  readonly onUrgent?: (replacements: number) => void;
   readonly onError?: (error: unknown) => void;
 }): Promise<boolean> {
   if (input.batchSize <= 1 || input.policy.minBatch <= 1) return true;
@@ -217,7 +283,7 @@ export async function redemptionPassReady(input: {
       input.rail,
       { orderedBySeq: input.orderedBySeq, exclude: input.exclude },
     );
-    return gatheringReady(
+    const ready = gatheringReady(
       input.policy,
       {
         count: waiting.count,
@@ -229,6 +295,13 @@ export async function redemptionPassReady(input: {
       input.nowMs,
       input.urgentWithinSeconds,
     );
+    if (ready) return true;
+    const replacements = waiting.replacementCount ?? 0;
+    if (replacements > 0 && input.urgentReplacements?.tryTake(input.asset, input.nowMs)) {
+      input.onUrgent?.(replacements);
+      return true;
+    }
+    return false;
   } catch (error) {
     input.onError?.(error);
     return true;

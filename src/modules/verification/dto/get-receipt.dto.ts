@@ -270,4 +270,41 @@ export class GetReceiptResponseDto {
 
   @ApiPropertyOptional({ nullable: true, description: 'When the hold was actually resolved' })
   settledAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'When the held payment (or the channel bucket holding it) was paid to the provider: the ' +
+      'collect was booked. Null until then, and for a call that was refunded or never held',
+  })
+  collectedAt?: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'The collect (payout) transaction that paid the provider, once `collectedAt` is set and ' +
+      'the chain recorded one. Null otherwise',
+  })
+  payoutTxRef?: string | null;
+
+  @ApiPropertyOptional({
+    enum: ['PER_CALL', 'CHANNEL'],
+    description: 'Which voucher door paid the call',
+  })
+  voucherFormat?: 'PER_CALL' | 'CHANNEL';
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Channel calls only (as on `GET /tool-calls`): the cumulative and calls the voucher ' +
+      'signed, whether the channel settlement landed, when its bucket matures, and whether a ' +
+      'later settlement folded into the bucket and moved that maturity later. Null per call',
+  })
+  channel?: {
+    cumulative: string;
+    calls: number;
+    settled: boolean;
+    bucketMaturesAt: Date | null;
+    refundWindowExtended: boolean;
+  } | null;
 }

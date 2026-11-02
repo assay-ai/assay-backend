@@ -212,6 +212,10 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   // for a voucher admitted against a stale read, under the same rule.
   'DelegateIsRevoked',
   'DelegateIsExpired',
+  // An admin block of the payer, a delegate or the payee. `VoucherRedemptionService`
+  // reads which side is blocked and retries (payer) or forfeits (payee), so it
+  // is a named, handled refusal, never an unknown one (e2e R-4).
+  'AddressBlocked',
   'DelegateVoucherExceedsPerCallLimit',
 ]);
 

@@ -1,3 +1,5 @@
+import { OperatorChannelDrainService } from './services/operator-channel-drain.service';
+import { ProviderPayoutStagesService } from '@modules/provider/services/provider-payout-stages.service';
 import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
@@ -123,6 +125,9 @@ import { LastSeenModule } from '@shared/last-seen';
     OperatorToolVerificationController,
   ],
   providers: [
+    // The settlement panel (W2): read-only, from the channel tables.
+    ProviderPayoutStagesService,
+    OperatorChannelDrainService,
     OperatorCaseBriefService,
     OperatorAccountBlockService,
     OperatorApprovalService,
