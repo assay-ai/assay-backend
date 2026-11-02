@@ -435,7 +435,12 @@ describe('public receipt: the service', () => {
       missing.svc.read(INTENT).catch((e: unknown) => e),
     ]);
     expect(bad.reader.findPublicReceiptRow).not.toHaveBeenCalled();
-    const wire = (e: unknown) => JSON.stringify((e as { toJSON(): unknown }).toJSON());
+    // The wire body minus its `timestamp`, which is stamped per error and may differ by a millisecond.
+    const wire = (e: unknown) => {
+      const body = { ...(e as { toJSON(): Record<string, unknown> }).toJSON() };
+      delete body.timestamp;
+      return JSON.stringify(body);
+    };
     const [a, b] = errors;
     expect((a as { statusCode: number }).statusCode).toBe(404);
     expect((b as { statusCode: number }).statusCode).toBe(404);
