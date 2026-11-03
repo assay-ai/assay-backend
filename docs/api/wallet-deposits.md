@@ -11,8 +11,9 @@ buyer still controls the wallet key and pays the network fee.
 1. Call `POST /api/v1/deposits` with a positive atomic-unit `amount` string and
    the intended `chainId`. The server derives the buyer, agent, organization and
    settlement asset from the authenticated session and chain configuration.
-   An agent holds at most 5 open deposit intents (unexpired `CREATED`, or
-   `SETTLING`); a sixth is refused with `409 PAYMENT_DEPOSIT_OPEN_LIMIT`.
+   An agent holds at most 5 open deposit intents (`CREATED` or `SETTLING`,
+   still inside the intent's lifetime); a sixth is refused with
+   `409 PAYMENT_DEPOSIT_OPEN_LIMIT`.
 2. Check the returned requirements against the intended chain, token, escrow,
    buyer and amount. On EVM, the buyer wallet approves the exact token amount
    to the returned spender if needed, then calls the required
@@ -25,15 +26,18 @@ buyer still controls the wallet key and pays the network fee.
    escrow `Deposited` events for this intent's buyer in that transaction
    (summed), when:
    - they total at least the requested amount;
-   - the transaction was mined after the intent was created (60 s of clock
-     skew allowed);
-   - the buyer's escrow on chain still holds the money (the escrow balance must
-     cover everything the ledger already counts for that buyer plus this
-     credit).
+   - the transaction was mined after the buyer's earliest deposit intent that
+     never settled (open, expired or failed) in the last 24 hours was created
+     (60 s of clock skew allowed). Reporting the hash on a fresh intent after
+     the first one expired therefore still works.
+   The credit is written as pending (never spendable).
 4. Poll `GET /api/v1/deposits/{depositId}`. `SETTLED` means the deposit was
    observed; wait for `finality: CONFIRMED` before treating it as available.
-   A deposit is confirmed only while the escrow still covers it; one that left
-   the escrow before finality is rejected.
+   A deposit becomes spendable only once it is final on chain AND the buyer's
+   escrow covers everything the ledger counts for that buyer. Until then it
+   stays pending; it is never rejected for that reason. A deposit still
+   uncovered after 15 minutes alerts the operators. Only a transaction that is
+   no longer on chain (reorg) is rejected.
 
 ## Single use
 
@@ -60,15 +64,15 @@ lost response; read the intent first.
 | `201` `SETTLED` | Credited (pending until finality) | Poll `GET /deposits/{id}` |
 | `422 PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED` | Reported before it was mined, or not visible yet (observed for 20 s) | Report the same hash on the same intent again once it is mined |
 | `422 PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING` | Mined, but credits this buyer nothing (reverted, an `approve`, another buyer) | Report the `depositFor` hash |
-| `422 PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT` | Mined before the intent existed | Not claimable. Withdraw it from the escrow and deposit again through a new intent |
-| `409 PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION` | A report of this intent is in flight (`SETTLING`) | Poll `GET /deposits/{id}`; do not retry |
-| `409 PAYMENT_DEPOSIT_NOT_COVERED` | The escrow does not currently hold the deposited funds | Retry in a minute; if the funds were withdrawn, it will not be credited |
-| `402 PAYMENT_DEPOSIT_EXPIRED` | The intent expired (10 minutes on EVM) | Open a new intent. A transaction mined before the new intent cannot be claimed by it |
+| `422 PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT` | Mined before any unsettled intent of this buyer (last 24 hours) existed | Not claimable. Withdraw it from the escrow and deposit again through a new intent |
+| `409 PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION` | A report of this intent is in flight (`SETTLING`) | Poll `GET /deposits/{id}`; do not retry. A `SETTLING` intent whose request died is resumed by the platform within minutes |
+| `402 PAYMENT_DEPOSIT_EXPIRED` | The intent expired (10 minutes on EVM) | Open a new intent and report the same hash on it (within 24 hours of the first intent) |
 | `503 CHAIN_RPC_READ_FAILED` | The chain could not be read | Retry the same hash; nothing was recorded |
 
 ## Deposits made outside an intent
 
-A `deposit()` or `depositFor()` sent without an intent stays uncredited (the
+A `deposit()` or `depositFor()` sent with no deposit intent of the buyer open
+(or expired or failed within the previous 24 hours) stays uncredited (the
 reconciler reports it as `escrow_uncredited_deposit`). It cannot be claimed
 later, because its money may have been withdrawn since. The buyer withdraws it
 from the escrow and deposits again through an intent.
