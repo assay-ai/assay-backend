@@ -13,7 +13,12 @@ buyer still controls the wallet key and pays the network fee.
    settlement asset from the authenticated session and chain configuration.
    An agent holds at most 5 open deposit intents (`CREATED` or `SETTLING`,
    still inside the intent's lifetime); a sixth is refused with
-   `409 PAYMENT_DEPOSIT_OPEN_LIMIT`.
+   `409 PAYMENT_DEPOSIT_OPEN_LIMIT`. While the buyer account has a deposit held
+   pending for more than 15 minutes because its escrow holds less than the
+   ledger records (see step 4), new intents are refused with
+   `409 PAYMENT_DEPOSIT_ESCROW_SHORTFALL`: every new deposit would be held too.
+   Contact support to resolve it. Reporting a transaction for an intent that
+   already exists is never refused for this reason.
 2. Check the returned requirements against the intended chain, token, escrow,
    buyer and amount. On EVM, the buyer wallet approves the exact token amount
    to the returned spender if needed, then calls the required
@@ -35,7 +40,9 @@ buyer still controls the wallet key and pays the network fee.
    observed; wait for `finality: CONFIRMED` before treating it as available.
    A deposit becomes spendable only once it is final on chain AND the buyer's
    escrow covers everything the ledger counts for that buyer. Until then it
-   stays pending; it is never rejected for that reason. A deposit still
+   stays pending; it is never rejected for that reason. It is re-checked with
+   a back-off (30 s, doubling, at most every 10 minutes), so once the escrow
+   covers it again it becomes spendable within 10 minutes. A deposit still
    uncovered after 15 minutes alerts the operators. Only a transaction that is
    no longer on chain (reorg) is rejected.
 
@@ -65,9 +72,30 @@ lost response; read the intent first.
 | `422 PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED` | Reported before it was mined, or not visible yet (observed for 20 s) | Report the same hash on the same intent again once it is mined |
 | `422 PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING` | Mined, but credits this buyer nothing (reverted, an `approve`, another buyer) | Report the `depositFor` hash |
 | `422 PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT` | Mined before any unsettled intent of this buyer (last 24 hours) existed | Not claimable. Withdraw it from the escrow and deposit again through a new intent |
-| `409 PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION` | A report of this intent is in flight (`SETTLING`) | Poll `GET /deposits/{id}`; do not retry. A `SETTLING` intent whose request died is resumed by the platform within minutes |
+| `409 PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION` | A report of this intent is in flight (`SETTLING`) | Poll `GET /deposits/{id}`; do not retry. A `SETTLING` intent whose request died is resumed by the platform within minutes. One with no recorded transaction is never failed automatically; after an hour it is flagged for operator review |
+| `409 PAYMENT_DEPOSIT_ESCROW_SHORTFALL` (create) | The account has a deposit held pending because the escrow holds less than the ledger records | Do not send funds. Contact support. Existing intents can still be reported |
 | `402 PAYMENT_DEPOSIT_EXPIRED` | The intent expired (10 minutes on EVM) | Open a new intent and report the same hash on it (within 24 hours of the first intent) |
 | `503 CHAIN_RPC_READ_FAILED` | The chain could not be read | Retry the same hash; nothing was recorded |
+
+## Deploying the migration (operators)
+
+Migration `1793491200000-deposit-claim-per-account` adds the
+`deposit_intents` columns this code reads (`submitted_tx_ref`,
+`finality_uncovered_since`, `finality_next_check_at`) and builds three indexes
+concurrently on `ledger_entries` / `deposit_intents`. On prod run it **out of
+band, before rolling the new image**, from a one-off container of the new
+image with the API's environment (the image's entrypoint is `yarn`):
+
+```sh
+docker run --rm --env-file <api env file> <new image> migration:run:prod
+# or: docker compose run --rm <api service> migration:run:prod   (new image tag)
+docker run --rm --env-file <api env file> <new image> migration:show:prod
+```
+
+Then roll the image; `start:prod` finds nothing pending. The column change runs
+under `lock_timeout = 5s` and fails fast behind a long transaction: rerun it.
+A cancelled concurrent build leaves an invalid index that the next run drops
+and rebuilds.
 
 ## Deposits made outside an intent
 
