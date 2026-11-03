@@ -40,10 +40,13 @@ const AGENT_ROUTES: Readonly<Record<string, AgentScope>> = {
   'GET /escrow/debts': AgentScope.PAYMENTS,
   'POST /escrow/debts/:intentId/voucher-intent': AgentScope.PAYMENTS,
   'POST /escrow/debts/:intentId/voucher': AgentScope.PAYMENTS,
+  'POST /deposits': AgentScope.PAYMENTS,
+  'POST /deposits/:depositId/broadcast': AgentScope.PAYMENTS,
 
   // activity:read
   'GET /escrow': AgentScope.ACTIVITY_READ,
   'GET /balances': AgentScope.ACTIVITY_READ,
+  'GET /deposits/:depositId': AgentScope.ACTIVITY_READ,
   'GET /holds': AgentScope.ACTIVITY_READ,
   'GET /tool-calls': AgentScope.ACTIVITY_READ,
   'GET /tool-calls/:intentId': AgentScope.ACTIVITY_READ,
@@ -86,7 +89,7 @@ const PERSON_ONLY_SAMPLE = [
   'GET /org/handle',
   'GET /catalogue/tools',
   'GET /tools',
-  'POST /deposits',
+  'POST /deposits/:depositId/settle',
   'GET /deposits',
   'GET /statements/balance',
   'GET /withheld',

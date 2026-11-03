@@ -4,7 +4,13 @@ import { ApiBearerAuth, ApiExtraModels, ApiOperation, ApiResponse, ApiTags } fro
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { TxRef } from '@modules/chains/ports/x402.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import {
+  AgentScope,
+  CurrentSession,
+  isHumanCallerKind,
+  RequireAgentScope,
+  SessionAuthGuard,
+} from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositAssetFor } from '../domain/deposit-asset';
@@ -91,6 +97,7 @@ export class DepositsController {
   ) {}
 
   @Post()
+  @RequireAgentScope(AgentScope.PAYMENTS)
   @ApiOperation({
     summary: 'Open a deposit intent and return everything needed to build the transfer',
     description:
@@ -103,7 +110,9 @@ export class DepositsController {
       'purpose; see `SolanaDepositRequirementsDto`.) On `eip155` it carries a **contract call** ' +
       'and deliberately no destination address: `approve(spender, amount)` on `asset`, then ' +
       '`depositFor(buyer, amount)` on `contract`. A plain ERC-20 transfer into that contract ' +
-      'moves the tokens and credits nobody, with no remedy — see `EvmDepositRequirementsDto`.',
+      'moves the tokens and credits nobody, with no remedy — see `EvmDepositRequirementsDto`. ' +
+      'API credentials require the payments scope; the buyer and agent are taken from the ' +
+      'authenticated session, never from the request body.',
   })
   @ApiResponse({ status: 201, type: CreateDepositResponseDto })
   @ApiResponse({
@@ -219,6 +228,7 @@ export class DepositsController {
   }
 
   @Post(':depositId/broadcast')
+  @RequireAgentScope(AgentScope.PAYMENTS)
   @ApiOperation({
     summary: 'Settle a deposit the buyer’s own wallet already broadcast, by its transaction hash',
     description:
@@ -228,7 +238,8 @@ export class DepositsController {
       'from the chain and credits only an escrow `Deposited` event crediting this intent’s ' +
       'buyer for at least the requested amount; a hash already used by another deposit is ' +
       'refused. Idempotent on an already-`SETTLED` intent. Not offered on chains whose deposits ' +
-      'need the platform as fee payer.',
+      'need the platform as fee payer. API credentials require the payments scope and may ' +
+      'report only deposits belonging to their own agent.',
   })
   @ApiResponse({ status: 201, type: SettledDepositDto })
   @ApiResponse({
@@ -254,6 +265,7 @@ export class DepositsController {
       session.organizationId,
       depositId,
       body.transactionHash as TxRef,
+      isHumanCallerKind(session.callerKind) ? undefined : session.agentId,
     );
 
     return {

@@ -8,10 +8,12 @@ import { SetMetadata } from '@nestjs/common';
  * - `tools:call`: list, search and call tools on the MCP host; read its own
  *   free quota and tool access.
  * - `payments`: take part in paid calls (bind a payment key, issue voucher
- *   seqs, settle its own debts). Without it a session is free-only, exactly
+ *   seqs, settle its own debts), create a deposit intent and report its own
+ *   wallet-broadcast deposit. It never signs or broadcasts a wallet transfer.
+ *   Without it a session is free-only, exactly
  *   like a third-party OAuth grant.
  * - `activity:read`: read its own money and activity (balance, calls,
- *   receipts, verdicts, spend policy, its own bad-result reports).
+ *   receipts, individual deposits, verdicts, spend policy, its own bad-result reports).
  * - `reports:write`: report a bad result, or withdraw a report.
  *
  * A person's session is not limited by scopes. Everything a route does not

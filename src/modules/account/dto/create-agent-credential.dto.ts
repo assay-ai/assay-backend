@@ -34,7 +34,9 @@ export class CreateAgentCredentialBodyDto {
       'What the key may do. Omitted: `tools:call payments activity:read`. ' +
       '`payments` needs `tools:call`. `reports:write` is never on unless asked for. ' +
       'A route not open to any scope (audit log, notifications, dashboards, toolset ' +
-      'management, deposits, the provider console…) refuses every key.',
+      'management, facilitator deposit settlement, the provider console…) refuses every key. ' +
+      'payments permits creating and reporting the agent’s own wallet-broadcast deposits; ' +
+      'activity:read permits polling their status.',
   })
   @IsOptional()
   @IsArray()

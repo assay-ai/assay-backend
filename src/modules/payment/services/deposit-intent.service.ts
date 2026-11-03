@@ -51,8 +51,16 @@ export class DepositIntentService {
     return this.findById(input.organizationId, row.id as string);
   }
 
-  async findById(organizationId: string, intentId: string): Promise<DepositIntent> {
-    const row = await this.deposits.findOneBy({ organizationId, id: intentId });
+  async findById(
+    organizationId: string,
+    intentId: string,
+    agentId?: string,
+  ): Promise<DepositIntent> {
+    const row = await this.deposits.findOneBy({
+      organizationId,
+      id: intentId,
+      ...(agentId === undefined ? {} : { agentId }),
+    });
     if (!row) {
       throw PaymentErrors.depositIntentNotFound({ id: intentId });
     }

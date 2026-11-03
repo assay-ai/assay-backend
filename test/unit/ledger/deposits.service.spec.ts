@@ -129,7 +129,9 @@ describe('DepositsService.list', () => {
 
 describe('DepositsService.getOne', () => {
   function withRow(row: ReturnType<typeof depositRow> | null) {
-    const findOneBy = jest.fn().mockResolvedValue(row);
+    const findOneBy = jest.fn(async (where: Record<string, unknown>) =>
+      row && Object.entries(where).every(([key, value]) => row[key] === value) ? row : null,
+    );
     const { entries, depositResolutions } = journal({ 'dep-1': 'DEPOSIT_CONFIRM' });
     const service = new DepositsService(
       { findOneBy } as unknown as DepositIntentRepository,
@@ -162,6 +164,36 @@ describe('DepositsService.getOne', () => {
       errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
     });
   });
+
+  it('returns finality for the calling agent and scopes the read before resolving it', async () => {
+    const { service, findOneBy } = withRow(
+      depositRow({ status: DepositIntentStatus.SETTLED, settledAmount: '5000000' }),
+    );
+
+    expect((await service.getOne(ORG, 'dep-1', 'agent-1')).finality).toBe(
+      DepositFinality.CONFIRMED,
+    );
+    expect(findOneBy).toHaveBeenCalledWith({
+      organizationId: ORG,
+      id: 'dep-1',
+      agentId: 'agent-1',
+    });
+  });
+
+  it.each([
+    [ORG, 'agent-2'],
+    ['other-organization', 'agent-1'],
+  ])(
+    'does not disclose a foreign deposit or its finality for org=%s agent=%s',
+    async (org, agentId) => {
+      const { service, depositResolutions } = withRow(depositRow());
+
+      await expect(service.getOne(org, 'dep-1', agentId)).rejects.toMatchObject({
+        errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
+      });
+      expect(depositResolutions).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('DepositsService finality', () => {

@@ -290,8 +290,11 @@ export class DepositService {
     organizationId: string,
     intentId: string,
     transaction: TxRef,
+    agentId?: string,
   ): Promise<DepositIntent> {
-    const intent = await this.deposits.findById(organizationId, intentId);
+    // Scope the read before the settled fast path: completed intents must
+    // not disclose another agent's deposit either.
+    const intent = await this.deposits.findById(organizationId, intentId, agentId);
 
     if (intent.status === DepositIntentStatus.SETTLED) {
       return intent;

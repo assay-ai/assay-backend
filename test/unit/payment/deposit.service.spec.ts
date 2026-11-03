@@ -924,6 +924,75 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     });
   }
 
+  it('allows a scoped caller to report its own deposit and keeps a retry single-use', async () => {
+    const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+    const intent = await createdIntent(harness);
+
+    const first = await harness.service.settleDepositByBroadcast(
+      ORGANIZATION_ID,
+      intent.id,
+      TX_HASH,
+      AGENT_ID,
+    );
+    const again = await harness.service.settleDepositByBroadcast(
+      ORGANIZATION_ID,
+      intent.id,
+      TX_HASH,
+      AGENT_ID,
+    );
+
+    expect(first.status).toBe(DepositIntentStatus.SETTLED);
+    expect(again.id).toBe(first.id);
+    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(harness.facilitator.settle).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'hides another agent deposit before chain or ledger work, including settled=%s',
+    async (settled) => {
+      const adapter = selfBroadcastAdapter();
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+      if (settled) {
+        await harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH);
+      }
+      jest.clearAllMocks();
+
+      await expectErrorCodeAsync(
+        () =>
+          harness.service.settleDepositByBroadcast(
+            ORGANIZATION_ID,
+            intent.id,
+            TX_HASH,
+            '44444444-4444-4444-4444-444444444444',
+          ),
+        PaymentErrorCode.PAYMENT_DEPOSIT_NOT_FOUND,
+      );
+      expect(adapter.observeTransfer).not.toHaveBeenCalled();
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      expect(harness.facilitator.settle).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not widen organization scope when the agent id matches', async () => {
+    const adapter = selfBroadcastAdapter();
+    const harness = buildHarness({ adapter });
+    const intent = await createdIntent(harness);
+
+    await expectErrorCodeAsync(
+      () =>
+        harness.service.settleDepositByBroadcast(
+          '55555555-5555-5555-5555-555555555555',
+          intent.id,
+          TX_HASH,
+          AGENT_ID,
+        ),
+      PaymentErrorCode.PAYMENT_DEPOSIT_NOT_FOUND,
+    );
+    expect(adapter.observeTransfer).not.toHaveBeenCalled();
+    expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+  });
+
   it('reads the transfer off the chain, credits DEPOSIT_PENDING once, and reaches SETTLED — no facilitator', async () => {
     const adapter = selfBroadcastAdapter();
     const harness = buildHarness({ adapter });

@@ -130,22 +130,25 @@ function buildHarness(overrides?: { extra?: Record<string, unknown> }) {
 }
 
 describe('DepositsController.create', () => {
-  it('takes every identity field from the session and only the amount from the body', async () => {
-    const { controller, deposits } = buildHarness();
+  it.each([McpCallerKind.CONFIG, McpCallerKind.AGENT])(
+    'takes identity from the %s session and only the amount from the body',
+    async (callerKind) => {
+      const { controller, deposits } = buildHarness();
 
-    await controller.create(evmSession(), { amount: '5000000' });
+      await controller.create({ ...evmSession(), callerKind }, { amount: '5000000' });
 
-    // Not `objectContaining`: the assertion is as much about what is *absent*
-    // — there is no field on this call the request body could have supplied.
-    expect(deposits.createDeposit).toHaveBeenCalledTimes(1);
-    expect(deposits.createDeposit).toHaveBeenCalledWith({
-      organizationId: ORGANIZATION_ID,
-      agentId: AGENT_ID,
-      agentAccount: EVM_AGENT_ACCOUNT,
-      chainId: ROBINHOOD_TESTNET,
-      amount: MoneyUtil.of(5_000_000n, USDG, 6),
-    });
-  });
+      // Not `objectContaining`: the assertion is as much about what is *absent*
+      // — there is no field on this call the request body could have supplied.
+      expect(deposits.createDeposit).toHaveBeenCalledTimes(1);
+      expect(deposits.createDeposit).toHaveBeenCalledWith({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        agentAccount: EVM_AGENT_ACCOUNT,
+        chainId: ROBINHOOD_TESTNET,
+        amount: MoneyUtil.of(5_000_000n, USDG, 6),
+      });
+    },
+  );
 
   it('hands the builder the intent’s scale and the session’s chain, and returns its answer', async () => {
     const { controller, requirementsBuilder } = buildHarness();
@@ -323,6 +326,7 @@ describe('DepositsController.broadcast', () => {
       ORGANIZATION_ID,
       DEPOSIT_ID,
       hash,
+      undefined,
     );
     expect(response).toEqual({
       id: DEPOSIT_ID,
@@ -330,5 +334,22 @@ describe('DepositsController.broadcast', () => {
       settledAmount: MoneyUtil.of(5_000_000n, USDC, 6),
       chainTxRef: hash,
     });
+  });
+
+  it('binds an agent credential to its own agent when reporting a wallet transaction', async () => {
+    const { controller, deposits } = buildHarness();
+    const hash = `0x${'cd'.repeat(32)}`;
+    deposits.settleDepositByBroadcast.mockResolvedValue(intent());
+
+    await controller.broadcast(session({ callerKind: McpCallerKind.AGENT }), DEPOSIT_ID, {
+      transactionHash: hash,
+    });
+
+    expect(deposits.settleDepositByBroadcast).toHaveBeenCalledWith(
+      ORGANIZATION_ID,
+      DEPOSIT_ID,
+      hash,
+      AGENT_ID,
+    );
   });
 });

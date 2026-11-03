@@ -55,8 +55,12 @@ export class DepositsService {
    * polls instead of `GET /balances`. Another organization's id is the same
    * 404 as an unknown one.
    */
-  async getOne(organizationId: string, depositId: string): Promise<DepositDto> {
-    const row = await this.deposits.findOneBy({ organizationId, id: depositId });
+  async getOne(organizationId: string, depositId: string, agentId?: string): Promise<DepositDto> {
+    const row = await this.deposits.findOneBy({
+      organizationId,
+      id: depositId,
+      ...(agentId === undefined ? {} : { agentId }),
+    });
     if (!row) {
       throw PaymentErrors.depositIntentNotFound({ id: depositId });
     }
