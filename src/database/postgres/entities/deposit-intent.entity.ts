@@ -12,6 +12,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Entity('deposit_intents')
 @Index('idx_deposit_intents_status_expires_at', ['status', 'expiresAt'])
 @Index('idx_deposit_intents_agent', ['organizationId', 'agentId'])
+@Index('idx_deposit_intents_account_created', ['agentAccount', 'createdAt'])
 export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** One of `DepositIntentStatus`; the CHECK constraint holds the enum. */
   @Column({ name: 'status', type: 'varchar', length: 16 })
@@ -49,6 +50,16 @@ export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /** The settlement transaction signature, once known. */
   @Column({ name: 'chain_tx_ref', type: 'varchar', length: 256, nullable: true })
   chainTxRef: string | null;
+
+  /**
+   * The transaction this intent is settling on, recorded when the intent
+   * moves to `SETTLING` (buyer broadcast) or right after the facilitator
+   * submitted it. Lets the finality job resume an intent whose request died
+   * before the credit (`DepositService.resumeStuckSettling`). Not a claim:
+   * single use is `chain_tx_ref` and the ledger's unique indexes.
+   */
+  @Column({ name: 'submitted_tx_ref', type: 'varchar', length: 256, nullable: true })
+  submittedTxRef: string | null;
 
   /** Short — bounded by the SVM blockhash the client's transaction is signed over. */
   @Column({ name: 'expires_at', type: 'timestamptz' })

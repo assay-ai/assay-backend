@@ -97,15 +97,27 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
     txRef: string,
     account: string,
   ): Promise<{ readonly intentId: string | null } | null> {
+    // One arm per entry type, each matching a partial index's predicate
+    // exactly (`uq_ledger_entries_deposit_pending_account`,
+    // `idx_ledger_entries_deposit_legacy_account`). An `IN (...)` over both
+    // types matched neither and read every ledger row of the account.
     const rows = (await this.manager.query(
-      `SELECT "id"::text AS "intentId"
-         FROM "deposit_intents"
-        WHERE "chain_tx_ref" = $1 AND "agent_account" = $2
+      `(SELECT "id"::text AS "intentId"
+          FROM "deposit_intents"
+         WHERE "chain_tx_ref" = $1 AND "agent_account" = $2
+         LIMIT 1)
        UNION ALL
-       SELECT "intent_id"::text AS "intentId"
-         FROM "ledger_entries"
-        WHERE "chain_tx_ref" = $1 AND "account_id" = $2
-          AND "entry_type" IN ('DEPOSIT_PENDING', 'DEPOSIT')
+       (SELECT "intent_id"::text AS "intentId"
+          FROM "ledger_entries"
+         WHERE "chain_tx_ref" = $1 AND "account_id" = $2
+           AND "entry_type" = 'DEPOSIT_PENDING' AND "chain_tx_ref" IS NOT NULL
+         LIMIT 1)
+       UNION ALL
+       (SELECT "intent_id"::text AS "intentId"
+          FROM "ledger_entries"
+         WHERE "chain_tx_ref" = $1 AND "account_id" = $2
+           AND "entry_type" = 'DEPOSIT' AND "chain_tx_ref" IS NOT NULL
+         LIMIT 1)
        LIMIT 1`,
       [txRef, account],
     )) as { intentId: string | null }[];
@@ -113,19 +125,65 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
   }
 
   /**
-   * How many deposits this agent has open: `SETTLING`, or `CREATED` and not
-   * yet past its deadline (an expired `CREATED` row waiting for the sweep no
-   * longer counts). The abuse cap on `POST /deposits`.
+   * How many deposits this agent has open: `CREATED` or `SETTLING`, still
+   * inside the intent's lifetime. An expired `CREATED` row waiting for the
+   * sweep, and a `SETTLING` row older than its lifetime (stuck, resumed by the
+   * finality job), no longer count. The abuse cap on `POST /deposits`.
    */
   async countOpenForAgent(organizationId: string, agentId: string, now: Date): Promise<number> {
     return this.createQueryBuilder('intent')
       .where('intent.organizationId = :organizationId', { organizationId })
       .andWhere('intent.agentId = :agentId', { agentId })
-      .andWhere(
-        "(intent.status = 'SETTLING' OR (intent.status = 'CREATED' AND intent.expiresAt > :now))",
-        { now },
-      )
+      .andWhere("intent.status IN ('CREATED', 'SETTLING')")
+      .andWhere('intent.expiresAt > :now', { now })
       .getCount();
+  }
+
+  /**
+   * When the earliest deposit intent of this buyer account that never settled
+   * (`CREATED`, `EXPIRED`, `FAILED`) was created, among those created at or
+   * after `since`. The broadcast time bound: a transaction mined inside any
+   * such intent's life is a deposit made through an intent. Cross-tenant on
+   * the account, like the claim lookup (an account belongs to one
+   * organization's escrow anyway). Served by `idx_deposit_intents_account_created`.
+   */
+  async earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    const rows = (await this.manager.query(
+      `SELECT min("created_at") AS "at"
+         FROM "deposit_intents"
+        WHERE "agent_account" = $1
+          AND "created_at" >= $2
+          AND "status" IN ('CREATED', 'EXPIRED', 'FAILED')`,
+      [account, since],
+    )) as { at: Date | string | null }[];
+    const at = rows[0]?.at ?? null;
+    return at === null ? null : new Date(at);
+  }
+
+  /**
+   * `SETTLING` intents not touched since `before`: no live request owns them
+   * any more. Cross-tenant, for the finality job.
+   */
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
+    return this.createQueryBuilder('intent')
+      .where('intent.status = :status', { status: 'SETTLING' })
+      .andWhere('intent.updatedAt < :before', { before })
+      .orderBy('intent.updatedAt', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /** Records the transaction a `SETTLING` intent is settling on. */
+  async recordSubmittedTx(
+    organizationId: string,
+    intentId: string,
+    txRef: string,
+  ): Promise<number> {
+    const result = await this.update(
+      { organizationId, id: intentId, status: 'SETTLING' },
+      { submittedTxRef: txRef },
+    );
+    return result.affected ?? 0;
   }
 
   /**

@@ -12,6 +12,7 @@ import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migration
 import { DepositFinalityResolution1758100000001 } from '@database/postgres/migrations/1758100000001-deposit-finality-resolution';
 import { DepositResolutionUniqueness1758200000000 } from '@database/postgres/migrations/1758200000000-deposit-resolution-uniqueness';
 import { DepositPendingUniqueness1762400000110 } from '@database/postgres/migrations/1762400000110-deposit-pending-uniqueness';
+import { DepositClaimPerAccount1793491200000 } from '@database/postgres/migrations/1793491200000-deposit-claim-per-account';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
@@ -168,7 +169,10 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
       DepositFinalityResolution1758100000001,
       DepositResolutionUniqueness1758200000000,
       DepositPendingUniqueness1762400000110,
+      // Non-transactional (`CREATE INDEX CONCURRENTLY`): needs `each`.
+      DepositClaimPerAccount1793491200000,
     ],
+    migrationsTransactionMode: 'each',
     synchronize: false,
     logging: process.env.DEPOSIT_TEST_LOGGING === 'true',
     extra: { max: TEST_POOL_SIZE },
@@ -289,7 +293,6 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     escrowReader,
     escrows,
     ledger,
-    coverage,
   );
   const finality = new DepositFinalityService(repository, registry, escrowReader, ledger, coverage);
 

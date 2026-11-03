@@ -110,10 +110,22 @@ describe('uq_ledger_entries_deposit_*_account (claim per transaction and buyer)'
     );
   });
 
-  it('builds the new index before dropping the old one, so the guarantee never lapses', () => {
+  it('builds both new indexes before dropping either old one, so the guarantee never lapses', () => {
     const up = sql.slice(sql.indexOf('async up('), sql.indexOf('async down('));
-    expect(up.indexOf('CREATE UNIQUE INDEX CONCURRENTLY')).toBeLessThan(
-      up.indexOf('DROP INDEX CONCURRENTLY IF EXISTS "${index.old}"'),
-    );
+    const create = up.indexOf('CREATE UNIQUE INDEX CONCURRENTLY');
+    const drop = up.indexOf('DROP INDEX CONCURRENTLY IF EXISTS "${index.old}"');
+    expect(create).toBeLessThan(drop);
+    // The drops run in their own loop, after the loop that creates both.
+    const loops = [...up.matchAll(/for \(const index of UNIQUE_INDEXES\)/g)].map((m) => m.index);
+    expect(loops).toHaveLength(2);
+    expect(loops[0]).toBeLessThan(create);
+    expect(create).toBeLessThan(loops[1]!);
+    expect(loops[1]!).toBeLessThan(drop);
+  });
+
+  it('indexes the claim lookup over legacy DEPOSIT rows and the time-bound read', () => {
+    expect(sql).toContain('idx_ledger_entries_deposit_legacy_account');
+    expect(sql).toContain(`"entry_type" = 'DEPOSIT' AND "chain_tx_ref" IS NOT NULL`);
+    expect(sql).toContain('ON "deposit_intents" ("agent_account", "created_at")');
   });
 });
