@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, SelectQueryBuilder } from 'typeorm';
+import { DataSource, IsNull, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { DepositIntentEntity } from '../entities/deposit-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -65,16 +65,133 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    * lower-cased to match. Deliberately cross-tenant: the escrow walk is a
    * platform job.
    */
-  async findCreditedTxRefs(txRefs: readonly string[]): Promise<Set<string>> {
+  async findCreditedTxRefs(account: string, txRefs: readonly string[]): Promise<Set<string>> {
     if (txRefs.length === 0) return new Set();
+    // Per account: one transaction can fund several buyers, and each buyer's
+    // share is claimed on its own (see `findClaimOfTxRef`).
     const rows = (await this.manager.query(
       `SELECT DISTINCT "chain_tx_ref" AS "ref"
          FROM "deposit_intents"
         WHERE "status" IN ('SETTLING', 'SETTLED')
-          AND "chain_tx_ref" = ANY($1)`,
-      [txRefs.map((ref) => ref.toLowerCase())],
+          AND "agent_account" = $1
+          AND "chain_tx_ref" = ANY($2)`,
+      [account, txRefs.map((ref) => ref.toLowerCase())],
     )) as { ref: string }[];
     return new Set(rows.map((row) => row.ref));
+  }
+
+  /**
+   * The deposit intent that already credited `account` from this transaction,
+   * in ANY organization, or the bare fact that a deposit ledger entry did
+   * (`intentId: null` for a credit with no intent row).
+   *
+   * The claim unit is the pair (transaction, buyer account): a batch
+   * transaction that funds two buyers lets each claim only its own events,
+   * once. Only a SUCCESSFUL credit is found here — `chain_tx_ref` is written on
+   * an intent only with its settled amount, and a ledger entry only when
+   * the credit is written — so a failed, refused or retried claim never
+   * reserves a hash someone else can then not use. Cross-tenant on purpose:
+   * single use is a global property (the unique indexes are global too).
+   */
+  async findClaimOfTxRef(
+    txRef: string,
+    account: string,
+  ): Promise<{ readonly intentId: string | null } | null> {
+    // One arm per entry type, each matching a partial index's predicate
+    // exactly (`uq_ledger_entries_deposit_pending_account`,
+    // `idx_ledger_entries_deposit_legacy_account`). An `IN (...)` over both
+    // types matched neither and read every ledger row of the account.
+    const rows = (await this.manager.query(
+      `(SELECT "id"::text AS "intentId"
+          FROM "deposit_intents"
+         WHERE "chain_tx_ref" = $1 AND "agent_account" = $2
+         LIMIT 1)
+       UNION ALL
+       (SELECT "intent_id"::text AS "intentId"
+          FROM "ledger_entries"
+         WHERE "chain_tx_ref" = $1 AND "account_id" = $2
+           AND "entry_type" = 'DEPOSIT_PENDING' AND "chain_tx_ref" IS NOT NULL
+         LIMIT 1)
+       UNION ALL
+       (SELECT "intent_id"::text AS "intentId"
+          FROM "ledger_entries"
+         WHERE "chain_tx_ref" = $1 AND "account_id" = $2
+           AND "entry_type" = 'DEPOSIT' AND "chain_tx_ref" IS NOT NULL
+         LIMIT 1)
+       LIMIT 1`,
+      [txRef, account],
+    )) as { intentId: string | null }[];
+    return rows.length > 0 ? { intentId: rows[0].intentId ?? null } : null;
+  }
+
+  /**
+   * How many deposits this agent has open: `CREATED` or `SETTLING`, still
+   * inside the intent's lifetime. An expired `CREATED` row waiting for the
+   * sweep, and a `SETTLING` row older than its lifetime (stuck, resumed by the
+   * finality job), no longer count. The abuse cap on `POST /deposits`.
+   */
+  async countOpenForAgent(organizationId: string, agentId: string, now: Date): Promise<number> {
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('intent.agentId = :agentId', { agentId })
+      .andWhere("intent.status IN ('CREATED', 'SETTLING')")
+      .andWhere('intent.expiresAt > :now', { now })
+      .getCount();
+  }
+
+  /**
+   * When the earliest deposit intent of this buyer account that never settled
+   * (`CREATED`, `EXPIRED`, `FAILED`) was created, among those created at or
+   * after `since`. The broadcast time bound: a transaction mined inside any
+   * such intent's life is a deposit made through an intent. Cross-tenant on
+   * the account, like the claim lookup (an account belongs to one
+   * organization's escrow anyway). Served by `idx_deposit_intents_account_created`.
+   */
+  async earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    const rows = (await this.manager.query(
+      `SELECT min("created_at") AS "at"
+         FROM "deposit_intents"
+        WHERE "agent_account" = $1
+          AND "created_at" >= $2
+          AND "status" IN ('CREATED', 'EXPIRED', 'FAILED')`,
+      [account, since],
+    )) as { at: Date | string | null }[];
+    const at = rows[0]?.at ?? null;
+    return at === null ? null : new Date(at);
+  }
+
+  /**
+   * `SETTLING` intents not touched since `before`: no live request owns them
+   * any more. Cross-tenant, for the finality job.
+   */
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
+    const stale = (withTx: boolean, take: number) =>
+      this.createQueryBuilder('intent')
+        .where('intent.status = :status', { status: 'SETTLING' })
+        .andWhere('intent.updatedAt < :before', { before })
+        .andWhere(withTx ? 'intent.submittedTxRef IS NOT NULL' : 'intent.submittedTxRef IS NULL')
+        .orderBy('intent.updatedAt', 'ASC')
+        .limit(take)
+        .getMany();
+    // Rows with a recorded transaction first: rows without one are left for
+    // operator review once given up (never failed blindly), so they would
+    // otherwise hold the head of the batch for good.
+    const withTx = await stale(true, limit);
+    if (withTx.length >= limit) return withTx;
+    return [...withTx, ...(await stale(false, limit - withTx.length))];
+  }
+
+  /** Records the transaction a `SETTLING` intent is settling on. */
+  async recordSubmittedTx(
+    organizationId: string,
+    intentId: string,
+    txRef: string,
+  ): Promise<number> {
+    const result = await this.update(
+      { organizationId, id: intentId, status: 'SETTLING' },
+      { submittedTxRef: txRef },
+    );
+    return result.affected ?? 0;
   }
 
   /**
@@ -96,18 +213,71 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    *
    * Deliberately cross-tenant, same reasoning as `findDueForExpiry`.
    */
-  async findSettledAwaitingFinality(limit: number): Promise<SettledDepositIntent[]> {
-    return this.createQueryBuilder('intent')
-      .select('intent.organizationId', 'organizationId')
-      .addSelect('intent.id', 'id')
-      .addSelect('intent.chainId', 'chainId')
-      .addSelect('intent.chainTxRef', 'chainTxRef')
-      .where('intent.status = :status', { status: 'SETTLED' })
-      .andWhere('intent.chainTxRef IS NOT NULL')
-      .andWhere('intent.finalityResolvedAt IS NULL')
-      .orderBy('intent.updatedAt', 'ASC')
-      .limit(limit)
-      .getRawMany<SettledDepositIntent>();
+  async findSettledAwaitingFinality(
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<SettledDepositIntent[]> {
+    // H-1 (round 3): a deposit found uncovered carries `finality_next_check_at`
+    // and is skipped until then (exponential back-off, capped), and even when
+    // due it sorts after every deposit that was never found uncovered. So
+    // stuck rows cannot hold the head of the queue and starve other buyers'
+    // confirmations, and each one costs a bounded number of reads per hour.
+    const rows = (await this.manager.query(
+      `SELECT "organization_id" AS "organizationId", "id", "chain_id" AS "chainId",
+              "chain_tx_ref" AS "chainTxRef",
+              "finality_uncovered_since" AS "uncoveredSince"
+         FROM "deposit_intents"
+        WHERE "status" = 'SETTLED'
+          AND "chain_tx_ref" IS NOT NULL
+          AND "finality_resolved_at" IS NULL
+          AND ("finality_next_check_at" IS NULL OR "finality_next_check_at" <= $1)
+        ORDER BY ("finality_uncovered_since" IS NOT NULL) ASC, "updated_at" ASC
+        LIMIT $2`,
+      [now, limit],
+    )) as (Omit<SettledDepositIntent, 'uncoveredSince'> & {
+      uncoveredSince: Date | string | null;
+    })[];
+    return rows.map((row) => ({
+      ...row,
+      uncoveredSince: row.uncoveredSince === null ? null : new Date(row.uncoveredSince),
+    }));
+  }
+
+  /**
+   * Records that the finality sweep found this deposit uncovered: since when
+   * (kept from the first time) and when to look again. Queue marker only.
+   */
+  async markFinalityUncovered(
+    organizationId: string,
+    intentId: string,
+    since: Date,
+    nextCheckAt: Date,
+  ): Promise<number> {
+    const result = await this.update(
+      { organizationId, id: intentId, finalityResolvedAt: IsNull() },
+      { finalityUncoveredSince: since, finalityNextCheckAt: nextCheckAt },
+    );
+    return result.affected ?? 0;
+  }
+
+  /**
+   * Whether this buyer account has a settled deposit the finality sweep has
+   * held uncovered since `before` or earlier: an unresolved escrow shortfall.
+   * `POST /deposits` refuses a new intent then (H-1 pre-flight). Cross-tenant
+   * on the account, like the claim lookup.
+   */
+  async hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    const rows = (await this.manager.query(
+      `SELECT 1
+         FROM "deposit_intents"
+        WHERE "agent_account" = $1
+          AND "status" = 'SETTLED'
+          AND "finality_resolved_at" IS NULL
+          AND "finality_uncovered_since" <= $2
+        LIMIT 1`,
+      [account, before],
+    )) as unknown[];
+    return rows.length > 0;
   }
 
   /**
@@ -147,4 +317,6 @@ export interface SettledDepositIntent {
   readonly id: string;
   readonly chainId: string;
   readonly chainTxRef: string;
+  /** When the sweep first found it uncovered by the escrow; `null` if never. */
+  readonly uncoveredSince: Date | null;
 }

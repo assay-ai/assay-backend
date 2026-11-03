@@ -40,6 +40,17 @@ export const CLAIMED_WITHDRAWAL_BOOKING_BATCH = 100;
  * the rest is logged; an entry of zero still books the claim, so it is not
  * read again. A held remainder is an `ESCROW_SHORTFALL` the reconciler
  * already reports.
+ *
+ * **A remainder taken out of a pending deposit is not lost (H-1).** If the
+ * claim paid out money the ledger still has as `pending` (a deposit credited
+ * but not final yet), the books now claim more than the escrow holds. Nothing
+ * is recorded here for it, because nothing has to be: every deposit credit is
+ * checked against the escrow balance READ LIVE from the chain, which already
+ * reflects this claim — `DepositService` before writing `DEPOSIT_PENDING`, and
+ * `DepositFinalityService` before `DEPOSIT_CONFIRM`, which refuses to make the
+ * pending money spendable and rejects it once the booking grace has passed.
+ * So no later credit can exceed what the escrow holds, whatever this pass
+ * could not debit.
  */
 @Injectable()
 export class ClaimedWithdrawalBooker {
@@ -71,9 +82,14 @@ export class ClaimedWithdrawalBooker {
         const available = BigInt(balance.available.amount);
         const debit = claim.amount < available ? claim.amount : available;
         if (debit < claim.amount) {
+          const pending = BigInt(balance.pending?.amount ?? '0');
           this.logger.warn(
             `claim ${claim.ref} of ${account}: paid ${claim.amount}, the books have ` +
-              `${available} available; ${claim.amount - debit} was not on them as available`,
+              `${available} available; ${claim.amount - debit} was not on them as available` +
+              (pending > 0n
+                ? ` (${pending} is pending: the finality pass will not confirm what the ` +
+                  `escrow no longer covers)`
+                : ''),
           );
         }
         await this.ledger.appendNow({

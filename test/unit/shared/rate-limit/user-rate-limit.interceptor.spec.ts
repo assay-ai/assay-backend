@@ -514,6 +514,7 @@ describe('UserRateLimitInterceptor with Redis', () => {
         `rate:user:heavy:/balances:person:${ORG}:agent-alice:${index}`,
         `rate:user:read:person:${ORG}:agent-alice:${index}`,
         `rate:user:deposit:acct:${person().session.agentAccount}:${index}`,
+        `rate:user:deposit-caller:person:${ORG}:agent-alice:${index}`,
         `rate:user:read:cred:cred-5:${index}`,
       ].sort(),
     );
@@ -546,6 +547,33 @@ describe('UserRateLimitInterceptor with Redis', () => {
       request('POST', '/toolsets'),
     );
     expect(statuses.slice(0, -1).every((status) => status === 200)).toBe(true);
+    expect(statuses.at(-1)).toBe(429);
+  });
+
+  // Low-3 / fix #4: one key of an account cannot use up the whole account's
+  // deposit budget, so the person (and other keys) can still deposit.
+  it('limits deposit creation per credential within the per-account window', async () => {
+    const { interceptor } = limiter();
+    const perCaller = ROUTE_RULES['POST /deposits'].perCaller!.limit;
+    expect(perCaller).toBeLessThan(ROUTE_RULES['POST /deposits'].limit);
+
+    const keyStatuses = await sendMany(interceptor, perCaller + 1, () =>
+      request('POST', '/deposits', apiKey('cred-loop', 'agent-alice')),
+    );
+    expect(keyStatuses.slice(0, -1).every((status) => status === 200)).toBe(true);
+    expect(keyStatuses.at(-1)).toBe(429);
+
+    expect((await send(interceptor, request('POST', '/deposits'))).status).toBe(200);
+  });
+
+  it('limits deposit reports per credential too', async () => {
+    const { interceptor } = limiter();
+    const rule = ROUTE_RULES['POST /deposits/:depositId/broadcast'];
+    expect(rule.perCaller?.limit).toBeLessThan(rule.limit);
+
+    const statuses = await sendMany(interceptor, rule.perCaller!.limit + 1, () =>
+      request('POST', '/deposits/:depositId/broadcast', apiKey('cred-loop', 'agent-alice')),
+    );
     expect(statuses.at(-1)).toBe(429);
   });
 

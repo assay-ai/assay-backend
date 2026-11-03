@@ -131,17 +131,35 @@ interface Stub {
   readonly latestBlock: { number: bigint };
 }
 
+const BLOCK_TIMESTAMP = 1_800_000_000n;
+
 function stubClient(
-  overrides: { receipt?: EvmTransactionReceipt | null; escrow?: unknown } = {},
+  overrides: {
+    receipt?: EvmTransactionReceipt | null;
+    escrow?: unknown;
+    receiptError?: Error;
+  } = {},
 ): Stub {
   const finalizedBlock = { number: 100n as bigint | null };
   const latestBlock = { number: 100n };
   const client: EvmReadClient = {
-    getTransactionReceipt: async ({ hash }) =>
-      hash === (SETTLED_HASH as string)
+    getTransactionReceipt: async ({ hash }) => {
+      if (overrides.receiptError) throw overrides.receiptError;
+      return hash === (SETTLED_HASH as string)
         ? (overrides.receipt ?? SETTLED_RECEIPT)
-        : Promise.reject(new Error('TransactionReceiptNotFoundError')),
-    getBlock: async () => finalizedBlock,
+        : Promise.reject(
+            Object.assign(
+              new Error(`Transaction receipt with hash "${hash}" could not be found.`),
+              {
+                name: 'TransactionReceiptNotFoundError',
+              },
+            ),
+          );
+    },
+    getBlock: async (args) =>
+      'blockNumber' in args
+        ? { number: args.blockNumber, timestamp: BLOCK_TIMESTAMP }
+        : finalizedBlock,
     getBlockNumber: async () => latestBlock.number,
     readContract: async () => overrides.escrow ?? ESCROW_REPLY,
   };
@@ -636,6 +654,84 @@ describe('EvmChainAdapter observeTransfer', () => {
     await expect(
       adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
     ).resolves.not.toBeNull();
+  });
+});
+
+describe('EvmChainAdapter observeDeposit', () => {
+  it('answers credited, with the time of the block it landed in', async () => {
+    const { adapter } = buildAdapter();
+    await expect(adapter.observeDeposit(intent, SETTLED_HASH)).resolves.toEqual({
+      kind: 'credited',
+      transfer: { amount: DEPOSITED_AMOUNT.toString(), asset: USDG, decimals: 6 },
+      blockTime: new Date(Number(BLOCK_TIMESTAMP) * 1000),
+    });
+  });
+
+  it('answers pending for a hash the chain cannot find yet', async () => {
+    const { adapter } = buildAdapter();
+    await expect(adapter.observeDeposit(intent, UNKNOWN_HASH)).resolves.toEqual({
+      kind: 'pending',
+    });
+  });
+
+  it.each([
+    ['a reverted transaction', { ...SETTLED_RECEIPT, status: 'reverted' as const }],
+    [
+      'a transaction crediting another buyer',
+      {
+        status: 'success' as const,
+        blockNumber: 100n,
+        logs: [depositedLog({ buyer: SOMEBODY_ELSE, funder: BUYER, amount: 5n, balance: 5n })],
+      },
+    ],
+    ['a transaction with no escrow event (an approve)', { ...SETTLED_RECEIPT, logs: [] }],
+  ])('answers no_credit at once for %s', async (_label, receipt) => {
+    const { adapter } = buildAdapter({ receipt });
+    await expect(adapter.observeDeposit(intent, SETTLED_HASH)).resolves.toEqual({
+      kind: 'no_credit',
+    });
+  });
+
+  // L-1 / fix #9: a batch crediting this buyer twice is credited in full, once;
+  // the other buyer's event in the same transaction is not this buyer's.
+  it('sums every Deposited event for this buyer, and only this buyer', async () => {
+    const { adapter } = buildAdapter({
+      receipt: {
+        status: 'success',
+        blockNumber: 100n,
+        logs: [
+          depositedLog({ buyer: BUYER, funder: BUYER, amount: 5n, balance: 5n }),
+          depositedLog({ buyer: SOMEBODY_ELSE, funder: BUYER, amount: 1_000n, balance: 1_000n }),
+          depositedLog({ buyer: BUYER, funder: BUYER, amount: 100n, balance: 105n }),
+        ],
+      },
+    });
+    const read = await adapter.observeDeposit(intent, SETTLED_HASH);
+    expect(read.kind === 'credited' && read.transfer.amount).toBe('105');
+    await expect(adapter.observeTransfer(intent, SETTLED_HASH)).resolves.toMatchObject({
+      amount: '105',
+    });
+  });
+
+  // M-2: an RPC failure is not "no such transaction".
+  it('throws CHAIN_RPC_READ_FAILED when the receipt read fails, from both methods', async () => {
+    const { adapter } = buildAdapter({ receiptError: new Error('503 Service Unavailable') });
+    await expect(adapter.observeDeposit(intent, SETTLED_HASH)).rejects.toMatchObject({
+      errorCode: ChainErrorCode.CHAIN_RPC_READ_FAILED,
+    });
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).rejects.toMatchObject({ errorCode: ChainErrorCode.CHAIN_RPC_READ_FAILED });
+  });
+
+  it('throws when the finalized head cannot be read, instead of reading "not final"', async () => {
+    const { adapter, stub } = buildAdapter();
+    (stub.client as { getBlock: unknown }).getBlock = async () => {
+      throw new Error('timeout');
+    };
+    await expect(
+      adapter.observeTransfer(intent, SETTLED_HASH, { commitment: 'finalized' }),
+    ).rejects.toMatchObject({ errorCode: ChainErrorCode.CHAIN_RPC_READ_FAILED });
   });
 });
 

@@ -143,3 +143,82 @@ export const DEPOSIT_WATCH_CHAIN_ID = 'DEPOSIT_WATCH_CHAIN_ID';
  * this many whole units of the asset.
  */
 export const DEPOSIT_MINIMUM_USD = 5;
+
+/**
+ * How far before the time bound a buyer-broadcast transaction may have been
+ * mined and still be claimed: clock skew between this server and the chain's
+ * block timestamps, plus a wallet that broadcast a moment before the response
+ * creating the intent arrived.
+ *
+ * The bound itself is the earliest unsettled deposit intent of the same buyer
+ * account created within {@link DEPOSIT_TX_BOUND_LOOKBACK_MS} (see
+ * `DepositService.settleDepositByBroadcast`), not only the intent the hash is
+ * reported on: the portal re-reports a hash on a fresh intent after the first
+ * one expired, and that deposit was made inside the first intent. Anything
+ * older is a deposit made outside every intent, and is refused
+ * (`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`).
+ */
+export const DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS = 60 * 1000;
+
+/** How far back an unsettled intent still anchors the time bound above. */
+export const DEPOSIT_TX_BOUND_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Open deposit intents one agent may hold: `CREATED` or `SETTLING`, still
+ * inside the intent's lifetime (`expires_at` in the future). Every intent is a
+ * row on the person's funding screen and a chain read when reported; a
+ * looping key otherwise creates them without bound. An older `SETTLING` row
+ * (stuck, and retried by the finality job) does not lock anyone out.
+ */
+export const DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT = 5;
+
+/**
+ * How long the finality sweep keeps a pending deposit the escrow does not
+ * cover before it raises a WARN alert (`deposit_pending_uncovered`), measured
+ * from the first pass that saw it uncovered. Covers the platform's own booking
+ * lag (a redemption landed before its `HOLD_COMMIT`, a withdrawal claimed
+ * before the booker ran). The deposit is never rejected for being uncovered:
+ * it stays pending (never spendable), is re-checked with a back-off, and
+ * becomes spendable once a check finds the escrow covers it. An operator
+ * decides the rest. Also the grace after which `POST /deposits` refuses a new
+ * intent for that account (`PAYMENT_DEPOSIT_ESCROW_SHORTFALL`).
+ */
+export const DEPOSIT_UNCOVERED_ALERT_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * Back-off of an uncovered deposit in the finality queue (H-1, round 3): the
+ * next check is as far away as the deposit has been uncovered so far, within
+ * these bounds, so the interval doubles from 30 s up to 10 min.
+ */
+export const DEPOSIT_UNCOVERED_BACKOFF_MIN_MS = 30 * 1000;
+export const DEPOSIT_UNCOVERED_BACKOFF_MAX_MS = 10 * 60 * 1000;
+
+/** How long one uncovered deposit's alert stays quiet after paging. */
+export const DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS = 24 * 60 * 60;
+
+/**
+ * A `SETTLING` intent untouched for this long is no longer owned by a live
+ * request (the longest one, observation included, answers within about 30 s)
+ * and is resumed by the finality job (`DepositService.resumeStuckSettling`).
+ */
+export const DEPOSIT_SETTLING_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * A stuck `SETTLING` intent whose transaction the chain still does not know
+ * (no receipt) is failed after this long. Its hash is not burned: a
+ * transaction that lands later is named by the reconciler
+ * (`ESCROW_UNCREDITED_DEPOSIT`) and can be reported again. One that never
+ * recorded a transaction is NOT failed: past this long it is alerted for
+ * operator review (`deposit_settling_needs_review`), since nothing can tell
+ * whether its deposit landed.
+ */
+export const DEPOSIT_SETTLING_GIVE_UP_MS = 60 * 60 * 1000;
+
+/**
+ * Stuck `SETTLING` intents resumed per pass, and how long one resume pass may
+ * run before it stops and leaves the rest to the next (M-1, round 3). Each
+ * read is capped at `DEPOSIT_OBSERVE_TIMEOUT_MS`; during an RPC outage a
+ * bigger batch only multiplies reads against a failing endpoint.
+ */
+export const DEPOSIT_SETTLING_RESUME_BATCH = 20;
+export const DEPOSIT_SETTLING_RESUME_BUDGET_MS = 60 * 1000;

@@ -1181,7 +1181,10 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       amount: '5000000',
       blockNumber: '12',
     });
-    expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(['0xcredited', '0x473e1319']);
+    expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(BUYER_A, [
+      '0xcredited',
+      '0x473e1319',
+    ]);
     expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_uncredited_deposit');
   });
 
@@ -1382,5 +1385,84 @@ describe('ReconciliationService — channel buckets (SPEC-W2 §1.2)', () => {
     const report = await service.reconcile(USDC);
 
     expect(report.findings.map((f) => f.code)).toContain(ReconciliationFindingCode.RESERVES_BREACH);
+  });
+
+  it('stores totalUnpaid in total_liabilities, so the row satisfies difference = vault - total', async () => {
+    const { service, runs } = build({
+      vaultBalance: 15_000_000n,
+      journal: { [LedgerEntryType.DEPOSIT]: 10_000_000n },
+      snapshot: { available: 10_000_000n },
+      channel: { held: 0n, totalUnpaid: 5_000_000n },
+    });
+
+    await service.reconcile(USDC);
+
+    // chk_reconciliation_runs_difference: a row breaking it is never written,
+    // and three unwritten runs freeze withdrawals (RECONCILIATION_BLIND).
+    const row = runs.rows[0];
+    expect(row).toMatchObject({ totalLiabilities: '15000000', difference: '0' });
+    expect(BigInt(row.vaultBalance) - BigInt(row.totalLiabilities)).toBe(BigInt(row.difference));
+  });
+});
+
+/**
+ * A pending deposit credit the buyer's escrow does not hold (withdrawn money
+ * reported in an intent's window, or a ledger already ahead of the chain) is
+ * never spendable: finality holds it and alerts. The vault does not owe it, so
+ * it must not page a reserves breach (which freezes withdrawals); it shows as
+ * escrow drift naming the pending part.
+ */
+describe('ReconciliationService — pending deposit the escrow does not hold', () => {
+  const journal = {
+    [LedgerEntryType.DEPOSIT]: 10_000_000n,
+    [LedgerEntryType.DEPOSIT_PENDING]: 5_000_000n,
+  };
+
+  it('raises no RESERVES_BREACH for it, and names it on the escrow drift', async () => {
+    const { service } = build({
+      vaultBalance: 10_000_000n,
+      journal,
+      snapshot: { available: 10_000_000n, pending: 5_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 10_000_000n, pending: 5_000_000n }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).toEqual([
+      ReconciliationFindingCode.ESCROW_MIRROR_DRIFT,
+    ]);
+    expect(report.severity).toBe(ReconciliationSeverity.WARN);
+    expect(report.findings[0].details).toMatchObject({ pendingNotHeld: '5000000' });
+    expect(report.differenceAtomic).toBe(0n);
+  });
+
+  it('stores total_liabilities net of it, so the row satisfies difference = vault - total', async () => {
+    const { service, runs } = build({
+      vaultBalance: 10_000_000n,
+      journal,
+      snapshot: { available: 10_000_000n, pending: 5_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 10_000_000n, pending: 5_000_000n }],
+    });
+
+    await service.reconcile(USDC);
+
+    const row = runs.rows[0];
+    expect(row).toMatchObject({ totalLiabilities: '10000000', difference: '0' });
+    expect(BigInt(row.vaultBalance) - BigInt(row.totalLiabilities)).toBe(BigInt(row.difference));
+  });
+
+  it('still breaches when the missing money is spendable credit, not pending', async () => {
+    const { service } = build({
+      vaultBalance: 10_000_000n,
+      journal: { [LedgerEntryType.DEPOSIT]: 15_000_000n },
+      snapshot: { available: 15_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 15_000_000n }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).toContain(
+      ReconciliationFindingCode.RESERVES_BREACH,
+    );
   });
 });

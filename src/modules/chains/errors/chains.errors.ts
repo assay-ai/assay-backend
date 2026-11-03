@@ -30,6 +30,7 @@ export enum ChainErrorCode {
   CHAIN_PROGRAM_NOT_CONFIGURED = 'CHAIN_PROGRAM_NOT_CONFIGURED',
   CHAIN_ACCOUNT_LAYOUT_UNEXPECTED = 'CHAIN_ACCOUNT_LAYOUT_UNEXPECTED',
   CHAIN_RPC_REPLY_MALFORMED = 'CHAIN_RPC_REPLY_MALFORMED',
+  CHAIN_RPC_READ_FAILED = 'CHAIN_RPC_READ_FAILED',
   CHAIN_TRANSACTION_FAILED = 'CHAIN_TRANSACTION_FAILED',
   CHAIN_SLASH_RECORD_NOT_FOUND = 'CHAIN_SLASH_RECORD_NOT_FOUND',
   CHAIN_REDEEMER_MISMATCH = 'CHAIN_REDEEMER_MISMATCH',
@@ -272,6 +273,18 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * remedy is another node or another attempt, not a code change. `503`, not
    * `502`, because the edge replaces an origin `502` (`edgeSafeStatus`).
    */
+  /**
+   * A chain read did not answer (transport error, timeout, rate limit, node
+   * 5xx). Not "not found": a caller that folded this into "the transaction is
+   * not there" rejected real deposits on an RPC blip (M-2). `503`: the remedy
+   * is another attempt, and never `502`/`504` (`edgeSafeStatus`).
+   */
+  rpcReadFailed: {
+    code: ChainErrorCode.CHAIN_RPC_READ_FAILED,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `Chain RPC read failed${context?.method ? ` (${context.method})` : ''}; try again`,
+  },
   rpcReplyMalformed: {
     code: ChainErrorCode.CHAIN_RPC_REPLY_MALFORMED,
     statusCode: 503,

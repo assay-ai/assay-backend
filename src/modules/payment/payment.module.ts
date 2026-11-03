@@ -9,6 +9,7 @@ import { AuditLogModule } from '@shared/audit';
 
 import { BuyerDebtSpikeMonitor } from './services/buyer-debt-spike.monitor';
 import { BuyerDebtSchemaCheck } from './services/buyer-debt-schema-check.service';
+import { DepositCoverageService } from './services/deposit-coverage.service';
 import { DepositFinalityService } from './services/deposit-finality.service';
 import { EscrowSeqService } from './services/escrow-seq.service';
 import { DepositIntentExpiryService } from './services/deposit-intent-expiry.service';
@@ -96,6 +97,8 @@ import { VoucherService } from './services/voucher.service';
     // it.
     EscrowSeqService,
     DepositIntentService,
+    // H-1: deposit credits stay backed by the buyer's escrow on chain.
+    DepositCoverageService,
     DepositService,
     DepositFinalityService,
     DepositIntentExpiryService,

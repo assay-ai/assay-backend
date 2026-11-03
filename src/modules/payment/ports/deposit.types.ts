@@ -45,6 +45,11 @@ export interface DepositIntent {
   readonly chainId: ChainId;
   /** The settlement transaction signature, once known. */
   readonly chainTxRef: string | null;
+  /**
+   * The transaction the intent is settling on, known before it is credited
+   * (`SETTLING`). Internal: lets the finality job resume a stuck intent.
+   */
+  readonly submittedTxRef: string | null;
 
   /**
    * Short-lived, and chain-dependent (`DEPOSIT_INTENT_TTL_MS`): 90 s on Solana,
@@ -72,4 +77,5 @@ export interface DepositIntentTransitionContext {
   readonly reason?: string;
   readonly settledAmount?: Money;
   readonly chainTxRef?: string;
+  readonly submittedTxRef?: string;
 }

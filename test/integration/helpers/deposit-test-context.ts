@@ -12,6 +12,7 @@ import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migration
 import { DepositFinalityResolution1758100000001 } from '@database/postgres/migrations/1758100000001-deposit-finality-resolution';
 import { DepositResolutionUniqueness1758200000000 } from '@database/postgres/migrations/1758200000000-deposit-resolution-uniqueness';
 import { DepositPendingUniqueness1762400000110 } from '@database/postgres/migrations/1762400000110-deposit-pending-uniqueness';
+import { DepositClaimPerAccount1793491200000 } from '@database/postgres/migrations/1793491200000-deposit-claim-per-account';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
@@ -37,6 +38,7 @@ import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.se
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { DepositIntentExpiryService } from '@modules/payment/services/deposit-intent-expiry.service';
 import { DepositIntentService } from '@modules/payment/services/deposit-intent.service';
+import { DepositCoverageService } from '@modules/payment/services/deposit-coverage.service';
 import { DepositService } from '@modules/payment/services/deposit.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -167,7 +169,10 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
       DepositFinalityResolution1758100000001,
       DepositResolutionUniqueness1758200000000,
       DepositPendingUniqueness1762400000110,
+      // Non-transactional (`CREATE INDEX CONCURRENTLY`): needs `each`.
+      DepositClaimPerAccount1793491200000,
     ],
+    migrationsTransactionMode: 'each',
     synchronize: false,
     logging: process.env.DEPOSIT_TEST_LOGGING === 'true',
     extra: { max: TEST_POOL_SIZE },
@@ -275,6 +280,11 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     listAll: jest.fn().mockResolvedValue([]),
   } as unknown as BuyerEscrowRepository;
 
+  // The escrow-coverage guard (H-1) has its own unit tests; here the escrow
+  // always covers, so these specs keep testing the database guarantees.
+  const coverage = {
+    check: async () => ({ chain: 0n, claim: 0n, covered: true }),
+  } as unknown as DepositCoverageService;
   const depositService = new DepositService(
     deposits,
     registry,
@@ -284,7 +294,7 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     escrows,
     ledger,
   );
-  const finality = new DepositFinalityService(repository, registry, escrowReader, ledger);
+  const finality = new DepositFinalityService(repository, registry, escrowReader, ledger, coverage);
 
   const context: DepositTestContext = {
     deposits,

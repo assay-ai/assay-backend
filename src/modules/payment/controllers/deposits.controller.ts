@@ -4,7 +4,15 @@ import { ApiBearerAuth, ApiExtraModels, ApiOperation, ApiResponse, ApiTags } fro
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { TxRef } from '@modules/chains/ports/x402.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { auditActorOf } from '@shared/audit';
+import {
+  AgentScope,
+  CurrentSession,
+  depositOwnerScope,
+  isHumanCallerKind,
+  RequireAgentScope,
+  SessionAuthGuard,
+} from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositAssetFor } from '../domain/deposit-asset';
@@ -26,7 +34,7 @@ import {
   DEPOSIT_REQUIREMENTS_BUILDER,
   DepositRequirementsBuilderPort,
 } from '../ports/deposit-requirements.port';
-import { DepositService } from '../services/deposit.service';
+import { DepositCaller, DepositService } from '../services/deposit.service';
 
 /**
  * `POST /api/v1/deposits` and `POST /api/v1/deposits/:id/settle`.
@@ -91,6 +99,7 @@ export class DepositsController {
   ) {}
 
   @Post()
+  @RequireAgentScope(AgentScope.DEPOSITS_WRITE)
   @ApiOperation({
     summary: 'Open a deposit intent and return everything needed to build the transfer',
     description:
@@ -103,7 +112,11 @@ export class DepositsController {
       'purpose; see `SolanaDepositRequirementsDto`.) On `eip155` it carries a **contract call** ' +
       'and deliberately no destination address: `approve(spender, amount)` on `asset`, then ' +
       '`depositFor(buyer, amount)` on `contract`. A plain ERC-20 transfer into that contract ' +
-      'moves the tokens and credits nobody, with no remedy — see `EvmDepositRequirementsDto`.',
+      'moves the tokens and credits nobody, with no remedy — see `EvmDepositRequirementsDto`. ' +
+      'API credentials require the opt-in `deposits:write` scope; the buyer and agent are ' +
+      'taken from the authenticated session, never from the request body. An agent holds at ' +
+      'most 5 open (unexpired `CREATED` or `SETTLING`) deposit intents ' +
+      '(`PAYMENT_DEPOSIT_OPEN_LIMIT`).',
   })
   @ApiResponse({ status: 201, type: CreateDepositResponseDto })
   @ApiResponse({
@@ -117,7 +130,10 @@ export class DepositsController {
     description:
       'This buyer has no linked account on the named chain (`PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED`), ' +
       'the chain offers no paid rail and takes no deposit (`CHAIN_RAIL_NOT_OFFERED`), ' +
-      'or had no escrow open and the chain could not confirm opening one',
+      'had no escrow open and the chain could not confirm opening one, or the agent already ' +
+      'has 5 open deposit intents (`PAYMENT_DEPOSIT_OPEN_LIMIT`), or the account has an ' +
+      'unresolved escrow shortfall: an earlier deposit is held pending because the escrow ' +
+      'holds less than the ledger records; contact support (`PAYMENT_DEPOSIT_ESCROW_SHORTFALL`)',
   })
   @ApiResponse({
     status: 503,
@@ -153,6 +169,7 @@ export class DepositsController {
       agentAccount: account.accountId,
       chainId: account.chainId,
       amount: MoneyUtil.of(body.amount, asset, decimals),
+      caller: depositCallerOf(session),
     });
 
     const requirementsDto = await this.requirementsBuilder.build({
@@ -180,7 +197,11 @@ export class DepositsController {
   })
   @ApiResponse({ status: 201, type: SettledDepositDto })
   @ApiResponse({ status: 402, description: 'The intent expired; request a fresh one' })
-  @ApiResponse({ status: 404, description: 'No such deposit intent in this organization' })
+  @ApiResponse({
+    status: 404,
+    description:
+      "PAYMENT_DEPOSIT_NOT_FOUND — not this agent's (for an API credential) or not in this organization",
+  })
   @ApiResponse({ status: 409, description: 'A settlement for this intent is already in flight' })
   @ApiResponse({
     status: 422,
@@ -203,7 +224,7 @@ export class DepositsController {
     // `PaymentPayload.network` is a branded `ChainId`; the body's is a string.
     // Narrowed rather than cast, and deliberately not replaced with the
     // session's chain — `asPayloadChainId` carries the argument.
-    const intent = await this.deposits.settleDeposit(session.organizationId, depositId, {
+    const intent = await this.deposits.settleDeposit(depositOwnerScope(session), depositId, {
       x402Version: body.x402Version,
       scheme: body.scheme,
       network: asPayloadChainId(body.network),
@@ -219,16 +240,22 @@ export class DepositsController {
   }
 
   @Post(':depositId/broadcast')
+  @RequireAgentScope(AgentScope.DEPOSITS_WRITE)
   @ApiOperation({
     summary: 'Settle a deposit the buyer’s own wallet already broadcast, by its transaction hash',
     description:
       'For wallets that can send a transaction but not sign one without sending it — MetaMask, ' +
       'Rabby and nearly every injected wallet. The buyer sends `approve` and `depositFor` ' +
       'themselves, then posts the `depositFor` hash here. The platform reads the transaction ' +
-      'from the chain and credits only an escrow `Deposited` event crediting this intent’s ' +
-      'buyer for at least the requested amount; a hash already used by another deposit is ' +
-      'refused. Idempotent on an already-`SETTLED` intent. Not offered on chains whose deposits ' +
-      'need the platform as fee payer.',
+      'from the chain and credits the escrow `Deposited` events crediting this intent’s ' +
+      'buyer (summed), if they total at least the requested amount, the transaction was mined ' +
+      'after the intent was created (60 s skew), and the buyer’s escrow on chain still holds ' +
+      'the money. A transaction credits each buyer once, platform-wide. Idempotent on an ' +
+      'already-`SETTLED` intent for the same hash; a different hash is `409`. Every refusal ' +
+      'below except `402` leaves the intent open, so the right (or the same, once mined) hash ' +
+      'can be reported again before it expires. Not offered on chains whose deposits need the ' +
+      'platform as fee payer. API credentials require the opt-in `deposits:write` scope and ' +
+      'may report only deposits belonging to their own agent.',
   })
   @ApiResponse({ status: 201, type: SettledDepositDto })
   @ApiResponse({
@@ -237,13 +264,35 @@ export class DepositsController {
       'This chain settles deposits through the facilitator only, or the hash is not a ' +
       'well-formed transaction hash for the chain (`VALIDATION_FAILED`)',
   })
-  @ApiResponse({ status: 402, description: 'The intent expired; request a fresh one' })
-  @ApiResponse({ status: 409, description: 'The transaction already settled another deposit' })
+  @ApiResponse({
+    status: 402,
+    description:
+      'The intent expired (10 minutes on EVM); open a new one (`PAYMENT_DEPOSIT_EXPIRED`)',
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      "PAYMENT_DEPOSIT_NOT_FOUND — not this agent's (for an API credential) or not in this organization",
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'The transaction already credited this buyer (`PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED`); ' +
+      'the intent is settled by another transaction (`PAYMENT_DEPOSIT_ALREADY_SETTLED`); a report ' +
+      'of this intent is still in flight — poll `GET /deposits/:id` instead of retrying ' +
+      '(`PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION`)',
+  })
   @ApiResponse({
     status: 422,
     description:
-      'No transfer crediting this buyer was found in that transaction; the intent is FAILED ' +
-      '(`PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED`)',
+      'Not observed yet — not mined or not visible yet; report the same hash again ' +
+      '(`PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED`); mined but crediting this buyer nothing ' +
+      '(`PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING`); or mined before the buyer’s earliest open or expired intent ' +
+      '(`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`)',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'The chain could not be read; retry the same hash (`CHAIN_RPC_READ_FAILED`)',
   })
   async broadcast(
     @CurrentSession() session: McpSession,
@@ -251,9 +300,10 @@ export class DepositsController {
     @Body() body: BroadcastDepositBodyDto,
   ): Promise<SettledDepositDto> {
     const intent = await this.deposits.settleDepositByBroadcast(
-      session.organizationId,
+      depositOwnerScope(session),
       depositId,
       body.transactionHash as TxRef,
+      depositCallerOf(session),
     );
 
     return {
@@ -263,4 +313,10 @@ export class DepositsController {
       chainTxRef: intent.chainTxRef,
     };
   }
+}
+
+/** The agent credential behind a deposit action, for its audit row; `null` for a person. */
+function depositCallerOf(session: McpSession): DepositCaller | null {
+  if (isHumanCallerKind(session.callerKind)) return null;
+  return { actor: auditActorOf(session), credentialId: session.credentialId ?? null };
 }

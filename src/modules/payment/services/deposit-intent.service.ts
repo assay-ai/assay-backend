@@ -4,6 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { DepositIntentEntity } from '@database/postgres/entities/deposit-intent.entity';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
+import { DepositOwnerScope } from '@shared/auth/deposit-owner-scope';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositIntentTtlMs } from '../constants/deposit-intent.constants';
@@ -44,15 +45,27 @@ export class DepositIntentService {
       settledAmount: null,
       chainId: input.chainId,
       chainTxRef: null,
+      submittedTxRef: null,
       expiresAt: input.expiresAt ?? new Date(Date.now() + depositIntentTtlMs(input.chainId)),
     };
 
     await this.deposits.insert(row);
-    return this.findById(input.organizationId, row.id as string);
+    return this.findById(
+      { organizationId: input.organizationId, agentId: input.agentId },
+      row.id as string,
+    );
   }
 
-  async findById(organizationId: string, intentId: string): Promise<DepositIntent> {
-    const row = await this.deposits.findOneBy({ organizationId, id: intentId });
+  /**
+   * One intent, inside `scope`: another agent's intent (for an agent caller)
+   * or another organization's is the same 404 as a missing one.
+   */
+  async findById(scope: DepositOwnerScope, intentId: string): Promise<DepositIntent> {
+    const row = await this.deposits.findOneBy({
+      organizationId: scope.organizationId,
+      id: intentId,
+      ...(scope.agentId === null ? {} : { agentId: scope.agentId }),
+    });
     if (!row) {
       throw PaymentErrors.depositIntentNotFound({ id: intentId });
     }
@@ -60,16 +73,41 @@ export class DepositIntentService {
   }
 
   /**
-   * The deposit of this organization a transaction already settled, if any —
-   * the replay guard for a buyer-broadcast deposit, where the hash arrives
-   * from the client rather than from the facilitator.
+   * Whether `account` was already credited from this transaction, anywhere on
+   * the platform — see `DepositIntentRepository.findClaimOfTxRef`. The replay
+   * guard for a buyer-broadcast deposit, where the hash arrives from the
+   * client rather than from the facilitator.
    */
-  async findByChainTxRef(
-    organizationId: string,
+  findClaimOfTxRef(
     chainTxRef: string,
-  ): Promise<DepositIntent | null> {
-    const row = await this.deposits.findOneBy({ organizationId, chainTxRef });
-    return row ? toDepositIntent(row) : null;
+    account: string,
+  ): Promise<{ readonly intentId: string | null } | null> {
+    return this.deposits.findClaimOfTxRef(chainTxRef, account);
+  }
+
+  /** Open (`CREATED` or `SETTLING`, inside the intent's lifetime) intents of one agent. */
+  countOpenForAgent(organizationId: string, agentId: string): Promise<number> {
+    return this.deposits.countOpenForAgent(organizationId, agentId, new Date());
+  }
+
+  /** See `DepositIntentRepository.earliestUnsettledCreatedAt`. */
+  earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    return this.deposits.earliestUnsettledCreatedAt(account, since);
+  }
+
+  /** See `DepositIntentRepository.hasUncoveredPendingSince`. */
+  hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    return this.deposits.hasUncoveredPendingSince(account, before);
+  }
+
+  /** `SETTLING` intents no live request owns any more (untouched since `before`). */
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntent[]> {
+    return (await this.deposits.findStaleSettling(before, limit)).map(toDepositIntent);
+  }
+
+  /** Records the transaction a `SETTLING` intent is settling on. */
+  async recordSubmittedTx(organizationId: string, intentId: string, txRef: string): Promise<void> {
+    await this.deposits.recordSubmittedTx(organizationId, intentId, txRef);
   }
 
   /**
@@ -92,6 +130,7 @@ export class DepositIntentService {
         ? { settledAmount: context.settledAmount.amount }
         : {}),
       ...(context.chainTxRef !== undefined ? { chainTxRef: context.chainTxRef } : {}),
+      ...(context.submittedTxRef !== undefined ? { submittedTxRef: context.submittedTxRef } : {}),
     });
 
     if (affected !== 1) {
@@ -107,7 +146,7 @@ export class DepositIntentService {
       });
     }
 
-    return this.findById(organizationId, intentId);
+    return this.findById({ organizationId, agentId: null }, intentId);
   }
 }
 
@@ -126,6 +165,7 @@ export function toDepositIntent(row: DepositIntentEntity): DepositIntent {
     settledAmount: row.settledAmount === null ? null : money(row.settledAmount),
     chainId: row.chainId as ChainId,
     chainTxRef: row.chainTxRef,
+    submittedTxRef: row.submittedTxRef ?? null,
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

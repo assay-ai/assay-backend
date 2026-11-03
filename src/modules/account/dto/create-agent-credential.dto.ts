@@ -32,9 +32,13 @@ export class CreateAgentCredentialBodyDto {
     example: DEFAULT_AGENT_SCOPES,
     description:
       'What the key may do. Omitted: `tools:call payments activity:read`. ' +
-      '`payments` needs `tools:call`. `reports:write` is never on unless asked for. ' +
+      '`payments` needs `tools:call`. `reports:write` and `deposits:write` are never on ' +
+      'unless asked for. `deposits:write` opens a deposit intent for the key’s own agent and ' +
+      'reports the transaction the buyer’s wallet broadcast for it (the key never signs or ' +
+      'sends one); polling that deposit needs `activity:read`. ' +
       'A route not open to any scope (audit log, notifications, dashboards, toolset ' +
-      'management, deposits, the provider console…) refuses every key.',
+      'management, the deposit list, facilitator deposit settlement, the provider console…) ' +
+      'refuses every key.',
   })
   @IsOptional()
   @IsArray()

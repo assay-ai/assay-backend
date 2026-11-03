@@ -15,6 +15,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
+import { escrowLedgerClaim } from '@modules/ledger/domain/escrow-ledger-claim';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { AccountId, AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -443,11 +444,14 @@ export class EscrowAccountService {
       this.balances.findOneRow(organizationId, account, asset),
       this.intents.sumHeldOnChainByAccounts(asset, [account]),
     ]);
-    const mirrored =
-      BigInt(row?.available ?? '0') +
-      BigInt(row?.held ?? '0') -
-      (heldOnChain.get(account) ?? 0n) +
-      BigInt(row?.pending ?? '0');
+    const mirrored = escrowLedgerClaim(
+      {
+        available: BigInt(row?.available ?? '0'),
+        held: BigInt(row?.held ?? '0'),
+        pending: BigInt(row?.pending ?? '0'),
+      },
+      heldOnChain.get(account) ?? 0n,
+    );
     return chainAtomic > mirrored ? chainAtomic - mirrored : 0n;
   }
 

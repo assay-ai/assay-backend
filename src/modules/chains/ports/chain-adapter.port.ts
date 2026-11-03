@@ -127,6 +127,24 @@ export interface ChainAdapter {
     options?: { readonly commitment?: 'confirmed' | 'finalized' },
   ): Promise<ObservedTransfer | null>;
 
+  /**
+   * The deposit path's richer read of the same transaction, at the chain's
+   * fastest durable commitment: whether it is not there yet, there and
+   * crediting `intent.payer` nothing, or there and crediting it — with the
+   * time of the block it landed in.
+   *
+   * Unlike `observeTransfer`'s `null`, the three answers are kept apart, so a
+   * caller can fail a wrong hash at once instead of polling it, and a read
+   * that FAILED (RPC error, timeout) is never one of them: it throws, and the
+   * caller treats it as "ask again", never as "not found".
+   *
+   * Optional: an adapter without it is read through `observeTransfer`, where
+   * a `null` means "not observed yet" and no block time is known. The
+   * buyer-broadcast deposit, which must bind the transaction to the intent's
+   * lifetime, is refused on such a chain.
+   */
+  observeDeposit?(intent: PaymentIntent, transaction: TxRef): Promise<DepositObservation>;
+
   // ── Vouchers (rail B) ────────────────────────────────────────────────────
 
   /** Canonical bytes an agent signs. Identical semantics across chains. */
@@ -261,3 +279,16 @@ export interface ChainAdapter {
 
 /** DI token for the array of adapters the registry is built from. */
 export const CHAIN_ADAPTERS = 'CHAIN_ADAPTERS';
+
+/** See {@link ChainAdapter.observeDeposit}. */
+export type DepositObservation =
+  /** No receipt yet: not mined, or not visible to this node yet. Ask again. */
+  | { readonly kind: 'pending' }
+  /** Mined, and it credits `payer` nothing (reverted, another buyer, not our escrow). Final. */
+  | { readonly kind: 'no_credit' }
+  /**
+   * Mined, and it credits `payer`: the SUM of every escrow `Deposited` event
+   * for `payer` in the transaction (a transaction is claimed once per payer,
+   * so the sum is credited once).
+   */
+  | { readonly kind: 'credited'; readonly transfer: ObservedTransfer; readonly blockTime: Date };

@@ -160,6 +160,7 @@ describe('Deposit resolution uniqueness — one credit per signature', () => {
       { resolve: () => ctx.adapter } as never,
       ctx.escrowReader,
       ctx.ledger,
+      { check: async () => ({ chain: 0n, claim: 0n, covered: true }) } as never,
     );
 
     const [a, b] = await Promise.allSettled([
