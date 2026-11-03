@@ -45,6 +45,8 @@ export interface RateDecision {
   readonly key: string;
   /** The A1 window this request also counts in, for a rule `withinRead`. */
   readonly readKey?: string;
+  /** The rule's per-caller window (`perCaller`), when it has one. */
+  readonly callerKey?: string;
 }
 
 const OWN_LIMITER = new Set(OWN_LIMITER_ROUTES);
@@ -132,6 +134,14 @@ export class UserRateLimitInterceptor implements NestInterceptor {
 
     const outcomes = [await this.windows.take(decision.key, rule)];
     if (decision.readKey) outcomes.push(await this.windows.take(decision.readKey, READ_RULE));
+    if (decision.callerKey && rule.perCaller) {
+      outcomes.push(
+        await this.windows.take(decision.callerKey, {
+          limit: rule.perCaller.limit,
+          windowMs: rule.windowMs,
+        }),
+      );
+    }
     const refused = outcomes.filter((outcome) => !outcome.allowed);
     if (refused.length > 0) {
       release?.();
@@ -166,12 +176,14 @@ export function decide(request: Request): RateDecision | null {
   const key = rule.perPath
     ? `${rule.bucket}:${concretePath(request)}:${subject}`
     : `${rule.bucket}:${subject}`;
+  const caller = rule.perCaller ? subjectOf(request, RateSubject.CALLER) : null;
   return {
     route,
     rule,
     subject,
     key,
     ...(rule.withinRead ? { readKey: `${READ_RULE.bucket}:${subject}` } : {}),
+    ...(rule.perCaller && caller ? { callerKey: `${rule.perCaller.bucket}:${caller}` } : {}),
   };
 }
 

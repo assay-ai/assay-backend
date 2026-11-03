@@ -6,6 +6,7 @@ import { DepositIntentEntity } from '@database/postgres/entities/deposit-intent.
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
+import { DepositOwnerScope } from '@shared/auth/deposit-owner-scope';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
@@ -52,15 +53,19 @@ export class DepositsService {
 
   /**
    * One deposit, in the row shape `list` returns — what a pending-deposit wait
-   * polls instead of `GET /balances`. Another organization's id is the same
-   * 404 as an unknown one.
+   * polls instead of `GET /balances`. Another organization's id, or for an
+   * agent caller another agent's, is the same 404 as an unknown one.
    */
-  async getOne(organizationId: string, depositId: string): Promise<DepositDto> {
-    const row = await this.deposits.findOneBy({ organizationId, id: depositId });
+  async getOne(scope: DepositOwnerScope, depositId: string): Promise<DepositDto> {
+    const row = await this.deposits.findOneBy({
+      organizationId: scope.organizationId,
+      id: depositId,
+      ...(scope.agentId === null ? {} : { agentId: scope.agentId }),
+    });
     if (!row) {
       throw PaymentErrors.depositIntentNotFound({ id: depositId });
     }
-    return toDepositDto(row, await this.resolutions(organizationId, [row]));
+    return toDepositDto(row, await this.resolutions(scope.organizationId, [row]));
   }
 
   /** The finality verdicts of the `SETTLED` rows among `rows`; one query, none when there are none. */

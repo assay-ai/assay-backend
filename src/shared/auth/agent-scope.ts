@@ -11,8 +11,17 @@ import { SetMetadata } from '@nestjs/common';
  *   seqs, settle its own debts). Without it a session is free-only, exactly
  *   like a third-party OAuth grant.
  * - `activity:read`: read its own money and activity (balance, calls,
- *   receipts, verdicts, spend policy, its own bad-result reports).
+ *   receipts, one deposit's status, verdicts, spend policy, its own bad-result
+ *   reports).
  * - `reports:write`: report a bad result, or withdraw a report.
+ * - `deposits:write`: open a deposit intent for its own agent and report the
+ *   transaction the buyer's wallet broadcast for it (`POST /deposits`,
+ *   `POST /deposits/:id/broadcast`). It never signs or sends a wallet
+ *   transaction: the wallet key stays with the buyer. Off unless asked for, and
+ *   not in any default (new keys, the first-party MCP grant), so no existing key
+ *   gains it. Needs no other scope: funding the agent's own escrow-backed
+ *   balance spends nothing, so a funding-only key need not be able to pay;
+ *   polling the deposit needs `activity:read` as well.
  *
  * A person's session is not limited by scopes. Everything a route does not
  * open with a scope is a person's only, whatever scopes a key holds.
@@ -22,11 +31,15 @@ export enum AgentScope {
   PAYMENTS = 'payments',
   ACTIVITY_READ = 'activity:read',
   REPORTS_WRITE = 'reports:write',
+  DEPOSITS_WRITE = 'deposits:write',
 }
 
 export const AGENT_SCOPES: readonly AgentScope[] = Object.freeze(Object.values(AgentScope));
 
-/** A new API key, and a grant of the first-party `assay-mcp` client. */
+/**
+ * A new API key, and a grant of the first-party `assay-mcp` client. Never
+ * `reports:write` or `deposits:write`: both are opt-in.
+ */
 export const DEFAULT_AGENT_SCOPES: readonly AgentScope[] = Object.freeze([
   AgentScope.TOOLS_CALL,
   AgentScope.PAYMENTS,

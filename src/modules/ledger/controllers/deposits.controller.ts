@@ -1,7 +1,13 @@
 import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import {
+  AgentScope,
+  CurrentSession,
+  depositOwnerScope,
+  RequireAgentScope,
+  SessionAuthGuard,
+} from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
@@ -38,14 +44,24 @@ export class DepositsController {
   }
 
   @Get(':depositId')
-  @TenantCache({ ttl: 5, vary: 'org', epochs: ['money'] })
-  @ApiOperation({ summary: 'One deposit intent, in the same shape as the list row' })
+  @RequireAgentScope(AgentScope.ACTIVITY_READ)
+  @TenantCache({ ttl: 5, vary: 'agent', epochs: ['money'] })
+  @ApiOperation({
+    summary: 'One deposit intent, in the same shape as the list row',
+    description:
+      'API credentials require activity:read and may read only their own agent deposits. ' +
+      'Human sessions retain organization-wide access.',
+  })
   @ApiResponse({ status: 200, description: 'The deposit', type: DepositDto })
-  @ApiResponse({ status: 404, description: 'PAYMENT_DEPOSIT_NOT_FOUND — not in this organization' })
+  @ApiResponse({
+    status: 404,
+    description:
+      "PAYMENT_DEPOSIT_NOT_FOUND — not this agent's (for an API credential) or not in this organization",
+  })
   async getOne(
     @CurrentSession() session: McpSession,
     @Param('depositId', new ParseUUIDPipe()) depositId: string,
   ): Promise<DepositDto> {
-    return this.deposits.getOne(session.organizationId, depositId);
+    return this.deposits.getOne(depositOwnerScope(session), depositId);
   }
 }

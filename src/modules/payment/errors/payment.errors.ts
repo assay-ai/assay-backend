@@ -22,6 +22,11 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED = 'PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED',
   PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED = 'PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED',
   PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED = 'PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED',
+  PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING = 'PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING',
+  PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT = 'PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT',
+  PAYMENT_DEPOSIT_ALREADY_SETTLED = 'PAYMENT_DEPOSIT_ALREADY_SETTLED',
+  PAYMENT_DEPOSIT_OPEN_LIMIT = 'PAYMENT_DEPOSIT_OPEN_LIMIT',
+  PAYMENT_DEPOSIT_ESCROW_SHORTFALL = 'PAYMENT_DEPOSIT_ESCROW_SHORTFALL',
   PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET = 'PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET',
   PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE = 'PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE',
   PAYMENT_DEPOSIT_CHAIN_REQUIRED = 'PAYMENT_DEPOSIT_CHAIN_REQUIRED',
@@ -607,31 +612,103 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `a transaction the buyer broadcast cannot be claimed here`,
   },
   /**
-   * `409`: this transaction already settled another deposit of this
-   * organization. One transaction credits once.
+   * `409`: this transaction already credited this buyer, through another
+   * deposit (any organization: single use is global). One transaction credits
+   * each buyer once.
+   *
+   * The message names no other intent and no organization: the id of the
+   * deposit that holds the claim is a server log, never an answer (an agent
+   * key reporting a same-org person's hash used to learn that intent's id).
    */
   depositTransactionAlreadyClaimed: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `Transaction ${context?.transaction ?? ''} already settled deposit ` +
-      `${context?.claimedBy ?? 'another deposit'}`,
+      `Transaction ${context?.transaction ?? ''} has already been credited to this buyer ` +
+      `by another deposit`,
   },
   /**
    * No escrow transfer crediting this intent's buyer was observed in the
-   * transaction within the observation window; the intent is now `FAILED`.
+   * transaction within the observation window: it is not mined yet, or not
+   * visible yet. On the buyer-broadcast path the intent stays open, so the
+   * SAME hash can be reported again on the same intent until it expires; on
+   * the facilitator path the intent is `FAILED` (`context.failed`).
    *
    * `422`, not `502` (BUG-PROD-BUY-MONEY-02): the edge in front of the API
    * replaces an origin `502`/`504` with its own page, which carries no CORS
    * headers, so a browser on the web app saw "Failed to fetch" and never this
-   * body. The transaction is readable; it just does not credit this buyer.
+   * body.
    */
   depositTransferNotObserved: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
     statusCode: 422,
     message: (context?: Record<string, any>) =>
       `No transfer crediting this buyer was observed in transaction ` +
-      `${context?.transaction ?? ''}; the deposit is marked failed`,
+      `${context?.transaction ?? ''}` +
+      (context?.failed
+        ? '; the deposit is marked failed'
+        : ' yet; the deposit is still open — report the same hash again once it is mined'),
+  },
+  /**
+   * The transaction is mined and credits this intent's buyer nothing: it
+   * reverted, it is not a `depositFor` on the escrow (an `approve`, a plain
+   * transfer), or it funds another buyer. Final for this hash; answered at
+   * once, without polling. The intent stays open on the buyer-broadcast path,
+   * so the right hash can still be reported.
+   */
+  depositTransactionCreditsNothing: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `Transaction ${context?.transaction ?? ''} is mined but credits this buyer nothing ` +
+      `on the escrow (report the depositFor transaction, not the approve)`,
+  },
+  /**
+   * The transaction was mined before this deposit intent, and before every
+   * other unsettled intent of this buyer in the last day, existed (beyond a
+   * small clock skew). A deposit made outside an intent is never claimable
+   * later: its money may have been withdrawn since, and the ledger cannot
+   * tell. The buyer withdraws it and deposits again through an intent.
+   */
+  depositTransactionPredatesIntent: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `Transaction ${context?.transaction ?? ''} was mined before any open or expired deposit ` +
+      `intent of this buyer was created and cannot be claimed. A deposit made outside an intent is not ` +
+      `credited; withdraw it from the escrow and deposit again through a new intent`,
+  },
+  /** `409`: the intent is already settled, by a different transaction than the one reported. */
+  depositAlreadySettled: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_ALREADY_SETTLED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Deposit intent ${context?.id ?? ''} is already settled by another transaction; ` +
+      `open a new deposit intent to report this one`,
+  },
+  /** `409`: too many open deposit intents for this agent; wait for one to settle or expire. */
+  depositOpenLimit: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_OPEN_LIMIT,
+    statusCode: 409,
+    publicContext: ['limit'],
+    message: (context?: Record<string, any>) =>
+      `This agent already has ${context?.limit ?? 'the maximum number of'} open deposit ` +
+      `intents; finish or let one expire (10 minutes) before opening another`,
+  },
+  /**
+   * `409`: this buyer account already has a deposit held pending because its
+   * escrow holds less than the ledger records (H-1 pre-flight). A new deposit
+   * would be held pending too, so no new intent is opened until support
+   * resolves it. Reporting a transaction for an existing intent still works.
+   */
+  depositEscrowShortfall: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_ESCROW_SHORTFALL,
+    statusCode: 409,
+    message: () =>
+      `This account has an unresolved escrow shortfall: an earlier deposit is held pending ` +
+      `because the escrow holds less than the balance records. New deposits are paused for ` +
+      `this account until it is resolved; contact support. Do not send funds to the escrow ` +
+      `meanwhile. Reporting a transaction for an existing deposit still works`,
   },
   settlementFailed: {
     code: PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,

@@ -12,6 +12,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Entity('deposit_intents')
 @Index('idx_deposit_intents_status_expires_at', ['status', 'expiresAt'])
 @Index('idx_deposit_intents_agent', ['organizationId', 'agentId'])
+@Index('idx_deposit_intents_account_created', ['agentAccount', 'createdAt'])
 export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** One of `DepositIntentStatus`; the CHECK constraint holds the enum. */
   @Column({ name: 'status', type: 'varchar', length: 16 })
@@ -50,6 +51,16 @@ export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'chain_tx_ref', type: 'varchar', length: 256, nullable: true })
   chainTxRef: string | null;
 
+  /**
+   * The transaction this intent is settling on, recorded when the intent
+   * moves to `SETTLING` (buyer broadcast) or right after the facilitator
+   * submitted it. Lets the finality job resume an intent whose request died
+   * before the credit (`DepositService.resumeStuckSettling`). Not a claim:
+   * single use is `chain_tx_ref` and the ledger's unique indexes.
+   */
+  @Column({ name: 'submitted_tx_ref', type: 'varchar', length: 256, nullable: true })
+  submittedTxRef: string | null;
+
   /** Short — bounded by the SVM blockhash the client's transaction is signed over. */
   @Column({ name: 'expires_at', type: 'timestamptz' })
   expiresAt: Date;
@@ -68,4 +79,22 @@ export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    */
   @Column({ name: 'finality_resolved_at', type: 'timestamptz', nullable: true })
   finalityResolvedAt: Date | null;
+
+  /**
+   * When the finality sweep first found this deposit final on chain but not
+   * covered by the buyer's escrow (H-1). Never cleared while the row is
+   * queued: the alert delay and the back-off run from it, and `POST /deposits`
+   * refuses a new intent for an account that has one older than the alert
+   * delay. A queue and pre-flight marker only; the journal is the record.
+   */
+  @Column({ name: 'finality_uncovered_since', type: 'timestamptz', nullable: true })
+  finalityUncoveredSince: Date | null;
+
+  /**
+   * The earliest time the finality sweep looks at this deposit again, set
+   * only when it was found uncovered (exponential back-off, capped). Keeps a
+   * stuck row from holding the head of the queue and bounds its RPC cost.
+   */
+  @Column({ name: 'finality_next_check_at', type: 'timestamptz', nullable: true })
+  finalityNextCheckAt: Date | null;
 }

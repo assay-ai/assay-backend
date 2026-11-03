@@ -165,7 +165,7 @@ async function run(phase: string): Promise<E6Result> {
 
     // ── 3. The platform reads the buyer's transaction off the chain ───────
     const settled = await deposits.settleDepositByBroadcast(
-      organizationId,
+      { organizationId, agentId: null },
       intent.id,
       hash as TxRef,
     );

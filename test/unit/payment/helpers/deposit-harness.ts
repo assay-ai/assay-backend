@@ -25,7 +25,18 @@ export class FakeDepositIntentRepository {
   readonly rows = new Map<string, DepositIntentEntity>();
 
   async insert(row: Partial<DepositIntentEntity>): Promise<{ identifiers: [{ id: string }] }> {
-    this.rows.set(row.id as string, { ...row } as DepositIntentEntity);
+    // `created_at` / `updated_at` are database defaults; the fake fills them
+    // the same way, since the broadcast path binds a transaction to `createdAt`.
+    const now = new Date();
+    this.rows.set(
+      row.id as string,
+      {
+        createdAt: now,
+        updatedAt: now,
+        submittedTxRef: null,
+        ...row,
+      } as DepositIntentEntity,
+    );
     return { identifiers: [{ id: row.id as string }] };
   }
 
@@ -53,7 +64,78 @@ export class FakeDepositIntentRepository {
     if (!row || row.organizationId !== organizationId || row.status !== from) {
       return 0;
     }
-    Object.assign(row, patch, { status: to });
+    // `updated_at` moves on every real UPDATE, as the database does.
+    Object.assign(row, patch, { status: to, updatedAt: new Date() });
+    return 1;
+  }
+
+  /**
+   * Credits recorded outside an intent row (a ledger-only DEPOSIT_PENDING /
+   * DEPOSIT), as `hash|account`, for the global single-use lookup.
+   */
+  readonly ledgerClaims = new Set<string>();
+
+  /** Mirrors the real cross-tenant lookup: any organization, keyed on (hash, account). */
+  async findClaimOfTxRef(
+    txRef: string,
+    account: string,
+  ): Promise<{ intentId: string | null } | null> {
+    const row = [...this.rows.values()].find(
+      (candidate) => candidate.chainTxRef === txRef && candidate.agentAccount === account,
+    );
+    if (row) return { intentId: row.id };
+    return this.ledgerClaims.has(`${txRef}|${account}`) ? { intentId: null } : null;
+  }
+
+  async countOpenForAgent(organizationId: string, agentId: string, now: Date): Promise<number> {
+    return [...this.rows.values()].filter(
+      (row) =>
+        row.organizationId === organizationId &&
+        row.agentId === agentId &&
+        (row.status === 'CREATED' || row.status === 'SETTLING') &&
+        row.expiresAt.getTime() > now.getTime(),
+    ).length;
+  }
+
+  async earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    const times = [...this.rows.values()]
+      .filter(
+        (row) =>
+          row.agentAccount === account &&
+          row.createdAt.getTime() >= since.getTime() &&
+          ['CREATED', 'EXPIRED', 'FAILED'].includes(row.status),
+      )
+      .map((row) => row.createdAt.getTime());
+    return times.length ? new Date(Math.min(...times)) : null;
+  }
+
+  /** Mirrors the real query: rows with a recorded transaction first, oldest first. */
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
+    return [...this.rows.values()]
+      .filter((row) => row.status === 'SETTLING' && row.updatedAt.getTime() < before.getTime())
+      .sort(
+        (a, b) =>
+          Number(a.submittedTxRef === null) - Number(b.submittedTxRef === null) ||
+          a.updatedAt.getTime() - b.updatedAt.getTime(),
+      )
+      .slice(0, limit);
+  }
+
+  async hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    return [...this.rows.values()].some(
+      (row) =>
+        row.agentAccount === account &&
+        row.status === 'SETTLED' &&
+        !row.finalityResolvedAt &&
+        !!row.finalityUncoveredSince &&
+        row.finalityUncoveredSince.getTime() <= before.getTime(),
+    );
+  }
+
+  async recordSubmittedTx(organizationId: string, id: string, txRef: string): Promise<number> {
+    const row = this.rows.get(id);
+    if (!row || row.organizationId !== organizationId || row.status !== 'SETTLING') return 0;
+    Object.assign(row, { submittedTxRef: txRef, updatedAt: new Date() });
     return 1;
   }
 

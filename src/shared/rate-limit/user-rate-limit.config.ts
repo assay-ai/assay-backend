@@ -13,7 +13,7 @@
  * | W1 write | every authenticated POST/PUT/PATCH/DELETE not listed below | 20 / min | caller |
  * | W1 per-item | `PATCH /notifications/:id/read`, `PUT /toolsets/:id/entries`, `POST …/validate-mapping` | 120 / min, each its own window | caller |
  * | W2 create | credential mint, tool request, provider registration, handle | per route | organization |
- * | M1 money | deposit create/settle/broadcast, debt voucher, withdraw intent | per route | account / credential |
+ * | M1 money | deposit create/settle/broadcast, debt voucher, withdraw intent | per route | account / credential (deposits: both) |
  * | M2 chain | stake intents, slash dispute intent, arbiter ruling intent | per route | organization / operator |
  * | AU auth | `POST /auth/wallet/link` | 60 / min | client address |
  *
@@ -79,6 +79,12 @@ export interface RateRule {
   readonly perPath?: boolean;
   /** Also counted in the A1 read window. */
   readonly withinRead?: boolean;
+  /**
+   * A second window over the same period, counted per CALLER (the person, or
+   * the key's credential) — for a route whose main window is per account, so
+   * one key of an account cannot use up the whole account's budget.
+   */
+  readonly perCaller?: { readonly bucket: string; readonly limit: number };
 }
 
 /** A1: every authenticated read not listed below; one window across all of them. */
@@ -190,11 +196,15 @@ export const ROUTE_RULES: Readonly<Record<string, RateRule>> = Object.freeze({
   },
 
   // M1 — money intents.
+  // Per account, and per caller within it: a key cannot spend the person's
+  // whole deposit budget (each intent is also capped per agent, see
+  // `DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT`).
   'POST /deposits': {
     bucket: 'deposit',
     limit: 10,
     windowMs: MINUTE_MS,
     subject: RateSubject.ACCOUNT,
+    perCaller: { bucket: 'deposit-caller', limit: 5 },
   },
   // One window for both: the console's pending-transaction poll asks every
   // 8 s, at most five times, per deposit.
@@ -203,12 +213,14 @@ export const ROUTE_RULES: Readonly<Record<string, RateRule>> = Object.freeze({
     limit: 30,
     windowMs: MINUTE_MS,
     subject: RateSubject.ACCOUNT,
+    perCaller: { bucket: 'deposit-confirm-caller', limit: 15 },
   },
   'POST /deposits/:depositId/broadcast': {
     bucket: 'deposit-confirm',
     limit: 30,
     windowMs: MINUTE_MS,
     subject: RateSubject.ACCOUNT,
+    perCaller: { bucket: 'deposit-confirm-caller', limit: 15 },
   },
   // The same budget as its voucher-intent (`NEXT_SEQ_RATE_LIMITS`).
   'POST /escrow/debts/:intentId/voucher': {

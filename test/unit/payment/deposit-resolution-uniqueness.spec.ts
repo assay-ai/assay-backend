@@ -72,7 +72,7 @@ describe('uq_ledger_entries_deposit_resolution', () => {
     expect(predicate).not.toContain(`'${LedgerEntryType.DEPOSIT_PENDING}'`);
   });
 
-  it('is keyed on the signature alone, so one transfer can resolve once', () => {
+  it('was first keyed on the signature alone', () => {
     expect(sql).toMatch(
       /CREATE UNIQUE INDEX "uq_ledger_entries_deposit_resolution"\s+ON "ledger_entries" \("chain_tx_ref"\)/,
     );
@@ -80,5 +80,77 @@ describe('uq_ledger_entries_deposit_resolution', () => {
 
   it('excludes rows with no signature, which carry no claim to be unique about', () => {
     expect(sql).toContain('"chain_tx_ref" IS NOT NULL');
+  });
+});
+
+/**
+ * The claim unit since `DepositClaimPerAccount1793491200000`: (transaction,
+ * buyer account). A batch transaction funding two buyers lets each resolve its
+ * own credit once; the same buyer still resolves once.
+ */
+describe('uq_ledger_entries_deposit_*_account (claim per transaction and buyer)', () => {
+  const sql = readFileSync(
+    join(
+      __dirname,
+      '../../../src/database/postgres/migrations/1793491200000-deposit-claim-per-account.ts',
+    ),
+    'utf8',
+  );
+
+  it('keys both deposit indexes on (chain_tx_ref, account_id)', () => {
+    expect(sql).toContain('uq_ledger_entries_deposit_pending_account');
+    expect(sql).toContain('uq_ledger_entries_deposit_resolution_account');
+    expect(sql).toMatch(/ON "ledger_entries" \("chain_tx_ref", "account_id"\)/);
+  });
+
+  it('keeps the same entry-type predicates', () => {
+    expect(sql).toContain(`"entry_type" = 'DEPOSIT_PENDING' AND "chain_tx_ref" IS NOT NULL`);
+    expect(sql).toContain(
+      `"entry_type" IN ('DEPOSIT_CONFIRM', 'DEPOSIT_REJECT') AND "chain_tx_ref" IS NOT NULL`,
+    );
+  });
+
+  it('builds both new indexes before dropping either old one, so the guarantee never lapses', () => {
+    const up = sql.slice(sql.indexOf('async up('), sql.indexOf('async down('));
+    const create = up.indexOf('CREATE UNIQUE INDEX CONCURRENTLY');
+    const drop = up.indexOf('DROP INDEX CONCURRENTLY IF EXISTS "${index.old}"');
+    expect(create).toBeLessThan(drop);
+    // The drops run in their own loop, after the loop that creates both.
+    const loops = [...up.matchAll(/for \(const index of UNIQUE_INDEXES\)/g)].map((m) => m.index);
+    expect(loops).toHaveLength(2);
+    expect(loops[0]).toBeLessThan(create);
+    expect(create).toBeLessThan(loops[1]!);
+    expect(loops[1]!).toBeLessThan(drop);
+  });
+
+  it('changes the columns under a short lock_timeout, then restores the build timeout', () => {
+    const up = sql.slice(sql.indexOf('async up('), sql.indexOf('async down('));
+    const short = up.indexOf(`SET lock_timeout = '5s'`);
+    const alter = up.indexOf('ALTER TABLE "deposit_intents"');
+    const restore = up.indexOf(`SET lock_timeout = '60s'`);
+    const firstBuild = up.indexOf('CREATE INDEX CONCURRENTLY');
+    expect(short).toBeGreaterThan(-1);
+    expect(short).toBeLessThan(alter);
+    expect(alter).toBeLessThan(restore);
+    expect(restore).toBeLessThan(firstBuild);
+    expect(up).toContain('nonTransactionalStep(');
+    for (const column of [
+      'submitted_tx_ref',
+      'finality_uncovered_since',
+      'finality_next_check_at',
+    ]) {
+      expect(up).toContain(`ADD COLUMN IF NOT EXISTS "${column}"`);
+    }
+  });
+
+  it('documents the out-of-band prod run with the exact command', () => {
+    expect(sql).toContain('migration:run:prod');
+    expect(sql).toMatch(/out of band, before rolling the new image/);
+  });
+
+  it('indexes the claim lookup over legacy DEPOSIT rows and the time-bound read', () => {
+    expect(sql).toContain('idx_ledger_entries_deposit_legacy_account');
+    expect(sql).toContain(`"entry_type" = 'DEPOSIT' AND "chain_tx_ref" IS NOT NULL`);
+    expect(sql).toContain('ON "deposit_intents" ("agent_account", "created_at")');
   });
 });

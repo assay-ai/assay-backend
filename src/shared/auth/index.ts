@@ -10,3 +10,4 @@ export * from './require-roles.decorator';
 export * from './operator-roles.guard';
 export * from './human-session.guard';
 export * from './agent-scope';
+export * from './deposit-owner-scope';

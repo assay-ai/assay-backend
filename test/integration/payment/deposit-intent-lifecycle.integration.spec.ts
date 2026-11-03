@@ -71,12 +71,16 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
 
     expect(intent.status).toBe(DepositIntentStatus.CREATED);
 
-    const settled = await ctx.depositService.settleDeposit(ctx.organizationId, intent.id, {
-      x402Version: 2,
-      scheme: 'exact',
-      network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
-      payload: { transaction: 'ZmFrZQ==' },
-    });
+    const settled = await ctx.depositService.settleDeposit(
+      { organizationId: ctx.organizationId, agentId: null },
+      intent.id,
+      {
+        x402Version: 2,
+        scheme: 'exact',
+        network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
+        payload: { transaction: 'ZmFrZQ==' },
+      },
+    );
 
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     expect(settled.chainTxRef).toBe(txSig);
@@ -112,7 +116,10 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
     const report = await ctx.expiry.sweep();
     expect(report.expired).toBeGreaterThanOrEqual(1);
 
-    const after = await ctx.deposits.findById(ctx.organizationId, intent.id);
+    const after = await ctx.deposits.findById(
+      { organizationId: ctx.organizationId, agentId: null },
+      intent.id,
+    );
     expect(after.status).toBe(DepositIntentStatus.EXPIRED);
     expect(await ctx.pending(agent)).toBe(0n);
   });
@@ -140,12 +147,16 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
       chainId: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
       amount: requested,
     });
-    await ctx.depositService.settleDeposit(ctx.organizationId, intent.id, {
-      x402Version: 2,
-      scheme: 'exact',
-      network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
-      payload: { transaction: 'ZmFrZQ==' },
-    });
+    await ctx.depositService.settleDeposit(
+      { organizationId: ctx.organizationId, agentId: null },
+      intent.id,
+      {
+        x402Version: 2,
+        scheme: 'exact',
+        network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
+        payload: { transaction: 'ZmFrZQ==' },
+      },
+    );
     expect(await ctx.pending(agent)).toBe(6_000_000n);
 
     // Still there at `finalized` commitment — same mock, simulating no reorg.
@@ -185,12 +196,16 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
       chainId: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
       amount: requested,
     });
-    await ctx.depositService.settleDeposit(ctx.organizationId, intent.id, {
-      x402Version: 2,
-      scheme: 'exact',
-      network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
-      payload: { transaction: 'ZmFrZQ==' },
-    });
+    await ctx.depositService.settleDeposit(
+      { organizationId: ctx.organizationId, agentId: null },
+      intent.id,
+      {
+        x402Version: 2,
+        scheme: 'exact',
+        network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
+        payload: { transaction: 'ZmFrZQ==' },
+      },
+    );
     expect(await ctx.pending(agent)).toBe(7_500_000n);
 
     // A reorg dropped it — the re-check finds nothing at `finalized` commitment, nor at the
