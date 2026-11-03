@@ -1430,6 +1430,33 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     });
 
+    // The last read can start right at the deadline and be cut at once: that
+    // is the window ending, not the node failing (seen live: 503 for a hash
+    // the chain had answered "not mined" all window).
+    it('answers 422, not 503, when only the read cut by the deadline did not answer', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      let calls = 0;
+      const observeDeposit = jest.fn().mockImplementation(() => {
+        calls += 1;
+        // Answers "not mined" for a while, then hangs past the window's end.
+        return calls < 3 ? Promise.resolve({ kind: 'pending' }) : new Promise(() => undefined);
+      });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+      const intent = await createdIntent(harness);
+
+      const settling = errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
+      const error = await settling;
+
+      expect(error.statusCode).toBe(422);
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
+    });
+
     // M-2: an RPC error is not "the transaction is not there".
     it('answers an unreadable chain with a retryable 503, failing and burning nothing', async () => {
       jest.useFakeTimers({ doNotFake: ['nextTick'] });

@@ -914,13 +914,20 @@ export class DepositService {
   ): Promise<Landed> {
     const deadline = Date.now() + DEPOSIT_OBSERVE_TIMEOUT_MS;
     let attempt = 0;
+    // A read the chain answered "not mined yet" during the window. The last
+    // read can start right at the deadline and be cut at once: that cut is the
+    // window ending, not the node failing, so it must not turn a clean "not
+    // there" into `unavailable` (503 instead of 422).
+    let sawPending = false;
 
     for (;;) {
       let failure: unknown = null;
+      let cutByDeadline = false;
       let landed: Landed | null = null;
       try {
         const read = await withinDeadline(readLanded(adapter, intent, transaction), deadline);
         if (read === TIMED_OUT) {
+          cutByDeadline = true;
           failure = ChainErrors.rpcReadFailed({ method: 'observe deposit (timed out)' });
         } else {
           landed = read;
@@ -931,7 +938,9 @@ export class DepositService {
       if (landed && landed.kind !== 'pending') {
         return landed;
       }
+      if (landed) sawPending = true;
       if (Date.now() >= deadline) {
+        if (failure && cutByDeadline && sawPending) failure = null;
         this.logger.warn(
           `Deposit settlement ${transaction} still unobservable after ` +
             `${DEPOSIT_OBSERVE_TIMEOUT_MS}ms and ${attempt + 1} reads` +
