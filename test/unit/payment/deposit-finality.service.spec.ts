@@ -8,7 +8,9 @@ import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
-import { DEPOSIT_UNCOVERED_GRACE_MS } from '@modules/payment/constants/deposit-intent.constants';
+import { DEPOSIT_UNCOVERED_ALERT_AFTER_MS } from '@modules/payment/constants/deposit-intent.constants';
+import { DepositCoverageService } from '@modules/payment/services/deposit-coverage.service';
+import { AlertAggregation, AlertSeverity } from '@shared/alerting';
 
 /**
  * The finality sweep's three answers.
@@ -34,6 +36,7 @@ function build(
     notify?: jest.Mock;
     coverage?: jest.Mock;
     pendingAt?: Date;
+    alerts?: { emit: jest.Mock };
   } = {},
 ) {
   const deposits = {
@@ -78,6 +81,7 @@ function build(
     { check: coverage } as never,
     options.notify ? ({ notify: options.notify } as never) : undefined,
     audit as never,
+    (options.alerts ?? { emit: jest.fn().mockResolvedValue(undefined) }) as never,
   );
   return { service, deposits, ledger, adapter, audit, coverage };
 }
@@ -235,7 +239,9 @@ describe('DepositFinalityService escrow coverage (H-1)', () => {
     expect(coverage).toHaveBeenCalledWith('org-1', ACCOUNT, money.asset, 0n);
   });
 
-  it('claim -> withdraw: never confirms an uncovered deposit, and keeps it queued within the grace', async () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('claim -> withdraw: never confirms an uncovered deposit, and keeps it queued', async () => {
     const { service, ledger, deposits } = build(() => LANDED, { coverage: uncovered() });
 
     await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
@@ -247,25 +253,67 @@ describe('DepositFinalityService escrow coverage (H-1)', () => {
     expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
   });
 
-  it('rejects a deposit still uncovered after the grace, telling the buyer why', async () => {
+  it('never rejects for being uncovered: it stays pending and alerts once the delay has passed', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-03T00:00:00Z') });
     const notify = jest.fn().mockResolvedValue(undefined);
-    const { service, ledger, deposits, audit } = build(() => LANDED, {
+    const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+    const { service, ledger, deposits } = build(() => LANDED, {
       coverage: uncovered(),
       notify,
-      pendingAt: new Date(Date.now() - DEPOSIT_UNCOVERED_GRACE_MS - 1_000),
+      alerts,
     });
 
-    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ rejected: 1 });
-    expect(ledger.appendNow).toHaveBeenCalledTimes(1);
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_REJECT, chainTxRef: TX }),
+    await service.promotePendingDeposits(10);
+    jest.setSystemTime(Date.now() + DEPOSIT_UNCOVERED_ALERT_AFTER_MS - 1_000);
+    await service.promotePendingDeposits(10);
+    expect(alerts.emit).not.toHaveBeenCalled();
+
+    jest.setSystemTime(Date.now() + 2_000);
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
+      rejected: 0,
+      skipped: 1,
+    });
+    expect(alerts.emit).toHaveBeenCalledTimes(1);
+    expect(alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: AlertSeverity.WARN,
+        name: 'deposit_pending_uncovered',
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: 'dep-1',
+        details: expect.objectContaining({
+          intentId: 'dep-1',
+          account: ACCOUNT,
+          shortfall: '25000000',
+        }),
+      }),
     );
-    expect(deposits.markFinalityResolved).toHaveBeenCalledTimes(1);
-    expect(audit.recordAfterCommit.mock.calls[0][0]).toMatchObject({ action: 'deposit.rejected' });
-    expect(notify.mock.calls[0][0].body).toContain('no longer in your escrow');
+    // Hours later: still pending, never a DEPOSIT_REJECT, no buyer notice.
+    jest.setSystemTime(Date.now() + 6 * 60 * 60 * 1000);
+    await service.promotePendingDeposits(10);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
   });
 
-  it('confirms once the escrow covers it again (a booking lag, not a withdrawal)', async () => {
+  it('slow finality (M-3): the alert delay runs from the first uncovered pass, not from the credit', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-03T00:00:00Z') });
+    const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+    // Credited 40 minutes ago; final (and first checked) only now.
+    const { service } = build(() => LANDED, {
+      coverage: uncovered(),
+      alerts,
+      pendingAt: new Date(Date.now() - 40 * 60 * 1000),
+    });
+
+    await service.promotePendingDeposits(10);
+    expect(alerts.emit).not.toHaveBeenCalled();
+
+    jest.setSystemTime(Date.now() + DEPOSIT_UNCOVERED_ALERT_AFTER_MS);
+    await service.promotePendingDeposits(10);
+    expect(alerts.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('uncovered, then covered later: becomes spendable (a booking lag, not a withdrawal)', async () => {
     const coverage = jest
       .fn()
       .mockResolvedValueOnce({ chain: 0n, claim: 25_000_000n, covered: false })
@@ -303,5 +351,69 @@ describe('DepositFinalityService chain read failures (M-2)', () => {
     });
     expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Two concurrent claims for one buyer, each covered alone, together more than
+ * the escrow holds (L-6): both are written pending (the deposit path checks
+ * no balance), and the real coverage check keeps both from becoming spendable
+ * until the escrow holds the sum.
+ */
+describe('DepositFinalityService two claims together exceeding the escrow', () => {
+  it('confirms neither while the sum is uncovered, both once it is', async () => {
+    const five = MoneyUtil.of('5000000', ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6);
+    const escrowBalance = { value: 8_000_000n };
+    const coverage = new DepositCoverageService(
+      {
+        read: jest.fn(async () => ({
+          balance: MoneyUtil.of(escrowBalance.value, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+        })),
+      } as never,
+      {
+        // Both credits pending, nothing spendable yet.
+        getBalance: jest.fn(async () => ({
+          available: MoneyUtil.of(0n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+          held: MoneyUtil.of(0n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+          pending: MoneyUtil.of(10_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+        })),
+      } as never,
+      { sumHeldOnChainByAccounts: jest.fn(async () => new Map()) } as never,
+    );
+    const deposits = {
+      findSettledAwaitingFinality: jest.fn().mockResolvedValue([
+        { id: 'dep-a', organizationId: 'org-1', chainId: CHAIN, chainTxRef: TX },
+        {
+          id: 'dep-b',
+          organizationId: 'org-1',
+          chainId: CHAIN,
+          chainTxRef: `0x${'cd'.repeat(32)}`,
+        },
+      ]),
+      markFinalityResolved: jest.fn().mockResolvedValue(undefined),
+    };
+    const ledger = {
+      readJournal: jest.fn(async () => [
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money: five },
+      ]),
+      appendNow: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new DepositFinalityService(
+      deposits as unknown as DepositIntentRepository,
+      { resolve: () => ({ observeTransfer: jest.fn(async () => LANDED) }) } as never,
+      { escrowAddresses: async () => ({ escrowPda: ACCOUNT }) } as never,
+      ledger as unknown as LedgerService,
+      coverage,
+    );
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
+      confirmed: 0,
+      rejected: 0,
+      skipped: 2,
+    });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+
+    escrowBalance.value = 10_000_000n;
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ confirmed: 2 });
   });
 });

@@ -9,8 +9,8 @@
  *
  * The one definition. The reconciler's per-escrow walk compares it with the
  * chain (`ESCROW_MIRROR_DRIFT`), the escrow screen shows the chain's excess
- * over it as uncredited, and the deposit path refuses a credit that would put
- * it above the chain (`DepositCoverageService`). Three copies of this sum
+ * over it as uncredited, and the finality pass makes no pending deposit
+ * spendable while it is above the chain (`DepositCoverageService`). Three copies of this sum
  * drifting apart would let one of them pass what another reports.
  */
 export function escrowLedgerClaim(

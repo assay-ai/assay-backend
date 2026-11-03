@@ -31,13 +31,12 @@ export interface DepositIntentTransitionRule {
  *
  * ### Why `EXPIRED` is reachable only from `CREATED`
  *
- * Once `/verify` has passed and the intent has moved to `SETTLING`, settling
- * a deposit is one synchronous call chain within `DepositService` — there is
- * no worker handoff and no window in which the process could die holding an
- * unresolved `SETTLING` intent the way a payment intent's `PROVIDER_EXECUTING`
- * can outlive the request that opened it. So there is no backstop to design
- * for on that side, and no case where a `SETTLING` intent is still around by
- * the time a sweep would look at it.
+ * Once the intent has moved to `SETTLING` the transaction may have landed,
+ * so expiring it would drop a deposit that is in the escrow. A `SETTLING`
+ * intent whose request died (a chain read that failed after the facilitator
+ * settled, a crash before `SETTLED`) is resumed by the finality job instead
+ * (`DepositService.resumeStuckSettling`), along the same two edges a live
+ * request takes: `SETTLED` or `FAILED`.
  */
 export const DEPOSIT_INTENT_TRANSITIONS: readonly DepositIntentTransitionRule[] = [
   {

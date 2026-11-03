@@ -18,10 +18,15 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { AuditLogWriter } from '@shared/audit';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { formatDollars } from '@shared/utils/money-display.util';
 
-import { DEPOSIT_UNCOVERED_GRACE_MS, depositResource } from '../constants/deposit-intent.constants';
+import {
+  DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
+  DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
+  depositResource,
+} from '../constants/deposit-intent.constants';
 import { DepositCoverageService } from './deposit-coverage.service';
 
 export interface DepositFinalitySummary {
@@ -74,7 +79,16 @@ export class DepositFinalityService {
     // Optional for the same reason. Bookkeeping only: the entry is written
     // after the resolving ledger entry is durable and never decides anything.
     @Optional() private readonly audit?: AuditLogWriter,
+    // Optional for the same reason: the uncovered-deposit alert.
+    @Optional() @Inject(ALERT_PORT) private readonly alerts?: AlertPort,
   ) {}
+
+  /**
+   * When each pending deposit was first seen final but uncovered (M-3: the
+   * alert delay runs from here, not from the credit). In memory: after a
+   * restart the delay starts again, which only postpones an alert.
+   */
+  private readonly uncoveredSince = new Map<string, number>();
 
   /**
    * Runs a sweep, never concurrently with another.
@@ -216,12 +230,13 @@ export class DepositFinalityService {
 
         // Final on chain is not enough to make it spendable: the money must
         // still be in the buyer's escrow (H-1). A withdrawal claimed after the
-        // credit (the booker debits only `available`, never this `pending`), or
-        // a credit that raced another, leaves the ledger claiming more than
-        // the escrow holds. Uncovered: never confirmed. Kept queued for the
-        // platform's own booking lag, then rejected. A failed read throws and
-        // the row is retried next pass.
-        let uncovered = false;
+        // credit (the booker debits only `available`, never this `pending`), a
+        // credit that raced another, or a ledger already ahead of the chain
+        // for another reason leaves the ledger claiming more than the escrow
+        // holds. Uncovered: never confirmed and never rejected for it. It
+        // stays pending (not spendable), is re-checked every pass, and is
+        // alerted once it stays uncovered past the delay; an operator
+        // decides. A failed read throws and the row is retried next pass.
         if (stillThere) {
           const coverage = await this.coverage.check(
             candidate.organizationId,
@@ -230,23 +245,14 @@ export class DepositFinalityService {
             0n,
           );
           if (!coverage.covered) {
-            const age = Date.now() - pending.createdAt.getTime();
-            this.logger.warn(
-              `Deposit ${candidate.id}: final, but the escrow holds ${coverage.chain} against a ` +
-                `ledger claim of ${coverage.claim} — ` +
-                (age < DEPOSIT_UNCOVERED_GRACE_MS
-                  ? 'not confirming yet'
-                  : 'writing DEPOSIT_REJECT'),
-            );
-            if (age < DEPOSIT_UNCOVERED_GRACE_MS) {
-              skipped += 1;
-              continue;
-            }
-            uncovered = true;
+            await this.holdUncovered(candidate, pending, coverage);
+            skipped += 1;
+            continue;
           }
+          this.uncoveredSince.delete(candidate.id);
         }
 
-        if (stillThere && !uncovered) {
+        if (stillThere) {
           const won = await this.appendResolution(candidate, {
             organizationId: candidate.organizationId,
             accountId: pending.accountId as AccountId,
@@ -294,12 +300,10 @@ export class DepositFinalityService {
               this.logger.warn(`deposit.credited notification failed: ${describe(error)}`),
             );
         } else {
-          if (!uncovered) {
-            this.logger.warn(
-              `Deposit ${candidate.id}: transaction ${candidate.chainTxRef} no longer observable ` +
-                `at finalized commitment — writing DEPOSIT_REJECT`,
-            );
-          }
+          this.logger.warn(
+            `Deposit ${candidate.id}: transaction ${candidate.chainTxRef} no longer observable ` +
+              `at finalized commitment — writing DEPOSIT_REJECT`,
+          );
           const won = await this.appendResolution(candidate, {
             organizationId: candidate.organizationId,
             accountId: pending.accountId as AccountId,
@@ -326,9 +330,7 @@ export class DepositFinalityService {
               organizationId: candidate.organizationId,
               event: NotificationEvent.DEPOSIT_FAILED,
               title: 'Deposit failed',
-              body: uncovered
-                ? `Your deposit of ${formatDollars(pending.money)} was not credited: the funds are no longer in your escrow. No balance was affected.`
-                : `Your deposit of ${formatDollars(pending.money)} could not be finalized on chain. No balance was affected.`,
+              body: `Your deposit of ${formatDollars(pending.money)} could not be finalized on chain. No balance was affected.`,
               subjectType: 'deposit_intent',
               subjectId: candidate.id,
               payload: {
@@ -345,6 +347,7 @@ export class DepositFinalityService {
         // After the resolving entry is durable, never before — see
         // `markFinalityResolved`. One call site for both branches so a new
         // resolution path cannot be added without leaving the queue.
+        this.uncoveredSince.delete(candidate.id);
         await this.deposits.markFinalityResolved(
           candidate.organizationId,
           candidate.id,
@@ -364,6 +367,54 @@ export class DepositFinalityService {
     }
 
     return { checked: candidates.length, confirmed, rejected, skipped };
+  }
+
+  /**
+   * Keeps an uncovered pending deposit queued and, once it has been uncovered
+   * for {@link DEPOSIT_UNCOVERED_ALERT_AFTER_MS} since first seen, raises a
+   * WARN (once per deposit per window) naming account, intent and shortfall.
+   */
+  private async holdUncovered(
+    candidate: { organizationId: string; id: string; chainTxRef: string },
+    pending: { accountId: string; money: Money },
+    coverage: { chain: bigint; claim: bigint },
+  ): Promise<void> {
+    const now = Date.now();
+    const seen = this.uncoveredSince.get(candidate.id);
+    const since = seen ?? now;
+    const shortfall = coverage.claim - coverage.chain;
+    if (seen === undefined) {
+      this.uncoveredSince.set(candidate.id, since);
+      // Once, not every 5 s: the alert below carries the standing condition.
+      this.logger.warn(
+        `Deposit ${candidate.id}: final, but the escrow holds ${coverage.chain} against a ` +
+          `ledger claim of ${coverage.claim} — kept pending (not spendable), not confirming`,
+      );
+    }
+    if (now - since < DEPOSIT_UNCOVERED_ALERT_AFTER_MS) return;
+    await this.alerts?.emit({
+      severity: AlertSeverity.WARN,
+      name: 'deposit_pending_uncovered',
+      summary:
+        `Deposit ${candidate.id} (${pending.money.amount} atomic) for ${pending.accountId} is ` +
+        `final on chain but the buyer's escrow is short of the ledger's claim by ${shortfall} ` +
+        `atomic units. It stays pending (not spendable). Find the booking gap or the ` +
+        `withdrawal; never credit or reject it by hand without a cause.`,
+      details: {
+        organizationId: candidate.organizationId,
+        intentId: candidate.id,
+        account: pending.accountId,
+        transactionHash: candidate.chainTxRef,
+        amount: pending.money.amount,
+        escrowBalance: coverage.chain.toString(),
+        ledgerClaim: coverage.claim.toString(),
+        shortfall: shortfall.toString(),
+        uncoveredForSeconds: Math.floor((now - since) / 1000),
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: candidate.id,
+      suppressionWindowSeconds: DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
+    });
   }
 
   /**

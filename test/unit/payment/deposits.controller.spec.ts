@@ -86,6 +86,7 @@ function intent(overrides?: Partial<DepositIntent>): DepositIntent {
     settledAmount: null,
     chainId: SOLANA_DEVNET,
     chainTxRef: null,
+    submittedTxRef: null,
     expiresAt: new Date('2026-08-23T10:00:00.000Z'),
     createdAt: new Date('2026-08-23T09:59:00.000Z'),
     updatedAt: new Date('2026-08-23T09:59:00.000Z'),

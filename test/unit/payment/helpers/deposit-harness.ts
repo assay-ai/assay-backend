@@ -28,11 +28,15 @@ export class FakeDepositIntentRepository {
     // `created_at` / `updated_at` are database defaults; the fake fills them
     // the same way, since the broadcast path binds a transaction to `createdAt`.
     const now = new Date();
-    this.rows.set(row.id as string, {
-      createdAt: now,
-      updatedAt: now,
-      ...row,
-    } as DepositIntentEntity);
+    this.rows.set(
+      row.id as string,
+      {
+        createdAt: now,
+        updatedAt: now,
+        submittedTxRef: null,
+        ...row,
+      } as DepositIntentEntity,
+    );
     return { identifiers: [{ id: row.id as string }] };
   }
 
@@ -60,7 +64,8 @@ export class FakeDepositIntentRepository {
     if (!row || row.organizationId !== organizationId || row.status !== from) {
       return 0;
     }
-    Object.assign(row, patch, { status: to });
+    // `updated_at` moves on every real UPDATE, as the database does.
+    Object.assign(row, patch, { status: to, updatedAt: new Date() });
     return 1;
   }
 
@@ -87,21 +92,40 @@ export class FakeDepositIntentRepository {
       (row) =>
         row.organizationId === organizationId &&
         row.agentId === agentId &&
-        (row.status === 'SETTLING' ||
-          (row.status === 'CREATED' && row.expiresAt.getTime() > now.getTime())),
+        (row.status === 'CREATED' || row.status === 'SETTLING') &&
+        row.expiresAt.getTime() > now.getTime(),
     ).length;
+  }
+
+  async earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    const times = [...this.rows.values()]
+      .filter(
+        (row) =>
+          row.agentAccount === account &&
+          row.createdAt.getTime() >= since.getTime() &&
+          ['CREATED', 'EXPIRED', 'FAILED'].includes(row.status),
+      )
+      .map((row) => row.createdAt.getTime());
+    return times.length ? new Date(Math.min(...times)) : null;
+  }
+
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
+    return [...this.rows.values()]
+      .filter((row) => row.status === 'SETTLING' && row.updatedAt.getTime() < before.getTime())
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, limit);
+  }
+
+  async recordSubmittedTx(organizationId: string, id: string, txRef: string): Promise<number> {
+    const row = this.rows.get(id);
+    if (!row || row.organizationId !== organizationId || row.status !== 'SETTLING') return 0;
+    Object.assign(row, { submittedTxRef: txRef, updatedAt: new Date() });
+    return 1;
   }
 
   asRepository(): DepositIntentRepository {
     return this as unknown as DepositIntentRepository;
   }
-}
-
-/** A `DepositCoverageService` stand-in: covered unless a test says otherwise. */
-export function fakeCoverage(covered = true): { check: jest.Mock } {
-  return {
-    check: jest.fn().mockResolvedValue({ chain: 0n, claim: 0n, covered }),
-  };
 }
 
 /**

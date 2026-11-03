@@ -145,33 +145,59 @@ export const DEPOSIT_WATCH_CHAIN_ID = 'DEPOSIT_WATCH_CHAIN_ID';
 export const DEPOSIT_MINIMUM_USD = 5;
 
 /**
- * How far before its intent's `createdAt` a buyer-broadcast transaction may
- * have been mined and still be claimed: clock skew between this server and the
- * chain's block timestamps, plus a wallet that broadcast a moment before the
- * response creating the intent arrived. Anything older is a deposit made
- * outside an intent, and is refused (`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`).
+ * How far before the time bound a buyer-broadcast transaction may have been
+ * mined and still be claimed: clock skew between this server and the chain's
+ * block timestamps, plus a wallet that broadcast a moment before the response
+ * creating the intent arrived.
+ *
+ * The bound itself is the earliest unsettled deposit intent of the same buyer
+ * account created within {@link DEPOSIT_TX_BOUND_LOOKBACK_MS} (see
+ * `DepositService.settleDepositByBroadcast`), not only the intent the hash is
+ * reported on: the portal re-reports a hash on a fresh intent after the first
+ * one expired, and that deposit was made inside the first intent. Anything
+ * older is a deposit made outside every intent, and is refused
+ * (`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`).
  */
 export const DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS = 60 * 1000;
 
+/** How far back an unsettled intent still anchors the time bound above. */
+export const DEPOSIT_TX_BOUND_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Open deposit intents (`SETTLING`, or `CREATED` and unexpired) one agent may
- * hold. Every intent is a row on the person's funding screen and a chain read
- * when reported; a looping key otherwise creates them without bound.
+ * Open deposit intents one agent may hold: `CREATED` or `SETTLING`, still
+ * inside the intent's lifetime (`expires_at` in the future). Every intent is a
+ * row on the person's funding screen and a chain read when reported; a
+ * looping key otherwise creates them without bound. An older `SETTLING` row
+ * (stuck, and retried by the finality job) does not lock anyone out.
  */
 export const DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT = 5;
 
 /**
- * How long a credit is re-checked against the escrow balance before the
- * deposit path gives up: an RPC node one block behind the one that served the
- * receipt reads the balance without the deposit for a moment.
+ * How long the finality sweep keeps a pending deposit the escrow does not
+ * cover before it raises a WARN alert (`deposit_pending_uncovered`), measured
+ * from the first pass that saw it uncovered. Covers the platform's own booking
+ * lag (a redemption landed before its `HOLD_COMMIT`, a withdrawal claimed
+ * before the booker ran). The deposit is never rejected for being uncovered:
+ * it stays pending (never spendable), is re-checked on every pass, and
+ * becomes spendable the moment the escrow covers it. An operator decides the
+ * rest.
  */
-export const DEPOSIT_COVERAGE_WAIT_MS = 4 * 1000;
+export const DEPOSIT_UNCOVERED_ALERT_AFTER_MS = 15 * 60 * 1000;
+
+/** How long one uncovered deposit's alert stays quiet after paging. */
+export const DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS = 24 * 60 * 60;
 
 /**
- * How long the finality sweep keeps a pending deposit the escrow does not
- * cover before it writes `DEPOSIT_REJECT`. Covers the platform's own booking
- * lag (a redemption landed before its `HOLD_COMMIT`, a withdrawal claimed
- * before the booker ran, about a minute); a deposit that is still uncovered
- * after this left the escrow. Pending is never spendable meanwhile.
+ * A `SETTLING` intent untouched for this long is no longer owned by a live
+ * request (the longest one, observation included, answers within about 30 s)
+ * and is resumed by the finality job (`DepositService.resumeStuckSettling`).
  */
-export const DEPOSIT_UNCOVERED_GRACE_MS = 15 * 60 * 1000;
+export const DEPOSIT_SETTLING_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * A stuck `SETTLING` intent whose transaction the chain still does not know
+ * (no receipt), or that never recorded one, is failed after this long. Its
+ * hash is not burned: a transaction that lands later is named by the
+ * reconciler (`ESCROW_UNCREDITED_DEPOSIT`) and can be reported again.
+ */
+export const DEPOSIT_SETTLING_GIVE_UP_MS = 60 * 60 * 1000;

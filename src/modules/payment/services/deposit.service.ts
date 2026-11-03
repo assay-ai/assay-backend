@@ -29,10 +29,12 @@ import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 
 import {
-  DEPOSIT_COVERAGE_WAIT_MS,
   DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
+  DEPOSIT_SETTLING_GIVE_UP_MS,
+  DEPOSIT_SETTLING_STALE_MS,
+  DEPOSIT_TX_BOUND_LOOKBACK_MS,
   DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS,
   depositResource,
 } from '../constants/deposit-intent.constants';
@@ -47,7 +49,6 @@ import {
   DepositIntentStatus,
 } from '../ports/deposit.types';
 import { ESCROW_OPENER, EscrowOpenerPort } from '../ports/escrow-opener.port';
-import { DepositCoverageService } from './deposit-coverage.service';
 import { DepositIntentService } from './deposit-intent.service';
 
 /**
@@ -137,8 +138,6 @@ export class DepositService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly escrows: BuyerEscrowRepository,
     private readonly ledger: LedgerService,
-    // H-1: every credit is checked against the buyer's escrow on chain.
-    private readonly coverage: DepositCoverageService,
     // The ON-CHAIN pause and blocklist (D-19), asked before the escrow mirror
     // row and the intent row are written: a refused deposit leaves neither.
     @Optional()
@@ -335,13 +334,20 @@ export class DepositService {
    * 2. The chain is read (`observeDeposit`): only escrow `Deposited` events
    *    crediting THIS intent's buyer count, summed; a mined transaction that
    *    credits nobody is refused at once, without polling.
-   * 3. Bound in time to the intent: a transaction mined before the intent
-   *    (beyond {@link DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS}) is a deposit made
-   *    outside an intent, whose money may have been withdrawn since.
+   * 3. Bound in time: a transaction mined before the earliest unsettled
+   *    intent of this buyer in the last day (beyond
+   *    {@link DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS}) is a deposit made outside
+   *    every intent, whose money may have been withdrawn since.
    * 4. At least the requested amount (`extractSettledAmount`).
-   * 5. Still in the escrow: the buyer's escrow on chain must cover the
-   *    ledger's claim on it plus this credit (`DepositCoverageService`, H-1).
    *
+   * Whether the money is STILL in the escrow is not asked here. The credit is
+   * written as `DEPOSIT_PENDING`, which is never spendable, and only
+   * `DepositFinalityService` makes it spendable, after checking that the
+   * buyer's escrow covers it (H-1). Refusing an uncovered claim here instead
+   * lost real deposits: the buyer's money had moved, the intent expired while
+   * every report answered "not covered", and the hash could then never be
+   * claimed. Recording it binds the hash to this intent; finality holds it
+   * and alerts until the escrow covers it.
    * Refused on a chain that needs the platform as fee payer (Solana): no buyer
    * can broadcast there alone, so a hash-only claim has no honest producer.
    */
@@ -416,14 +422,12 @@ export class DepositService {
     }
 
     const minedAt = landed.blockTime;
-    if (
-      !minedAt ||
-      minedAt.getTime() < intent.createdAt.getTime() - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS
-    ) {
+    const bound = await this.txTimeBound(intent);
+    if (!minedAt || minedAt.getTime() < bound.getTime()) {
       this.logger.warn(
         `Deposit ${intent.id}: transaction ${transaction} mined at ` +
-          `${minedAt?.toISOString() ?? 'an unknown time'}, before the intent ` +
-          `(${intent.createdAt.toISOString()}) — refused`,
+          `${minedAt?.toISOString() ?? 'an unknown time'}, before ${bound.toISOString()} ` +
+          `(the buyer's earliest unsettled intent, less the clock skew) — refused`,
       );
       throw PaymentErrors.depositTransactionPredatesIntent({ transaction });
     }
@@ -437,16 +441,12 @@ export class DepositService {
       observed: landed.transfer,
     });
 
-    if (!(await this.waitForCoverage(intent, settledMoney, transaction))) {
-      throw PaymentErrors.depositNotCovered({ transaction });
-    }
-
     await this.deposits.transition(
       organizationId,
       intentId,
       DepositIntentStatus.CREATED,
       DepositIntentStatus.SETTLING,
-      { reason: 'buyer broadcast; observed on chain and covered by the escrow' },
+      { reason: 'buyer broadcast; observed on chain', submittedTxRef: transaction },
     );
 
     const settled = await this.creditAndSettle(organizationId, intent, settledMoney, transaction);
@@ -457,6 +457,24 @@ export class DepositService {
       });
     }
     return settled;
+  }
+
+  /**
+   * The earliest a reported transaction may have been mined: the creation of
+   * this buyer's earliest intent that never settled (`CREATED`, `EXPIRED`,
+   * `FAILED`) in the last {@link DEPOSIT_TX_BOUND_LOOKBACK_MS}, less
+   * {@link DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS}. Not just this intent's: the
+   * portal re-reports a hash on a fresh intent after the first one expired,
+   * and that deposit was made inside the first one (M-2). `intent` itself is
+   * `CREATED`, so the bound is never later than its own.
+   */
+  private async txTimeBound(intent: DepositIntent): Promise<Date> {
+    const earliest = await this.deposits.earliestUnsettledCreatedAt(
+      intent.agentAccount,
+      new Date(Date.now() - DEPOSIT_TX_BOUND_LOOKBACK_MS),
+    );
+    const anchor = Math.min(earliest?.getTime() ?? Infinity, intent.createdAt.getTime());
+    return new Date(anchor - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS);
   }
 
   /**
@@ -482,14 +500,13 @@ export class DepositService {
    * The intent is already `SETTLING` here (the payload went to the facilitator
    * and may have landed), so the outcomes are:
    * - not observed in the window, or observed crediting nobody: `FAILED`;
-   * - the chain could not be read: left `SETTLING` and answered `503` — the
-   *   transaction may well have landed, and failing the intent on an RPC blip
-   *   is what M-2 forbids;
-   * - observed: credited `DEPOSIT_PENDING`, then `SETTLED`. When the escrow
-   *   does not (yet) cover the credit, it is still written as PENDING — the
-   *   money was minted into the escrow by our own facilitator a moment ago —
-   *   and `DepositFinalityService` refuses to make it spendable until the
-   *   escrow covers it, rejecting it if it never does.
+   * - the chain could not be read: left `SETTLING` (with the transaction
+   *   recorded) and answered `503` — the transaction may well have landed,
+   *   and failing the intent on an RPC blip is what M-2 forbids. The finality
+   *   job resumes it (`resumeStuckSettling`);
+   * - observed: credited `DEPOSIT_PENDING`, then `SETTLED`. Pending is never
+   *   spendable; `DepositFinalityService` makes it spendable only once the
+   *   buyer's escrow covers it (H-1).
    */
   private async recordFacilitatorSettlement(
     organizationId: string,
@@ -500,6 +517,9 @@ export class DepositService {
     payer: AccountId,
   ): Promise<DepositIntent> {
     const intentId = intent.id;
+    // Before anything can fail: a request that dies past this point leaves a
+    // SETTLING intent the finality job can still resume.
+    await this.deposits.recordSubmittedTx(organizationId, intentId, transaction);
     const fail = (reason: string) =>
       this.deposits.transition(
         organizationId,
@@ -523,7 +543,7 @@ export class DepositService {
       case 'unavailable':
         this.logger.error(
           `Deposit ${intentId}: chain unreadable after the facilitator settled ${transaction}; ` +
-            `left SETTLING — ${describe(landed.error)}`,
+            `left SETTLING for the finality job — ${describe(landed.error)}`,
         );
         throw landed.error;
       case 'pending':
@@ -547,24 +567,117 @@ export class DepositService {
       throw error;
     }
 
-    let covered: boolean;
-    try {
-      covered = await this.waitForCoverage(intent, settledMoney, transaction);
-    } catch (error) {
-      this.logger.error(
-        `Deposit ${intentId}: escrow unreadable after the facilitator settled ${transaction}; ` +
-          `left SETTLING — ${describe(error)}`,
-      );
-      throw error;
+    return this.creditAndSettle(organizationId, intent, settledMoney, transaction);
+  }
+
+  /**
+   * Resumes `SETTLING` intents no live request owns any more (untouched for
+   * {@link DEPOSIT_SETTLING_STALE_MS}), from the finality job. Without it, a
+   * chain read that failed after the facilitator settled (M-1), or a request
+   * that died between the credit and `SETTLED` (L-7), left the intent
+   * `SETTLING` forever, the money in the escrow and nothing credited.
+   *
+   * Per intent, one chain read, never a wait:
+   * - its `DEPOSIT_PENDING` is already written: finish `SETTLED`;
+   * - the transaction credits the buyer: credit and settle, through the same
+   *   `creditAndSettle` (the claim index still applies);
+   * - it credits nobody: `FAILED`;
+   * - no receipt yet, or no transaction recorded: wait, and fail after
+   *   {@link DEPOSIT_SETTLING_GIVE_UP_MS};
+   * - the chain cannot be read: skipped, retried next pass.
+   */
+  async resumeStuckSettling(limit: number): Promise<{ checked: number; resolved: number }> {
+    const now = Date.now();
+    const stuck = await this.deposits.findStaleSettling(
+      new Date(now - DEPOSIT_SETTLING_STALE_MS),
+      limit,
+    );
+    let resolved = 0;
+    for (const intent of stuck) {
+      try {
+        if (await this.resumeOne(intent, now)) resolved += 1;
+      } catch (error) {
+        this.logger.warn(
+          `Deposit ${intent.id}: resuming SETTLING failed, retried next pass — ${describe(error)}`,
+        );
+      }
     }
-    if (!covered) {
-      this.logger.warn(
-        `Deposit ${intentId}: the escrow does not cover ${settledMoney.amount} from ` +
-          `${transaction}; credited as pending only, finality will not confirm it uncovered`,
+    return { checked: stuck.length, resolved };
+  }
+
+  /** One stuck intent; `true` when it left `SETTLING`. Throws on an unreadable chain. */
+  private async resumeOne(intent: DepositIntent, now: number): Promise<boolean> {
+    const { organizationId, id: intentId } = intent;
+    const fail = async (reason: string) => {
+      await this.deposits.transition(
+        organizationId,
+        intentId,
+        DepositIntentStatus.SETTLING,
+        DepositIntentStatus.FAILED,
+        { reason },
       );
+      this.logger.warn(`Deposit ${intentId}: stuck SETTLING failed — ${reason}`);
+      return true;
+    };
+    const givenUp = now - intent.updatedAt.getTime() >= DEPOSIT_SETTLING_GIVE_UP_MS;
+
+    const entries = await this.ledger.readJournal(organizationId, { intentId });
+    const pending = entries.find((entry) => entry.entryType === LedgerEntryType.DEPOSIT_PENDING);
+    if (pending) {
+      await this.deposits.transition(
+        organizationId,
+        intentId,
+        DepositIntentStatus.SETTLING,
+        DepositIntentStatus.SETTLED,
+        {
+          reason: 'resumed: credit already written',
+          settledAmount: pending.money,
+          chainTxRef: pending.chainTxRef ?? intent.submittedTxRef ?? undefined,
+        },
+      );
+      return true;
     }
 
-    return this.creditAndSettle(organizationId, intent, settledMoney, transaction);
+    const transaction = intent.submittedTxRef as TxRef | null;
+    if (!transaction) {
+      return givenUp ? fail('resumed: no transaction was recorded for this intent') : false;
+    }
+
+    const adapter = this.registry.resolve(intent.chainId);
+    const { escrowPda } = await this.escrowReader.escrowAddresses(
+      intent.agentAccount,
+      intent.requestedAmount.asset,
+    );
+    const asChainIntent = this.toChainIntent(intent, escrowPda);
+    const landed = await withinDeadline(
+      readLanded(adapter, asChainIntent, transaction),
+      Date.now() + DEPOSIT_OBSERVE_TIMEOUT_MS,
+    );
+    if (landed === TIMED_OUT) {
+      throw ChainErrors.rpcReadFailed({ method: 'observe deposit (timed out)' });
+    }
+    switch (landed.kind) {
+      case 'unavailable':
+        throw landed.error;
+      case 'pending':
+        return givenUp ? fail(`resumed: no receipt for ${transaction}`) : false;
+      case 'no_credit':
+        return fail(`resumed: transaction ${transaction} credits this buyer nothing`);
+    }
+
+    let settledMoney: Money;
+    try {
+      settledMoney = adapter.extractSettledAmount(asChainIntent, {
+        transaction,
+        network: intent.chainId,
+        payer: intent.agentAccount,
+        observed: landed.transfer,
+      });
+    } catch (error) {
+      return fail(`resumed: settled amount rejected on ${transaction}: ${describe(error)}`);
+    }
+    await this.creditAndSettle(organizationId, intent, settledMoney, transaction);
+    return true;
   }
 
   /**
@@ -604,6 +717,12 @@ export class DepositService {
       // close. This intent can never settle on a transfer another intent owns,
       // so fail it cleanly and report the same 409 the check would have.
       if (!isUniqueViolation(error)) throw error;
+      // This intent's own credit (the finality job resuming it raced a live
+      // request): it is credited, and whoever wrote it finishes SETTLED.
+      const own = await this.ledger.readJournal(organizationId, { intentId });
+      if (own.some((entry) => entry.entryType === LedgerEntryType.DEPOSIT_PENDING)) {
+        throw PaymentErrors.depositTransactionAlreadyClaimed({ transaction });
+      }
       await this.deposits.transition(
         organizationId,
         intentId,
@@ -629,37 +748,6 @@ export class DepositService {
         chainTxRef: transaction,
       },
     );
-  }
-
-  /**
-   * Whether the buyer's escrow covers the ledger's claim on it plus `credit`,
-   * asked again for up to {@link DEPOSIT_COVERAGE_WAIT_MS}: the node that
-   * answers the balance can be a block behind the one that answered the
-   * receipt. A failed chain read throws (unknown is never "covered").
-   */
-  private async waitForCoverage(
-    intent: DepositIntent,
-    credit: Money,
-    transaction: TxRef,
-  ): Promise<boolean> {
-    const deadline = Date.now() + DEPOSIT_COVERAGE_WAIT_MS;
-    for (;;) {
-      const coverage = await this.coverage.check(
-        intent.organizationId,
-        intent.agentAccount,
-        credit.asset,
-        BigInt(credit.amount),
-      );
-      if (coverage.covered) return true;
-      if (Date.now() >= deadline) {
-        this.logger.warn(
-          `Deposit ${intent.id}: ${transaction} not covered — escrow holds ${coverage.chain}, ` +
-            `ledger claims ${coverage.claim}, credit ${credit.amount}`,
-        );
-        return false;
-      }
-      await sleep(Math.min(DEPOSIT_OBSERVE_POLL_MS, Math.max(0, deadline - Date.now())));
-    }
   }
 
   /** The audit row naming the agent credential behind a deposit action (M-2). Never throws. */

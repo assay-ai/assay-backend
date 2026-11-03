@@ -45,6 +45,7 @@ export class DepositIntentService {
       settledAmount: null,
       chainId: input.chainId,
       chainTxRef: null,
+      submittedTxRef: null,
       expiresAt: input.expiresAt ?? new Date(Date.now() + depositIntentTtlMs(input.chainId)),
     };
 
@@ -84,9 +85,24 @@ export class DepositIntentService {
     return this.deposits.findClaimOfTxRef(chainTxRef, account);
   }
 
-  /** Open (`SETTLING`, or `CREATED` and unexpired) intents of one agent. */
+  /** Open (`CREATED` or `SETTLING`, inside the intent's lifetime) intents of one agent. */
   countOpenForAgent(organizationId: string, agentId: string): Promise<number> {
     return this.deposits.countOpenForAgent(organizationId, agentId, new Date());
+  }
+
+  /** See `DepositIntentRepository.earliestUnsettledCreatedAt`. */
+  earliestUnsettledCreatedAt(account: string, since: Date): Promise<Date | null> {
+    return this.deposits.earliestUnsettledCreatedAt(account, since);
+  }
+
+  /** `SETTLING` intents no live request owns any more (untouched since `before`). */
+  async findStaleSettling(before: Date, limit: number): Promise<DepositIntent[]> {
+    return (await this.deposits.findStaleSettling(before, limit)).map(toDepositIntent);
+  }
+
+  /** Records the transaction a `SETTLING` intent is settling on. */
+  async recordSubmittedTx(organizationId: string, intentId: string, txRef: string): Promise<void> {
+    await this.deposits.recordSubmittedTx(organizationId, intentId, txRef);
   }
 
   /**
@@ -109,6 +125,7 @@ export class DepositIntentService {
         ? { settledAmount: context.settledAmount.amount }
         : {}),
       ...(context.chainTxRef !== undefined ? { chainTxRef: context.chainTxRef } : {}),
+      ...(context.submittedTxRef !== undefined ? { submittedTxRef: context.submittedTxRef } : {}),
     });
 
     if (affected !== 1) {
@@ -143,6 +160,7 @@ export function toDepositIntent(row: DepositIntentEntity): DepositIntent {
     settledAmount: row.settledAmount === null ? null : money(row.settledAmount),
     chainId: row.chainId as ChainId,
     chainTxRef: row.chainTxRef,
+    submittedTxRef: row.submittedTxRef ?? null,
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

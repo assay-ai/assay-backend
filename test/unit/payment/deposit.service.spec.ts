@@ -21,8 +21,10 @@ import { DepositIntentService } from '@modules/payment/services/deposit-intent.s
 import { DepositService } from '@modules/payment/services/deposit.service';
 import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import {
-  DEPOSIT_COVERAGE_WAIT_MS,
   DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
+  DEPOSIT_SETTLING_GIVE_UP_MS,
+  DEPOSIT_SETTLING_STALE_MS,
+  DEPOSIT_TX_BOUND_LOOKBACK_MS,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
   DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS,
@@ -40,7 +42,6 @@ import {
   fakeFacilitator,
   fakeLedger,
   fakeVaultPort,
-  fakeCoverage,
 } from './helpers/deposit-harness';
 
 const SOLANA_DEVNET: ChainId = CHAIN_IDS.SOLANA_DEVNET;
@@ -80,7 +81,6 @@ function buildHarness(overrides?: {
   /** Seeds the escrow mirror with an already-open row for `AGENT_ACCOUNT` when true (default). */
   escrowExists?: boolean;
   chainState?: { assertActive: jest.Mock } | null;
-  coverage?: { check: jest.Mock };
   audit?: { recordAfterCommit: jest.Mock };
 }) {
   const repo = new FakeDepositIntentRepository();
@@ -90,7 +90,6 @@ function buildHarness(overrides?: {
   const opener = overrides?.opener ?? fakeEscrowOpener();
   const escrowReader = overrides?.escrowReader ?? fakeEscrowBalanceReader();
   const ledger = overrides?.ledger ?? fakeLedger();
-  const coverage = overrides?.coverage ?? fakeCoverage();
   const audit = overrides?.audit ?? { recordAfterCommit: jest.fn().mockResolvedValue(undefined) };
   const vault = fakeVaultPort();
 
@@ -119,7 +118,6 @@ function buildHarness(overrides?: {
     escrowReader,
     escrows.asRepository(),
     ledger,
-    coverage as never,
     (overrides?.chainState ?? null) as never,
     audit as never,
   );
@@ -135,7 +133,6 @@ function buildHarness(overrides?: {
     vault,
     ledger,
     registry,
-    coverage,
     audit,
     service,
   };
@@ -1006,13 +1003,8 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
         chainTxRef: TX_HASH,
       }),
     );
-    // H-1: the escrow must cover the ledger's claim plus THIS credit.
-    expect(harness.coverage.check).toHaveBeenCalledWith(
-      ORGANIZATION_ID,
-      AGENT_ACCOUNT,
-      USDC,
-      5_000_000n,
-    );
+    // Bound to this intent before the credit, so a stuck intent can be resumed.
+    expect((await harness.depositIntents.findById(ORG, intent.id)).submittedTxRef).toBe(TX_HASH);
   });
 
   it('allows a scoped caller to report its own deposit and keeps a retry of the same hash idempotent', async () => {
@@ -1503,7 +1495,6 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
 
     it('keeps the observation window at 20 s, under the 30 s client timeout', () => {
       expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBe(20_000);
-      expect(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_COVERAGE_WAIT_MS).toBeLessThan(30_000);
     });
 
     it('never credits less than was requested, and leaves the intent open', async () => {
@@ -1543,7 +1534,6 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT);
       expect(error.statusCode).toBe(422);
       expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      expect(harness.coverage.check).not.toHaveBeenCalled();
       expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
         DepositIntentStatus.CREATED,
       );
@@ -1562,56 +1552,108 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     });
 
     // Scenario B: inside one intent's lifetime — deposit, withdraw on chain,
-    // then report. The time bound passes; the escrow balance does not.
-    it('deposit -> withdraw -> claim: refuses a credit the escrow no longer covers, crediting nothing', async () => {
-      jest.useFakeTimers({ doNotFake: ['nextTick'] });
-      const coverage = fakeCoverage(false);
-      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
+    // then report. The deposit path reads no balance: the claim is recorded
+    // as PENDING (never spendable), binding the hash to this intent, and
+    // finality keeps it from becoming spendable while the escrow does not
+    // cover it (H-1). Refusing it here instead stranded real deposits.
+    it('deposit -> withdraw -> claim: records the credit as pending only, never refusing it', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
       const intent = await createdIntent(harness);
 
-      const settling = errorOf(() =>
-        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
-      );
-      await jest.advanceTimersByTimeAsync(DEPOSIT_COVERAGE_WAIT_MS + DEPOSIT_OBSERVE_POLL_MS);
-      const error = await settling;
+      const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
 
-      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_NOT_COVERED);
-      expect(error.statusCode).toBe(409);
-      // Asked again for the node-lag window, not once.
-      expect(coverage.check.mock.calls.length).toBeGreaterThan(1);
-      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      const after = await harness.depositIntents.findById(ORG, intent.id);
-      expect(after.status).toBe(DepositIntentStatus.CREATED);
-      expect(after.chainTxRef).toBeNull();
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect(settled.chainTxRef).toBe(TX_HASH);
+      expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+      expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+        expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING }),
+      );
+      expect(harness.ledger.appendNow).not.toHaveBeenCalledWith(
+        expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_CONFIRM }),
+      );
     });
 
-    it('credits once a lagging balance read catches up inside the coverage window', async () => {
-      jest.useFakeTimers({ doNotFake: ['nextTick'] });
-      const coverage = fakeCoverage();
-      coverage.check
-        .mockResolvedValueOnce({ chain: 0n, claim: 0n, covered: false })
-        .mockResolvedValue({ chain: 5_000_000n, claim: 0n, covered: true });
-      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
-      const intent = await createdIntent(harness);
+    // M-2: the portal re-reports a hash on a fresh intent after the first one
+    // expired; that deposit was made inside the first one.
+    describe('re-report after expiry (time bound from the earliest unsettled intent)', () => {
+      function age(
+        harness: ReturnType<typeof buildHarness>,
+        id: string,
+        ms: number,
+        status: string,
+      ) {
+        const row = harness.repo.rows.get(id)!;
+        row.createdAt = new Date(Date.now() - ms);
+        row.expiresAt = new Date(row.createdAt.getTime() + 10 * 60 * 1000);
+        row.status = status;
+      }
 
-      const settling = harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
-      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_POLL_MS * 2);
+      it('credits a hash mined inside an expired intent, reported on a fresh one', async () => {
+        const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+        const first = await createdIntent(harness);
+        age(harness, first.id, 15 * 60 * 1000, DepositIntentStatus.EXPIRED);
+        const fresh = await createdIntent(harness);
+        (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(
+          credited(new Date(Date.now() - 12 * 60 * 1000)),
+        );
 
-      expect((await settling).status).toBe(DepositIntentStatus.SETTLED);
-    });
+        const settled = await harness.service.settleDepositByBroadcast(ORG, fresh.id, TX_HASH);
 
-    it('answers a failed escrow read with the read error, leaving the intent open', async () => {
-      const coverage = { check: jest.fn().mockRejectedValue(new Error('escrow unreadable')) };
-      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
-      const intent = await createdIntent(harness);
+        expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      });
 
-      await expect(
-        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
-      ).rejects.toThrow('escrow unreadable');
-      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
-        DepositIntentStatus.CREATED,
-      );
+      it('also anchors on a FAILED intent', async () => {
+        const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+        const first = await createdIntent(harness);
+        age(harness, first.id, 15 * 60 * 1000, DepositIntentStatus.FAILED);
+        const fresh = await createdIntent(harness);
+        (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(
+          credited(new Date(Date.now() - 12 * 60 * 1000)),
+        );
+
+        await expect(
+          harness.service.settleDepositByBroadcast(ORG, fresh.id, TX_HASH),
+        ).resolves.toMatchObject({ status: DepositIntentStatus.SETTLED });
+      });
+
+      it('does not anchor on a SETTLED intent, nor on one older than the lookback', async () => {
+        for (const [ms, status] of [
+          [15 * 60 * 1000, DepositIntentStatus.SETTLED],
+          [DEPOSIT_TX_BOUND_LOOKBACK_MS + 60_000, DepositIntentStatus.EXPIRED],
+        ] as const) {
+          const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+          const first = await createdIntent(harness);
+          age(harness, first.id, ms, status);
+          const fresh = await createdIntent(harness);
+          (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(
+            credited(new Date(Date.now() - 12 * 60 * 1000)),
+          );
+
+          const error = await errorOf(() =>
+            harness.service.settleDepositByBroadcast(ORG, fresh.id, TX_HASH),
+          );
+          expect(error.errorCode).toBe(
+            PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT,
+          );
+        }
+      });
+
+      it('still refuses a transaction mined before every such intent', async () => {
+        const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+        const first = await createdIntent(harness);
+        age(harness, first.id, 15 * 60 * 1000, DepositIntentStatus.EXPIRED);
+        const fresh = await createdIntent(harness);
+        (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(
+          credited(
+            new Date(Date.now() - 15 * 60 * 1000 - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS - 1_000),
+          ),
+        );
+
+        const error = await errorOf(() =>
+          harness.service.settleDepositByBroadcast(ORG, fresh.id, TX_HASH),
+        );
+        expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT);
+      });
     });
   });
 
@@ -1767,6 +1809,36 @@ describe('DepositService.createDeposit — open intents per agent', () => {
 
     await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
   });
+
+  // M-4: a stuck SETTLING row past the intent's lifetime no longer locks
+  // anyone out; a recent one (a report in flight) still counts.
+  it('does not count SETTLING rows older than the intent lifetime', async () => {
+    const harness = buildHarness();
+    for (let i = 0; i < DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT; i += 1) {
+      await harness.service.createDeposit(input());
+    }
+    for (const row of harness.repo.rows.values()) {
+      row.status = DepositIntentStatus.SETTLING;
+      row.expiresAt = new Date(Date.now() - 1);
+    }
+
+    await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
+  });
+
+  it('still counts a SETTLING row inside the intent lifetime', async () => {
+    const harness = buildHarness();
+    for (let i = 0; i < DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT; i += 1) {
+      await harness.service.createDeposit(input());
+    }
+    for (const row of harness.repo.rows.values()) {
+      row.status = DepositIntentStatus.SETTLING;
+    }
+
+    await expectErrorCodeAsync(
+      () => harness.service.createDeposit(input()),
+      PaymentErrorCode.PAYMENT_DEPOSIT_OPEN_LIMIT,
+    );
+  });
 });
 
 function dummyPayload() {
@@ -1848,24 +1920,119 @@ describe('DepositService.settleDeposit — after the facilitator broadcast', () 
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
   });
 
-  // H-1 on the shared path: the facilitator minted this deposit a moment ago,
-  // so it is held as pending (never spendable) rather than lost, and finality
-  // decides.
-  it('holds an uncovered credit as pending only, leaving the decision to finality', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+  // No balance read on this path: the credit is pending (never spendable)
+  // and finality decides, so an escrow read cannot fail it or wedge it (M-1).
+  it('credits pending without reading the escrow balance', async () => {
     const observeTransfer = jest.fn().mockResolvedValue(observedTransfer);
-    const coverage = fakeCoverage(false);
-    const { harness, intent } = await settling({ observeTransfer }, { coverage });
+    const { harness, intent } = await settling({ observeTransfer });
 
-    const pending = harness.service.settleDeposit(ORG, intent.id, dummyPayload());
-    await jest.advanceTimersByTimeAsync(DEPOSIT_COVERAGE_WAIT_MS + DEPOSIT_OBSERVE_POLL_MS);
-    const settled = await pending;
+    const settled = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
 
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
-    expect(coverage.check).toHaveBeenCalled();
-    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(harness.escrowReader.read).not.toHaveBeenCalled();
     expect(harness.ledger.appendNow).toHaveBeenCalledWith(
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING }),
     );
+  });
+
+  // M-1: a failed chain read after the facilitator settled leaves SETTLING
+  // with the transaction recorded; the finality job resumes and credits it.
+  it('failed read after the facilitator settled: the finality job resumes and credits it', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    const observeTransfer = jest
+      .fn()
+      .mockRejectedValue(ChainErrors.rpcReadFailed({ method: 'getTransaction' }));
+    const { harness, intent } = await settling({ observeTransfer });
+
+    const pending = harness.service
+      .settleDeposit(ORG, intent.id, dummyPayload())
+      .catch((error: unknown) => error);
+    await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
+    await pending;
+    expect((await harness.depositIntents.findById(ORG, intent.id)).submittedTxRef).toBe(TX_SIG);
+
+    // A live request still owns it: not touched.
+    await expect(harness.service.resumeStuckSettling(10)).resolves.toEqual({
+      checked: 0,
+      resolved: 0,
+    });
+
+    observeTransfer.mockReset().mockResolvedValue(observedTransfer);
+    jest.setSystemTime(Date.now() + DEPOSIT_SETTLING_STALE_MS + 1_000);
+    await expect(harness.service.resumeStuckSettling(10)).resolves.toEqual({
+      checked: 1,
+      resolved: 1,
+    });
+
+    const after = await harness.depositIntents.findById(ORG, intent.id);
+    expect(after.status).toBe(DepositIntentStatus.SETTLED);
+    expect(after.chainTxRef).toBe(TX_SIG);
+    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING, chainTxRef: TX_SIG }),
+    );
+  });
+
+  describe('resumeStuckSettling', () => {
+    async function stuck(observeTransfer: jest.Mock, txRef: string | null = TX_SIG) {
+      const { harness, intent } = await settling({ observeTransfer });
+      const row = harness.repo.rows.get(intent.id)!;
+      row.status = DepositIntentStatus.SETTLING;
+      row.submittedTxRef = txRef;
+      row.updatedAt = new Date(Date.now() - DEPOSIT_SETTLING_STALE_MS - 1_000);
+      return { harness, intent, row };
+    }
+
+    it('finishes SETTLED when the credit was already written (L-7)', async () => {
+      const observeTransfer = jest.fn();
+      const { harness, intent } = await stuck(observeTransfer);
+      (harness.ledger.readJournal as jest.Mock).mockResolvedValue([
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, money: amount(), chainTxRef: TX_SIG },
+      ]);
+
+      await harness.service.resumeStuckSettling(10);
+
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.SETTLED);
+      expect(after.chainTxRef).toBe(TX_SIG);
+      expect(observeTransfer).not.toHaveBeenCalled();
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+    });
+
+    it('keeps waiting on an unreadable chain, and on no receipt until the give-up time', async () => {
+      const observeTransfer = jest
+        .fn()
+        .mockRejectedValueOnce(ChainErrors.rpcReadFailed({ method: 'getTransaction' }))
+        .mockResolvedValue(null);
+      const { harness, intent, row } = await stuck(observeTransfer);
+
+      await harness.service.resumeStuckSettling(10);
+      await harness.service.resumeStuckSettling(10);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.SETTLING,
+      );
+
+      row.updatedAt = new Date(Date.now() - DEPOSIT_SETTLING_GIVE_UP_MS - 1_000);
+      await harness.service.resumeStuckSettling(10);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.FAILED,
+      );
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+    });
+
+    it('fails one that never recorded a transaction, only after the give-up time', async () => {
+      const { harness, intent, row } = await stuck(jest.fn(), null);
+
+      await harness.service.resumeStuckSettling(10);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.SETTLING,
+      );
+
+      row.updatedAt = new Date(Date.now() - DEPOSIT_SETTLING_GIVE_UP_MS - 1_000);
+      await harness.service.resumeStuckSettling(10);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.FAILED,
+      );
+    });
   });
 });

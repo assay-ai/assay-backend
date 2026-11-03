@@ -24,7 +24,6 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED = 'PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED',
   PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING = 'PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING',
   PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT = 'PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT',
-  PAYMENT_DEPOSIT_NOT_COVERED = 'PAYMENT_DEPOSIT_NOT_COVERED',
   PAYMENT_DEPOSIT_ALREADY_SETTLED = 'PAYMENT_DEPOSIT_ALREADY_SETTLED',
   PAYMENT_DEPOSIT_OPEN_LIMIT = 'PAYMENT_DEPOSIT_OPEN_LIMIT',
   PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET = 'PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET',
@@ -664,7 +663,8 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `on the escrow (report the depositFor transaction, not the approve)`,
   },
   /**
-   * The transaction was mined before this deposit intent existed (beyond a
+   * The transaction was mined before this deposit intent, and before every
+   * other unsettled intent of this buyer in the last day, existed (beyond a
    * small clock skew). A deposit made outside an intent is never claimable
    * later: its money may have been withdrawn since, and the ledger cannot
    * tell. The buyer withdraws it and deposits again through an intent.
@@ -673,23 +673,9 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT,
     statusCode: 422,
     message: (context?: Record<string, any>) =>
-      `Transaction ${context?.transaction ?? ''} was mined before this deposit intent was ` +
-      `created and cannot be claimed by it. A deposit made outside an intent is not ` +
+      `Transaction ${context?.transaction ?? ''} was mined before any open or expired deposit ` +
+      `intent of this buyer was created and cannot be claimed. A deposit made outside an intent is not ` +
       `credited; withdraw it from the escrow and deposit again through a new intent`,
-  },
-  /**
-   * The buyer's escrow on chain does not hold what the ledger would say after
-   * this credit: the deposited money is no longer (all) in the escrow, or the
-   * platform is still booking a recent redemption or withdrawal. Nothing was
-   * credited and the intent stays open; retry shortly.
-   */
-  depositNotCovered: {
-    code: PaymentErrorCode.PAYMENT_DEPOSIT_NOT_COVERED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `The buyer's escrow does not currently hold the funds transaction ` +
-      `${context?.transaction ?? ''} deposited; nothing was credited. If the funds are still ` +
-      `in the escrow, retry in a minute`,
   },
   /** `409`: the intent is already settled, by a different transaction than the one reported. */
   depositAlreadySettled: {

@@ -278,15 +278,14 @@ export class DepositsController {
       'The transaction already credited this buyer (`PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED`); ' +
       'the intent is settled by another transaction (`PAYMENT_DEPOSIT_ALREADY_SETTLED`); a report ' +
       'of this intent is still in flight — poll `GET /deposits/:id` instead of retrying ' +
-      '(`PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION`); or the buyer’s escrow does not currently ' +
-      'hold the deposited funds — retry shortly (`PAYMENT_DEPOSIT_NOT_COVERED`)',
+      '(`PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION`)',
   })
   @ApiResponse({
     status: 422,
     description:
       'Not observed yet — not mined or not visible yet; report the same hash again ' +
       '(`PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED`); mined but crediting this buyer nothing ' +
-      '(`PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING`); or mined before the intent was created ' +
+      '(`PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING`); or mined before the buyer’s earliest open or expired intent ' +
       '(`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`)',
   })
   @ApiResponse({

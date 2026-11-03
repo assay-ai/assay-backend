@@ -27,8 +27,8 @@ export interface EscrowCoverage {
  * it is still there. A buyer who deposits outside an intent, withdraws on
  * chain (the withdrawal booker debits only what the ledger has as available),
  * and then reports the old hash would otherwise be credited with money that
- * left. So every write that grows what the ledger says a buyer's escrow holds
- * from a deposit, and the promotion to spendable, asks the chain first:
+ * left. So the promotion of a pending deposit to spendable
+ * (`DepositFinalityService`) asks the chain first:
  *
  *   `escrowLedgerClaim(ledger) + credit <= escrow balance on chain`
  *
@@ -46,8 +46,7 @@ export class DepositCoverageService {
 
   /**
    * Whether the buyer's escrow covers its ledger claim plus `extra` atomic
-   * units. `extra` is the credit about to be written (`0n` when the credit is
-   * already on the ledger, as at finality).
+   * units (`0n` at finality, where the credit is already on the ledger).
    */
   async check(
     organizationId: string,
