@@ -1,5 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
+import { nonTransactionalStep } from '../non-transactional-migration';
+
 /**
  * One deposit claim per (transaction, buyer account), not per transaction.
  *
@@ -19,9 +21,33 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   over legacy `DEPOSIT` rows (the `DEPOSIT_PENDING` arm uses the new unique
  *   index).
  *
- * **Run this before deploying the code that needs it.** The new code writes
- * `submitted_tx_ref`, and until the per-account indexes exist the second buyer
- * of a batch transaction still hits the old hash-only index.
+ * - `deposit_intents.finality_uncovered_since` / `finality_next_check_at`: the
+ *   finality sweep backs off a deposit it finds uncovered by the buyer's escrow,
+ *   so stuck rows cannot hold the head of the queue (H-1, round 3).
+ *
+ * **Run this before deploying the code that needs it.** The new code reads and
+ * writes the new columns (every `deposit_intents` query fails without them),
+ * and until the per-account indexes exist the second buyer of a batch
+ * transaction still hits the old hash-only index.
+ *
+ * **On prod, run it out of band, before rolling the new image.** `start:prod`
+ * would run it inside the new container, where the concurrent builds (each
+ * scans `ledger_entries` twice) can outlast the healthcheck. Run it once from
+ * a one-off container of the NEW image with the API's environment (the image's
+ * entrypoint is `yarn`):
+ *
+ *     docker run --rm --env-file <api env file> <new image> migration:run:prod
+ *
+ * (or `docker compose run --rm <api service> migration:run:prod` with the new
+ * image tag), check `migration:show:prod` lists it as run, then roll the image;
+ * its own `start:prod` then finds nothing pending.
+ *
+ * The column change takes `ACCESS EXCLUSIVE` on `deposit_intents` for a catalog
+ * update only, under `lock_timeout = 5s`: behind a long transaction it fails
+ * fast (rerun) instead of queueing every deposit query behind it. The whole
+ * run holds the migration's advisory lock and the 60 s / 1 h timeouts of
+ * `nonTransactionalStep`, so two concurrent migrators cannot drop each other's
+ * in-progress index.
  *
  * Safe to build on existing rows: the old indexes were unique on
  * `chain_tx_ref` alone, which implies unique on `(chain_tx_ref, account_id)`.
@@ -61,9 +87,20 @@ export class DepositClaimPerAccount1793491200000 implements MigrationInterface {
   transaction = false;
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    await nonTransactionalStep(queryRunner, this.name, () => this.apply(queryRunner));
+  }
+
+  private async apply(queryRunner: QueryRunner): Promise<void> {
+    // Fail fast rather than queue every deposit query behind the ALTER; back
+    // to the step's 60 s for the concurrent builds below.
+    await queryRunner.query(`SET lock_timeout = '5s'`);
     await queryRunner.query(
-      `ALTER TABLE "deposit_intents" ADD COLUMN IF NOT EXISTS "submitted_tx_ref" varchar(256)`,
+      `ALTER TABLE "deposit_intents"
+         ADD COLUMN IF NOT EXISTS "submitted_tx_ref" varchar(256),
+         ADD COLUMN IF NOT EXISTS "finality_uncovered_since" timestamptz,
+         ADD COLUMN IF NOT EXISTS "finality_next_check_at" timestamptz`,
     );
+    await queryRunner.query(`SET lock_timeout = '60s'`);
     for (const index of PLAIN_INDEXES) {
       await dropIfInvalid(queryRunner, index.name);
       await queryRunner.query(
@@ -85,6 +122,10 @@ export class DepositClaimPerAccount1793491200000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    await nonTransactionalStep(queryRunner, this.name, () => this.revert(queryRunner));
+  }
+
+  private async revert(queryRunner: QueryRunner): Promise<void> {
     // Rebuilding the hash-only indexes fails if a batch transaction has since
     // been claimed by two buyers; that is the state this migration allows, and
     // undoing it needs a reviewed repair first, not a silent drop. Concurrent,
@@ -103,8 +144,12 @@ export class DepositClaimPerAccount1793491200000 implements MigrationInterface {
     for (const index of PLAIN_INDEXES) {
       await queryRunner.query(`DROP INDEX CONCURRENTLY IF EXISTS "${index.name}"`);
     }
+    await queryRunner.query(`SET lock_timeout = '5s'`);
     await queryRunner.query(
-      `ALTER TABLE "deposit_intents" DROP COLUMN IF EXISTS "submitted_tx_ref"`,
+      `ALTER TABLE "deposit_intents"
+         DROP COLUMN IF EXISTS "finality_next_check_at",
+         DROP COLUMN IF EXISTS "finality_uncovered_since",
+         DROP COLUMN IF EXISTS "submitted_tx_ref"`,
     );
   }
 }

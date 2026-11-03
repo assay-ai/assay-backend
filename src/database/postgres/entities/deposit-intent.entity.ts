@@ -79,4 +79,22 @@ export class DepositIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    */
   @Column({ name: 'finality_resolved_at', type: 'timestamptz', nullable: true })
   finalityResolvedAt: Date | null;
+
+  /**
+   * When the finality sweep first found this deposit final on chain but not
+   * covered by the buyer's escrow (H-1). Never cleared while the row is
+   * queued: the alert delay and the back-off run from it, and `POST /deposits`
+   * refuses a new intent for an account that has one older than the alert
+   * delay. A queue and pre-flight marker only; the journal is the record.
+   */
+  @Column({ name: 'finality_uncovered_since', type: 'timestamptz', nullable: true })
+  finalityUncoveredSince: Date | null;
+
+  /**
+   * The earliest time the finality sweep looks at this deposit again, set
+   * only when it was found uncovered (exponential back-off, capped). Keeps a
+   * stuck row from holding the head of the queue and bounds its RPC cost.
+   */
+  @Column({ name: 'finality_next_check_at', type: 'timestamptz', nullable: true })
+  finalityNextCheckAt: Date | null;
 }

@@ -123,6 +123,31 @@ describe('uq_ledger_entries_deposit_*_account (claim per transaction and buyer)'
     expect(loops[1]!).toBeLessThan(drop);
   });
 
+  it('changes the columns under a short lock_timeout, then restores the build timeout', () => {
+    const up = sql.slice(sql.indexOf('async up('), sql.indexOf('async down('));
+    const short = up.indexOf(`SET lock_timeout = '5s'`);
+    const alter = up.indexOf('ALTER TABLE "deposit_intents"');
+    const restore = up.indexOf(`SET lock_timeout = '60s'`);
+    const firstBuild = up.indexOf('CREATE INDEX CONCURRENTLY');
+    expect(short).toBeGreaterThan(-1);
+    expect(short).toBeLessThan(alter);
+    expect(alter).toBeLessThan(restore);
+    expect(restore).toBeLessThan(firstBuild);
+    expect(up).toContain('nonTransactionalStep(');
+    for (const column of [
+      'submitted_tx_ref',
+      'finality_uncovered_since',
+      'finality_next_check_at',
+    ]) {
+      expect(up).toContain(`ADD COLUMN IF NOT EXISTS "${column}"`);
+    }
+  });
+
+  it('documents the out-of-band prod run with the exact command', () => {
+    expect(sql).toContain('migration:run:prod');
+    expect(sql).toMatch(/out of band, before rolling the new image/);
+  });
+
   it('indexes the claim lookup over legacy DEPOSIT rows and the time-bound read', () => {
     expect(sql).toContain('idx_ledger_entries_deposit_legacy_account');
     expect(sql).toContain(`"entry_type" = 'DEPOSIT' AND "chain_tx_ref" IS NOT NULL`);
