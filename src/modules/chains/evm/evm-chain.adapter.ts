@@ -30,7 +30,7 @@ import {
   parseChainId,
   toAccountId,
 } from '../ports/caip.types';
-import { ChainAdapter } from '../ports/chain-adapter.port';
+import { ChainAdapter, DepositObservation } from '../ports/chain-adapter.port';
 import {
   DelegateBindingChallenge,
   DelegateBindingTypedData,
@@ -122,7 +122,9 @@ export type EvmEscrowView = Readonly<Record<(typeof ESCROW_FIELDS)[number], bigi
  */
 export interface EvmReadClient {
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<EvmTransactionReceipt | null>;
-  getBlock(args: { blockTag: 'finalized' }): Promise<{ readonly number: bigint | null }>;
+  getBlock(
+    args: { blockTag: 'finalized' } | { blockNumber: bigint },
+  ): Promise<{ readonly number: bigint | null; readonly timestamp?: bigint }>;
   getBlockNumber(): Promise<bigint>;
   readContract(args: {
     address: `0x${string}`;
@@ -465,6 +467,66 @@ export class EvmChainAdapter implements ChainAdapter {
     transaction: TxRef,
     options?: { readonly commitment?: 'confirmed' | 'finalized' },
   ): Promise<ObservedTransfer | null> {
+    const read = await this.readDeposit(intent, transaction, options?.commitment ?? 'confirmed');
+    // Not found, not final yet, reverted, or crediting somebody else all look
+    // identical through this method: "this transaction moved you nothing (yet)".
+    // A read that FAILED is not one of them: it throws (M-2), so the finality
+    // sweep retries the row instead of writing DEPOSIT_REJECT on an RPC blip.
+    return read.kind === 'credited' ? read.transfer : null;
+  }
+
+  /**
+   * See `ChainAdapter.observeDeposit`. One extra read over `observeTransfer`:
+   * the block, for its timestamp, so the deposit path can refuse a
+   * transaction mined before the intent that claims it.
+   */
+  async observeDeposit(intent: PaymentIntent, transaction: TxRef): Promise<DepositObservation> {
+    const read = await this.readDeposit(intent, transaction, 'confirmed');
+    if (read.kind !== 'credited') return read;
+    const client = this.clientFor(intent.chainId);
+    const block = await client
+      .getBlock({ blockNumber: read.blockNumber })
+      .catch((error: unknown) => {
+        throw ChainErrors.rpcReadFailed({
+          method: 'eth_getBlockByNumber',
+          reason: describe(error),
+        });
+      });
+    if (typeof block?.timestamp !== 'bigint') {
+      throw ChainErrors.rpcReplyMalformed({
+        method: 'eth_getBlockByNumber',
+        expected: 'a block with a timestamp',
+      });
+    }
+    return {
+      kind: 'credited',
+      transfer: read.transfer,
+      blockTime: new Date(Number(block.timestamp) * 1000),
+    };
+  }
+
+  /**
+   * The shared read behind both methods.
+   *
+   * Every escrow `Deposited` event for this buyer in the transaction is
+   * SUMMED. A transaction is claimed once per buyer (the claim check and
+   * `uq_ledger_entries_deposit_pending_account` key on the hash AND the
+   * account), so a batch that funds this buyer twice is credited once, in
+   * full, and a batch that funds two buyers lets each claim only its own.
+   */
+  private async readDeposit(
+    intent: PaymentIntent,
+    transaction: TxRef,
+    commitment: 'confirmed' | 'finalized',
+  ): Promise<
+    | { readonly kind: 'pending' }
+    | { readonly kind: 'no_credit' }
+    | {
+        readonly kind: 'credited';
+        readonly transfer: ObservedTransfer;
+        readonly blockNumber: bigint;
+      }
+  > {
     this.assertServes(intent.chainId);
     const client = this.clientFor(intent.chainId);
     const deployment = this.deploymentFor(intent.chainId);
@@ -473,35 +535,32 @@ export class EvmChainAdapter implements ChainAdapter {
     const buyer = getAddress(this.parseAccountId(intent.payer).address);
 
     if (!TX_HASH_RE.test(transaction)) {
-      return null;
+      return { kind: 'no_credit' };
     }
 
+    // viem THROWS for a receipt that does not exist; that one error is the
+    // answer "not there (yet)". Every other error is a read that failed, and
+    // must never be mistaken for it.
     const receipt = await client
       .getTransactionReceipt({ hash: transaction as `0x${string}` })
-      .catch(() => null);
+      .catch((error: unknown) => {
+        if (isReceiptNotFound(error)) return null;
+        throw ChainErrors.rpcReadFailed({
+          method: 'eth_getTransactionReceipt',
+          reason: describe(error),
+        });
+      });
 
-    // Not found, not mined yet, or dropped by a reorg all look identical from
-    // here, and a reverted transaction moved nothing. The caller's state
-    // machine decides what "nothing observed" means — never a throw.
-    if (!receipt || receipt.status !== 'success') {
-      return null;
+    if (!receipt) {
+      return { kind: 'pending' };
     }
-    if (options?.commitment === 'finalized') {
-      if (this.depositConfirmations !== null) {
-        if (this.depositConfirmations > 0) {
-          const latest = await client.getBlockNumber().catch(() => null);
-          if (latest === null || latest - receipt.blockNumber < BigInt(this.depositConfirmations)) {
-            return null;
-          }
-        }
-      } else {
-        const finalized = await client.getBlock({ blockTag: 'finalized' }).catch(() => null);
-        if (!finalized || finalized.number === null || finalized.number < receipt.blockNumber) {
-          return null;
-        }
-      }
+    // A reverted transaction moved nothing, and never will.
+    if (receipt.status !== 'success') {
+      return { kind: 'no_credit' };
     }
 
+    let total = 0n;
+    let matched = false;
     for (const log of receipt.logs) {
       if (getAddress(log.address) !== getAddress(deployment.escrow)) {
         continue;
@@ -520,18 +579,43 @@ export class EvmChainAdapter implements ChainAdapter {
       if (getAddress(args.buyer) !== buyer) {
         continue;
       }
-      return {
-        amount: args.amount.toString(),
-        asset: intent.amount.asset,
-        decimals: getAssetMetadata(intent.amount.asset).decimals,
-      };
+      matched = true;
+      total += args.amount;
     }
 
-    // Found, mined, succeeded — and credited somebody else, or nobody. Not a
-    // parse failure and not an error: it is the same "this transaction moved
-    // you nothing" the not-found case reports, and the caller's state machine
-    // is what decides whether that is a problem.
-    return null;
+    // Found, mined, succeeded — and credited somebody else, or nobody.
+    if (!matched) {
+      return { kind: 'no_credit' };
+    }
+
+    if (commitment === 'finalized' && !(await this.isFinal(client, receipt.blockNumber))) {
+      return { kind: 'pending' };
+    }
+
+    return {
+      kind: 'credited',
+      transfer: {
+        amount: total.toString(),
+        asset: intent.amount.asset,
+        decimals: getAssetMetadata(intent.amount.asset).decimals,
+      },
+      blockNumber: receipt.blockNumber,
+    };
+  }
+
+  /** Whether `blockNumber` is final by this deployment's rule. A failed read throws. */
+  private async isFinal(client: EvmReadClient, blockNumber: bigint): Promise<boolean> {
+    if (this.depositConfirmations !== null) {
+      if (this.depositConfirmations === 0) return true;
+      const latest = await client.getBlockNumber().catch((error: unknown) => {
+        throw ChainErrors.rpcReadFailed({ method: 'eth_blockNumber', reason: describe(error) });
+      });
+      return latest - blockNumber >= BigInt(this.depositConfirmations);
+    }
+    const finalized = await client.getBlock({ blockTag: 'finalized' }).catch((error: unknown) => {
+      throw ChainErrors.rpcReadFailed({ method: 'eth_getBlockByNumber', reason: describe(error) });
+    });
+    return !!finalized && finalized.number !== null && finalized.number >= blockNumber;
   }
 
   // ── Vouchers (rail B) ────────────────────────────────────────────────────
@@ -1169,4 +1253,18 @@ function toDelegateBindingMessage(
     nonce: challenge.nonce,
     expiresAt: BigInt(challenge.expiresAt),
   };
+}
+
+/** viem's `TransactionReceiptNotFoundError`: the one error that means "no receipt (yet)". */
+function isReceiptNotFound(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    name === 'TransactionReceiptNotFoundError' ||
+    /TransactionReceiptNotFound|could not be found/i.test(message)
+  );
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
