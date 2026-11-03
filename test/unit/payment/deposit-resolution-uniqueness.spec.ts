@@ -72,7 +72,7 @@ describe('uq_ledger_entries_deposit_resolution', () => {
     expect(predicate).not.toContain(`'${LedgerEntryType.DEPOSIT_PENDING}'`);
   });
 
-  it('is keyed on the signature alone, so one transfer can resolve once', () => {
+  it('was first keyed on the signature alone', () => {
     expect(sql).toMatch(
       /CREATE UNIQUE INDEX "uq_ledger_entries_deposit_resolution"\s+ON "ledger_entries" \("chain_tx_ref"\)/,
     );
@@ -80,5 +80,40 @@ describe('uq_ledger_entries_deposit_resolution', () => {
 
   it('excludes rows with no signature, which carry no claim to be unique about', () => {
     expect(sql).toContain('"chain_tx_ref" IS NOT NULL');
+  });
+});
+
+/**
+ * The claim unit since `DepositClaimPerAccount1793491200000`: (transaction,
+ * buyer account). A batch transaction funding two buyers lets each resolve its
+ * own credit once; the same buyer still resolves once.
+ */
+describe('uq_ledger_entries_deposit_*_account (claim per transaction and buyer)', () => {
+  const sql = readFileSync(
+    join(
+      __dirname,
+      '../../../src/database/postgres/migrations/1793491200000-deposit-claim-per-account.ts',
+    ),
+    'utf8',
+  );
+
+  it('keys both deposit indexes on (chain_tx_ref, account_id)', () => {
+    expect(sql).toContain('uq_ledger_entries_deposit_pending_account');
+    expect(sql).toContain('uq_ledger_entries_deposit_resolution_account');
+    expect(sql).toMatch(/ON "ledger_entries" \("chain_tx_ref", "account_id"\)/);
+  });
+
+  it('keeps the same entry-type predicates', () => {
+    expect(sql).toContain(`"entry_type" = 'DEPOSIT_PENDING' AND "chain_tx_ref" IS NOT NULL`);
+    expect(sql).toContain(
+      `"entry_type" IN ('DEPOSIT_CONFIRM', 'DEPOSIT_REJECT') AND "chain_tx_ref" IS NOT NULL`,
+    );
+  });
+
+  it('builds the new index before dropping the old one, so the guarantee never lapses', () => {
+    const up = sql.slice(sql.indexOf('async up('), sql.indexOf('async down('));
+    expect(up.indexOf('CREATE UNIQUE INDEX CONCURRENTLY')).toBeLessThan(
+      up.indexOf('DROP INDEX CONCURRENTLY IF EXISTS "${index.old}"'),
+    );
   });
 });

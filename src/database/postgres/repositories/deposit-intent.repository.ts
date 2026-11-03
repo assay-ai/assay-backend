@@ -65,16 +65,67 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    * lower-cased to match. Deliberately cross-tenant: the escrow walk is a
    * platform job.
    */
-  async findCreditedTxRefs(txRefs: readonly string[]): Promise<Set<string>> {
+  async findCreditedTxRefs(account: string, txRefs: readonly string[]): Promise<Set<string>> {
     if (txRefs.length === 0) return new Set();
+    // Per account: one transaction can fund several buyers, and each buyer's
+    // share is claimed on its own (see `findClaimOfTxRef`).
     const rows = (await this.manager.query(
       `SELECT DISTINCT "chain_tx_ref" AS "ref"
          FROM "deposit_intents"
         WHERE "status" IN ('SETTLING', 'SETTLED')
-          AND "chain_tx_ref" = ANY($1)`,
-      [txRefs.map((ref) => ref.toLowerCase())],
+          AND "agent_account" = $1
+          AND "chain_tx_ref" = ANY($2)`,
+      [account, txRefs.map((ref) => ref.toLowerCase())],
     )) as { ref: string }[];
     return new Set(rows.map((row) => row.ref));
+  }
+
+  /**
+   * The deposit intent that already credited `account` from this transaction,
+   * in ANY organization, or the bare fact that a deposit ledger entry did
+   * (`intentId: null` for a credit with no intent row).
+   *
+   * The claim unit is the pair (transaction, buyer account): a batch
+   * transaction that funds two buyers lets each claim only its own events,
+   * once. Only a SUCCESSFUL credit is found here — `chain_tx_ref` is written on
+   * an intent only with its settled amount, and a ledger entry only when
+   * the credit is written — so a failed, refused or retried claim never
+   * reserves a hash someone else can then not use. Cross-tenant on purpose:
+   * single use is a global property (the unique indexes are global too).
+   */
+  async findClaimOfTxRef(
+    txRef: string,
+    account: string,
+  ): Promise<{ readonly intentId: string | null } | null> {
+    const rows = (await this.manager.query(
+      `SELECT "id"::text AS "intentId"
+         FROM "deposit_intents"
+        WHERE "chain_tx_ref" = $1 AND "agent_account" = $2
+       UNION ALL
+       SELECT "intent_id"::text AS "intentId"
+         FROM "ledger_entries"
+        WHERE "chain_tx_ref" = $1 AND "account_id" = $2
+          AND "entry_type" IN ('DEPOSIT_PENDING', 'DEPOSIT')
+       LIMIT 1`,
+      [txRef, account],
+    )) as { intentId: string | null }[];
+    return rows.length > 0 ? { intentId: rows[0].intentId ?? null } : null;
+  }
+
+  /**
+   * How many deposits this agent has open: `SETTLING`, or `CREATED` and not
+   * yet past its deadline (an expired `CREATED` row waiting for the sweep no
+   * longer counts). The abuse cap on `POST /deposits`.
+   */
+  async countOpenForAgent(organizationId: string, agentId: string, now: Date): Promise<number> {
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('intent.agentId = :agentId', { agentId })
+      .andWhere(
+        "(intent.status = 'SETTLING' OR (intent.status = 'CREATED' AND intent.expiresAt > :now))",
+        { now },
+      )
+      .getCount();
   }
 
   /**

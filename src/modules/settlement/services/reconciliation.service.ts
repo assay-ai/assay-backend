@@ -11,6 +11,7 @@ import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliat
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
+import { escrowLedgerClaim } from '@modules/ledger/domain/escrow-ledger-claim';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
@@ -519,7 +520,10 @@ export class ReconciliationService {
         const scan = await this.depositLogs.depositsTo(asset, account);
         if (scan === null || deadline.expired) continue;
         const { logs } = scan;
-        const credited = await this.deposits.findCreditedTxRefs(logs.map((log) => log.txHash));
+        const credited = await this.deposits.findCreditedTxRefs(
+          account,
+          logs.map((log) => log.txHash),
+        );
         const uncredited = logs.filter((log) => !credited.has(log.txHash.toLowerCase()));
         const named: ReconciliationFinding[] = uncredited.map((log) => ({
           code: ReconciliationFindingCode.ESCROW_UNCREDITED_DEPOSIT,
@@ -528,7 +532,9 @@ export class ReconciliationService {
             `Uncredited deposit on ${asset}: transaction ${log.txHash} put ` +
             `${format(log.amount, decimals)} into ${account}'s escrow (block ` +
             `${log.blockNumber}) and no deposit intent credited it. Agents cannot spend it; ` +
-            `the buyer can still withdraw it. Never credit it by hand.`,
+            `the buyer can still withdraw it. It cannot be claimed later: a deposit intent ` +
+            `accepts only a transaction mined after the intent was created, so the buyer ` +
+            `withdraws it and deposits again through a new intent. Never credit it by hand.`,
           details: {
             asset,
             account,
@@ -651,8 +657,14 @@ export class ReconciliationService {
         // `pending` too: a deposit settled and awaiting finality is already in
         // the escrow on chain. Leaving it out paged drift for every deposit on
         // a chain whose finality lags (~20 minutes on eip155:46630).
-        const mirrored =
-          (mirror.get(account)?.available ?? 0n) + held + (mirror.get(account)?.pending ?? 0n);
+        const mirrored = escrowLedgerClaim(
+          {
+            available: mirror.get(account)?.available ?? 0n,
+            held: mirror.get(account)?.held ?? 0n,
+            pending: mirror.get(account)?.pending ?? 0n,
+          },
+          inHold,
+        );
 
         if (chain < held) {
           shortfalls += 1;

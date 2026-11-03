@@ -1181,7 +1181,10 @@ describe('ReconciliationService — names what the drift is made of (A2)', () =>
       amount: '5000000',
       blockNumber: '12',
     });
-    expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(['0xcredited', '0x473e1319']);
+    expect(named.deposits.findCreditedTxRefs).toHaveBeenCalledWith(BUYER_A, [
+      '0xcredited',
+      '0x473e1319',
+    ]);
     expect(named.alerts.emitted.map((alert) => alert.name)).toContain('escrow_uncredited_deposit');
   });
 
