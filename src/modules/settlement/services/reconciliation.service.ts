@@ -216,9 +216,13 @@ export class ReconciliationService {
     const channel = this.channelBooks
       ? await this.channelBooks.read(asset)
       : { held: 0n, totalUnpaid: 0n, readable: false, findings: [] };
-    const difference = vaultAtomic - liabilities.total - channel.totalUnpaid;
-
     const escrows = await this.walkEscrows(asset, decimals);
+    // A pending deposit credit the buyer's escrow does not hold is never
+    // spendable (finality holds it until the escrow covers it, and alerts),
+    // so the vault does not owe it: counted, it paged a false reserves breach
+    // and froze withdrawals for every such deposit.
+    const difference =
+      vaultAtomic - (liabilities.total - escrows.uncoveredPending) - channel.totalUnpaid;
     // The vault IS the escrow contract, so what it holds beyond the buyer
     // escrows the walk read is value in no `buyer_escrows` row. Only known
     // when every escrow was read. The escrow's held payments (G3.B1): in the
@@ -239,6 +243,7 @@ export class ReconciliationService {
         liabilities,
         difference,
         outsideEscrows,
+        escrows.uncoveredPending,
       ),
       ...this.checkSnapshot(decimals, asset, books.total, snapshotTotal),
       ...this.checkBooks(decimals, asset, books),
@@ -532,9 +537,9 @@ export class ReconciliationService {
             `Uncredited deposit on ${asset}: transaction ${log.txHash} put ` +
             `${format(log.amount, decimals)} into ${account}'s escrow (block ` +
             `${log.blockNumber}) and no deposit intent credited it. Agents cannot spend it; ` +
-            `the buyer can still withdraw it. It cannot be claimed later: a deposit intent ` +
-            `accepts only a transaction mined after the intent was created, so the buyer ` +
-            `withdraws it and deposits again through a new intent. Never credit it by hand.`,
+            `the buyer can still withdraw it. A deposit made outside every deposit intent ` +
+            `(more than a day before, or with no intent open) cannot be claimed later, so the ` +
+            `buyer withdraws it and deposits again through a new intent. Never credit it by hand.`,
           details: {
             asset,
             account,
@@ -615,6 +620,7 @@ export class ReconciliationService {
     let read = 0;
     let shortfalls = 0;
     let unreadable = 0;
+    let uncoveredPending = 0n;
     let after: string | null = null;
 
     for (;;) {
@@ -666,11 +672,20 @@ export class ReconciliationService {
           inHold,
         );
 
+        // The part of the pending deposit credit this escrow does not hold.
+        const pendingNotHeld = minBigInt(
+          mirror.get(account)?.pending ?? 0n,
+          maxBigInt(0n, mirrored - chain),
+        );
+        uncoveredPending += pendingNotHeld;
+
         if (chain < held) {
           shortfalls += 1;
           findings.push(this.escrowShortfall(asset, decimals, account, row, chain, held));
         } else if (chain !== mirrored) {
-          findings.push(this.escrowDrift(asset, decimals, account, chain, mirrored));
+          findings.push(
+            this.escrowDrift(asset, decimals, account, chain, mirrored, pendingNotHeld),
+          );
           if (chain > mirrored) surpluses.push({ account, chain, mirrored });
         }
 
@@ -697,7 +712,7 @@ export class ReconciliationService {
       });
     }
 
-    return { findings, total, read, shortfalls, unreadable, seqHighs, surpluses };
+    return { findings, total, read, shortfalls, unreadable, seqHighs, surpluses, uncoveredPending };
   }
 
   /**
@@ -760,6 +775,7 @@ export class ReconciliationService {
     account: AccountId,
     chain: bigint,
     mirrored: bigint,
+    pendingNotHeld = 0n,
   ): ReconciliationFinding {
     const drift = mirrored - chain;
     return {
@@ -770,13 +786,18 @@ export class ReconciliationService {
         `${format(chain, decimals)}, the mirror says ${format(mirrored, decimals)} ` +
         `(available + held + pending) — drift ${format(drift, decimals)}. Nobody's money is missing and ` +
         `the chain wins; a redemption that landed before its HOLD_COMMIT looks exactly like ` +
-        `this until the commit is written.`,
+        `this until the commit is written.` +
+        (pendingNotHeld > 0n
+          ? ` ${format(pendingNotHeld, decimals)} of it is pending deposit credit the escrow does ` +
+            `not hold: kept pending (not spendable) until covered — see deposit_pending_uncovered.`
+          : ''),
       details: {
         asset,
         account,
         chainBalance: chain.toString(),
         mirrorBalance: mirrored.toString(),
         drift: drift.toString(),
+        pendingNotHeld: pendingNotHeld.toString(),
       },
     };
   }
@@ -870,8 +891,10 @@ export class ReconciliationService {
     liabilities: LedgerLiabilities,
     difference: bigint,
     outsideEscrows: bigint | null = null,
+    uncoveredPending = 0n,
   ): ReconciliationFinding[] {
     const details = {
+      uncoveredPending: uncoveredPending.toString(),
       asset,
       vault,
       vaultBalance: vaultAtomic.toString(),
@@ -1241,6 +1264,12 @@ interface EscrowWalk {
   readonly seqHighs: readonly EscrowSeqHigh[];
   /** The escrows holding more than their mirror (A2: where to look for uncredited deposits). */
   readonly surpluses: readonly EscrowSurplus[];
+  /**
+   * `Σ` over the escrows read of the pending deposit credit each does not hold
+   * (`min(pending, max(0, mirrored - chain))`): not spendable, so not owed by
+   * the vault. A lower bound when some escrows were unreadable.
+   */
+  readonly uncoveredPending: bigint;
 }
 
 interface EscrowSeqHigh {
@@ -1383,4 +1412,12 @@ function atomicOrUnknown(value: bigint | null, decimals: number): string {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function minBigInt(a: bigint, b: bigint): bigint {
+  return a < b ? a : b;
+}
+
+function maxBigInt(a: bigint, b: bigint): bigint {
+  return a > b ? a : b;
 }

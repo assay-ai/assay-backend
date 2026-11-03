@@ -1387,3 +1387,50 @@ describe('ReconciliationService — channel buckets (SPEC-W2 §1.2)', () => {
     expect(report.findings.map((f) => f.code)).toContain(ReconciliationFindingCode.RESERVES_BREACH);
   });
 });
+
+/**
+ * A pending deposit credit the buyer's escrow does not hold (withdrawn money
+ * reported in an intent's window, or a ledger already ahead of the chain) is
+ * never spendable: finality holds it and alerts. The vault does not owe it, so
+ * it must not page a reserves breach (which freezes withdrawals); it shows as
+ * escrow drift naming the pending part.
+ */
+describe('ReconciliationService — pending deposit the escrow does not hold', () => {
+  const journal = {
+    [LedgerEntryType.DEPOSIT]: 10_000_000n,
+    [LedgerEntryType.DEPOSIT_PENDING]: 5_000_000n,
+  };
+
+  it('raises no RESERVES_BREACH for it, and names it on the escrow drift', async () => {
+    const { service } = build({
+      vaultBalance: 10_000_000n,
+      journal,
+      snapshot: { available: 10_000_000n, pending: 5_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 10_000_000n, pending: 5_000_000n }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).toEqual([
+      ReconciliationFindingCode.ESCROW_MIRROR_DRIFT,
+    ]);
+    expect(report.severity).toBe(ReconciliationSeverity.WARN);
+    expect(report.findings[0].details).toMatchObject({ pendingNotHeld: '5000000' });
+    expect(report.differenceAtomic).toBe(0n);
+  });
+
+  it('still breaches when the missing money is spendable credit, not pending', async () => {
+    const { service } = build({
+      vaultBalance: 10_000_000n,
+      journal: { [LedgerEntryType.DEPOSIT]: 15_000_000n },
+      snapshot: { available: 15_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 15_000_000n }],
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings.map((finding) => finding.code)).toContain(
+      ReconciliationFindingCode.RESERVES_BREACH,
+    );
+  });
+});
