@@ -37,6 +37,7 @@ import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.se
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { DepositIntentExpiryService } from '@modules/payment/services/deposit-intent-expiry.service';
 import { DepositIntentService } from '@modules/payment/services/deposit-intent.service';
+import { DepositCoverageService } from '@modules/payment/services/deposit-coverage.service';
 import { DepositService } from '@modules/payment/services/deposit.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -275,6 +276,11 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     listAll: jest.fn().mockResolvedValue([]),
   } as unknown as BuyerEscrowRepository;
 
+  // The escrow-coverage guard (H-1) has its own unit tests; here the escrow
+  // always covers, so these specs keep testing the database guarantees.
+  const coverage = {
+    check: async () => ({ chain: 0n, claim: 0n, covered: true }),
+  } as unknown as DepositCoverageService;
   const depositService = new DepositService(
     deposits,
     registry,
@@ -283,8 +289,9 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     escrowReader,
     escrows,
     ledger,
+    coverage,
   );
-  const finality = new DepositFinalityService(repository, registry, escrowReader, ledger);
+  const finality = new DepositFinalityService(repository, registry, escrowReader, ledger, coverage);
 
   const context: DepositTestContext = {
     deposits,

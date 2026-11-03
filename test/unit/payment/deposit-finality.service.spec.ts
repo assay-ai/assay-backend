@@ -7,6 +7,8 @@ import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { ChainErrors } from '@modules/chains/errors/chains.errors';
+import { DEPOSIT_UNCOVERED_GRACE_MS } from '@modules/payment/constants/deposit-intent.constants';
 
 /**
  * The finality sweep's three answers.
@@ -27,7 +29,12 @@ const money = MoneyUtil.of('25000000', ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6);
 
 function build(
   observe: (commitment: string | undefined) => unknown,
-  options: { appendFails?: boolean; notify?: jest.Mock } = {},
+  options: {
+    appendFails?: boolean;
+    notify?: jest.Mock;
+    coverage?: jest.Mock;
+    pendingAt?: Date;
+  } = {},
 ) {
   const deposits = {
     findSettledAwaitingFinality: jest
@@ -38,16 +45,22 @@ function build(
     markFinalityResolved: jest.fn().mockResolvedValue(undefined),
   };
   const ledger = {
-    readJournal: jest
-      .fn()
-      .mockResolvedValue([
-        { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
-      ]),
+    readJournal: jest.fn().mockResolvedValue([
+      {
+        entryType: LedgerEntryType.DEPOSIT_PENDING,
+        accountId: ACCOUNT,
+        money,
+        createdAt: options.pendingAt ?? new Date(),
+      },
+    ]),
     appendNow: options.appendFails
       ? jest.fn().mockRejectedValue(new Error('Balance folded negative'))
       : jest.fn().mockResolvedValue(undefined),
   };
   const audit = { recordAfterCommit: jest.fn().mockResolvedValue(undefined) };
+  const coverage =
+    options.coverage ??
+    jest.fn().mockResolvedValue({ chain: 25_000_000n, claim: 25_000_000n, covered: true });
   const adapter = {
     observeTransfer: jest.fn(async (_intent, _tx, options?: { commitment?: string }) =>
       observe(options?.commitment),
@@ -62,10 +75,11 @@ function build(
       }),
     } as unknown as EscrowBalanceReaderPort,
     ledger as unknown as LedgerService,
+    { check: coverage } as never,
     options.notify ? ({ notify: options.notify } as never) : undefined,
     audit as never,
   );
-  return { service, deposits, ledger, adapter, audit };
+  return { service, deposits, ledger, adapter, audit, coverage };
 }
 
 const LANDED = { amount: '25000000', asset: ASSET_IDS.USDG_ROBINHOOD_TESTNET, decimals: 6 };
@@ -199,5 +213,95 @@ describe('DepositFinalityService notices (B8)', () => {
     expect(failed.mock.calls[0][0].body).toBe(
       'Your deposit of $25.00 could not be finalized on chain. No balance was affected.',
     );
+  });
+});
+
+/**
+ * H-1, the second check: final on chain is not enough to make a deposit
+ * spendable; the money must still be in the buyer's escrow. The ordering this
+ * covers is claim -> withdraw: the credit was covered when it was written, and
+ * the buyer withdrew it on chain before finality (the withdrawal booker debits
+ * only `available`, never this `pending`).
+ */
+describe('DepositFinalityService escrow coverage (H-1)', () => {
+  const uncovered = () =>
+    jest.fn().mockResolvedValue({ chain: 0n, claim: 25_000_000n, covered: false });
+
+  it('checks the escrow covers the ledger claim, with nothing extra, before confirming', async () => {
+    const { service, coverage } = build(() => LANDED);
+
+    await service.promotePendingDeposits(10);
+
+    expect(coverage).toHaveBeenCalledWith('org-1', ACCOUNT, money.asset, 0n);
+  });
+
+  it('claim -> withdraw: never confirms an uncovered deposit, and keeps it queued within the grace', async () => {
+    const { service, ledger, deposits } = build(() => LANDED, { coverage: uncovered() });
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
+      confirmed: 0,
+      rejected: 0,
+      skipped: 1,
+    });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
+  });
+
+  it('rejects a deposit still uncovered after the grace, telling the buyer why', async () => {
+    const notify = jest.fn().mockResolvedValue(undefined);
+    const { service, ledger, deposits, audit } = build(() => LANDED, {
+      coverage: uncovered(),
+      notify,
+      pendingAt: new Date(Date.now() - DEPOSIT_UNCOVERED_GRACE_MS - 1_000),
+    });
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ rejected: 1 });
+    expect(ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_REJECT, chainTxRef: TX }),
+    );
+    expect(deposits.markFinalityResolved).toHaveBeenCalledTimes(1);
+    expect(audit.recordAfterCommit.mock.calls[0][0]).toMatchObject({ action: 'deposit.rejected' });
+    expect(notify.mock.calls[0][0].body).toContain('no longer in your escrow');
+  });
+
+  it('confirms once the escrow covers it again (a booking lag, not a withdrawal)', async () => {
+    const coverage = jest
+      .fn()
+      .mockResolvedValueOnce({ chain: 0n, claim: 25_000_000n, covered: false })
+      .mockResolvedValue({ chain: 25_000_000n, claim: 25_000_000n, covered: true });
+    const { service, ledger } = build(() => LANDED, { coverage });
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ skipped: 1 });
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ confirmed: 1 });
+    expect(ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_CONFIRM }),
+    );
+  });
+
+  it('leaves the row queued when the escrow cannot be read', async () => {
+    const { service, ledger, deposits } = build(() => LANDED, {
+      coverage: jest.fn().mockRejectedValue(new Error('rpc down')),
+    });
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ skipped: 1 });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
+  });
+});
+
+/** M-2: an RPC failure at finality used to read as "dropped by a reorg". */
+describe('DepositFinalityService chain read failures (M-2)', () => {
+  it('writes no DEPOSIT_REJECT when the chain read fails; the row is retried next pass', async () => {
+    const { service, ledger, deposits } = build(() => {
+      throw ChainErrors.rpcReadFailed({ method: 'eth_getTransactionReceipt' });
+    });
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
+      rejected: 0,
+      skipped: 1,
+    });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
   });
 });

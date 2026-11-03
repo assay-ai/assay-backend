@@ -145,7 +145,7 @@ describe('DepositsService.getOne', () => {
     const { service, findOneBy } = withRow(row);
     const list = build([row], { 'dep-1': 'DEPOSIT_CONFIRM' }).service;
 
-    const one = await service.getOne(ORG, 'dep-1');
+    const one = await service.getOne({ organizationId: ORG, agentId: null }, 'dep-1');
 
     expect(findOneBy).toHaveBeenCalledWith({ organizationId: ORG, id: 'dep-1' });
     expect(one).toEqual((await list.list(ORG, query())).items[0]);
@@ -155,12 +155,16 @@ describe('DepositsService.getOne', () => {
   it('asks the journal nothing for a deposit that has not settled', async () => {
     const { service, depositResolutions } = withRow(depositRow());
 
-    expect((await service.getOne(ORG, 'dep-1')).finality).toBeNull();
+    expect(
+      (await service.getOne({ organizationId: ORG, agentId: null }, 'dep-1')).finality,
+    ).toBeNull();
     expect(depositResolutions).toHaveBeenCalledWith(ORG, []);
   });
 
   it('is PAYMENT_DEPOSIT_NOT_FOUND when the organization has no such deposit', async () => {
-    await expect(withRow(null).service.getOne(ORG, 'dep-x')).rejects.toMatchObject({
+    await expect(
+      withRow(null).service.getOne({ organizationId: ORG, agentId: null }, 'dep-x'),
+    ).rejects.toMatchObject({
       errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
     });
   });
@@ -170,9 +174,9 @@ describe('DepositsService.getOne', () => {
       depositRow({ status: DepositIntentStatus.SETTLED, settledAmount: '5000000' }),
     );
 
-    expect((await service.getOne(ORG, 'dep-1', 'agent-1')).finality).toBe(
-      DepositFinality.CONFIRMED,
-    );
+    expect(
+      (await service.getOne({ organizationId: ORG, agentId: 'agent-1' }, 'dep-1')).finality,
+    ).toBe(DepositFinality.CONFIRMED);
     expect(findOneBy).toHaveBeenCalledWith({
       organizationId: ORG,
       id: 'dep-1',
@@ -188,9 +192,11 @@ describe('DepositsService.getOne', () => {
     async (org, agentId) => {
       const { service, depositResolutions } = withRow(depositRow());
 
-      await expect(service.getOne(org, 'dep-1', agentId)).rejects.toMatchObject({
-        errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
-      });
+      await expect(service.getOne({ organizationId: org, agentId }, 'dep-1')).rejects.toMatchObject(
+        {
+          errorCode: 'PAYMENT_DEPOSIT_NOT_FOUND',
+        },
+      );
       expect(depositResolutions).not.toHaveBeenCalled();
     },
   );

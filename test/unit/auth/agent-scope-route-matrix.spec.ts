@@ -9,7 +9,13 @@ import { Reflector } from '@nestjs/core';
 
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
-import { AGENT_SCOPES, AGENT_SCOPE_METADATA, AgentScope } from '@shared/auth/agent-scope';
+import {
+  AGENT_SCOPES,
+  AGENT_SCOPE_METADATA,
+  AgentScope,
+  DEFAULT_AGENT_SCOPES,
+  oauthGrantScopes,
+} from '@shared/auth/agent-scope';
 import { SessionAuthGuard } from '@shared/auth/session-auth.guard';
 
 /**
@@ -40,8 +46,10 @@ const AGENT_ROUTES: Readonly<Record<string, AgentScope>> = {
   'GET /escrow/debts': AgentScope.PAYMENTS,
   'POST /escrow/debts/:intentId/voucher-intent': AgentScope.PAYMENTS,
   'POST /escrow/debts/:intentId/voucher': AgentScope.PAYMENTS,
-  'POST /deposits': AgentScope.PAYMENTS,
-  'POST /deposits/:depositId/broadcast': AgentScope.PAYMENTS,
+
+  // deposits:write (opt-in)
+  'POST /deposits': AgentScope.DEPOSITS_WRITE,
+  'POST /deposits/:depositId/broadcast': AgentScope.DEPOSITS_WRITE,
 
   // activity:read
   'GET /escrow': AgentScope.ACTIVITY_READ,
@@ -263,5 +271,23 @@ describe('agent key scopes: the route matrix (deny by default)', () => {
       expect(await run(route, session(McpCallerKind.HUMAN, []))).toBe('ALLOWED');
       expect(await run(route, session(McpCallerKind.CONFIG, []))).toBe('ALLOWED');
     });
+  });
+});
+
+/**
+ * M-1: deposit writes are opt-in. No existing key, new default key or OAuth
+ * grant gains them; only a key created with `deposits:write` does.
+ */
+describe('deposits:write is opt-in', () => {
+  it('is in no default scope set', () => {
+    expect(DEFAULT_AGENT_SCOPES).not.toContain(AgentScope.DEPOSITS_WRITE);
+    expect(oauthGrantScopes(true)).not.toContain(AgentScope.DEPOSITS_WRITE);
+    expect(oauthGrantScopes(false)).not.toContain(AgentScope.DEPOSITS_WRITE);
+  });
+
+  it('is what the two deposit writes require, and the read stays activity:read', () => {
+    expect(AGENT_ROUTES['POST /deposits']).toBe(AgentScope.DEPOSITS_WRITE);
+    expect(AGENT_ROUTES['POST /deposits/:depositId/broadcast']).toBe(AgentScope.DEPOSITS_WRITE);
+    expect(AGENT_ROUTES['GET /deposits/:depositId']).toBe(AgentScope.ACTIVITY_READ);
   });
 });

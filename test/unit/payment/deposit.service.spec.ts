@@ -21,8 +21,11 @@ import { DepositIntentService } from '@modules/payment/services/deposit-intent.s
 import { DepositService } from '@modules/payment/services/deposit.service';
 import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import {
+  DEPOSIT_COVERAGE_WAIT_MS,
+  DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
+  DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS,
 } from '@modules/payment/constants/deposit-intent.constants';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
@@ -37,12 +40,17 @@ import {
   fakeFacilitator,
   fakeLedger,
   fakeVaultPort,
+  fakeCoverage,
 } from './helpers/deposit-harness';
 
 const SOLANA_DEVNET: ChainId = CHAIN_IDS.SOLANA_DEVNET;
 const USDC = ASSET_IDS.USDC_SOLANA_DEVNET;
 const ORGANIZATION_ID = '11111111-1111-1111-1111-111111111111';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
+/** A person's view: the whole organization. */
+const ORG = { organizationId: ORGANIZATION_ID, agentId: null };
+/** An agent credential's view: its own agent only. */
+const AGENT_SCOPE = { organizationId: ORGANIZATION_ID, agentId: AGENT_ID };
 const AGENT_ACCOUNT: AccountId = toAccountId(
   SOLANA_DEVNET,
   'AgentAccount1111111111111111111111111111111',
@@ -72,6 +80,8 @@ function buildHarness(overrides?: {
   /** Seeds the escrow mirror with an already-open row for `AGENT_ACCOUNT` when true (default). */
   escrowExists?: boolean;
   chainState?: { assertActive: jest.Mock } | null;
+  coverage?: { check: jest.Mock };
+  audit?: { recordAfterCommit: jest.Mock };
 }) {
   const repo = new FakeDepositIntentRepository();
   const depositIntents = new DepositIntentService(repo.asRepository());
@@ -80,6 +90,8 @@ function buildHarness(overrides?: {
   const opener = overrides?.opener ?? fakeEscrowOpener();
   const escrowReader = overrides?.escrowReader ?? fakeEscrowBalanceReader();
   const ledger = overrides?.ledger ?? fakeLedger();
+  const coverage = overrides?.coverage ?? fakeCoverage();
+  const audit = overrides?.audit ?? { recordAfterCommit: jest.fn().mockResolvedValue(undefined) };
   const vault = fakeVaultPort();
 
   const escrows = new FakeBuyerEscrowRepository();
@@ -107,7 +119,9 @@ function buildHarness(overrides?: {
     escrowReader,
     escrows.asRepository(),
     ledger,
+    coverage as never,
     (overrides?.chainState ?? null) as never,
+    audit as never,
   );
 
   return {
@@ -121,6 +135,8 @@ function buildHarness(overrides?: {
     vault,
     ledger,
     registry,
+    coverage,
+    audit,
     service,
   };
 }
@@ -415,7 +431,7 @@ describe('DepositService.settleDeposit — happy path', () => {
       amount: amount(),
     });
 
-    const settled = await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    const settled = await service.settleDeposit(ORG, intent.id, dummyPayload());
 
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     expect(settled.settledAmount?.amount).toBe('5000000');
@@ -425,7 +441,7 @@ describe('DepositService.settleDeposit — happy path', () => {
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING, intentId: intent.id }),
     );
 
-    const reread = await depositIntents.findById(ORGANIZATION_ID, intent.id);
+    const reread = await depositIntents.findById(ORG, intent.id);
     expect(reread.status).toBe(DepositIntentStatus.SETTLED);
   });
 
@@ -464,7 +480,7 @@ describe('DepositService.settleDeposit — happy path', () => {
       chainId: SOLANA_DEVNET,
       amount: amount(),
     });
-    await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    await service.settleDeposit(ORG, intent.id, dummyPayload());
 
     expect(ledger.appendNow).toHaveBeenCalledWith(
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING, intentId: intent.id }),
@@ -494,7 +510,7 @@ describe('DepositService.settleDeposit — happy path', () => {
       chainId: SOLANA_DEVNET,
       amount: amount(),
     });
-    await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    await service.settleDeposit(ORG, intent.id, dummyPayload());
 
     const expected = expect.objectContaining({ payTo: ESCROW_PDA, payer: AGENT_ACCOUNT });
     expect(adapter.assertPayloadBoundToIntent).toHaveBeenCalledWith(expect.anything(), expected);
@@ -524,7 +540,7 @@ describe('DepositService.settleDeposit — happy path', () => {
       amount: amount(),
     });
 
-    const settled = await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    const settled = await service.settleDeposit(ORG, intent.id, dummyPayload());
 
     expect(settled.settledAmount?.amount).toBe('1500000');
     expect(ledger.appendNow).toHaveBeenCalledWith(
@@ -556,12 +572,12 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       PaymentErrorCode.PAYMENT_INVALID_SIGNATURE,
     );
     expect(facilitator.settle).not.toHaveBeenCalled();
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    const after = await harness.depositIntents.findById(ORG, intent.id);
     expect(after.status).toBe(DepositIntentStatus.CREATED);
   });
 
@@ -585,11 +601,11 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_SETTLED_AMOUNT_BELOW_INTENT,
     );
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    const after = await harness.depositIntents.findById(ORG, intent.id);
     expect(after.status).toBe(DepositIntentStatus.FAILED);
   });
 
@@ -607,7 +623,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const harness = buildHarness({ adapter, facilitator });
     const intent = await createdIntent(harness);
 
-    const settled = await harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    const settled = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     expect(settled.settledAmount?.amount).toBe('1000001');
   });
@@ -636,7 +652,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_SETTLED_ASSET_MISMATCH,
     );
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
@@ -650,7 +666,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
 
     await expectErrorCodeAsync(
       () =>
-        harness.service.settleDeposit(ORGANIZATION_ID, intent.id, {
+        harness.service.settleDeposit(ORG, intent.id, {
           ...dummyPayload(),
           scheme: 'upto',
         }),
@@ -658,7 +674,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     );
     expect(adapter.assertPayloadBoundToIntent).not.toHaveBeenCalled();
     expect(facilitator.verify).not.toHaveBeenCalled();
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    const after = await harness.depositIntents.findById(ORG, intent.id);
     expect(after.status).toBe(DepositIntentStatus.CREATED);
   });
 
@@ -672,7 +688,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
     );
   });
@@ -691,7 +707,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
     );
     expect(facilitator.verify).not.toHaveBeenCalled();
@@ -711,7 +727,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
     );
   });
@@ -729,7 +745,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
     );
   });
@@ -748,7 +764,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       ChainErrorCode.CHAIN_PAYLOAD_NOT_BOUND_TO_INTENT,
     );
   });
@@ -762,7 +778,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     harness.repo.rows.get(intent.id)!.expiresAt = new Date(Date.now() - 1000);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,
     );
     expect(harness.adapter.assertPayloadBoundToIntent).not.toHaveBeenCalled();
@@ -782,8 +798,8 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const harness = buildHarness({ adapter, facilitator });
     const intent = await createdIntent(harness);
 
-    const first = await harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
-    const second = await harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+    const first = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
+    const second = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
 
     expect(first.status).toBe(DepositIntentStatus.SETTLED);
     expect(second.status).toBe(DepositIntentStatus.SETTLED);
@@ -800,7 +816,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     harness.repo.rows.get(intent.id)!.status = DepositIntentStatus.SETTLING;
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       PaymentErrorCode.PAYMENT_DEPOSIT_INVALID_STATE_TRANSITION,
     );
   });
@@ -817,10 +833,10 @@ describe('DepositService.settleDeposit — required failure paths', () => {
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
       PaymentErrorCode.PAYMENT_INSUFFICIENT_FUNDS,
     );
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+    const after = await harness.depositIntents.findById(ORG, intent.id);
     expect(after.status).toBe(DepositIntentStatus.FAILED);
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
   });
@@ -844,14 +860,14 @@ describe('DepositService.settleDeposit — required failure paths', () => {
       const intent = await createdIntent(harness);
 
       const settling = expectErrorCodeAsync(
-        () => harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload()),
+        () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
         PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
       );
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
       await settling;
 
       expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
+      const after = await harness.depositIntents.findById(ORG, intent.id);
       expect(after.status).toBe(DepositIntentStatus.FAILED);
     } finally {
       jest.useRealTimers();
@@ -885,7 +901,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
       const harness = buildHarness({ adapter, facilitator });
       const intent = await createdIntent(harness);
 
-      const settling = harness.service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
+      const settling = harness.service.settleDeposit(ORG, intent.id, dummyPayload());
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_POLL_MS * 3);
       const settled = await settling;
 
@@ -908,43 +924,124 @@ describe('DepositService.settleDeposit — required failure paths', () => {
 */
 describe('DepositService.settleDepositByBroadcast — the buyer sent it themselves', () => {
   const TX_HASH = `0x${'ab'.repeat(32)}` as TxRef;
+  const OTHER_HASH = `0x${'cd'.repeat(32)}` as TxRef;
   const observed = { amount: '5000000', asset: USDC, decimals: 6 };
+  const OTHER_AGENT = '44444444-4444-4444-4444-444444444444';
+  const OTHER_ORG = '55555555-5555-5555-5555-555555555555';
+  const OTHER_ACCOUNT: AccountId = toAccountId(
+    SOLANA_DEVNET,
+    'OtherAccount1111111111111111111111111111111',
+  );
+  const CALLER = {
+    actor: { type: 'agent' as const, id: AGENT_ID },
+    credentialId: '66666666-6666-6666-6666-666666666666',
+  };
 
-  async function createdIntent(harness: ReturnType<typeof buildHarness>) {
-    const { intent } = await harness.service.createDeposit(input());
+  /** Mined now, crediting the intent's buyer: the honest answer. */
+  const credited = (blockTime: Date = new Date()) => ({
+    kind: 'credited' as const,
+    transfer: observed,
+    blockTime,
+  });
+
+  async function createdIntent(
+    harness: ReturnType<typeof buildHarness>,
+    overrides: Partial<ReturnType<typeof input>> = {},
+  ) {
+    const { intent } = await harness.service.createDeposit({ ...input(), ...overrides });
     return intent;
   }
 
   function selfBroadcastAdapter(overrides: Parameters<typeof fakeChainAdapter>[0] = {}) {
     return fakeChainAdapter({
       requiresFeePayer: false,
-      observeTransfer: jest.fn().mockResolvedValue(observed),
+      observeDeposit: jest.fn().mockImplementation(async () => credited()),
       extractSettledAmount: jest.fn().mockReturnValue(amount()),
       ...overrides,
     });
   }
 
-  it('allows a scoped caller to report its own deposit and keeps a retry single-use', async () => {
+  /**
+   * The chain as it really answers: the transaction credits `buyer` only, and
+   * a claim for any other account finds it crediting nobody.
+   */
+  function chainCrediting(buyer: AccountId, state: { mined: boolean } = { mined: true }) {
+    return jest.fn().mockImplementation(async (intent: { payer: AccountId }) => {
+      if (!state.mined) return { kind: 'pending' };
+      return intent.payer === buyer ? credited() : { kind: 'no_credit' };
+    });
+  }
+
+  async function errorOf(work: () => Promise<unknown>) {
+    return work().then(
+      () => {
+        throw new Error('expected a refusal');
+      },
+      (error: unknown) => error as { errorCode: string; statusCode: number; message: string },
+    );
+  }
+
+  afterEach(() => jest.useRealTimers());
+
+  it('reads the transfer off the chain, credits DEPOSIT_PENDING once, and reaches SETTLED — no facilitator', async () => {
+    const adapter = selfBroadcastAdapter();
+    const harness = buildHarness({ adapter });
+    const intent = await createdIntent(harness);
+
+    const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+
+    expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    expect(settled.chainTxRef).toBe(TX_HASH);
+    expect(harness.facilitator.verify).not.toHaveBeenCalled();
+    expect(harness.facilitator.settle).not.toHaveBeenCalled();
+    expect(adapter.observeDeposit).toHaveBeenCalledWith(
+      expect.objectContaining({ payer: AGENT_ACCOUNT }),
+      TX_HASH,
+    );
+    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entryType: LedgerEntryType.DEPOSIT_PENDING,
+        intentId: intent.id,
+        chainTxRef: TX_HASH,
+      }),
+    );
+    // H-1: the escrow must cover the ledger's claim plus THIS credit.
+    expect(harness.coverage.check).toHaveBeenCalledWith(
+      ORGANIZATION_ID,
+      AGENT_ACCOUNT,
+      USDC,
+      5_000_000n,
+    );
+  });
+
+  it('allows a scoped caller to report its own deposit and keeps a retry of the same hash idempotent', async () => {
     const harness = buildHarness({ adapter: selfBroadcastAdapter() });
     const intent = await createdIntent(harness);
 
-    const first = await harness.service.settleDepositByBroadcast(
-      ORGANIZATION_ID,
-      intent.id,
-      TX_HASH,
-      AGENT_ID,
-    );
-    const again = await harness.service.settleDepositByBroadcast(
-      ORGANIZATION_ID,
-      intent.id,
-      TX_HASH,
-      AGENT_ID,
-    );
+    const first = await harness.service.settleDepositByBroadcast(AGENT_SCOPE, intent.id, TX_HASH);
+    const again = await harness.service.settleDepositByBroadcast(AGENT_SCOPE, intent.id, TX_HASH);
 
     expect(first.status).toBe(DepositIntentStatus.SETTLED);
     expect(again.id).toBe(first.id);
     expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
-    expect(harness.facilitator.settle).not.toHaveBeenCalled();
+  });
+
+  // L-2: a second, different deposit reported on a settled intent was told
+  // "SETTLED" while its own money stayed uncredited.
+  it('answers 409 for a DIFFERENT hash on an already-settled intent, crediting nothing', async () => {
+    const adapter = selfBroadcastAdapter();
+    const harness = buildHarness({ adapter });
+    const intent = await createdIntent(harness);
+    await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+    jest.clearAllMocks();
+
+    await expectErrorCodeAsync(
+      () => harness.service.settleDepositByBroadcast(ORG, intent.id, OTHER_HASH),
+      PaymentErrorCode.PAYMENT_DEPOSIT_ALREADY_SETTLED,
+    );
+    expect(adapter.observeDeposit).not.toHaveBeenCalled();
+    expect(harness.ledger.appendNow).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(
@@ -954,23 +1051,21 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       const harness = buildHarness({ adapter });
       const intent = await createdIntent(harness);
       if (settled) {
-        await harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH);
+        await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
       }
       jest.clearAllMocks();
 
       await expectErrorCodeAsync(
         () =>
           harness.service.settleDepositByBroadcast(
-            ORGANIZATION_ID,
+            { organizationId: ORGANIZATION_ID, agentId: OTHER_AGENT },
             intent.id,
             TX_HASH,
-            '44444444-4444-4444-4444-444444444444',
           ),
         PaymentErrorCode.PAYMENT_DEPOSIT_NOT_FOUND,
       );
-      expect(adapter.observeTransfer).not.toHaveBeenCalled();
+      expect(adapter.observeDeposit).not.toHaveBeenCalled();
       expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      expect(harness.facilitator.settle).not.toHaveBeenCalled();
     },
   );
 
@@ -982,234 +1077,552 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     await expectErrorCodeAsync(
       () =>
         harness.service.settleDepositByBroadcast(
-          '55555555-5555-5555-5555-555555555555',
+          { organizationId: OTHER_ORG, agentId: AGENT_ID },
           intent.id,
           TX_HASH,
-          AGENT_ID,
         ),
       PaymentErrorCode.PAYMENT_DEPOSIT_NOT_FOUND,
     );
-    expect(adapter.observeTransfer).not.toHaveBeenCalled();
-    expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-  });
-
-  it('reads the transfer off the chain, credits DEPOSIT_PENDING once, and reaches SETTLED — no facilitator', async () => {
-    const adapter = selfBroadcastAdapter();
-    const harness = buildHarness({ adapter });
-    const intent = await createdIntent(harness);
-
-    const settled = await harness.service.settleDepositByBroadcast(
-      ORGANIZATION_ID,
-      intent.id,
-      TX_HASH,
-    );
-
-    expect(settled.status).toBe(DepositIntentStatus.SETTLED);
-    expect(settled.chainTxRef).toBe(TX_HASH);
-    expect(harness.facilitator.verify).not.toHaveBeenCalled();
-    expect(harness.facilitator.settle).not.toHaveBeenCalled();
-    expect(adapter.observeTransfer).toHaveBeenCalledWith(
-      expect.objectContaining({ payer: AGENT_ACCOUNT }),
-      TX_HASH,
-      { commitment: 'confirmed' },
-    );
-    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
-    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        entryType: LedgerEntryType.DEPOSIT_PENDING,
-        intentId: intent.id,
-        chainTxRef: TX_HASH,
-      }),
-    );
+    expect(adapter.observeDeposit).not.toHaveBeenCalled();
   });
 
   it('refuses on a chain whose transactions need the platform as fee payer', async () => {
-    // Solana: the facilitator is the fee payer, so a buyer cannot broadcast
-    // alone and a hash-only claim there has no honest producer.
     const adapter = selfBroadcastAdapter({ requiresFeePayer: true });
     const harness = buildHarness({ adapter });
     const intent = await createdIntent(harness);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+      () => harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
       PaymentErrorCode.PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED,
     );
-    expect(adapter.observeTransfer).not.toHaveBeenCalled();
+    expect(adapter.observeDeposit).not.toHaveBeenCalled();
+  });
+
+  it('refuses on a chain whose adapter cannot date a transaction (no observeDeposit)', async () => {
+    const adapter = selfBroadcastAdapter({ observeDeposit: undefined });
+    const harness = buildHarness({ adapter });
+    const intent = await createdIntent(harness);
+
+    await expectErrorCodeAsync(
+      () => harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      PaymentErrorCode.PAYMENT_DEPOSIT_BROADCAST_UNSUPPORTED,
+    );
     expect(harness.ledger.appendNow).not.toHaveBeenCalled();
   });
 
-  it('refuses a transaction another deposit of this organization already claimed', async () => {
-    const adapter = selfBroadcastAdapter();
-    const harness = buildHarness({ adapter });
-    const first = await createdIntent(harness);
-    await harness.service.settleDepositByBroadcast(ORGANIZATION_ID, first.id, TX_HASH);
-    const second = await createdIntent(harness);
+  describe('single use, per (transaction, buyer), platform-wide', () => {
+    it('refuses a transaction another deposit already credited to this buyer', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const first = await createdIntent(harness);
+      await harness.service.settleDepositByBroadcast(ORG, first.id, TX_HASH);
+      const second = await createdIntent(harness);
 
-    await expectErrorCodeAsync(
-      () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, second.id, TX_HASH),
-      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
-    );
-    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, second.id);
-    expect(after.status).toBe(DepositIntentStatus.CREATED);
-  });
+      await expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORG, second.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
+      );
+      expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+      const after = await harness.depositIntents.findById(ORG, second.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+    });
 
-  // An EVM hash is case-insensitive on the node but compared byte for byte by
-  // the claim lookup and both single-use indexes: each case variant of one real
-  // deposit used to be credited again.
-  it('refuses a case variant of a transaction already claimed, and stores the hash lowercase', async () => {
-    const adapter = selfBroadcastAdapter({ namespace: ChainNamespace.EIP155 });
-    const harness = buildHarness({ adapter });
-    const first = await createdIntent(harness);
-    const mixed = `0x${'aB'.repeat(32)}` as TxRef;
-
-    const settled = await harness.service.settleDepositByBroadcast(
-      ORGANIZATION_ID,
-      first.id,
-      mixed,
-    );
-    expect(settled.chainTxRef).toBe(mixed.toLowerCase());
-    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ chainTxRef: mixed.toLowerCase() }),
-    );
-
-    const second = await createdIntent(harness);
-    await expectErrorCodeAsync(
-      () =>
-        harness.service.settleDepositByBroadcast(
-          ORGANIZATION_ID,
-          second.id,
-          mixed.toUpperCase().replace('0X', '0x') as TxRef,
-        ),
-      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
-    );
-    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
-  });
-
-  // HIGH-1 regression: two concurrent broadcasts of one transaction both pass
-  // the read-then-write guard; `uq_ledger_entries_deposit_pending` refuses the
-  // loser's DEPOSIT_PENDING. The loser must end FAILED with the same 409, never
-  // stuck SETTLING and never SETTLED (which would put it in the finality queue).
-  it('fails the loser of a concurrent claim cleanly when the pending-credit index refuses it', async () => {
-    const adapter = selfBroadcastAdapter();
-    const uniqueViolation = Object.assign(new Error('duplicate key value'), { code: '23505' });
-    const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(uniqueViolation) });
-    const harness = buildHarness({ adapter, ledger });
-    const intent = await createdIntent(harness);
-
-    await expectErrorCodeAsync(
-      () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
-    );
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-    expect(after.status).toBe(DepositIntentStatus.FAILED);
-    expect(after.chainTxRef).toBeNull();
-  });
-
-  it('re-raises a ledger failure that is not the pending-credit unique violation', async () => {
-    const adapter = selfBroadcastAdapter();
-    const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(new Error('db down')) });
-    const harness = buildHarness({ adapter, ledger });
-    const intent = await createdIntent(harness);
-
-    await expect(
-      harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-    ).rejects.toThrow('db down');
-  });
-
-  it('never credits a transaction that credits nobody this intent names', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick'] });
-    try {
-      const adapter = selfBroadcastAdapter({ observeTransfer: jest.fn().mockResolvedValue(null) });
+    // M-3: the pre-check was per organization, so another organization's claim
+    // was found only by the unique index, after a 20 s observe.
+    it('finds a claim held in ANOTHER organization, before reading the chain', async () => {
+      const adapter = selfBroadcastAdapter();
       const harness = buildHarness({ adapter });
       const intent = await createdIntent(harness);
+      const foreignId = '77777777-7777-7777-7777-777777777777';
+      const template = harness.repo.rows.get(intent.id)!;
+      harness.repo.rows.set(foreignId, {
+        ...template,
+        id: foreignId,
+        organizationId: OTHER_ORG,
+        status: DepositIntentStatus.SETTLED,
+        chainTxRef: TX_HASH,
+        settledAmount: '5000000',
+      } as unknown as typeof template);
 
-      const settling = expectErrorCodeAsync(
-        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+      const error = await errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED);
+      expect(adapter.observeDeposit).not.toHaveBeenCalled();
+      // Low-1 / L-1: the answer names no other deposit and no organization.
+      expect(error.message).not.toContain(foreignId);
+      expect(error.message).not.toContain(OTHER_ORG);
+      expect((error as unknown as { publicContext?: unknown }).publicContext).toBeUndefined();
+    });
+
+    it('finds a ledger-only credit of the same transaction and buyer', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const intent = await createdIntent(harness);
+      harness.repo.ledgerClaims.add(`${TX_HASH}|${AGENT_ACCOUNT}`);
+
+      await expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
+      );
+    });
+
+    // A batch transaction funding two buyers: each claims its own share, once.
+    it('lets a second buyer claim its own events in a transaction another buyer already claimed', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const first = await createdIntent(harness);
+      await harness.service.settleDepositByBroadcast(ORG, first.id, TX_HASH);
+      const second = await createdIntent(harness, {
+        agentId: OTHER_AGENT,
+        agentAccount: OTHER_ACCOUNT,
+      });
+
+      const settled = await harness.service.settleDepositByBroadcast(ORG, second.id, TX_HASH);
+
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect(harness.ledger.appendNow).toHaveBeenCalledTimes(2);
+      expect(harness.ledger.appendNow).toHaveBeenLastCalledWith(
+        expect.objectContaining({ accountId: OTHER_ACCOUNT, chainTxRef: TX_HASH }),
+      );
+    });
+
+    // An EVM hash is case-insensitive on the node but compared byte for byte by
+    // the claim lookup and both single-use indexes.
+    it('refuses a case variant of a transaction already claimed, and stores the hash lowercase', async () => {
+      const adapter = selfBroadcastAdapter({ namespace: ChainNamespace.EIP155 });
+      const harness = buildHarness({ adapter });
+      const first = await createdIntent(harness);
+      const mixed = `0x${'aB'.repeat(32)}` as TxRef;
+
+      const settled = await harness.service.settleDepositByBroadcast(ORG, first.id, mixed);
+      expect(settled.chainTxRef).toBe(mixed.toLowerCase());
+      // The same hash in another spelling is still the idempotent retry.
+      const again = await harness.service.settleDepositByBroadcast(
+        ORG,
+        first.id,
+        mixed.toUpperCase().replace('0X', '0x') as TxRef,
+      );
+      expect(again.id).toBe(first.id);
+
+      const second = await createdIntent(harness);
+      await expectErrorCodeAsync(
+        () =>
+          harness.service.settleDepositByBroadcast(
+            ORG,
+            second.id,
+            mixed.toUpperCase().replace('0X', '0x') as TxRef,
+          ),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED,
+      );
+      expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    });
+
+    // HIGH-1 regression: two concurrent claims both pass the read-then-write
+    // check; `uq_ledger_entries_deposit_pending_account` refuses the loser.
+    it('fails the loser of a concurrent claim cleanly, with a readable message', async () => {
+      const uniqueViolation = Object.assign(new Error('duplicate key value'), { code: '23505' });
+      const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(uniqueViolation) });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter(), ledger });
+      const intent = await createdIntent(harness);
+
+      const error = await errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_ALREADY_CLAIMED);
+      expect(error.message).not.toContain('deposit a concurrent deposit');
+      expect(error.message).toContain('already been credited');
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.FAILED);
+      expect(after.chainTxRef).toBeNull();
+    });
+
+    it('re-raises a ledger failure that is not the pending-credit unique violation', async () => {
+      const ledger = fakeLedger({ appendNow: jest.fn().mockRejectedValue(new Error('db down')) });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter(), ledger });
+      const intent = await createdIntent(harness);
+
+      await expect(
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      ).rejects.toThrow('db down');
+    });
+  });
+
+  describe("someone else's hash never reserves or burns it", () => {
+    const VICTIM_HASH = TX_HASH;
+
+    async function attackerAndVictim(
+      harness: ReturnType<typeof buildHarness>,
+      attackerOrg: string,
+    ) {
+      const victim = await createdIntent(harness);
+      if (attackerOrg !== ORGANIZATION_ID) {
+        harness.escrows.rows.push({
+          id: 'escrow-attacker',
+          organizationId: attackerOrg,
+          accountId: OTHER_ACCOUNT,
+          assetId: USDC,
+          escrowAccountId: toAccountId(SOLANA_DEVNET, 'AttackerEscrowPda111111111111111111111111'),
+          escrowAssetAccountId: toAccountId(
+            SOLANA_DEVNET,
+            'AttackerEscrowToken11111111111111111111111',
+          ),
+          openedTxRef: 'AttackerOpen1111111111111111111111111111111111111111111111111111111111',
+        });
+      }
+      const attacker = await createdIntent(harness, {
+        organizationId: attackerOrg,
+        agentId: OTHER_AGENT,
+        agentAccount: OTHER_ACCOUNT,
+      });
+      return { victim, attacker };
+    }
+
+    it.each([
+      ['the same organization (another agent)', ORGANIZATION_ID],
+      ['another organization', OTHER_ORG],
+    ])(
+      'an attacker in %s reporting the victim hash first is refused; the victim is then credited',
+      async (_label, attackerOrg) => {
+        const observeDeposit = chainCrediting(AGENT_ACCOUNT);
+        const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+        const { victim, attacker } = await attackerAndVictim(harness, attackerOrg);
+
+        await expectErrorCodeAsync(
+          () =>
+            harness.service.settleDepositByBroadcast(
+              { organizationId: attackerOrg, agentId: OTHER_AGENT },
+              attacker.id,
+              VICTIM_HASH,
+            ),
+          PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING,
+        );
+        const attackerAfter = await harness.depositIntents.findById(
+          { organizationId: attackerOrg, agentId: null },
+          attacker.id,
+        );
+        expect(attackerAfter.status).toBe(DepositIntentStatus.CREATED);
+        expect(attackerAfter.chainTxRef).toBeNull();
+
+        const settled = await harness.service.settleDepositByBroadcast(
+          AGENT_SCOPE,
+          victim.id,
+          VICTIM_HASH,
+        );
+        expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+        expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+        expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+          expect.objectContaining({ accountId: AGENT_ACCOUNT, chainTxRef: VICTIM_HASH }),
+        );
+      },
+    );
+
+    it('an attacker reporting the hash while the victim claim is SETTLING changes nothing', async () => {
+      const observeDeposit = chainCrediting(AGENT_ACCOUNT);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const appendNow = jest.fn().mockImplementation(() => gate.then(() => ({})));
+      const harness = buildHarness({
+        adapter: selfBroadcastAdapter({ observeDeposit }),
+        ledger: fakeLedger({ appendNow }),
+      });
+      const { victim, attacker } = await attackerAndVictim(harness, ORGANIZATION_ID);
+
+      const victimClaim = harness.service.settleDepositByBroadcast(AGENT_SCOPE, victim.id, TX_HASH);
+      // Let the victim reach the ledger write (SETTLING).
+      for (let i = 0; i < 20 && appendNow.mock.calls.length === 0; i += 1) {
+        await Promise.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect((await harness.depositIntents.findById(ORG, victim.id)).status).toBe(
+        DepositIntentStatus.SETTLING,
+      );
+
+      await expectErrorCodeAsync(
+        () =>
+          harness.service.settleDepositByBroadcast(
+            { organizationId: ORGANIZATION_ID, agentId: OTHER_AGENT },
+            attacker.id,
+            TX_HASH,
+          ),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING,
+      );
+
+      release();
+      const settled = await victimClaim;
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect(appendNow).toHaveBeenCalledTimes(1);
+    });
+
+    it('an attacker front-running a victim tx that is not mined yet is refused; the victim is credited later', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      const chain = { mined: false };
+      const observeDeposit = chainCrediting(AGENT_ACCOUNT, chain);
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+      const { victim, attacker } = await attackerAndVictim(harness, ORGANIZATION_ID);
+      const attackerScope = { organizationId: ORGANIZATION_ID, agentId: OTHER_AGENT };
+
+      const early = expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(attackerScope, attacker.id, TX_HASH),
         PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
       );
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
-      await settling;
+      await early;
 
-      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-      expect(after.status).toBe(DepositIntentStatus.FAILED);
-    } finally {
-      jest.useRealTimers();
-    }
+      chain.mined = true;
+      await expectErrorCodeAsync(
+        () => harness.service.settleDepositByBroadcast(attackerScope, attacker.id, TX_HASH),
+        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING,
+      );
+
+      const settled = await harness.service.settleDepositByBroadcast(
+        AGENT_SCOPE,
+        victim.id,
+        TX_HASH,
+      );
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    });
   });
 
-  // BUG-PROD-BUY-MONEY-02: the refusal is a 4xx. A 502 from the origin is
-  // replaced at the edge by a page without CORS headers, so the browser saw
-  // "Failed to fetch" instead of this body.
-  it('answers an unobserved transfer with a readable 422, not a 502', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick'] });
-    try {
-      const adapter = selfBroadcastAdapter({ observeTransfer: jest.fn().mockResolvedValue(null) });
-      const harness = buildHarness({ adapter });
+  describe('what the chain answers', () => {
+    // M-1: a mined transaction that credits nobody used to be polled for the
+    // whole 20 s window, about 27 RPC reads per bogus report.
+    it('answers a mined transaction crediting nobody at once, leaving the intent open', async () => {
+      const observeDeposit = jest.fn().mockResolvedValue({ kind: 'no_credit' });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
       const intent = await createdIntent(harness);
 
-      const settling = harness.service
-        .settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH)
-        .catch((error: unknown) => error);
+      const error = await errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+
+      expect(error.statusCode).toBe(422);
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING);
+      expect(observeDeposit).toHaveBeenCalledTimes(1);
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+      expect(after.chainTxRef).toBeNull();
+    });
+
+    // BUG-PROD-BUY-MONEY-02: a readable 422, never a 502. L-3: and the intent
+    // stays open, so the same hash can be reported once it is mined.
+    it('answers a transaction not mined within the window with a 422, then credits the same hash on the same intent', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const chain = { mined: false };
+      const observeDeposit = chainCrediting(AGENT_ACCOUNT, chain);
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+      const intent = await createdIntent(harness);
+
+      const settling = errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
-      const error = (await settling) as { statusCode: number; errorCode: string };
+      const error = await settling;
 
       expect(error.statusCode).toBe(422);
       expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
 
-  // BUG-PROD-BUY-MONEY-02: one RPC read may take the egress client's whole
-  // 30 s budget. The observation window is a hard bound, not a check made
-  // only between reads.
-  it('stops waiting at the observation deadline even when a chain read hangs', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick'] });
-    try {
+      chain.mined = true;
+      const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    // M-2: an RPC error is not "the transaction is not there".
+    it('answers an unreadable chain with a retryable 503, failing and burning nothing', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const observeDeposit = jest
+        .fn()
+        .mockRejectedValue(ChainErrors.rpcReadFailed({ method: 'eth_getTransactionReceipt' }));
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+      const intent = await createdIntent(harness);
+
+      const settling = errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
+      const error = await settling;
+
+      expect(error.statusCode).toBe(503);
+      expect(error.errorCode).toBe(ChainErrorCode.CHAIN_RPC_READ_FAILED);
+      expect(observeDeposit.mock.calls.length).toBeGreaterThan(1);
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+      expect(after.chainTxRef).toBeNull();
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+
+      jest.useRealTimers();
+      observeDeposit.mockImplementation(async () => credited());
+      const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    it('rides out a transient RPC error inside the window', async () => {
+      const observeDeposit = jest
+        .fn()
+        .mockRejectedValueOnce(ChainErrors.rpcReadFailed({ method: 'eth_getTransactionReceipt' }))
+        .mockImplementation(async () => credited());
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter({ observeDeposit }) });
+      const intent = await createdIntent(harness);
+
+      const settling = harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_POLL_MS * 2);
+
+      expect((await settling).status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    // BUG-PROD-BUY-MONEY-02: one RPC read may take the egress client's whole
+    // 30 s budget. The observation window is a hard bound.
+    it('stops waiting at the observation deadline even when a chain read hangs', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
       const adapter = selfBroadcastAdapter({
-        observeTransfer: jest.fn().mockReturnValue(new Promise(() => undefined)),
+        observeDeposit: jest.fn().mockReturnValue(new Promise(() => undefined)),
       });
       const harness = buildHarness({ adapter });
       const intent = await createdIntent(harness);
 
-      let settled = false;
-      const settling = expectErrorCodeAsync(
-        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
+      let done = false;
+      const settling = errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
       ).finally(() => {
-        settled = true;
+        done = true;
       });
       await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + 1);
-      expect(settled).toBe(true);
-      await settling;
+      expect(done).toBe(true);
+      expect((await settling).errorCode).toBe(ChainErrorCode.CHAIN_RPC_READ_FAILED);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
+    });
 
-      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-      expect(after.status).toBe(DepositIntentStatus.FAILED);
-    } finally {
-      jest.useRealTimers();
-    }
+    it('keeps the observation window at 20 s, under the 30 s client timeout', () => {
+      expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBe(20_000);
+      expect(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_COVERAGE_WAIT_MS).toBeLessThan(30_000);
+    });
+
+    it('never credits less than was requested, and leaves the intent open', async () => {
+      const adapter = selfBroadcastAdapter({
+        extractSettledAmount: jest.fn().mockImplementation(() => {
+          throw ChainErrors.payloadMalformed({ reason: 'underpaid' });
+        }),
+      });
+      const harness = buildHarness({ adapter });
+      const intent = await createdIntent(harness);
+
+      await expect(
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      ).rejects.toThrow();
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
+    });
   });
 
-  /*
-    BUG-PROD-DEPOSIT-01: an EVM deposit is two wallet prompts (approve, wait
-    for it to be mined, depositFor) after a slow wallet-session refresh, and
-    the 90 s Solana lifetime expired real ones mid-flow. On eip155 the intent
-    lives 10 minutes; the expiry check itself is unchanged.
-  */
+  // C-1 / H-1: a deposit is bound to the intent's lifetime and to the money
+  // still being in the escrow.
+  describe('money that is no longer (or never was for this intent) in the escrow', () => {
+    it('refuses a transaction mined before the intent was created (old direct deposit)', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const intent = await createdIntent(harness);
+      const minedAt = new Date(
+        intent.createdAt.getTime() - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS - 1_000,
+      );
+      (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(credited(minedAt));
+
+      const error = await errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT);
+      expect(error.statusCode).toBe(422);
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      expect(harness.coverage.check).not.toHaveBeenCalled();
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
+    });
+
+    it('accepts a transaction mined within the clock skew before the intent', async () => {
+      const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+      const intent = await createdIntent(harness);
+      const minedAt = new Date(
+        intent.createdAt.getTime() - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS + 1_000,
+      );
+      (harness.adapter.observeDeposit as jest.Mock).mockResolvedValue(credited(minedAt));
+
+      const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    // Scenario B: inside one intent's lifetime — deposit, withdraw on chain,
+    // then report. The time bound passes; the escrow balance does not.
+    it('deposit -> withdraw -> claim: refuses a credit the escrow no longer covers, crediting nothing', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const coverage = fakeCoverage(false);
+      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
+      const intent = await createdIntent(harness);
+
+      const settling = errorOf(() =>
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      );
+      await jest.advanceTimersByTimeAsync(DEPOSIT_COVERAGE_WAIT_MS + DEPOSIT_OBSERVE_POLL_MS);
+      const error = await settling;
+
+      expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_NOT_COVERED);
+      expect(error.statusCode).toBe(409);
+      // Asked again for the node-lag window, not once.
+      expect(coverage.check.mock.calls.length).toBeGreaterThan(1);
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.CREATED);
+      expect(after.chainTxRef).toBeNull();
+    });
+
+    it('credits once a lagging balance read catches up inside the coverage window', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick'] });
+      const coverage = fakeCoverage();
+      coverage.check
+        .mockResolvedValueOnce({ chain: 0n, claim: 0n, covered: false })
+        .mockResolvedValue({ chain: 5_000_000n, claim: 0n, covered: true });
+      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
+      const intent = await createdIntent(harness);
+
+      const settling = harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_POLL_MS * 2);
+
+      expect((await settling).status).toBe(DepositIntentStatus.SETTLED);
+    });
+
+    it('answers a failed escrow read with the read error, leaving the intent open', async () => {
+      const coverage = { check: jest.fn().mockRejectedValue(new Error('escrow unreadable')) };
+      const harness = buildHarness({ adapter: selfBroadcastAdapter(), coverage });
+      const intent = await createdIntent(harness);
+
+      await expect(
+        harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
+      ).rejects.toThrow('escrow unreadable');
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
+    });
+  });
+
   describe('on eip155, where the intent lives 10 minutes', () => {
     async function createdEvmIntent(harness: ReturnType<typeof buildHarness>) {
-      const { intent } = await harness.service.createDeposit({
-        ...input(),
+      return createdIntent(harness, {
         agentAccount: EVM_AGENT_ACCOUNT,
         chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
         amount: MoneyUtil.of(5_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
       });
-      return intent;
     }
-
-    afterEach(() => jest.useRealTimers());
 
     it('still settles a broadcast that arrives after the old 90 s bound', async () => {
       jest.useFakeTimers({ doNotFake: ['nextTick'] });
@@ -1218,11 +1631,7 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       expect(intent.expiresAt.getTime() - Date.now()).toBe(10 * 60 * 1000);
 
       jest.setSystemTime(Date.now() + 2 * 60 * 1000);
-      const settled = await harness.service.settleDepositByBroadcast(
-        ORGANIZATION_ID,
-        intent.id,
-        TX_HASH,
-      );
+      const settled = await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
 
       expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     });
@@ -1235,50 +1644,19 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
 
       jest.setSystemTime(Date.now() + 10 * 60 * 1000 + 1);
       await expectErrorCodeAsync(
-        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+        () => harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
         PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,
       );
 
-      expect(adapter.observeTransfer).not.toHaveBeenCalled();
-      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-      expect(after.status).toBe(DepositIntentStatus.CREATED);
+      expect(adapter.observeDeposit).not.toHaveBeenCalled();
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
     });
   });
 
-  // The pause between reads is clamped to the deadline too: a 750 ms sleep
-  // begun just before it would otherwise end the window up to 750 ms late.
-  it('answers at the observation deadline, not one poll interval after it', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick'] });
-    try {
-      const adapter = selfBroadcastAdapter({
-        observeTransfer: jest.fn().mockResolvedValue(null),
-      });
-      const harness = buildHarness({ adapter });
-      const intent = await createdIntent(harness);
-
-      let settled = false;
-      const settling = expectErrorCodeAsync(
-        () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-        PaymentErrorCode.PAYMENT_DEPOSIT_TRANSFER_NOT_OBSERVED,
-      ).finally(() => {
-        settled = true;
-      });
-      await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + 1);
-      expect(settled).toBe(true);
-      await settling;
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it('keeps the observation window at 20 s, under the 30 s client timeout', () => {
-    expect(DEPOSIT_OBSERVE_TIMEOUT_MS).toBe(20_000);
-    expect(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS).toBeLessThan(30_000);
-  });
-
-  // BUG-PROD-BUY-MONEY-02: `0xdeadbeef` was polled for the whole observation
-  // window before failing the intent. A hash that cannot exist is a bad
-  // request, refused before the intent moves or the chain is read.
+  // BUG-PROD-BUY-MONEY-02: a hash that cannot exist is a bad request, refused
+  // before the intent moves or the chain is read.
   it.each([
     '0xdeadbeef',
     `0x${'ab'.repeat(31)}`,
@@ -1293,7 +1671,7 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       const intent = await createdIntent(harness);
 
       const error = await harness.service
-        .settleDepositByBroadcast(ORGANIZATION_ID, intent.id, hash as TxRef)
+        .settleDepositByBroadcast(ORG, intent.id, hash as TxRef)
         .catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(BadRequestException);
@@ -1301,28 +1679,12 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
       expect(response.message).toEqual([
         'transactionHash must be a 0x-prefixed 32-byte hex transaction hash',
       ]);
-      expect(adapter.observeTransfer).not.toHaveBeenCalled();
-      const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-      expect(after.status).toBe(DepositIntentStatus.CREATED);
+      expect(adapter.observeDeposit).not.toHaveBeenCalled();
+      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+        DepositIntentStatus.CREATED,
+      );
     },
   );
-
-  it('never credits less than was requested', async () => {
-    const adapter = selfBroadcastAdapter({
-      extractSettledAmount: jest.fn().mockImplementation(() => {
-        throw ChainErrors.payloadMalformed({ reason: 'underpaid' });
-      }),
-    });
-    const harness = buildHarness({ adapter });
-    const intent = await createdIntent(harness);
-
-    await expect(
-      harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
-    ).rejects.toThrow();
-    expect(harness.ledger.appendNow).not.toHaveBeenCalled();
-    const after = await harness.depositIntents.findById(ORGANIZATION_ID, intent.id);
-    expect(after.status).toBe(DepositIntentStatus.FAILED);
-  });
 
   it('refuses an expired intent before reading the chain', async () => {
     const adapter = selfBroadcastAdapter();
@@ -1332,26 +1694,78 @@ describe('DepositService.settleDepositByBroadcast — the buyer sent it themselv
     if (row) row.expiresAt = new Date(Date.now() - 1_000);
 
     await expectErrorCodeAsync(
-      () => harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH),
+      () => harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH),
       PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,
     );
-    expect(adapter.observeTransfer).not.toHaveBeenCalled();
+    expect(adapter.observeDeposit).not.toHaveBeenCalled();
   });
 
-  it('answers an already-SETTLED intent with itself, crediting nothing twice', async () => {
-    const adapter = selfBroadcastAdapter();
-    const harness = buildHarness({ adapter });
-    const intent = await createdIntent(harness);
-    await harness.service.settleDepositByBroadcast(ORGANIZATION_ID, intent.id, TX_HASH);
+  // M-2 (business review): which key opened or reported a deposit.
+  it('audits a key creating and reporting a deposit, naming the credential', async () => {
+    const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+    const { intent } = await harness.service.createDeposit({ ...input(), caller: CALLER });
+    await harness.service.settleDepositByBroadcast(AGENT_SCOPE, intent.id, TX_HASH, CALLER);
 
-    const again = await harness.service.settleDepositByBroadcast(
-      ORGANIZATION_ID,
-      intent.id,
-      TX_HASH,
+    expect(harness.audit.recordAfterCommit).toHaveBeenCalledTimes(2);
+    expect(harness.audit.recordAfterCommit).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        action: 'deposit.intent_created',
+        actor: CALLER.actor,
+        resourceId: intent.id,
+        after: expect.objectContaining({ credentialId: CALLER.credentialId }),
+      }),
     );
+    expect(harness.audit.recordAfterCommit).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        action: 'deposit.reported',
+        after: expect.objectContaining({
+          credentialId: CALLER.credentialId,
+          transactionHash: TX_HASH,
+        }),
+      }),
+    );
+  });
 
-    expect(again.status).toBe(DepositIntentStatus.SETTLED);
-    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+  it('writes no caller audit row for a person', async () => {
+    const harness = buildHarness({ adapter: selfBroadcastAdapter() });
+    const intent = await createdIntent(harness);
+    await harness.service.settleDepositByBroadcast(ORG, intent.id, TX_HASH);
+
+    expect(harness.audit.recordAfterCommit).not.toHaveBeenCalled();
+  });
+});
+
+describe('DepositService.createDeposit — open intents per agent', () => {
+  it(`refuses the ${DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT + 1}th open intent of one agent with 409 PAYMENT_DEPOSIT_OPEN_LIMIT`, async () => {
+    const harness = buildHarness();
+    for (let i = 0; i < DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT; i += 1) {
+      await harness.service.createDeposit(input());
+    }
+
+    const error = await harness.service.createDeposit(input()).catch((caught: unknown) => caught);
+
+    expect((error as { errorCode: string }).errorCode).toBe(
+      PaymentErrorCode.PAYMENT_DEPOSIT_OPEN_LIMIT,
+    );
+    expect((error as { statusCode: number }).statusCode).toBe(409);
+    expect(harness.repo.rows.size).toBe(DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT);
+  });
+
+  it('does not count an expired intent, nor another agent’s', async () => {
+    const harness = buildHarness();
+    for (let i = 0; i < DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT; i += 1) {
+      await harness.service.createDeposit(input());
+    }
+    await harness.service.createDeposit({
+      ...input(),
+      agentId: '88888888-8888-8888-8888-888888888888',
+    });
+    const [first] = [...harness.repo.rows.values()];
+    first.expiresAt = new Date(Date.now() - 1);
+
+    await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
   });
 });
 
@@ -1370,5 +1784,88 @@ describe('DEPOSIT_PAYMENT_SCHEMES', () => {
       [...new Set([SOLANA_PAYMENT_SCHEME, EVM_PAYMENT_SCHEME])].sort(),
     );
     expect(DEPOSIT_PAYMENT_SCHEMES.has('upto')).toBe(false);
+  });
+});
+
+/**
+ * The facilitator path shares the observation and the credit with the
+ * buyer-broadcast path, but its intent is already SETTLING (the payload went
+ * to the facilitator and may have landed), so its answers differ.
+ */
+describe('DepositService.settleDeposit — after the facilitator broadcast', () => {
+  const observedTransfer = { amount: '5000000', asset: USDC, decimals: 6 };
+
+  async function settling(adapterOverrides: Parameters<typeof fakeChainAdapter>[0], extra = {}) {
+    const adapter = fakeChainAdapter({
+      extractSettledAmount: jest.fn().mockReturnValue(amount()),
+      ...adapterOverrides,
+    });
+    const facilitator = fakeFacilitator({
+      settle: jest
+        .fn()
+        .mockResolvedValue({ success: true, network: SOLANA_DEVNET, transaction: TX_SIG }),
+    });
+    const harness = buildHarness({ adapter, facilitator, ...extra });
+    const { intent } = await harness.service.createDeposit(input());
+    return { harness, intent };
+  }
+
+  afterEach(() => jest.useRealTimers());
+
+  it('fails a transaction crediting nobody at once, without polling', async () => {
+    const observeDeposit = jest.fn().mockResolvedValue({ kind: 'no_credit' });
+    const { harness, intent } = await settling({ observeDeposit });
+
+    await expectErrorCodeAsync(
+      () => harness.service.settleDeposit(ORG, intent.id, dummyPayload()),
+      PaymentErrorCode.PAYMENT_DEPOSIT_TRANSACTION_CREDITS_NOTHING,
+    );
+    expect(observeDeposit).toHaveBeenCalledTimes(1);
+    expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
+      DepositIntentStatus.FAILED,
+    );
+  });
+
+  // M-2: the transaction may have landed; an RPC blip must not fail it.
+  it('leaves the intent SETTLING, uncredited and unburned, when the chain cannot be read', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    const observeTransfer = jest
+      .fn()
+      .mockRejectedValue(ChainErrors.rpcReadFailed({ method: 'getTransaction' }));
+    const { harness, intent } = await settling({ observeTransfer });
+
+    const pending = harness.service
+      .settleDeposit(ORG, intent.id, dummyPayload())
+      .catch((error: unknown) => error);
+    await jest.advanceTimersByTimeAsync(DEPOSIT_OBSERVE_TIMEOUT_MS + DEPOSIT_OBSERVE_POLL_MS);
+    const error = (await pending) as { errorCode: string; statusCode: number };
+
+    expect(error.errorCode).toBe(ChainErrorCode.CHAIN_RPC_READ_FAILED);
+    expect(error.statusCode).toBe(503);
+    const after = await harness.depositIntents.findById(ORG, intent.id);
+    expect(after.status).toBe(DepositIntentStatus.SETTLING);
+    expect(after.chainTxRef).toBeNull();
+    expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+  });
+
+  // H-1 on the shared path: the facilitator minted this deposit a moment ago,
+  // so it is held as pending (never spendable) rather than lost, and finality
+  // decides.
+  it('holds an uncovered credit as pending only, leaving the decision to finality', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick'] });
+    const observeTransfer = jest.fn().mockResolvedValue(observedTransfer);
+    const coverage = fakeCoverage(false);
+    const { harness, intent } = await settling({ observeTransfer }, { coverage });
+
+    const pending = harness.service.settleDeposit(ORG, intent.id, dummyPayload());
+    await jest.advanceTimersByTimeAsync(DEPOSIT_COVERAGE_WAIT_MS + DEPOSIT_OBSERVE_POLL_MS);
+    const settled = await pending;
+
+    expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+    expect(coverage.check).toHaveBeenCalled();
+    expect(harness.ledger.appendNow).toHaveBeenCalledTimes(1);
+    expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING }),
+    );
   });
 });

@@ -143,3 +143,35 @@ export const DEPOSIT_WATCH_CHAIN_ID = 'DEPOSIT_WATCH_CHAIN_ID';
  * this many whole units of the asset.
  */
 export const DEPOSIT_MINIMUM_USD = 5;
+
+/**
+ * How far before its intent's `createdAt` a buyer-broadcast transaction may
+ * have been mined and still be claimed: clock skew between this server and the
+ * chain's block timestamps, plus a wallet that broadcast a moment before the
+ * response creating the intent arrived. Anything older is a deposit made
+ * outside an intent, and is refused (`PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT`).
+ */
+export const DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS = 60 * 1000;
+
+/**
+ * Open deposit intents (`SETTLING`, or `CREATED` and unexpired) one agent may
+ * hold. Every intent is a row on the person's funding screen and a chain read
+ * when reported; a looping key otherwise creates them without bound.
+ */
+export const DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT = 5;
+
+/**
+ * How long a credit is re-checked against the escrow balance before the
+ * deposit path gives up: an RPC node one block behind the one that served the
+ * receipt reads the balance without the deposit for a moment.
+ */
+export const DEPOSIT_COVERAGE_WAIT_MS = 4 * 1000;
+
+/**
+ * How long the finality sweep keeps a pending deposit the escrow does not
+ * cover before it writes `DEPOSIT_REJECT`. Covers the platform's own booking
+ * lag (a redemption landed before its `HOLD_COMMIT`, a withdrawal claimed
+ * before the booker ran, about a minute); a deposit that is still uncovered
+ * after this left the escrow. Pending is never spendable meanwhile.
+ */
+export const DEPOSIT_UNCOVERED_GRACE_MS = 15 * 60 * 1000;

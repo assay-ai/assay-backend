@@ -4,7 +4,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import {
   AgentScope,
   CurrentSession,
-  isHumanCallerKind,
+  depositOwnerScope,
   RequireAgentScope,
   SessionAuthGuard,
 } from '@shared/auth';
@@ -53,15 +53,15 @@ export class DepositsController {
       'Human sessions retain organization-wide access.',
   })
   @ApiResponse({ status: 200, description: 'The deposit', type: DepositDto })
-  @ApiResponse({ status: 404, description: 'PAYMENT_DEPOSIT_NOT_FOUND — not in this organization' })
+  @ApiResponse({
+    status: 404,
+    description:
+      "PAYMENT_DEPOSIT_NOT_FOUND — not this agent's (for an API credential) or not in this organization",
+  })
   async getOne(
     @CurrentSession() session: McpSession,
     @Param('depositId', new ParseUUIDPipe()) depositId: string,
   ): Promise<DepositDto> {
-    return this.deposits.getOne(
-      session.organizationId,
-      depositId,
-      isHumanCallerKind(session.callerKind) ? undefined : session.agentId,
-    );
+    return this.deposits.getOne(depositOwnerScope(session), depositId);
   }
 }

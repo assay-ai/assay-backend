@@ -31,9 +31,11 @@ describe('deposit status polling', () => {
       await controller.getOne(session(kind), 'deposit-1');
 
       expect(getOne).toHaveBeenCalledWith(
-        'organization-1',
+        {
+          organizationId: 'organization-1',
+          agentId: kind === McpCallerKind.AGENT ? 'agent-1' : null,
+        },
         'deposit-1',
-        kind === McpCallerKind.AGENT ? 'agent-1' : undefined,
       );
     },
   );

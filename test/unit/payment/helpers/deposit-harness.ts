@@ -25,7 +25,14 @@ export class FakeDepositIntentRepository {
   readonly rows = new Map<string, DepositIntentEntity>();
 
   async insert(row: Partial<DepositIntentEntity>): Promise<{ identifiers: [{ id: string }] }> {
-    this.rows.set(row.id as string, { ...row } as DepositIntentEntity);
+    // `created_at` / `updated_at` are database defaults; the fake fills them
+    // the same way, since the broadcast path binds a transaction to `createdAt`.
+    const now = new Date();
+    this.rows.set(row.id as string, {
+      createdAt: now,
+      updatedAt: now,
+      ...row,
+    } as DepositIntentEntity);
     return { identifiers: [{ id: row.id as string }] };
   }
 
@@ -57,9 +64,44 @@ export class FakeDepositIntentRepository {
     return 1;
   }
 
+  /**
+   * Credits recorded outside an intent row (a ledger-only DEPOSIT_PENDING /
+   * DEPOSIT), as `hash|account`, for the global single-use lookup.
+   */
+  readonly ledgerClaims = new Set<string>();
+
+  /** Mirrors the real cross-tenant lookup: any organization, keyed on (hash, account). */
+  async findClaimOfTxRef(
+    txRef: string,
+    account: string,
+  ): Promise<{ intentId: string | null } | null> {
+    const row = [...this.rows.values()].find(
+      (candidate) => candidate.chainTxRef === txRef && candidate.agentAccount === account,
+    );
+    if (row) return { intentId: row.id };
+    return this.ledgerClaims.has(`${txRef}|${account}`) ? { intentId: null } : null;
+  }
+
+  async countOpenForAgent(organizationId: string, agentId: string, now: Date): Promise<number> {
+    return [...this.rows.values()].filter(
+      (row) =>
+        row.organizationId === organizationId &&
+        row.agentId === agentId &&
+        (row.status === 'SETTLING' ||
+          (row.status === 'CREATED' && row.expiresAt.getTime() > now.getTime())),
+    ).length;
+  }
+
   asRepository(): DepositIntentRepository {
     return this as unknown as DepositIntentRepository;
   }
+}
+
+/** A `DepositCoverageService` stand-in: covered unless a test says otherwise. */
+export function fakeCoverage(covered = true): { check: jest.Mock } {
+  return {
+    check: jest.fn().mockResolvedValue({ chain: 0n, claim: 0n, covered }),
+  };
 }
 
 /**

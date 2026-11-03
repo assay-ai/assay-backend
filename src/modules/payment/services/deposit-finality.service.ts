@@ -21,7 +21,8 @@ import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { formatDollars } from '@shared/utils/money-display.util';
 
-import { depositResource } from '../constants/deposit-intent.constants';
+import { DEPOSIT_UNCOVERED_GRACE_MS, depositResource } from '../constants/deposit-intent.constants';
+import { DepositCoverageService } from './deposit-coverage.service';
 
 export interface DepositFinalitySummary {
   readonly checked: number;
@@ -61,9 +62,11 @@ export class DepositFinalityService {
     private readonly registry: ChainAdapterRegistry,
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly ledger: LedgerService,
+    // H-1: nothing becomes spendable that the buyer's escrow does not hold.
+    private readonly coverage: DepositCoverageService,
     // Optional for the same reason `LedgerJournalService`'s is:
     // `test/integration/helpers/deposit-test-context.ts` constructs this class
-    // with `new DepositFinalityService(a, b, c, d)` directly, outside DI.
+    // with `new DepositFinalityService(a, b, c, d, e)` directly, outside DI.
     // `PaymentModule` always imports `NotificationModule` in the running app.
     @Optional()
     @Inject(NOTIFICATION_PORT)
@@ -211,7 +214,39 @@ export class DepositFinalityService {
           }
         }
 
+        // Final on chain is not enough to make it spendable: the money must
+        // still be in the buyer's escrow (H-1). A withdrawal claimed after the
+        // credit (the booker debits only `available`, never this `pending`), or
+        // a credit that raced another, leaves the ledger claiming more than
+        // the escrow holds. Uncovered: never confirmed. Kept queued for the
+        // platform's own booking lag, then rejected. A failed read throws and
+        // the row is retried next pass.
+        let uncovered = false;
         if (stillThere) {
+          const coverage = await this.coverage.check(
+            candidate.organizationId,
+            pending.accountId as AccountId,
+            pending.money.asset,
+            0n,
+          );
+          if (!coverage.covered) {
+            const age = Date.now() - pending.createdAt.getTime();
+            this.logger.warn(
+              `Deposit ${candidate.id}: final, but the escrow holds ${coverage.chain} against a ` +
+                `ledger claim of ${coverage.claim} — ` +
+                (age < DEPOSIT_UNCOVERED_GRACE_MS
+                  ? 'not confirming yet'
+                  : 'writing DEPOSIT_REJECT'),
+            );
+            if (age < DEPOSIT_UNCOVERED_GRACE_MS) {
+              skipped += 1;
+              continue;
+            }
+            uncovered = true;
+          }
+        }
+
+        if (stillThere && !uncovered) {
           const won = await this.appendResolution(candidate, {
             organizationId: candidate.organizationId,
             accountId: pending.accountId as AccountId,
@@ -259,10 +294,12 @@ export class DepositFinalityService {
               this.logger.warn(`deposit.credited notification failed: ${describe(error)}`),
             );
         } else {
-          this.logger.warn(
-            `Deposit ${candidate.id}: transaction ${candidate.chainTxRef} no longer observable at ` +
-              `finalized commitment — writing DEPOSIT_REJECT`,
-          );
+          if (!uncovered) {
+            this.logger.warn(
+              `Deposit ${candidate.id}: transaction ${candidate.chainTxRef} no longer observable ` +
+                `at finalized commitment — writing DEPOSIT_REJECT`,
+            );
+          }
           const won = await this.appendResolution(candidate, {
             organizationId: candidate.organizationId,
             accountId: pending.accountId as AccountId,
@@ -289,7 +326,9 @@ export class DepositFinalityService {
               organizationId: candidate.organizationId,
               event: NotificationEvent.DEPOSIT_FAILED,
               title: 'Deposit failed',
-              body: `Your deposit of ${formatDollars(pending.money)} could not be finalized on chain. No balance was affected.`,
+              body: uncovered
+                ? `Your deposit of ${formatDollars(pending.money)} was not credited: the funds are no longer in your escrow. No balance was affected.`
+                : `Your deposit of ${formatDollars(pending.money)} could not be finalized on chain. No balance was affected.`,
               subjectType: 'deposit_intent',
               subjectId: candidate.id,
               payload: {

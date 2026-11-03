@@ -146,6 +146,11 @@ describe('DepositsController.create', () => {
         agentAccount: EVM_AGENT_ACCOUNT,
         chainId: ROBINHOOD_TESTNET,
         amount: MoneyUtil.of(5_000_000n, USDG, 6),
+        // An agent credential is named for the audit row (M-2); a person is not.
+        caller:
+          callerKind === McpCallerKind.AGENT
+            ? { actor: { type: 'agent', id: AGENT_ID }, credentialId: 'cred-1' }
+            : null,
       });
     },
   );
@@ -259,12 +264,16 @@ describe('DepositsController.settle', () => {
     });
 
     // Three positional arguments — `settleDeposit` has no input object.
-    expect(deposits.settleDeposit).toHaveBeenCalledWith(ORGANIZATION_ID, DEPOSIT_ID, {
-      x402Version: 2,
-      scheme: 'exact',
-      network: SOLANA_DEVNET,
-      payload: { transaction: 'AQAB' },
-    });
+    expect(deposits.settleDeposit).toHaveBeenCalledWith(
+      { organizationId: ORGANIZATION_ID, agentId: null },
+      DEPOSIT_ID,
+      {
+        x402Version: 2,
+        scheme: 'exact',
+        network: SOLANA_DEVNET,
+        payload: { transaction: 'AQAB' },
+      },
+    );
 
     expect(response).toEqual({
       id: DEPOSIT_ID,
@@ -287,7 +296,10 @@ describe('DepositsController.settle', () => {
       payload: { transaction: 'AQAB' },
     });
 
-    expect(deposits.settleDeposit.mock.calls[0][0]).toBe(ORGANIZATION_ID);
+    expect(deposits.settleDeposit.mock.calls[0][0]).toEqual({
+      organizationId: ORGANIZATION_ID,
+      agentId: null,
+    });
   });
 
   it('refuses a network that is not a CAIP-2 chain id', async () => {
@@ -323,10 +335,10 @@ describe('DepositsController.broadcast', () => {
     const response = await controller.broadcast(session(), DEPOSIT_ID, { transactionHash: hash });
 
     expect(deposits.settleDepositByBroadcast).toHaveBeenCalledWith(
-      ORGANIZATION_ID,
+      { organizationId: ORGANIZATION_ID, agentId: null },
       DEPOSIT_ID,
       hash,
-      undefined,
+      null,
     );
     expect(response).toEqual({
       id: DEPOSIT_ID,
@@ -346,10 +358,10 @@ describe('DepositsController.broadcast', () => {
     });
 
     expect(deposits.settleDepositByBroadcast).toHaveBeenCalledWith(
-      ORGANIZATION_ID,
+      { organizationId: ORGANIZATION_ID, agentId: AGENT_ID },
       DEPOSIT_ID,
       hash,
-      AGENT_ID,
+      { actor: { type: 'agent', id: AGENT_ID }, credentialId: 'cred-1' },
     );
   });
 });

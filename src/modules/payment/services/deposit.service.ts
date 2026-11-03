@@ -5,7 +5,10 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId, AssetId, ChainId, ChainNamespace } from '@modules/chains/ports/caip.types';
 import { FACILITATOR_PORT, FacilitatorPort } from '@modules/chains/ports/facilitator.port';
 import { Money } from '@modules/chains/ports/money.types';
+import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { ChainAdapter } from '@modules/chains/ports/chain-adapter.port';
+import { AuditActor, AuditLogWriter } from '@shared/audit';
+import { DepositOwnerScope } from '@shared/auth/deposit-owner-scope';
 import {
   CHAIN_STATE_GATE,
   ChainDoor,
@@ -26,8 +29,11 @@ import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 
 import {
+  DEPOSIT_COVERAGE_WAIT_MS,
+  DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
+  DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS,
   depositResource,
 } from '../constants/deposit-intent.constants';
 import { assertDepositAssetIsSettlementAsset } from '../domain/deposit-asset';
@@ -41,6 +47,7 @@ import {
   DepositIntentStatus,
 } from '../ports/deposit.types';
 import { ESCROW_OPENER, EscrowOpenerPort } from '../ports/escrow-opener.port';
+import { DepositCoverageService } from './deposit-coverage.service';
 import { DepositIntentService } from './deposit-intent.service';
 
 /**
@@ -66,7 +73,33 @@ export interface CreateDepositResult {
 /** `createDeposit`'s input — `amount` in place of `CreateDepositIntentInput.requestedAmount`. */
 export type CreateDepositInput = Omit<CreateDepositIntentInput, 'expiresAt' | 'requestedAmount'> & {
   readonly amount: Money;
+  /** Who asked, when it is an agent credential: audited (`deposit.intent_created`). */
+  readonly caller?: DepositCaller | null;
 };
+
+/**
+ * An agent credential acting on a deposit: the audit actor and the credential
+ * it presented. An agent can hold several keys and an OAuth grant, and
+ * `deposit_intents` records only the agent, so the audit row is what names
+ * the key after an incident. `null` for a person's session.
+ */
+export interface DepositCaller {
+  readonly actor: AuditActor;
+  readonly credentialId: string | null;
+}
+
+/** What the chain said about a reported transaction, as the deposit path reads it. */
+type Landed =
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'no_credit' }
+  | {
+      readonly kind: 'credited';
+      readonly transfer: ObservedTransfer;
+      /** `null` where the adapter cannot tell (no `observeDeposit`). */
+      readonly blockTime: Date | null;
+    }
+  /** Every read failed or hung until the deadline: unknown, never "not there". */
+  | { readonly kind: 'unavailable'; readonly error: unknown };
 
 /**
  * The x402 `exact` gasless deposit path.
@@ -104,11 +137,16 @@ export class DepositService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly escrows: BuyerEscrowRepository,
     private readonly ledger: LedgerService,
+    // H-1: every credit is checked against the buyer's escrow on chain.
+    private readonly coverage: DepositCoverageService,
     // The ON-CHAIN pause and blocklist (D-19), asked before the escrow mirror
     // row and the intent row are written: a refused deposit leaves neither.
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
+    // Bookkeeping only (`recordAfterCommit` never throws): which key opened or
+    // reported a deposit.
+    @Optional() private readonly audit: AuditLogWriter | null = null,
   ) {}
 
   /**
@@ -143,6 +181,12 @@ export class DepositService {
       });
     }
 
+    // Before any chain read or write: an agent at its cap costs nothing more.
+    const open = await this.deposits.countOpenForAgent(input.organizationId, input.agentId);
+    if (open >= DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT) {
+      throw PaymentErrors.depositOpenLimit({ limit: DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT });
+    }
+
     const deps = await this.resolveRequirementDeps(
       input.organizationId,
       input.agentAccount,
@@ -160,6 +204,12 @@ export class DepositService {
 
     const requirements = await this.buildRequirements(intent, deps);
 
+    if (input.caller) {
+      await this.recordCallerAudit(intent, input.caller, 'deposit.intent_created', {
+        requestedAmount: intent.requestedAmount.amount,
+      });
+    }
+
     return { intent, requirements };
   }
 
@@ -175,11 +225,12 @@ export class DepositService {
    * `/settle` a second time for a payload that may already have landed.
    */
   async settleDeposit(
-    organizationId: string,
+    scope: DepositOwnerScope,
     intentId: string,
     payload: PaymentPayload,
   ): Promise<DepositIntent> {
-    const intent = await this.deposits.findById(organizationId, intentId);
+    const { organizationId } = scope;
+    const intent = await this.deposits.findById(scope, intentId);
 
     if (intent.status === DepositIntentStatus.SETTLED) {
       return intent;
@@ -253,12 +304,12 @@ export class DepositService {
       throwForX402InvalidReason(settleResult.errorReason);
     }
 
-    return this.recordObservedSettlement(
+    return this.recordFacilitatorSettlement(
       organizationId,
       intent,
       adapter,
       asChainIntent,
-      settleResult.transaction,
+      canonicalTxRef(adapter, settleResult.transaction),
       settleResult.payer ?? intent.agentAccount,
     );
   }
@@ -272,32 +323,54 @@ export class DepositService {
    * payload `settleDeposit` needs can never come from them. They send
    * `depositFor` themselves and hand the platform the hash.
    *
-   * Nothing the client says is trusted. The hash is only a pointer: the chain
-   * is read (`observeTransfer`), and only an escrow `Deposited` event crediting
-   * THIS intent's buyer, for at least the requested amount
-   * (`extractSettledAmount`), credits anything — exactly the two reads the
-   * facilitator path makes after its own broadcast. What the facilitator path
-   * also had and this one must supply itself is single use: there, the hash is
-   * minted by our own settle; here, the client could offer one transaction for
-   * two intents. `findByChainTxRef` refuses that before anything moves, and
-   * `uq_ledger_entries_deposit_resolution` refuses a second credit at finality
-   * if two claims race past it.
+   * Nothing the client says is trusted. The hash is only a pointer, and every
+   * check below runs BEFORE the intent moves or anything is recorded, so a
+   * refused claim (wrong hash, someone else's hash, not mined yet, an RPC
+   * failure) reserves nothing and burns nothing: the intent stays `CREATED`
+   * and can be reported again, and the hash stays claimable by its buyer.
+   *
+   * 1. Single use, per (transaction, buyer), across the whole platform
+   *    (`findClaimOfTxRef`; `uq_ledger_entries_deposit_pending_account` closes
+   *    the race behind it).
+   * 2. The chain is read (`observeDeposit`): only escrow `Deposited` events
+   *    crediting THIS intent's buyer count, summed; a mined transaction that
+   *    credits nobody is refused at once, without polling.
+   * 3. Bound in time to the intent: a transaction mined before the intent
+   *    (beyond {@link DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS}) is a deposit made
+   *    outside an intent, whose money may have been withdrawn since.
+   * 4. At least the requested amount (`extractSettledAmount`).
+   * 5. Still in the escrow: the buyer's escrow on chain must cover the
+   *    ledger's claim on it plus this credit (`DepositCoverageService`, H-1).
    *
    * Refused on a chain that needs the platform as fee payer (Solana): no buyer
    * can broadcast there alone, so a hash-only claim has no honest producer.
    */
   async settleDepositByBroadcast(
-    organizationId: string,
+    scope: DepositOwnerScope,
     intentId: string,
     transaction: TxRef,
-    agentId?: string,
+    caller: DepositCaller | null = null,
   ): Promise<DepositIntent> {
+    const { organizationId } = scope;
     // Scope the read before the settled fast path: completed intents must
     // not disclose another agent's deposit either.
-    const intent = await this.deposits.findById(organizationId, intentId, agentId);
+    const intent = await this.deposits.findById(scope, intentId);
+    const adapter = this.registry.resolve(intent.chainId);
+    // One transaction, one spelling. An EVM hash is case-insensitive hex — the
+    // node returns the same receipt for `0xabc…` and `0xABC…` — but the claim
+    // lookup and both single-use indexes compare `chain_tx_ref` byte for byte.
+    // Left raw, every case variant of one real deposit passed all three and was
+    // credited again. Canonicalize before anything reads or writes the hash.
+    // Only EVM: a Solana signature is base58, where case is significant.
+    transaction = canonicalTxRef(adapter, transaction);
 
     if (intent.status === DepositIntentStatus.SETTLED) {
-      return intent;
+      // Idempotent for the hash that settled it; a different one would be
+      // told "settled" while its own deposit stays uncredited.
+      if (intent.chainTxRef === transaction) {
+        return intent;
+      }
+      throw PaymentErrors.depositAlreadySettled({ id: intentId });
     }
     if (intent.status !== DepositIntentStatus.CREATED) {
       throw PaymentErrors.depositInvalidStateTransition({
@@ -314,27 +387,16 @@ export class DepositService {
       });
     }
 
-    const adapter = this.registry.resolve(intent.chainId);
-    if (adapter.requiresFeePayer) {
+    if (adapter.requiresFeePayer || !adapter.observeDeposit) {
       throw PaymentErrors.depositBroadcastUnsupported({ chainId: intent.chainId });
     }
 
-    // One transaction, one spelling. An EVM hash is case-insensitive hex — the
-    // node returns the same receipt for `0xabc…` and `0xABC…` — but the claim
-    // lookup and both single-use indexes compare `chain_tx_ref` byte for byte.
-    // Left raw, every case variant of one real deposit passed all three and was
-    // credited again. Canonicalize before anything reads or writes the hash.
-    // Only EVM: a Solana signature is base58, where case is significant.
-    transaction = canonicalTxRef(adapter, transaction);
     // A hash that cannot exist is the caller's mistake, refused before the
-    // intent moves: read on chain, `0xdeadbeef` was polled for the whole
-    // observation window and then failed the intent (BUG-PROD-BUY-MONEY-02).
+    // chain is read: `0xdeadbeef` was polled for the whole observation window
+    // and then failed the intent (BUG-PROD-BUY-MONEY-02).
     assertWellFormedTxRef(adapter, transaction);
 
-    const claimed = await this.deposits.findByChainTxRef(organizationId, transaction);
-    if (claimed && claimed.id !== intent.id) {
-      throw PaymentErrors.depositTransactionAlreadyClaimed({ transaction, claimedBy: claimed.id });
-    }
+    await this.assertTxUnclaimed(intent, transaction);
 
     const { escrowPda } = await this.escrowReader.escrowAddresses(
       intent.agentAccount,
@@ -342,31 +404,94 @@ export class DepositService {
     );
     const asChainIntent = this.toChainIntent(intent, escrowPda);
 
+    const landed = await this.observeOnceLanded(adapter, asChainIntent, transaction);
+    switch (landed.kind) {
+      case 'unavailable':
+        // Unknown is not "not there": nothing is failed or burned, retry.
+        throw landed.error;
+      case 'pending':
+        throw PaymentErrors.depositTransferNotObserved({ transaction, failed: false });
+      case 'no_credit':
+        throw PaymentErrors.depositTransactionCreditsNothing({ transaction });
+    }
+
+    const minedAt = landed.blockTime;
+    if (
+      !minedAt ||
+      minedAt.getTime() < intent.createdAt.getTime() - DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS
+    ) {
+      this.logger.warn(
+        `Deposit ${intent.id}: transaction ${transaction} mined at ` +
+          `${minedAt?.toISOString() ?? 'an unknown time'}, before the intent ` +
+          `(${intent.createdAt.toISOString()}) — refused`,
+      );
+      throw PaymentErrors.depositTransactionPredatesIntent({ transaction });
+    }
+
+    // Throws on an underpayment, a wrong asset or network: refused, the intent
+    // stays open for the right transaction.
+    const settledMoney = adapter.extractSettledAmount(asChainIntent, {
+      transaction,
+      network: intent.chainId,
+      payer: intent.agentAccount,
+      observed: landed.transfer,
+    });
+
+    if (!(await this.waitForCoverage(intent, settledMoney, transaction))) {
+      throw PaymentErrors.depositNotCovered({ transaction });
+    }
+
     await this.deposits.transition(
       organizationId,
       intentId,
       DepositIntentStatus.CREATED,
       DepositIntentStatus.SETTLING,
-      { reason: 'buyer broadcast; reading the transaction on chain' },
+      { reason: 'buyer broadcast; observed on chain and covered by the escrow' },
     );
 
-    return this.recordObservedSettlement(
-      organizationId,
-      intent,
-      adapter,
-      asChainIntent,
-      transaction,
-      intent.agentAccount,
-    );
+    const settled = await this.creditAndSettle(organizationId, intent, settledMoney, transaction);
+    if (caller) {
+      await this.recordCallerAudit(settled, caller, 'deposit.reported', {
+        transactionHash: transaction,
+        settledAmount: settledMoney.amount,
+      });
+    }
+    return settled;
   }
 
   /**
-   * SETTLING → SETTLED (or FAILED): observe the transfer, take the amount the
-   * chain moved, and credit `DEPOSIT_PENDING`. Shared by the facilitator path
-   * and the buyer-broadcast path, so the two cannot judge the same transaction
-   * differently.
+   * Refuses a transaction that already credited this intent's buyer, through
+   * any deposit of any organization. The answer names no other intent; the id
+   * goes to the server log only.
    */
-  private async recordObservedSettlement(
+  private async assertTxUnclaimed(intent: DepositIntent, transaction: TxRef): Promise<void> {
+    const claimed = await this.deposits.findClaimOfTxRef(transaction, intent.agentAccount);
+    if (claimed && claimed.intentId !== intent.id) {
+      this.logger.warn(
+        `Deposit ${intent.id}: transaction ${transaction} already credited ` +
+          `${intent.agentAccount} through ${claimed.intentId ?? 'a ledger entry with no intent'}`,
+      );
+      throw PaymentErrors.depositTransactionAlreadyClaimed({ transaction });
+    }
+  }
+
+  /**
+   * SETTLING → SETTLED (or FAILED) after the facilitator broadcast: observe the
+   * transfer, take the amount the chain moved, and credit `DEPOSIT_PENDING`.
+   *
+   * The intent is already `SETTLING` here (the payload went to the facilitator
+   * and may have landed), so the outcomes are:
+   * - not observed in the window, or observed crediting nobody: `FAILED`;
+   * - the chain could not be read: left `SETTLING` and answered `503` — the
+   *   transaction may well have landed, and failing the intent on an RPC blip
+   *   is what M-2 forbids;
+   * - observed: credited `DEPOSIT_PENDING`, then `SETTLED`. When the escrow
+   *   does not (yet) cover the credit, it is still written as PENDING — the
+   *   money was minted into the escrow by our own facilitator a moment ago —
+   *   and `DepositFinalityService` refuses to make it spendable until the
+   *   escrow covers it, rejecting it if it never does.
+   */
+  private async recordFacilitatorSettlement(
     organizationId: string,
     intent: DepositIntent,
     adapter: ChainAdapter,
@@ -375,35 +500,38 @@ export class DepositService {
     payer: AccountId,
   ): Promise<DepositIntent> {
     const intentId = intent.id;
-
-    // Never trust the requested amount — the SVM `exact` scheme tolerates
-    // overpayment, and only the chain says what actually moved.
-    const observed = await this.observeOnceLanded(adapter, asChainIntent, transaction);
-
-    if (!observed) {
-      await this.deposits.transition(
+    const fail = (reason: string) =>
+      this.deposits.transition(
         organizationId,
         intentId,
         DepositIntentStatus.SETTLING,
         DepositIntentStatus.FAILED,
-        {
-          // The signature goes in the REASON, not in `chainTxRef`.
-          // `chk_deposit_intents_settlement_pair` is
-          // `(settled_amount IS NULL) = (chain_tx_ref IS NULL)` — the two
-          // columns are one fact, "this is the transaction that settled it,
-          // and this is what it moved". A failed intent settled nothing, so
-          // setting one without the other is not a typo, it is a claim the
-          // schema refuses.
-          //
-          // Found live: this path threw the CHECK violation *instead of* the
-          // real error, so the intent stuck in SETTLING forever and the
-          // operator was shown a Postgres constraint name rather than the
-          // reason the deposit failed. A unit test over an in-memory
-          // repository cannot see a constraint.
-          reason: `settlement reported success but no transfer was observed on ${transaction}`,
-        },
+        // The signature goes in the REASON, not in `chainTxRef`.
+        // `chk_deposit_intents_settlement_pair` is
+        // `(settled_amount IS NULL) = (chain_tx_ref IS NULL)` — the two
+        // columns are one fact, "this is the transaction that settled it, and
+        // this is what it moved". A failed intent settled nothing. (Found
+        // live: setting one without the other threw the CHECK violation
+        // instead of the real error and left the intent SETTLING forever.)
+        { reason },
       );
-      throw PaymentErrors.depositTransferNotObserved({ transaction });
+
+    // Never trust the requested amount — the SVM `exact` scheme tolerates
+    // overpayment, and only the chain says what actually moved.
+    const landed = await this.observeOnceLanded(adapter, asChainIntent, transaction);
+    switch (landed.kind) {
+      case 'unavailable':
+        this.logger.error(
+          `Deposit ${intentId}: chain unreadable after the facilitator settled ${transaction}; ` +
+            `left SETTLING — ${describe(landed.error)}`,
+        );
+        throw landed.error;
+      case 'pending':
+        await fail(`settlement reported success but no transfer was observed on ${transaction}`);
+        throw PaymentErrors.depositTransferNotObserved({ transaction, failed: true });
+      case 'no_credit':
+        await fail(`transaction ${transaction} credits this buyer nothing`);
+        throw PaymentErrors.depositTransactionCreditsNothing({ transaction });
     }
 
     let settledMoney: Money;
@@ -412,21 +540,44 @@ export class DepositService {
         transaction,
         network: intent.chainId,
         payer,
-        observed,
+        observed: landed.transfer,
       });
     } catch (error) {
-      await this.deposits.transition(
-        organizationId,
-        intentId,
-        DepositIntentStatus.SETTLING,
-        DepositIntentStatus.FAILED,
-        // Same `chk_deposit_intents_settlement_pair` reasoning as above — the
-        // signature belongs in the reason on a path that settles nothing.
-        { reason: `settled amount rejected on ${transaction}: ${describe(error)}` },
-      );
+      await fail(`settled amount rejected on ${transaction}: ${describe(error)}`);
       throw error;
     }
 
+    let covered: boolean;
+    try {
+      covered = await this.waitForCoverage(intent, settledMoney, transaction);
+    } catch (error) {
+      this.logger.error(
+        `Deposit ${intentId}: escrow unreadable after the facilitator settled ${transaction}; ` +
+          `left SETTLING — ${describe(error)}`,
+      );
+      throw error;
+    }
+    if (!covered) {
+      this.logger.warn(
+        `Deposit ${intentId}: the escrow does not cover ${settledMoney.amount} from ` +
+          `${transaction}; credited as pending only, finality will not confirm it uncovered`,
+      );
+    }
+
+    return this.creditAndSettle(organizationId, intent, settledMoney, transaction);
+  }
+
+  /**
+   * `DEPOSIT_PENDING` for the observed amount, then SETTLING → SETTLED. Shared
+   * by both paths, so the two cannot credit the same transaction differently.
+   */
+  private async creditAndSettle(
+    organizationId: string,
+    intent: DepositIntent,
+    settledMoney: Money,
+    transaction: TxRef,
+  ): Promise<DepositIntent> {
+    const intentId = intent.id;
     // Credited before the intent is marked SETTLED, not after: an intent
     // that says SETTLED with no matching ledger entry is a worse failure than
     // the reverse (the chain-side reconciler repairs an orphaned deposit; there
@@ -446,14 +597,12 @@ export class DepositService {
         chainTxRef: transaction,
       });
     } catch (error) {
-      // `uq_ledger_entries_deposit_pending` makes the pending credit single-use
-      // per signature. Losing it means another intent in this organization
-      // claimed the same transfer between our `findByChainTxRef` read and this
-      // write — the read-then-write race that guard cannot close, and the one
-      // that previously let two intents both credit (and both enter finality
-      // for) a single transfer. This intent can never settle on a transfer
-      // another intent owns, so fail it cleanly and report the same 409 the
-      // guard would have.
+      // `uq_ledger_entries_deposit_pending_account` makes the pending credit
+      // single-use per (transaction, buyer). Losing it means another intent
+      // claimed this buyer's share of the same transfer between the claim
+      // check and this write — the read-then-write race that check cannot
+      // close. This intent can never settle on a transfer another intent owns,
+      // so fail it cleanly and report the same 409 the check would have.
       if (!isUniqueViolation(error)) throw error;
       await this.deposits.transition(
         organizationId,
@@ -462,10 +611,7 @@ export class DepositService {
         DepositIntentStatus.FAILED,
         { reason: `transaction ${transaction} already claimed by a concurrent deposit` },
       );
-      throw PaymentErrors.depositTransactionAlreadyClaimed({
-        transaction,
-        claimedBy: 'a concurrent deposit',
-      });
+      throw PaymentErrors.depositTransactionAlreadyClaimed({ transaction });
     }
 
     this.logger.log(
@@ -486,50 +632,110 @@ export class DepositService {
   }
 
   /**
+   * Whether the buyer's escrow covers the ledger's claim on it plus `credit`,
+   * asked again for up to {@link DEPOSIT_COVERAGE_WAIT_MS}: the node that
+   * answers the balance can be a block behind the one that answered the
+   * receipt. A failed chain read throws (unknown is never "covered").
+   */
+  private async waitForCoverage(
+    intent: DepositIntent,
+    credit: Money,
+    transaction: TxRef,
+  ): Promise<boolean> {
+    const deadline = Date.now() + DEPOSIT_COVERAGE_WAIT_MS;
+    for (;;) {
+      const coverage = await this.coverage.check(
+        intent.organizationId,
+        intent.agentAccount,
+        credit.asset,
+        BigInt(credit.amount),
+      );
+      if (coverage.covered) return true;
+      if (Date.now() >= deadline) {
+        this.logger.warn(
+          `Deposit ${intent.id}: ${transaction} not covered — escrow holds ${coverage.chain}, ` +
+            `ledger claims ${coverage.claim}, credit ${credit.amount}`,
+        );
+        return false;
+      }
+      await sleep(Math.min(DEPOSIT_OBSERVE_POLL_MS, Math.max(0, deadline - Date.now())));
+    }
+  }
+
+  /** The audit row naming the agent credential behind a deposit action (M-2). Never throws. */
+  private async recordCallerAudit(
+    intent: DepositIntent,
+    caller: DepositCaller,
+    action: 'deposit.intent_created' | 'deposit.reported',
+    after: Record<string, unknown>,
+  ): Promise<void> {
+    await this.audit?.recordAfterCommit({
+      organizationId: intent.organizationId,
+      actor: caller.actor,
+      action,
+      resourceType: 'deposit',
+      resourceId: intent.id,
+      before: null,
+      after: {
+        credentialId: caller.credentialId,
+        agentId: intent.agentId,
+        account: intent.agentAccount,
+        chainId: intent.chainId,
+        ...after,
+      },
+    });
+  }
+
+  /**
    * `observeTransfer` right after `settle` is a **race**, and losing it costs
    * real money.
    *
    * The facilitator returns as soon as the RPC accepts the transaction. At
-   * that moment it has not been confirmed, so `getTransaction` at
-   * `commitment: 'confirmed'` answers "not found" — which
-   * `observeTransfer` correctly reports as `null`, because from the adapter a
-   * reorg and "not landed yet" are indistinguishable and the caller owns that
-   * decision. This method is that decision.
+   * that moment it has not been confirmed, so the first read almost always
+   * answers "not found". Measured live on devnet: the transfer moved 25 USDC
+   * into the vault and the immediate read still returned `null`, so the
+   * deposit was marked FAILED while the money was already gone. So "not there
+   * yet" is asked again until the window ends.
    *
-   * Measured live on devnet: the transfer moved 25 USDC into the vault and the
-   * immediate read still returned `null`, so the deposit was marked FAILED
-   * while the money was already gone. Treating one unconfirmed read as failure
-   * is the difference between a deposit and a loss.
+   * Only that answer is polled. A mined transaction that credits nobody is
+   * final and returned at once (no 20 s of reads for a wrong hash). A read
+   * that fails or hangs is retried within the window too, and if the window
+   * ends on failures the answer is `unavailable`, never "not there" (M-2).
    *
-   * Bounded, not open-ended: a transaction that has genuinely not landed must
-   * still fail rather than hang a request forever. `expiresAt` is not the
-   * bound to use — the intent's TTL outlives the blockhash by a wide margin on
-   * a fast cluster.
+   * Bounded, not open-ended: each read is cut at the window's end, and the
+   * pause between reads never runs past it.
    */
   private async observeOnceLanded(
     adapter: ChainAdapter,
     intent: ChainPaymentIntent,
     transaction: TxRef,
-  ): Promise<ObservedTransfer | null> {
+  ): Promise<Landed> {
     const deadline = Date.now() + DEPOSIT_OBSERVE_TIMEOUT_MS;
     let attempt = 0;
 
     for (;;) {
-      // Each read is bounded by what is left of the window: one RPC call may
-      // otherwise take the egress client's whole budget past the deadline.
-      const observed = await withinDeadline(
-        adapter.observeTransfer(intent, transaction, { commitment: 'confirmed' }),
-        deadline,
-      );
-      if (observed) {
-        return observed;
+      let failure: unknown = null;
+      let landed: Landed | null = null;
+      try {
+        const read = await withinDeadline(readLanded(adapter, intent, transaction), deadline);
+        if (read === TIMED_OUT) {
+          failure = ChainErrors.rpcReadFailed({ method: 'observe deposit (timed out)' });
+        } else {
+          landed = read;
+        }
+      } catch (error) {
+        failure = error;
+      }
+      if (landed && landed.kind !== 'pending') {
+        return landed;
       }
       if (Date.now() >= deadline) {
         this.logger.warn(
           `Deposit settlement ${transaction} still unobservable after ` +
-            `${DEPOSIT_OBSERVE_TIMEOUT_MS}ms and ${attempt + 1} reads`,
+            `${DEPOSIT_OBSERVE_TIMEOUT_MS}ms and ${attempt + 1} reads` +
+            (failure ? ` (last read failed: ${describe(failure)})` : ''),
         );
-        return null;
+        return failure ? { kind: 'unavailable', error: failure } : { kind: 'pending' };
       }
       attempt += 1;
       // Never pause past the deadline: the window is the request's whole wait.
@@ -709,14 +915,21 @@ function assertWellFormedTxRef(adapter: ChainAdapter, transaction: TxRef): void 
   }
 }
 
+/** What {@link withinDeadline} answers when the deadline passed first. */
+const TIMED_OUT = Symbol('timed out');
+
 /**
- * `work`, or `null` once `deadline` passes. The read left behind is not
- * cancelled, only no longer awaited; its late rejection is swallowed.
+ * `work`, or {@link TIMED_OUT} once `deadline` passes. The read left behind is
+ * not cancelled, only no longer awaited; its late rejection is swallowed. A
+ * rejection of `work` before the deadline is passed through.
  */
-async function withinDeadline<T>(work: Promise<T | null>, deadline: number): Promise<T | null> {
+async function withinDeadline<T>(
+  work: Promise<T>,
+  deadline: number,
+): Promise<T | typeof TIMED_OUT> {
   let timer: NodeJS.Timeout | undefined;
-  const expired = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadline - Date.now()));
   });
   work.catch(() => undefined);
   try {
@@ -724,6 +937,23 @@ async function withinDeadline<T>(work: Promise<T | null>, deadline: number): Pro
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * One read, through `observeDeposit` where the adapter has it. Otherwise
+ * `observeTransfer`, whose `null` cannot tell "not yet" from "never", so it is
+ * read as "not yet" (polled) and no block time is known.
+ */
+async function readLanded(
+  adapter: ChainAdapter,
+  intent: ChainPaymentIntent,
+  transaction: TxRef,
+): Promise<Landed> {
+  if (adapter.observeDeposit) {
+    return adapter.observeDeposit(intent, transaction);
+  }
+  const transfer = await adapter.observeTransfer(intent, transaction, { commitment: 'confirmed' });
+  return transfer ? { kind: 'credited', transfer, blockTime: null } : { kind: 'pending' };
 }
 
 function sleep(ms: number): Promise<void> {
