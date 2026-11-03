@@ -1386,6 +1386,23 @@ describe('ReconciliationService — channel buckets (SPEC-W2 §1.2)', () => {
 
     expect(report.findings.map((f) => f.code)).toContain(ReconciliationFindingCode.RESERVES_BREACH);
   });
+
+  it('stores totalUnpaid in total_liabilities, so the row satisfies difference = vault - total', async () => {
+    const { service, runs } = build({
+      vaultBalance: 15_000_000n,
+      journal: { [LedgerEntryType.DEPOSIT]: 10_000_000n },
+      snapshot: { available: 10_000_000n },
+      channel: { held: 0n, totalUnpaid: 5_000_000n },
+    });
+
+    await service.reconcile(USDC);
+
+    // chk_reconciliation_runs_difference: a row breaking it is never written,
+    // and three unwritten runs freeze withdrawals (RECONCILIATION_BLIND).
+    const row = runs.rows[0];
+    expect(row).toMatchObject({ totalLiabilities: '15000000', difference: '0' });
+    expect(BigInt(row.vaultBalance) - BigInt(row.totalLiabilities)).toBe(BigInt(row.difference));
+  });
 });
 
 /**
@@ -1417,6 +1434,21 @@ describe('ReconciliationService — pending deposit the escrow does not hold', (
     expect(report.severity).toBe(ReconciliationSeverity.WARN);
     expect(report.findings[0].details).toMatchObject({ pendingNotHeld: '5000000' });
     expect(report.differenceAtomic).toBe(0n);
+  });
+
+  it('stores total_liabilities net of it, so the row satisfies difference = vault - total', async () => {
+    const { service, runs } = build({
+      vaultBalance: 10_000_000n,
+      journal,
+      snapshot: { available: 10_000_000n, pending: 5_000_000n },
+      escrows: [{ account: BUYER_A, chain: 10_000_000n, mirror: 10_000_000n, pending: 5_000_000n }],
+    });
+
+    await service.reconcile(USDC);
+
+    const row = runs.rows[0];
+    expect(row).toMatchObject({ totalLiabilities: '10000000', difference: '0' });
+    expect(BigInt(row.vaultBalance) - BigInt(row.totalLiabilities)).toBe(BigInt(row.difference));
   });
 
   it('still breaches when the missing money is spendable credit, not pending', async () => {

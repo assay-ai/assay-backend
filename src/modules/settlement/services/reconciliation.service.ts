@@ -221,8 +221,14 @@ export class ReconciliationService {
     // spendable (finality holds it until the escrow covers it, and alerts),
     // so the vault does not owe it: counted, it paged a false reserves breach
     // and froze withdrawals for every such deposit.
-    const difference =
-      vaultAtomic - (liabilities.total - escrows.uncoveredPending) - channel.totalUnpaid;
+    //
+    // What the vault owes, as one figure: stored as `total_liabilities`, so
+    // `chk_reconciliation_runs_difference` (difference = vault - total) holds.
+    // Subtracting either term from the difference alone broke that CHECK, and
+    // a run that cannot be recorded turns into RECONCILIATION_BLIND, which
+    // freezes withdrawals for every buyer.
+    const owedAtomic = liabilities.total - escrows.uncoveredPending + channel.totalUnpaid;
+    const difference = vaultAtomic - owedAtomic;
     // The vault IS the escrow contract, so what it holds beyond the buyer
     // escrows the walk read is value in no `buyer_escrows` row. Only known
     // when every escrow was read. The escrow's held payments (G3.B1): in the
@@ -268,7 +274,7 @@ export class ReconciliationService {
       openHoldsAtomic: liabilities.openHolds,
       providerPayableAtomic: liabilities.providerPayable,
       platformFeesAtomic: liabilities.platformFees,
-      totalLiabilitiesAtomic: liabilities.total,
+      totalLiabilitiesAtomic: owedAtomic,
       snapshotLiabilitiesAtomic: snapshotTotal,
       differenceAtomic: difference,
       journalEntries: journal.entries,
