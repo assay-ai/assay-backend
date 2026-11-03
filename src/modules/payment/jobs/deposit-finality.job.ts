@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import {
   DEPOSIT_FINALITY_SWEEP_BATCH,
   DEPOSIT_FINALITY_SWEEP_CRON,
+  DEPOSIT_SETTLING_RESUME_BATCH,
 } from '../constants/deposit-intent.constants';
 import { DepositFinalityService } from '../services/deposit-finality.service';
 import { DepositService } from '../services/deposit.service';
@@ -13,6 +14,15 @@ import { DepositService } from '../services/deposit.service';
  * and around `DepositService.resumeStuckSettling` on the same cadence: a
  * `SETTLING` intent whose request died (a failed chain read after the
  * facilitator settled, a crash before `SETTLED`) is retried here, never left.
+ *
+ * **Ticks never overlap** (`waitForCompletion`, as every other money cron
+ * here): a pass that outlasts 5 s (a slow RPC, resume reads capped at 20 s
+ * each) makes the next tick skip instead of stacking another pass on the
+ * same rows. Across processes the scheduler is a single instance by design
+ * (see `VoucherRedemptionJob`); the unique indexes and compare-and-swap
+ * transitions stay the guarantee. Finality runs first, then resume (small
+ * batch, time budget), so a resume stuck on a failing RPC never delays the
+ * confirmations of deposits already credited.
  */
 @Injectable()
 export class DepositFinalityJob {
@@ -23,20 +33,8 @@ export class DepositFinalityJob {
     private readonly deposits: DepositService,
   ) {}
 
-  @Cron(DEPOSIT_FINALITY_SWEEP_CRON)
+  @Cron(DEPOSIT_FINALITY_SWEEP_CRON, { waitForCompletion: true })
   async handleFinalitySweep(): Promise<void> {
-    try {
-      const resumed = await this.deposits.resumeStuckSettling(DEPOSIT_FINALITY_SWEEP_BATCH);
-      if (resumed.resolved) {
-        this.logger.log(
-          `Deposit SETTLING resume: ${resumed.checked} stuck, ${resumed.resolved} resolved`,
-        );
-      }
-    } catch (error) {
-      this.logger.error(
-        `Deposit SETTLING resume aborted: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
     try {
       const report = await this.finality.promotePendingDeposits(DEPOSIT_FINALITY_SWEEP_BATCH);
       if (report.confirmed || report.rejected) {
@@ -59,6 +57,18 @@ export class DepositFinalityJob {
     } catch (error) {
       this.logger.error(
         `Deposit finality sweep pass aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      const resumed = await this.deposits.resumeStuckSettling(DEPOSIT_SETTLING_RESUME_BATCH);
+      if (resumed.resolved) {
+        this.logger.log(
+          `Deposit SETTLING resume: ${resumed.checked} stuck, ${resumed.resolved} resolved`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Deposit SETTLING resume aborted: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

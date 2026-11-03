@@ -27,13 +27,17 @@ import {
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import {
   DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
   DEPOSIT_SETTLING_GIVE_UP_MS,
+  DEPOSIT_SETTLING_RESUME_BUDGET_MS,
   DEPOSIT_SETTLING_STALE_MS,
+  DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
+  DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
   DEPOSIT_TX_BOUND_LOOKBACK_MS,
   DEPOSIT_TX_MAX_AGE_BEFORE_INTENT_MS,
   depositResource,
@@ -146,7 +150,15 @@ export class DepositService {
     // Bookkeeping only (`recordAfterCommit` never throws): which key opened or
     // reported a deposit.
     @Optional() private readonly audit: AuditLogWriter | null = null,
+    // Optional for the same reason: the "stuck SETTLING needs review" alert.
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
+
+  /** In-process guard: one `resumeStuckSettling` pass at a time (M-1, round 3). */
+  private resuming = false;
+
+  /** When this process last alerted each stuck `SETTLING` intent with no transaction. */
+  private readonly reviewAlertedAt = new Map<string, number>();
 
   /**
    * Creates the intent and the `402` requirements a client builds a payload
@@ -184,6 +196,21 @@ export class DepositService {
     const open = await this.deposits.countOpenForAgent(input.organizationId, input.agentId);
     if (open >= DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT) {
       throw PaymentErrors.depositOpenLimit({ limit: DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT });
+    }
+
+    // H-1 pre-flight (round 3): this account already has a deposit held
+    // pending because its escrow holds less than the ledger claims. Every new
+    // deposit would be held pending too (the coverage check is the whole
+    // claim), so tell the buyer now, before they send money. New intents
+    // only: reporting a transaction for an existing intent is never refused
+    // here.
+    if (
+      await this.deposits.hasUncoveredPendingSince(
+        input.agentAccount,
+        new Date(Date.now() - DEPOSIT_UNCOVERED_ALERT_AFTER_MS),
+      )
+    ) {
+      throw PaymentErrors.depositEscrowShortfall();
     }
 
     const deps = await this.resolveRequirementDeps(
@@ -518,8 +545,13 @@ export class DepositService {
   ): Promise<DepositIntent> {
     const intentId = intent.id;
     // Before anything can fail: a request that dies past this point leaves a
-    // SETTLING intent the finality job can still resume.
-    await this.deposits.recordSubmittedTx(organizationId, intentId, transaction);
+    // SETTLING intent the finality job can still resume. Never fatal (L-3,
+    // round 3): the facilitator already moved the money, and this request can
+    // still credit it; aborting here is what used to strand it. Retried
+    // briefly; if the store still fails, the intent goes on without it, and a
+    // SETTLING intent with no recorded transaction is never failed by the
+    // resume job (it is left for operator review).
+    await this.recordSubmittedTxBestEffort(organizationId, intentId, transaction);
     const fail = (reason: string) =>
       this.deposits.transition(
         organizationId,
@@ -582,27 +614,108 @@ export class DepositService {
    * - the transaction credits the buyer: credit and settle, through the same
    *   `creditAndSettle` (the claim index still applies);
    * - it credits nobody: `FAILED`;
-   * - no receipt yet, or no transaction recorded: wait, and fail after
-   *   {@link DEPOSIT_SETTLING_GIVE_UP_MS};
+   * - no receipt yet: wait, and fail after {@link DEPOSIT_SETTLING_GIVE_UP_MS};
+   * - no transaction recorded: wait; past the give-up delay, never failed but
+   *   alerted for operator review (`flagForReview`);
    * - the chain cannot be read: skipped, retried next pass.
+   *
+   * Batch rows with a recorded transaction first, and the pass stops at
+   * {@link DEPOSIT_SETTLING_RESUME_BUDGET_MS}.
    */
   async resumeStuckSettling(limit: number): Promise<{ checked: number; resolved: number }> {
-    const now = Date.now();
-    const stuck = await this.deposits.findStaleSettling(
-      new Date(now - DEPOSIT_SETTLING_STALE_MS),
-      limit,
+    // One pass at a time in this process (M-1, round 3): during an RPC outage
+    // a pass lasts up to the budget, and a second one would only read the same
+    // intents again against the failing endpoint.
+    if (this.resuming) return { checked: 0, resolved: 0 };
+    this.resuming = true;
+    try {
+      const now = Date.now();
+      const stuck = await this.deposits.findStaleSettling(
+        new Date(now - DEPOSIT_SETTLING_STALE_MS),
+        limit,
+      );
+      let resolved = 0;
+      let checked = 0;
+      for (const intent of stuck) {
+        if (Date.now() - now >= DEPOSIT_SETTLING_RESUME_BUDGET_MS) break;
+        checked += 1;
+        try {
+          if (await this.resumeOne(intent, now)) resolved += 1;
+        } catch (error) {
+          this.logger.warn(
+            `Deposit ${intent.id}: resuming SETTLING failed, retried next pass — ${describe(error)}`,
+          );
+        }
+      }
+      return { checked, resolved };
+    } finally {
+      this.resuming = false;
+    }
+  }
+
+  /**
+   * A stuck `SETTLING` intent with no recorded transaction and no credit,
+   * past the give-up delay (L-2 / L-3, round 3). Never failed automatically:
+   * with no hash nothing can tell "never landed" from "landed and the request
+   * died before recording it" (every intent stuck before this code shipped
+   * looks like this, and an embedded-wallet buyer cannot re-report a hash it
+   * never saw), and failing one strands a possibly real deposit. Left
+   * `SETTLING` for an operator, alerted once a day per intent.
+   */
+  private async flagForReview(intent: DepositIntent, now: number): Promise<void> {
+    const last = this.reviewAlertedAt.get(intent.id);
+    if (last !== undefined && now - last < DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS * 1000) return;
+    this.reviewAlertedAt.set(intent.id, now);
+    this.logger.warn(
+      `Deposit ${intent.id}: SETTLING since ${intent.updatedAt.toISOString()} with no recorded ` +
+        `transaction and no credit — left for operator review, not failed`,
     );
-    let resolved = 0;
-    for (const intent of stuck) {
+    await this.alerts
+      ?.emit({
+        severity: AlertSeverity.WARN,
+        name: 'deposit_settling_needs_review',
+        summary:
+          `Deposit ${intent.id} for ${intent.agentAccount} has been SETTLING since ` +
+          `${intent.updatedAt.toISOString()} with no recorded transaction and no ledger credit. ` +
+          `It is not failed automatically: find the facilitator transaction (or confirm none ` +
+          `landed) before crediting or failing it.`,
+        details: {
+          organizationId: intent.organizationId,
+          intentId: intent.id,
+          account: intent.agentAccount,
+          requestedAmount: intent.requestedAmount.amount,
+          settlingSince: intent.updatedAt.toISOString(),
+        },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: intent.id,
+        suppressionWindowSeconds: DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
+      })
+      .catch((error) =>
+        this.logger.warn(`deposit_settling_needs_review alert failed: ${describe(error)}`),
+      );
+  }
+
+  /** `recordSubmittedTx`, retried, never throwing (see `recordFacilitatorSettlement`). */
+  private async recordSubmittedTxBestEffort(
+    organizationId: string,
+    intentId: string,
+    transaction: TxRef,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
       try {
-        if (await this.resumeOne(intent, now)) resolved += 1;
+        await this.deposits.recordSubmittedTx(organizationId, intentId, transaction);
+        return;
       } catch (error) {
-        this.logger.warn(
-          `Deposit ${intent.id}: resuming SETTLING failed, retried next pass — ${describe(error)}`,
-        );
+        if (attempt >= SUBMITTED_TX_STORE_ATTEMPTS) {
+          this.logger.error(
+            `Deposit ${intentId}: could not record submitted transaction ${transaction} ` +
+              `(${describe(error)}); continuing to credit it`,
+          );
+          return;
+        }
+        await sleep(SUBMITTED_TX_STORE_RETRY_MS * attempt);
       }
     }
-    return { checked: stuck.length, resolved };
   }
 
   /** One stuck intent; `true` when it left `SETTLING`. Throws on an unreadable chain. */
@@ -640,7 +753,8 @@ export class DepositService {
 
     const transaction = intent.submittedTxRef as TxRef | null;
     if (!transaction) {
-      return givenUp ? fail('resumed: no transaction was recorded for this intent') : false;
+      if (givenUp) await this.flagForReview(intent, now);
+      return false;
     }
 
     const adapter = this.registry.resolve(intent.chainId);
@@ -1005,6 +1119,10 @@ function assertWellFormedTxRef(adapter: ChainAdapter, transaction: TxRef): void 
 
 /** What {@link withinDeadline} answers when the deadline passed first. */
 const TIMED_OUT = Symbol('timed out');
+
+/** `recordSubmittedTx` on the facilitator path: attempts, and the pause step between them. */
+const SUBMITTED_TX_STORE_ATTEMPTS = 3;
+const SUBMITTED_TX_STORE_RETRY_MS = 200;
 
 /**
  * `work`, or {@link TIMED_OUT} once `deadline` passes. The read left behind is

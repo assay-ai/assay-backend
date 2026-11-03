@@ -8,7 +8,12 @@ import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
-import { DEPOSIT_UNCOVERED_ALERT_AFTER_MS } from '@modules/payment/constants/deposit-intent.constants';
+import {
+  DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
+  DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
+  DEPOSIT_UNCOVERED_BACKOFF_MAX_MS,
+  DEPOSIT_UNCOVERED_BACKOFF_MIN_MS,
+} from '@modules/payment/constants/deposit-intent.constants';
 import { DepositCoverageService } from '@modules/payment/services/deposit-coverage.service';
 import { AlertAggregation, AlertSeverity } from '@shared/alerting';
 
@@ -37,15 +42,25 @@ function build(
     coverage?: jest.Mock;
     pendingAt?: Date;
     alerts?: { emit: jest.Mock };
+    uncoveredSince?: Date;
   } = {},
 ) {
+  // The queue row, as the repository would return it: `markFinalityUncovered`
+  // persists `uncoveredSince` on it like the database does.
+  const row: Record<string, unknown> = {
+    id: 'dep-1',
+    organizationId: 'org-1',
+    chainId: CHAIN,
+    chainTxRef: TX,
+    uncoveredSince: options.uncoveredSince ?? null,
+  };
   const deposits = {
-    findSettledAwaitingFinality: jest
-      .fn()
-      .mockResolvedValue([
-        { id: 'dep-1', organizationId: 'org-1', chainId: CHAIN, chainTxRef: TX },
-      ]),
+    findSettledAwaitingFinality: jest.fn(async () => [{ ...row }]),
     markFinalityResolved: jest.fn().mockResolvedValue(undefined),
+    markFinalityUncovered: jest.fn(async (_org: string, _id: string, since: Date) => {
+      row.uncoveredSince = since;
+      return 1;
+    }),
   };
   const ledger = {
     readJournal: jest.fn().mockResolvedValue([
@@ -391,6 +406,7 @@ describe('DepositFinalityService two claims together exceeding the escrow', () =
         },
       ]),
       markFinalityResolved: jest.fn().mockResolvedValue(undefined),
+      markFinalityUncovered: jest.fn().mockResolvedValue(1),
     };
     const ledger = {
       readJournal: jest.fn(async () => [
@@ -415,5 +431,121 @@ describe('DepositFinalityService two claims together exceeding the escrow', () =
 
     escrowBalance.value = 10_000_000n;
     await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ confirmed: 2 });
+  });
+});
+
+/**
+ * H-1, round 3: an uncovered row must not hold the head of the queue. The
+ * queue query skips a row until its `finality_next_check_at` and sorts it
+ * after never-uncovered rows (covered over the real SQL in
+ * `deposit-intent-queries.integration.spec.ts`); the sweep's part is stamping
+ * that back-off, persisting when it was first uncovered, and keeping the log
+ * and the alert to one per step / one per day.
+ */
+describe('DepositFinalityService uncovered back-off (H-1, round 3)', () => {
+  const uncovered = () =>
+    jest.fn().mockResolvedValue({ chain: 0n, claim: 25_000_000n, covered: false });
+  afterEach(() => jest.useRealTimers());
+
+  it('stamps an exponential back-off from the first uncovered pass, capped at 10 minutes', async () => {
+    const t0 = new Date('2026-11-03T00:00:00Z').getTime();
+    jest.useFakeTimers({ now: t0 });
+    const { service, deposits } = build(() => LANDED, { coverage: uncovered() });
+
+    await service.promotePendingDeposits(10);
+    expect(deposits.markFinalityUncovered).toHaveBeenLastCalledWith(
+      'org-1',
+      'dep-1',
+      new Date(t0),
+      new Date(t0 + DEPOSIT_UNCOVERED_BACKOFF_MIN_MS),
+    );
+
+    // Each next check is as far away as the row has been uncovered so far.
+    jest.setSystemTime(t0 + 30_000);
+    await service.promotePendingDeposits(10);
+    expect(deposits.markFinalityUncovered).toHaveBeenLastCalledWith(
+      'org-1',
+      'dep-1',
+      new Date(t0),
+      new Date(t0 + 60_000),
+    );
+    jest.setSystemTime(t0 + 60_000);
+    await service.promotePendingDeposits(10);
+    expect(deposits.markFinalityUncovered).toHaveBeenLastCalledWith(
+      'org-1',
+      'dep-1',
+      new Date(t0),
+      new Date(t0 + 120_000),
+    );
+
+    jest.setSystemTime(t0 + 60 * 60 * 1000);
+    await service.promotePendingDeposits(10);
+    expect(deposits.markFinalityUncovered).toHaveBeenLastCalledWith(
+      'org-1',
+      'dep-1',
+      new Date(t0),
+      new Date(t0 + 60 * 60 * 1000 + DEPOSIT_UNCOVERED_BACKOFF_MAX_MS),
+    );
+  });
+
+  it('never stamps a back-off on a covered row, or one only waiting for finality', async () => {
+    const covered = build(() => LANDED);
+    await covered.service.promotePendingDeposits(10);
+    expect(covered.deposits.markFinalityUncovered).not.toHaveBeenCalled();
+
+    const notFinal = build((c) => (c === 'finalized' ? null : LANDED), {
+      coverage: uncovered(),
+    });
+    await notFinal.service.promotePendingDeposits(10);
+    expect(notFinal.deposits.markFinalityUncovered).not.toHaveBeenCalled();
+  });
+
+  it('runs the alert delay from the persisted first-uncovered time (survives a restart)', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-03T00:00:00Z') });
+    const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+    // A fresh process (nothing in memory) meets a row uncovered 20 minutes ago.
+    const { service } = build(() => LANDED, {
+      coverage: uncovered(),
+      alerts,
+      uncoveredSince: new Date(Date.now() - 20 * 60 * 1000),
+    });
+
+    await service.promotePendingDeposits(10);
+    expect(alerts.emit).toHaveBeenCalledTimes(1);
+    expect(alerts.emit.mock.calls[0][0].details.uncoveredForSeconds).toBe(20 * 60);
+  });
+
+  it('alerts once per deposit per day, however many back-off steps pass', async () => {
+    const t0 = new Date('2026-11-03T00:00:00Z').getTime();
+    jest.useFakeTimers({ now: t0 });
+    const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+    const { service } = build(() => LANDED, {
+      coverage: uncovered(),
+      alerts,
+      uncoveredSince: new Date(t0 - DEPOSIT_UNCOVERED_ALERT_AFTER_MS),
+    });
+
+    for (let step = 0; step < 20; step += 1) {
+      jest.setSystemTime(t0 + step * DEPOSIT_UNCOVERED_BACKOFF_MAX_MS);
+      await service.promotePendingDeposits(10);
+    }
+    expect(alerts.emit).toHaveBeenCalledTimes(1);
+
+    jest.setSystemTime(t0 + DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS * 1000);
+    await service.promotePendingDeposits(10);
+    expect(alerts.emit).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the back-off when the alert sink fails', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-03T00:00:00Z') });
+    const alerts = { emit: jest.fn().mockRejectedValue(new Error('redis down')) };
+    const { service, deposits } = build(() => LANDED, {
+      coverage: uncovered(),
+      alerts,
+      uncoveredSince: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    await service.promotePendingDeposits(10);
+    expect(deposits.markFinalityUncovered).toHaveBeenCalledTimes(1);
   });
 });

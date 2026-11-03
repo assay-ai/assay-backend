@@ -25,6 +25,8 @@ import { formatDollars } from '@shared/utils/money-display.util';
 import {
   DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
   DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
+  DEPOSIT_UNCOVERED_BACKOFF_MAX_MS,
+  DEPOSIT_UNCOVERED_BACKOFF_MIN_MS,
   depositResource,
 } from '../constants/deposit-intent.constants';
 import { DepositCoverageService } from './deposit-coverage.service';
@@ -84,11 +86,13 @@ export class DepositFinalityService {
   ) {}
 
   /**
-   * When each pending deposit was first seen final but uncovered (M-3: the
-   * alert delay runs from here, not from the credit). In memory: after a
-   * restart the delay starts again, which only postpones an alert.
+   * When this process last emitted the uncovered alert for each deposit. The
+   * alert sink logs every emit before its own suppression (and fails open
+   * without Redis), so this keeps it to once per deposit per window here.
+   * In memory: a restart costs at most one more emit, which the sink's
+   * window suppresses anyway.
    */
-  private readonly uncoveredSince = new Map<string, number>();
+  private readonly uncoveredAlertedAt = new Map<string, number>();
 
   /**
    * Runs a sweep, never concurrently with another.
@@ -234,8 +238,8 @@ export class DepositFinalityService {
         // credit that raced another, or a ledger already ahead of the chain
         // for another reason leaves the ledger claiming more than the escrow
         // holds. Uncovered: never confirmed and never rejected for it. It
-        // stays pending (not spendable), is re-checked every pass, and is
-        // alerted once it stays uncovered past the delay; an operator
+        // stays pending (not spendable), is re-checked with a back-off, and
+        // is alerted once it stays uncovered past the delay; an operator
         // decides. A failed read throws and the row is retried next pass.
         if (stillThere) {
           const coverage = await this.coverage.check(
@@ -249,7 +253,6 @@ export class DepositFinalityService {
             skipped += 1;
             continue;
           }
-          this.uncoveredSince.delete(candidate.id);
         }
 
         if (stillThere) {
@@ -347,7 +350,7 @@ export class DepositFinalityService {
         // After the resolving entry is durable, never before — see
         // `markFinalityResolved`. One call site for both branches so a new
         // resolution path cannot be added without leaving the queue.
-        this.uncoveredSince.delete(candidate.id);
+        this.uncoveredAlertedAt.delete(candidate.id);
         await this.deposits.markFinalityResolved(
           candidate.organizationId,
           candidate.id,
@@ -370,28 +373,58 @@ export class DepositFinalityService {
   }
 
   /**
-   * Keeps an uncovered pending deposit queued and, once it has been uncovered
-   * for {@link DEPOSIT_UNCOVERED_ALERT_AFTER_MS} since first seen, raises a
-   * WARN (once per deposit per window) naming account, intent and shortfall.
+   * Keeps an uncovered pending deposit queued, backed off, and, once it has
+   * been uncovered for {@link DEPOSIT_UNCOVERED_ALERT_AFTER_MS} since first
+   * seen, raises a WARN (once per deposit per window) naming account, intent
+   * and shortfall.
+   *
+   * Back-off (H-1, round 3): the next check is as far away as the row has
+   * been uncovered so far, between {@link DEPOSIT_UNCOVERED_BACKOFF_MIN_MS}
+   * and {@link DEPOSIT_UNCOVERED_BACKOFF_MAX_MS} — the interval doubles each
+   * step, from timestamps alone, and survives a restart. The queue skips the
+   * row until then and sorts it after never-uncovered rows, so one buyer's
+   * stuck deposits never delay another buyer's confirmation, and each costs
+   * at most a few reads per {@link DEPOSIT_UNCOVERED_BACKOFF_MAX_MS}. One log
+   * line per back-off step.
    */
   private async holdUncovered(
-    candidate: { organizationId: string; id: string; chainTxRef: string },
+    candidate: {
+      organizationId: string;
+      id: string;
+      chainTxRef: string;
+      uncoveredSince?: Date | null;
+    },
     pending: { accountId: string; money: Money },
     coverage: { chain: bigint; claim: bigint },
   ): Promise<void> {
     const now = Date.now();
-    const seen = this.uncoveredSince.get(candidate.id);
-    const since = seen ?? now;
+    const since = candidate.uncoveredSince?.getTime() ?? now;
     const shortfall = coverage.claim - coverage.chain;
-    if (seen === undefined) {
-      this.uncoveredSince.set(candidate.id, since);
-      // Once, not every 5 s: the alert below carries the standing condition.
-      this.logger.warn(
-        `Deposit ${candidate.id}: final, but the escrow holds ${coverage.chain} against a ` +
-          `ledger claim of ${coverage.claim} — kept pending (not spendable), not confirming`,
-      );
-    }
+    const delay = Math.min(
+      Math.max(now - since, DEPOSIT_UNCOVERED_BACKOFF_MIN_MS),
+      DEPOSIT_UNCOVERED_BACKOFF_MAX_MS,
+    );
+    // Before the alert: a failing alert sink must not undo the back-off.
+    await this.deposits.markFinalityUncovered(
+      candidate.organizationId,
+      candidate.id,
+      new Date(since),
+      new Date(now + delay),
+    );
+    this.logger.warn(
+      `Deposit ${candidate.id}: final, but the escrow holds ${coverage.chain} against a ` +
+        `ledger claim of ${coverage.claim} — kept pending (not spendable), not confirming; ` +
+        `next check in ${Math.round(delay / 1000)} s`,
+    );
     if (now - since < DEPOSIT_UNCOVERED_ALERT_AFTER_MS) return;
+    const alertedAt = this.uncoveredAlertedAt.get(candidate.id);
+    if (
+      alertedAt !== undefined &&
+      now - alertedAt < DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS * 1000
+    ) {
+      return;
+    }
+    this.uncoveredAlertedAt.set(candidate.id, now);
     await this.alerts?.emit({
       severity: AlertSeverity.WARN,
       name: 'deposit_pending_uncovered',

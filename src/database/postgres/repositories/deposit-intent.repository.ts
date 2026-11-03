@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, SelectQueryBuilder } from 'typeorm';
+import { DataSource, IsNull, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { DepositIntentEntity } from '../entities/deposit-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -165,12 +165,20 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    * any more. Cross-tenant, for the finality job.
    */
   async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
-    return this.createQueryBuilder('intent')
-      .where('intent.status = :status', { status: 'SETTLING' })
-      .andWhere('intent.updatedAt < :before', { before })
-      .orderBy('intent.updatedAt', 'ASC')
-      .limit(limit)
-      .getMany();
+    const stale = (withTx: boolean, take: number) =>
+      this.createQueryBuilder('intent')
+        .where('intent.status = :status', { status: 'SETTLING' })
+        .andWhere('intent.updatedAt < :before', { before })
+        .andWhere(withTx ? 'intent.submittedTxRef IS NOT NULL' : 'intent.submittedTxRef IS NULL')
+        .orderBy('intent.updatedAt', 'ASC')
+        .limit(take)
+        .getMany();
+    // Rows with a recorded transaction first: rows without one are left for
+    // operator review once given up (never failed blindly), so they would
+    // otherwise hold the head of the batch for good.
+    const withTx = await stale(true, limit);
+    if (withTx.length >= limit) return withTx;
+    return [...withTx, ...(await stale(false, limit - withTx.length))];
   }
 
   /** Records the transaction a `SETTLING` intent is settling on. */
@@ -205,18 +213,71 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
    *
    * Deliberately cross-tenant, same reasoning as `findDueForExpiry`.
    */
-  async findSettledAwaitingFinality(limit: number): Promise<SettledDepositIntent[]> {
-    return this.createQueryBuilder('intent')
-      .select('intent.organizationId', 'organizationId')
-      .addSelect('intent.id', 'id')
-      .addSelect('intent.chainId', 'chainId')
-      .addSelect('intent.chainTxRef', 'chainTxRef')
-      .where('intent.status = :status', { status: 'SETTLED' })
-      .andWhere('intent.chainTxRef IS NOT NULL')
-      .andWhere('intent.finalityResolvedAt IS NULL')
-      .orderBy('intent.updatedAt', 'ASC')
-      .limit(limit)
-      .getRawMany<SettledDepositIntent>();
+  async findSettledAwaitingFinality(
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<SettledDepositIntent[]> {
+    // H-1 (round 3): a deposit found uncovered carries `finality_next_check_at`
+    // and is skipped until then (exponential back-off, capped), and even when
+    // due it sorts after every deposit that was never found uncovered. So
+    // stuck rows cannot hold the head of the queue and starve other buyers'
+    // confirmations, and each one costs a bounded number of reads per hour.
+    const rows = (await this.manager.query(
+      `SELECT "organization_id" AS "organizationId", "id", "chain_id" AS "chainId",
+              "chain_tx_ref" AS "chainTxRef",
+              "finality_uncovered_since" AS "uncoveredSince"
+         FROM "deposit_intents"
+        WHERE "status" = 'SETTLED'
+          AND "chain_tx_ref" IS NOT NULL
+          AND "finality_resolved_at" IS NULL
+          AND ("finality_next_check_at" IS NULL OR "finality_next_check_at" <= $1)
+        ORDER BY ("finality_uncovered_since" IS NOT NULL) ASC, "updated_at" ASC
+        LIMIT $2`,
+      [now, limit],
+    )) as (Omit<SettledDepositIntent, 'uncoveredSince'> & {
+      uncoveredSince: Date | string | null;
+    })[];
+    return rows.map((row) => ({
+      ...row,
+      uncoveredSince: row.uncoveredSince === null ? null : new Date(row.uncoveredSince),
+    }));
+  }
+
+  /**
+   * Records that the finality sweep found this deposit uncovered: since when
+   * (kept from the first time) and when to look again. Queue marker only.
+   */
+  async markFinalityUncovered(
+    organizationId: string,
+    intentId: string,
+    since: Date,
+    nextCheckAt: Date,
+  ): Promise<number> {
+    const result = await this.update(
+      { organizationId, id: intentId, finalityResolvedAt: IsNull() },
+      { finalityUncoveredSince: since, finalityNextCheckAt: nextCheckAt },
+    );
+    return result.affected ?? 0;
+  }
+
+  /**
+   * Whether this buyer account has a settled deposit the finality sweep has
+   * held uncovered since `before` or earlier: an unresolved escrow shortfall.
+   * `POST /deposits` refuses a new intent then (H-1 pre-flight). Cross-tenant
+   * on the account, like the claim lookup.
+   */
+  async hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    const rows = (await this.manager.query(
+      `SELECT 1
+         FROM "deposit_intents"
+        WHERE "agent_account" = $1
+          AND "status" = 'SETTLED'
+          AND "finality_resolved_at" IS NULL
+          AND "finality_uncovered_since" <= $2
+        LIMIT 1`,
+      [account, before],
+    )) as unknown[];
+    return rows.length > 0;
   }
 
   /**
@@ -256,4 +317,6 @@ export interface SettledDepositIntent {
   readonly id: string;
   readonly chainId: string;
   readonly chainTxRef: string;
+  /** When the sweep first found it uncovered by the escrow; `null` if never. */
+  readonly uncoveredSince: Date | null;
 }

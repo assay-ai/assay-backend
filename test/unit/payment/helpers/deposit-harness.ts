@@ -109,11 +109,27 @@ export class FakeDepositIntentRepository {
     return times.length ? new Date(Math.min(...times)) : null;
   }
 
+  /** Mirrors the real query: rows with a recorded transaction first, oldest first. */
   async findStaleSettling(before: Date, limit: number): Promise<DepositIntentEntity[]> {
     return [...this.rows.values()]
       .filter((row) => row.status === 'SETTLING' && row.updatedAt.getTime() < before.getTime())
-      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .sort(
+        (a, b) =>
+          Number(a.submittedTxRef === null) - Number(b.submittedTxRef === null) ||
+          a.updatedAt.getTime() - b.updatedAt.getTime(),
+      )
       .slice(0, limit);
+  }
+
+  async hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    return [...this.rows.values()].some(
+      (row) =>
+        row.agentAccount === account &&
+        row.status === 'SETTLED' &&
+        !row.finalityResolvedAt &&
+        !!row.finalityUncoveredSince &&
+        row.finalityUncoveredSince.getTime() <= before.getTime(),
+    );
   }
 
   async recordSubmittedTx(organizationId: string, id: string, txRef: string): Promise<number> {

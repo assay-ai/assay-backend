@@ -178,11 +178,20 @@ export const DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT = 5;
  * from the first pass that saw it uncovered. Covers the platform's own booking
  * lag (a redemption landed before its `HOLD_COMMIT`, a withdrawal claimed
  * before the booker ran). The deposit is never rejected for being uncovered:
- * it stays pending (never spendable), is re-checked on every pass, and
- * becomes spendable the moment the escrow covers it. An operator decides the
- * rest.
+ * it stays pending (never spendable), is re-checked with a back-off, and
+ * becomes spendable once a check finds the escrow covers it. An operator
+ * decides the rest. Also the grace after which `POST /deposits` refuses a new
+ * intent for that account (`PAYMENT_DEPOSIT_ESCROW_SHORTFALL`).
  */
 export const DEPOSIT_UNCOVERED_ALERT_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * Back-off of an uncovered deposit in the finality queue (H-1, round 3): the
+ * next check is as far away as the deposit has been uncovered so far, within
+ * these bounds, so the interval doubles from 30 s up to 10 min.
+ */
+export const DEPOSIT_UNCOVERED_BACKOFF_MIN_MS = 30 * 1000;
+export const DEPOSIT_UNCOVERED_BACKOFF_MAX_MS = 10 * 60 * 1000;
 
 /** How long one uncovered deposit's alert stays quiet after paging. */
 export const DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS = 24 * 60 * 60;
@@ -196,8 +205,20 @@ export const DEPOSIT_SETTLING_STALE_MS = 2 * 60 * 1000;
 
 /**
  * A stuck `SETTLING` intent whose transaction the chain still does not know
- * (no receipt), or that never recorded one, is failed after this long. Its
- * hash is not burned: a transaction that lands later is named by the
- * reconciler (`ESCROW_UNCREDITED_DEPOSIT`) and can be reported again.
+ * (no receipt) is failed after this long. Its hash is not burned: a
+ * transaction that lands later is named by the reconciler
+ * (`ESCROW_UNCREDITED_DEPOSIT`) and can be reported again. One that never
+ * recorded a transaction is NOT failed: past this long it is alerted for
+ * operator review (`deposit_settling_needs_review`), since nothing can tell
+ * whether its deposit landed.
  */
 export const DEPOSIT_SETTLING_GIVE_UP_MS = 60 * 60 * 1000;
+
+/**
+ * Stuck `SETTLING` intents resumed per pass, and how long one resume pass may
+ * run before it stops and leaves the rest to the next (M-1, round 3). Each
+ * read is capped at `DEPOSIT_OBSERVE_TIMEOUT_MS`; during an RPC outage a
+ * bigger batch only multiplies reads against a failing endpoint.
+ */
+export const DEPOSIT_SETTLING_RESUME_BATCH = 20;
+export const DEPOSIT_SETTLING_RESUME_BUDGET_MS = 60 * 1000;

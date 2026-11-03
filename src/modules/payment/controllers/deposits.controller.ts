@@ -131,7 +131,9 @@ export class DepositsController {
       'This buyer has no linked account on the named chain (`PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED`), ' +
       'the chain offers no paid rail and takes no deposit (`CHAIN_RAIL_NOT_OFFERED`), ' +
       'had no escrow open and the chain could not confirm opening one, or the agent already ' +
-      'has 5 open deposit intents (`PAYMENT_DEPOSIT_OPEN_LIMIT`)',
+      'has 5 open deposit intents (`PAYMENT_DEPOSIT_OPEN_LIMIT`), or the account has an ' +
+      'unresolved escrow shortfall: an earlier deposit is held pending because the escrow ' +
+      'holds less than the ledger records; contact support (`PAYMENT_DEPOSIT_ESCROW_SHORTFALL`)',
   })
   @ApiResponse({
     status: 503,

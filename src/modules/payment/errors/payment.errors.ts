@@ -26,6 +26,7 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT = 'PAYMENT_DEPOSIT_TRANSACTION_PREDATES_INTENT',
   PAYMENT_DEPOSIT_ALREADY_SETTLED = 'PAYMENT_DEPOSIT_ALREADY_SETTLED',
   PAYMENT_DEPOSIT_OPEN_LIMIT = 'PAYMENT_DEPOSIT_OPEN_LIMIT',
+  PAYMENT_DEPOSIT_ESCROW_SHORTFALL = 'PAYMENT_DEPOSIT_ESCROW_SHORTFALL',
   PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET = 'PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET',
   PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE = 'PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE',
   PAYMENT_DEPOSIT_CHAIN_REQUIRED = 'PAYMENT_DEPOSIT_CHAIN_REQUIRED',
@@ -693,6 +694,21 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `This agent already has ${context?.limit ?? 'the maximum number of'} open deposit ` +
       `intents; finish or let one expire (10 minutes) before opening another`,
+  },
+  /**
+   * `409`: this buyer account already has a deposit held pending because its
+   * escrow holds less than the ledger records (H-1 pre-flight). A new deposit
+   * would be held pending too, so no new intent is opened until support
+   * resolves it. Reporting a transaction for an existing intent still works.
+   */
+  depositEscrowShortfall: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_ESCROW_SHORTFALL,
+    statusCode: 409,
+    message: () =>
+      `This account has an unresolved escrow shortfall: an earlier deposit is held pending ` +
+      `because the escrow holds less than the balance records. New deposits are paused for ` +
+      `this account until it is resolved; contact support. Do not send funds to the escrow ` +
+      `meanwhile. Reporting a transaction for an existing deposit still works`,
   },
   settlementFailed: {
     code: PaymentErrorCode.PAYMENT_SETTLEMENT_FAILED,

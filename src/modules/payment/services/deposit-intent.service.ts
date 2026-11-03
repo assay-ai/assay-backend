@@ -95,6 +95,11 @@ export class DepositIntentService {
     return this.deposits.earliestUnsettledCreatedAt(account, since);
   }
 
+  /** See `DepositIntentRepository.hasUncoveredPendingSince`. */
+  hasUncoveredPendingSince(account: string, before: Date): Promise<boolean> {
+    return this.deposits.hasUncoveredPendingSince(account, before);
+  }
+
   /** `SETTLING` intents no live request owns any more (untouched since `before`). */
   async findStaleSettling(before: Date, limit: number): Promise<DepositIntent[]> {
     return (await this.deposits.findStaleSettling(before, limit)).map(toDepositIntent);

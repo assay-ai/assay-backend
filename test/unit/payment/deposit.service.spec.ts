@@ -16,6 +16,7 @@ import {
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainErrorCode, ChainErrors } from '@modules/chains/errors/chains.errors';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { AlertSeverity } from '@shared/alerting';
 
 import { DepositIntentService } from '@modules/payment/services/deposit-intent.service';
 import { DepositService } from '@modules/payment/services/deposit.service';
@@ -23,7 +24,9 @@ import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import {
   DEPOSIT_MAX_OPEN_INTENTS_PER_AGENT,
   DEPOSIT_SETTLING_GIVE_UP_MS,
+  DEPOSIT_SETTLING_RESUME_BUDGET_MS,
   DEPOSIT_SETTLING_STALE_MS,
+  DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
   DEPOSIT_TX_BOUND_LOOKBACK_MS,
   DEPOSIT_OBSERVE_POLL_MS,
   DEPOSIT_OBSERVE_TIMEOUT_MS,
@@ -82,6 +85,7 @@ function buildHarness(overrides?: {
   escrowExists?: boolean;
   chainState?: { assertActive: jest.Mock } | null;
   audit?: { recordAfterCommit: jest.Mock };
+  alerts?: { emit: jest.Mock };
 }) {
   const repo = new FakeDepositIntentRepository();
   const depositIntents = new DepositIntentService(repo.asRepository());
@@ -120,6 +124,7 @@ function buildHarness(overrides?: {
     ledger,
     (overrides?.chainState ?? null) as never,
     audit as never,
+    (overrides?.alerts ?? null) as never,
   );
 
   return {
@@ -1841,6 +1846,80 @@ describe('DepositService.createDeposit — open intents per agent', () => {
   });
 });
 
+/**
+ * H-1 pre-flight (round 3): an account whose deposit is held pending because
+ * its escrow is short gets no new intent (every new deposit would be held
+ * too); reporting a transaction for an existing intent is never refused.
+ */
+describe('DepositService.createDeposit — unresolved escrow shortfall', () => {
+  function heldUncovered(harness: ReturnType<typeof buildHarness>, sinceMsAgo: number) {
+    harness.repo.rows.set('held-1', {
+      id: 'held-1',
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      agentAccount: AGENT_ACCOUNT,
+      status: DepositIntentStatus.SETTLED,
+      createdAt: new Date(Date.now() - 2 * sinceMsAgo),
+      updatedAt: new Date(),
+      expiresAt: new Date(Date.now() - sinceMsAgo),
+      finalityResolvedAt: null,
+      finalityUncoveredSince: new Date(Date.now() - sinceMsAgo),
+    } as never);
+  }
+
+  it('refuses a new intent with 409 PAYMENT_DEPOSIT_ESCROW_SHORTFALL past the grace, writing nothing', async () => {
+    const harness = buildHarness();
+    heldUncovered(harness, DEPOSIT_UNCOVERED_ALERT_AFTER_MS + 1_000);
+
+    const error = (await harness.service
+      .createDeposit(input())
+      .catch((caught: unknown) => caught)) as {
+      errorCode: string;
+      statusCode: number;
+      message: string;
+    };
+
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_ESCROW_SHORTFALL);
+    expect(error.statusCode).toBe(409);
+    expect(error.message).toMatch(/escrow shortfall/);
+    expect(error.message).toMatch(/contact support/);
+    expect(harness.repo.rows.size).toBe(1);
+    expect(harness.opener.open).not.toHaveBeenCalled();
+  });
+
+  it('admits a new intent inside the grace, once resolved, and for another account', async () => {
+    const harness = buildHarness();
+    heldUncovered(harness, DEPOSIT_UNCOVERED_ALERT_AFTER_MS - 60_000);
+    await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
+
+    harness.repo.rows.get('held-1')!.finalityUncoveredSince = new Date(0);
+    harness.repo.rows.get('held-1')!.finalityResolvedAt = new Date();
+    await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
+
+    harness.repo.rows.get('held-1')!.finalityResolvedAt = null;
+    harness.repo.rows.get('held-1')!.agentAccount = EVM_AGENT_ACCOUNT;
+    await expect(harness.service.createDeposit(input())).resolves.toBeDefined();
+  });
+
+  it('never refuses settling an intent that already exists', async () => {
+    const adapter = fakeChainAdapter({
+      extractSettledAmount: jest.fn().mockReturnValue(amount()),
+      observeTransfer: jest.fn().mockResolvedValue({ amount: '5000000', asset: USDC, decimals: 6 }),
+    });
+    const facilitator = fakeFacilitator({
+      settle: jest
+        .fn()
+        .mockResolvedValue({ success: true, network: SOLANA_DEVNET, transaction: TX_SIG }),
+    });
+    const harness = buildHarness({ adapter, facilitator });
+    const { intent } = await harness.service.createDeposit(input());
+    heldUncovered(harness, DEPOSIT_UNCOVERED_ALERT_AFTER_MS + 1_000);
+
+    const settled = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
+    expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+  });
+});
+
 function dummyPayload() {
   return {
     x402Version: 2,
@@ -1974,8 +2053,12 @@ describe('DepositService.settleDeposit — after the facilitator broadcast', () 
   });
 
   describe('resumeStuckSettling', () => {
-    async function stuck(observeTransfer: jest.Mock, txRef: string | null = TX_SIG) {
-      const { harness, intent } = await settling({ observeTransfer });
+    async function stuck(
+      observeTransfer: jest.Mock,
+      txRef: string | null = TX_SIG,
+      extra: Parameters<typeof buildHarness>[0] = {},
+    ) {
+      const { harness, intent } = await settling({ observeTransfer }, extra);
       const row = harness.repo.rows.get(intent.id)!;
       row.status = DepositIntentStatus.SETTLING;
       row.submittedTxRef = txRef;
@@ -2020,18 +2103,148 @@ describe('DepositService.settleDeposit — after the facilitator broadcast', () 
       expect(harness.ledger.appendNow).not.toHaveBeenCalled();
     });
 
-    it('fails one that never recorded a transaction, only after the give-up time', async () => {
-      const { harness, intent, row } = await stuck(jest.fn(), null);
+    // L-2 / L-3 (round 3): with no hash nothing can tell "never landed" from
+    // "landed, request died before recording it". Every intent stuck before
+    // this code shipped looks like this. Never failed blindly.
+    it('never fails one that recorded no transaction: flags it for operator review, once a day', async () => {
+      const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+      const { harness, intent, row } = await stuck(jest.fn(), null, { alerts });
 
       await harness.service.resumeStuckSettling(10);
-      expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
-        DepositIntentStatus.SETTLING,
-      );
+      expect(alerts.emit).not.toHaveBeenCalled();
 
       row.updatedAt = new Date(Date.now() - DEPOSIT_SETTLING_GIVE_UP_MS - 1_000);
       await harness.service.resumeStuckSettling(10);
+      await harness.service.resumeStuckSettling(10);
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.SETTLING);
+      expect(harness.ledger.appendNow).not.toHaveBeenCalled();
+      expect(alerts.emit).toHaveBeenCalledTimes(1);
+      expect(alerts.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: AlertSeverity.WARN,
+          name: 'deposit_settling_needs_review',
+          dedupeKey: intent.id,
+        }),
+      );
+    });
+
+    it('a pre-deploy SETTLING row with no hash but a pending credit finishes SETTLED', async () => {
+      const { harness, intent, row } = await stuck(jest.fn(), null);
+      row.updatedAt = new Date(Date.now() - 3 * DEPOSIT_SETTLING_GIVE_UP_MS);
+      (harness.ledger.readJournal as jest.Mock).mockResolvedValue([
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, money: amount(), chainTxRef: TX_SIG },
+      ]);
+
+      await harness.service.resumeStuckSettling(10);
+
+      const after = await harness.depositIntents.findById(ORG, intent.id);
+      expect(after.status).toBe(DepositIntentStatus.SETTLED);
+      expect(after.chainTxRef).toBe(TX_SIG);
+    });
+
+    it('resumes intents with a recorded transaction before ones without', async () => {
+      const observeTransfer = jest.fn().mockResolvedValue(observedTransfer);
+      const { harness, row } = await stuck(observeTransfer, null);
+      row.updatedAt = new Date(Date.now() - 3 * DEPOSIT_SETTLING_GIVE_UP_MS);
+      const { intent: second } = await harness.service.createDeposit(input());
+      const hashed = harness.repo.rows.get(second.id)!;
+      hashed.status = DepositIntentStatus.SETTLING;
+      hashed.submittedTxRef = TX_SIG;
+      hashed.updatedAt = new Date(Date.now() - DEPOSIT_SETTLING_STALE_MS - 1_000);
+
+      // Batch of one: the newer row with a hash wins the slot.
+      await expect(harness.service.resumeStuckSettling(1)).resolves.toEqual({
+        checked: 1,
+        resolved: 1,
+      });
+      expect((await harness.depositIntents.findById(ORG, second.id)).status).toBe(
+        DepositIntentStatus.SETTLED,
+      );
+    });
+
+    // M-1 (round 3): one pass at a time, and a pass stops at its budget.
+    it('never runs two passes at once', async () => {
+      let release!: (value: unknown) => void;
+      const observeTransfer = jest.fn(
+        () => new Promise((resolve) => (release = () => resolve(observedTransfer))),
+      );
+      const { harness, intent } = await stuck(observeTransfer);
+
+      const first = harness.service.resumeStuckSettling(10);
+      await new Promise((resolve) => setImmediate(resolve));
+      await expect(harness.service.resumeStuckSettling(10)).resolves.toEqual({
+        checked: 0,
+        resolved: 0,
+      });
+      release(undefined);
+      await expect(first).resolves.toEqual({ checked: 1, resolved: 1 });
+      expect(observeTransfer).toHaveBeenCalledTimes(1);
       expect((await harness.depositIntents.findById(ORG, intent.id)).status).toBe(
-        DepositIntentStatus.FAILED,
+        DepositIntentStatus.SETTLED,
+      );
+      // The guard is released: the next pass runs (nothing left to do).
+      await expect(harness.service.resumeStuckSettling(10)).resolves.toEqual({
+        checked: 0,
+        resolved: 0,
+      });
+    });
+
+    it('stops a pass at its time budget and leaves the rest to the next one', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      const observeTransfer = jest.fn(async () => {
+        // Each read takes most of the budget.
+        jest.setSystemTime(Date.now() + DEPOSIT_SETTLING_RESUME_BUDGET_MS);
+        return null;
+      });
+      const { harness } = await stuck(observeTransfer);
+      const { intent: second } = await harness.service.createDeposit(input());
+      Object.assign(harness.repo.rows.get(second.id)!, {
+        status: DepositIntentStatus.SETTLING,
+        submittedTxRef: TX_SIG,
+        updatedAt: new Date(Date.now() - DEPOSIT_SETTLING_STALE_MS - 1_000),
+      });
+
+      await expect(harness.service.resumeStuckSettling(10)).resolves.toEqual({
+        checked: 1,
+        resolved: 0,
+      });
+    });
+  });
+
+  // L-3 (round 3): a DB error storing the hash after the facilitator settled
+  // must not abort the request (and so strand the deposit).
+  describe('storing the submitted transaction', () => {
+    it('retries a failed store and keeps the hash', async () => {
+      const observeTransfer = jest.fn().mockResolvedValue(observedTransfer);
+      const { harness, intent } = await settling({ observeTransfer });
+      const real = harness.repo.recordSubmittedTx.bind(harness.repo);
+      const record = jest
+        .spyOn(harness.repo, 'recordSubmittedTx')
+        .mockRejectedValueOnce(new Error('connection reset'))
+        .mockImplementation(real);
+
+      const settled = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
+
+      expect(record).toHaveBeenCalledTimes(2);
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect((await harness.depositIntents.findById(ORG, intent.id)).submittedTxRef).toBe(TX_SIG);
+    });
+
+    it('still credits and settles when the store keeps failing', async () => {
+      const observeTransfer = jest.fn().mockResolvedValue(observedTransfer);
+      const { harness, intent } = await settling({ observeTransfer });
+      const record = jest
+        .spyOn(harness.repo, 'recordSubmittedTx')
+        .mockRejectedValue(new Error('database unavailable'));
+
+      const settled = await harness.service.settleDeposit(ORG, intent.id, dummyPayload());
+
+      expect(record).toHaveBeenCalledTimes(3);
+      expect(settled.status).toBe(DepositIntentStatus.SETTLED);
+      expect(settled.chainTxRef).toBe(TX_SIG);
+      expect(harness.ledger.appendNow).toHaveBeenCalledWith(
+        expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_PENDING, chainTxRef: TX_SIG }),
       );
     });
   });

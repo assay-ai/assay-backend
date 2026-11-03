@@ -149,4 +149,127 @@ describe('Deposit intent queries — real Postgres', () => {
     const after = await ctx.repository.findOneBy({ organizationId: ctx.organizationId, id: old });
     expect(after?.submittedTxRef).toBe('0xfeed');
   });
+  /** A SETTLED row in the finality queue, optionally already found uncovered. */
+  async function settled(
+    account: ReturnType<DepositTestContext['account']>,
+    ageMs: number,
+    marks: { uncoveredSince?: Date; nextCheckAt?: Date } = {},
+  ) {
+    const id = await intent(account, DepositIntentStatus.SETTLED, ageMs);
+    await ctx.dataSource.query(
+      `UPDATE "deposit_intents"
+          SET "settled_amount" = 5000000, "chain_tx_ref" = $2,
+              "finality_uncovered_since" = $3, "finality_next_check_at" = $4
+        WHERE "id" = $1`,
+      [id, freshHash(), marks.uncoveredSince ?? null, marks.nextCheckAt ?? null],
+    );
+    return id;
+  }
+
+  // H-1 (round 3): one buyer's uncovered rows never hold the head of the queue.
+  it('findSettledAwaitingFinality skips backed-off rows and sorts uncovered rows last', async () => {
+    const attacker = freshAccount();
+    const honest = freshAccount();
+    const now = Date.now();
+    const due = [];
+    for (let i = 0; i < 3; i += 1) {
+      // Older than everything else, uncovered, due now.
+      due.push(
+        await settled(attacker, 60 * 60 * 1000 + i, {
+          uncoveredSince: new Date(now - 60 * 60 * 1000),
+          nextCheckAt: new Date(now - 1_000),
+        }),
+      );
+    }
+    const backedOff = await settled(attacker, 2 * 60 * 60 * 1000, {
+      uncoveredSince: new Date(now - 60 * 60 * 1000),
+      nextCheckAt: new Date(now + 5 * 60 * 1000),
+    });
+    const fresh = [await settled(honest, 2_000), await settled(honest, 1_000)];
+
+    // A full batch of attacker rows cannot starve the honest buyer's deposits.
+    const head = await ctx.repository.findSettledAwaitingFinality(2, new Date(now));
+    expect(head.map((row) => row.id)).toEqual(fresh);
+    expect(head.every((row) => row.uncoveredSince === null)).toBe(true);
+
+    const all = await ctx.repository.findSettledAwaitingFinality(10, new Date(now));
+    const ids = all.map((row) => row.id);
+    expect(ids.slice(0, 2)).toEqual(fresh);
+    expect(new Set(ids.slice(2))).toEqual(new Set(due));
+    expect(ids).not.toContain(backedOff);
+    expect(all[2].uncoveredSince).toBeInstanceOf(Date);
+
+    // Due once its next check has passed.
+    const later = await ctx.repository.findSettledAwaitingFinality(
+      10,
+      new Date(now + 6 * 60 * 1000),
+    );
+    expect(later.map((row) => row.id)).toContain(backedOff);
+  });
+
+  it('markFinalityUncovered takes the row out of the queue until its next check', async () => {
+    const buyer = freshAccount();
+    const id = await settled(buyer, 1_000);
+    const now = Date.now();
+    const since = new Date(now - 1_000);
+
+    await expect(
+      ctx.repository.markFinalityUncovered(ctx.organizationId, id, since, new Date(now + 30_000)),
+    ).resolves.toBe(1);
+
+    const ids = async (at: number) =>
+      (await ctx.repository.findSettledAwaitingFinality(10, new Date(at))).map((row) => row.id);
+    expect(await ids(now)).not.toContain(id);
+    expect(await ids(now + 31_000)).toContain(id);
+    const [row] = (
+      await ctx.repository.findSettledAwaitingFinality(10, new Date(now + 31_000))
+    ).filter((candidate) => candidate.id === id);
+    expect(Math.abs(row.uncoveredSince!.getTime() - since.getTime())).toBeLessThan(5);
+
+    // A resolved row is never re-marked.
+    await ctx.repository.markFinalityResolved(ctx.organizationId, id, new Date());
+    await expect(
+      ctx.repository.markFinalityUncovered(ctx.organizationId, id, since, new Date(now)),
+    ).resolves.toBe(0);
+  });
+
+  it('hasUncoveredPendingSince finds an unresolved uncovered deposit of this account only', async () => {
+    const buyer = freshAccount();
+    const now = Date.now();
+    const id = await settled(buyer, 60 * 60 * 1000, {
+      uncoveredSince: new Date(now - 20 * 60 * 1000),
+    });
+    const grace = new Date(now - 15 * 60 * 1000);
+
+    await expect(ctx.repository.hasUncoveredPendingSince(buyer, grace)).resolves.toBe(true);
+    await expect(
+      ctx.repository.hasUncoveredPendingSince(buyer, new Date(now - 30 * 60 * 1000)),
+    ).resolves.toBe(false);
+    await expect(ctx.repository.hasUncoveredPendingSince(freshAccount(), grace)).resolves.toBe(
+      false,
+    );
+
+    await ctx.repository.markFinalityResolved(ctx.organizationId, id, new Date());
+    await expect(ctx.repository.hasUncoveredPendingSince(buyer, grace)).resolves.toBe(false);
+  });
+
+  it('findStaleSettling puts rows with a recorded transaction before rows without', async () => {
+    const buyer = freshAccount();
+    const noHashOldest = await intent(buyer, DepositIntentStatus.SETTLING, 3 * 60 * 60 * 1000);
+    const hashed = await intent(buyer, DepositIntentStatus.SETTLING, 10 * 60 * 1000);
+    await ctx.repository.recordSubmittedTx(ctx.organizationId, hashed, '0xfeed');
+    await ctx.dataSource.query(
+      `UPDATE "deposit_intents" SET "updated_at" = now() - interval '10 minutes' WHERE "id" = $1`,
+      [hashed],
+    );
+    const cutoff = new Date(Date.now() - 2 * 60 * 1000);
+
+    expect((await ctx.repository.findStaleSettling(cutoff, 1)).map((row) => row.id)).toEqual([
+      hashed,
+    ]);
+    expect((await ctx.repository.findStaleSettling(cutoff, 10)).map((row) => row.id)).toEqual([
+      hashed,
+      noHashOldest,
+    ]);
+  });
 });
