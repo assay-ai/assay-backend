@@ -16,7 +16,7 @@ import {
 import { EvmSendingKey, floatDedupeKey } from './evm-relayer-float.constants';
 import { DEFAULT_EVM_RELAYER_TIMING, EvmRelayerTiming } from './evm-relayer-timing';
 import { estimateL1Gas, paddedL1Gas } from './evm-l1-gas';
-import { EvmSendRejectedError, sendAnswerOf } from './evm-send-rejected.error';
+import { EvmSendRejectedError, isRateLimitedRpc, sendAnswerOf } from './evm-send-rejected.error';
 import {
   EvmRelayResult,
   EvmRelayedCall,
@@ -159,6 +159,11 @@ export const EVM_REDEEMER_IDENTITY: EvmSenderIdentity = {
  * When the data cannot be recovered the reason degrades to
  * `UNKNOWN_REVERT:none`; **the status never does.**
  */
+/** Waits before re-sending the same signed bytes after an HTTP 429 (about 7.5 s in all). */
+export const RATE_LIMIT_RETRY_DELAYS_MS: readonly number[] = Object.freeze([
+  500, 1_000, 2_000, 4_000,
+]);
+
 @Injectable()
 export class EvmRelayer implements EvmRelayerPort {
   readonly name: string;
@@ -303,7 +308,7 @@ export class EvmRelayer implements EvmRelayerPort {
     }
     let hash: `0x${string}`;
     try {
-      hash = await client.sendRawTransaction({ serializedTransaction });
+      hash = await this.sendRawRetryingRateLimit(client, serializedTransaction, signedHash);
     } catch (error) {
       // A refusal from the node's admission checks means the bytes were never
       // pooled: definitely not broadcast (`evm-send-rejected.error.ts`). "Already
@@ -346,6 +351,38 @@ export class EvmRelayer implements EvmRelayerPort {
       ...priceOf(receipt),
       blockNumber: receipt.blockNumber,
     };
+  }
+
+  /**
+   * `eth_sendRawTransaction`, handing over the SAME signed bytes again while
+   * the RPC gateway answers HTTP 429 (its rate limit, refused before any node
+   * saw them): re-sending identical bytes can only ever pool one transaction,
+   * the one whose hash was recorded. Every attempt rate-limited means the
+   * bytes never reached a node: `RATE_LIMITED`, not broadcast, so the caller
+   * releases and signs again later instead of waiting on a nonce nobody uses.
+   * Any other failure is returned as it came (outcome unknown, or a refusal).
+   */
+  private async sendRawRetryingRateLimit(
+    client: EvmRelayClient,
+    serializedTransaction: `0x${string}`,
+    signedHash: `0x${string}`,
+  ): Promise<`0x${string}`> {
+    const delays = this.timing.rateLimitRetryDelaysMs ?? RATE_LIMIT_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await client.sendRawTransaction({ serializedTransaction });
+      } catch (error) {
+        if (!isRateLimitedRpc(error)) throw error;
+        if (attempt >= delays.length) {
+          throw new EvmSendRejectedError(
+            'RATE_LIMITED',
+            signedHash,
+            `HTTP 429 on all ${attempt + 1} attempts`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
   }
 
   /**

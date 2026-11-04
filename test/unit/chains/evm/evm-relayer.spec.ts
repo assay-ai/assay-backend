@@ -13,7 +13,7 @@ import {
 import { EvmValueTransfer } from '@modules/chains/evm/ports/evm-relayer.port';
 import { NODE_INTERFACE_ADDRESS } from '@modules/chains/evm/evm-l1-gas';
 import { EvmSendRejectedError } from '@modules/chains/evm/evm-send-rejected.error';
-import { EvmRpcError } from '@modules/chains/evm/sanctioned-evm-rpc';
+import { EvmRpcError, EvmRpcHttpError } from '@modules/chains/evm/sanctioned-evm-rpc';
 import {
   DEFAULT_EVM_RELAYER_RECEIPT_TIMEOUT_MS,
   EvmRelayerTiming,
@@ -265,6 +265,63 @@ describe('EvmRelayer', () => {
       expect(result.status).toBe('SUCCESS');
       expect(result.hash).toBe(recorded[0]);
       expect(node.receiptWaits[0].hash).toBe(recorded[0]);
+    });
+
+    it('re-sends the SAME signed bytes after HTTP 429 and succeeds when the gateway lets it through', async () => {
+      const { relayer, node } = build({
+        timing: { ...readEvmRelayerTiming(() => ''), rateLimitRetryDelaysMs: [0, 0] },
+      });
+      const limited = () =>
+        new EvmRpcHttpError('EVM RPC eth_sendRawTransaction failed: HTTP 429', 429);
+      node.sendErrors = [limited(), limited()];
+      const recorded: string[] = [];
+
+      const result = await relayer.sendCall({
+        ...call(),
+        beforeBroadcast: async (hash) => void recorded.push(hash),
+      });
+
+      expect(result.status).toBe('SUCCESS');
+      expect(recorded).toHaveLength(1);
+      // Three hand-overs of one signature: the same bytes every time.
+      expect(node.attempted).toHaveLength(3);
+      expect(new Set(node.attempted).size).toBe(1);
+      expect(keccak256(node.attempted[0])).toBe(recorded[0]);
+    });
+
+    it('is RATE_LIMITED, not broadcast, when every hand-over is answered HTTP 429', async () => {
+      const { relayer, node } = build({
+        timing: { ...readEvmRelayerTiming(() => ''), rateLimitRetryDelaysMs: [0, 0] },
+      });
+      const limited = () =>
+        // As viem wraps it: the transport's error is the cause.
+        Object.assign(new Error('An unknown RPC error occurred.'), {
+          cause: new EvmRpcHttpError('EVM RPC eth_sendRawTransaction failed: HTTP 429', 429),
+        });
+      node.sendErrors = [limited(), limited(), limited()];
+      const recorded: string[] = [];
+
+      const error = await relayer
+        .sendCall({ ...call(), beforeBroadcast: async (hash) => void recorded.push(hash) })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(EvmSendRejectedError);
+      expect((error as EvmSendRejectedError).reason).toBe('RATE_LIMITED');
+      expect((error as EvmSendRejectedError).broadcast).toBe(false);
+      expect((error as EvmSendRejectedError).hash).toBe(recorded[0]);
+      expect(node.attempted).toHaveLength(3);
+      expect(node.receiptWaits).toHaveLength(0);
+    });
+
+    it('does not retry a non-429 HTTP failure: its outcome stays unknown', async () => {
+      const { relayer, node } = build({
+        timing: { ...readEvmRelayerTiming(() => ''), rateLimitRetryDelaysMs: [0, 0] },
+      });
+      const bad = new EvmRpcHttpError('EVM RPC eth_sendRawTransaction failed: HTTP 504', 504);
+      node.sendErrors = [bad];
+
+      await expect(relayer.sendCall(call())).rejects.toBe(bad);
+      expect(node.attempted).toHaveLength(1);
     });
 
     it('rethrows anything else untouched: the outcome is unknown', async () => {
@@ -574,7 +631,14 @@ class FakeNode implements EvmRelayClient {
   /** Set by a test: what `NodeInterface.gasEstimateL1Component` answers. */
   l1: { gas: bigint; baseFee: bigint } | null = null;
 
+  /** Set by a test: the next sends fail with these, in order. */
+  sendErrors: unknown[] = [];
+  /** Every hand-over, failed or not. */
+  readonly attempted: `0x${string}`[] = [];
+
   async sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`> {
+    this.attempted.push(args.serializedTransaction);
+    if (this.sendErrors.length > 0) throw this.sendErrors.shift();
     if (this.sendError) {
       const error = this.sendError;
       this.sendError = null;

@@ -22,6 +22,10 @@
  *   before admission.
  * - `REPLACEMENT_UNDERPRICED`: a DIFFERENT transaction holds this nonce in the
  *   pool, and ours was refused. Our hash is not in the pool.
+ * - `RATE_LIMITED`: every attempt to hand the bytes over was answered HTTP 429
+ *   by the RPC gateway, which refuses before forwarding to a node (prod
+ *   2026-11-04: a channel settle recorded, never pooled, its nonce left free).
+ *   Set by `EvmRelayer` after re-sending the SAME signed bytes a few times.
  *
  * Not a refusal, on purpose: **`already known`** (or `known transaction`). The
  * node already HAS these exact bytes, so the transaction WAS broadcast.
@@ -42,7 +46,8 @@ export type EvmSendRefusal =
   | 'NONCE_TOO_HIGH'
   | 'INTRINSIC_GAS_TOO_LOW'
   | 'FEE_CAP_TOO_LOW'
-  | 'REPLACEMENT_UNDERPRICED';
+  | 'REPLACEMENT_UNDERPRICED'
+  | 'RATE_LIMITED';
 
 /** What a node's answer to `eth_sendRawTransaction` means for the broadcast. */
 export type EvmSendAnswer = EvmSendRefusal | 'ALREADY_KNOWN';
@@ -127,4 +132,19 @@ export function isSendRejected(error: unknown): error is EvmSendRejectedError {
 /** Whether `error` is a refusal for lack of ETH. Every further send fails the same way. */
 export function isInsufficientFunds(error: unknown): boolean {
   return error instanceof EvmSendRejectedError && error.reason === 'INSUFFICIENT_FUNDS';
+}
+
+/**
+ * Whether `error` is the RPC gateway's rate limit (HTTP 429): the request was
+ * refused before any node saw it. Walks the `cause` chain (viem wraps the
+ * transport's error).
+ */
+export function isRateLimitedRpc(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    const node = current as { httpStatus?: unknown; cause?: unknown };
+    if (node.httpStatus === 429) return true;
+    current = node.cause;
+  }
+  return false;
 }
