@@ -267,6 +267,29 @@ describe('ChannelAdmissionService (v3 §5.3, SPEC-W2 §4)', () => {
     expect(h.service.channelsRequiredOn(CHAIN as never)).toBe(false);
   });
 
+  it('refuses per-call-only clients on a required chain unless the payer used a lane recently', async () => {
+    const h = harness();
+    const input = {
+      chainId: CHAIN as never,
+      asset: 'asset' as never,
+      payer: `${CHAIN}:${PAYER}` as never,
+    };
+    const used = jest.fn(async () => false);
+    (h.service as any).channels.usedChannelsRecently = used;
+    expect(await h.service.refusesPerCallOnly(input)).toBe(false);
+    expect(used).not.toHaveBeenCalled();
+
+    (h.service as any).requiredChains = new Set([CHAIN]);
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+    expect(used).toHaveBeenCalledWith(`${CHAIN}:${PAYER}`, 'asset', 7);
+
+    used.mockResolvedValueOnce(true);
+    expect(await h.service.refusesPerCallOnly(input)).toBe(false);
+
+    used.mockRejectedValueOnce(new Error('db down'));
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+  });
+
   it('refuses a hold above one hour', async () => {
     const h = harness();
     h.door.collectHoldSeconds.mockResolvedValue(7_200);

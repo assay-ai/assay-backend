@@ -881,10 +881,16 @@ export class McpToolCallService {
     // to upgrade, first thing, on the requirement and on a per-call retry
     // alike — before a seq, a voucher check or a hold, so nothing is charged.
     // A client that offers `channel-v1` keeps the protocol's own per-call
-    // fallback (no channel offered, lane cap, signer expiring).
+    // fallback (no channel offered, lane cap, signer expiring), and so does a
+    // payer that used a lane recently (a 1.2.0 client paused or sharing a key).
     if (
-      this.channelAdmission?.channelsRequiredOn(session.chainId) === true &&
-      !schemes.includes(CHANNEL_SCHEME)
+      !schemes.includes(CHANNEL_SCHEME) &&
+      this.channelAdmission &&
+      (await this.channelAdmission.refusesPerCallOnly({
+        chainId: session.chainId,
+        asset: chainMetadata(session.chainId).settlementAsset as AssetId,
+        payer: session.agentAccount,
+      }))
     ) {
       throw PaymentErrors.channelRequired({ chainId: session.chainId, tool: tool.name });
     }
