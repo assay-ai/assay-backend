@@ -23,7 +23,9 @@ import { ChannelRefundService } from './services/channel-refund.service';
 import {
   CHANNEL_LIVE_CHAINS,
   CHANNEL_POLICY,
+  CHANNEL_REQUIRED_CHAINS,
   EVM_CHANNELS_LIVE_CHAINS_ENV,
+  EVM_CHANNELS_REQUIRED_CHAINS_ENV,
   loadChannelPolicy,
   parseChannelLiveChains,
 } from './constants/channel.constants';
@@ -74,6 +76,12 @@ import { VoucherService } from './services/voucher.service';
       provide: CHANNEL_LIVE_CHAINS,
       useFactory: () => parseChannelLiveChains(process.env[EVM_CHANNELS_LIVE_CHAINS_ENV]),
     },
+    // Channel-only paid calls (owner decision 2026-11-04): same syntax as the
+    // live list, enforced only where the door is also live.
+    {
+      provide: CHANNEL_REQUIRED_CHAINS,
+      useFactory: () => parseChannelLiveChains(process.env[EVM_CHANNELS_REQUIRED_CHAINS_ENV]),
+    },
     ChannelAdmissionService,
     ChannelRefundService,
     // Boot refuses a schema without the buyer-debt columns (review-buyer-debt H2).
@@ -110,6 +118,7 @@ import { VoucherService } from './services/voucher.service';
     ChannelRefundService,
     CHANNEL_POLICY,
     CHANNEL_LIVE_CHAINS,
+    CHANNEL_REQUIRED_CHAINS,
     BuyerDebtSpikeMonitor,
     HeldCollectionService,
     PaymentIntentExpiryService,

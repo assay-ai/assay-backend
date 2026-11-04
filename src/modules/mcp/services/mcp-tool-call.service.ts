@@ -876,6 +876,24 @@ export class McpToolCallService {
     schemes: readonly string[] = [],
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    // Channel-only chains (`EVM_CHANNELS_REQUIRED_CHAINS`, owner decision
+    // 2026-11-04): a client that cannot pay through the channel door is told
+    // to upgrade, first thing, on the requirement and on a per-call retry
+    // alike — before a seq, a voucher check or a hold, so nothing is charged.
+    // A client that offers `channel-v1` keeps the protocol's own per-call
+    // fallback (no channel offered, lane cap, signer expiring), and so does a
+    // payer that used a lane recently (a 1.2.0 client paused or sharing a key).
+    if (
+      !schemes.includes(CHANNEL_SCHEME) &&
+      this.channelAdmission &&
+      (await this.channelAdmission.refusesPerCallOnly({
+        chainId: session.chainId,
+        asset: chainMetadata(session.chainId).settlementAsset as AssetId,
+        payer: session.agentAccount,
+      }))
+    ) {
+      throw PaymentErrors.channelRequired({ chainId: session.chainId, tool: tool.name });
+    }
     // The paid retry's echo, whichever door it pays through: it only chooses the re-draw.
     const pinned: { providerId: string; contractVersion?: number } | null =
       payment ?? channelPayment;

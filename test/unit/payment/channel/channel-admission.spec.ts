@@ -256,6 +256,46 @@ describe('ChannelAdmissionService (v3 §5.3, SPEC-W2 §4)', () => {
     expect(await code(h.call(PRICE, 1))).toBe(ChannelErrorCode.CHANNEL_NOT_OFFERED);
   });
 
+  it('requires channels only on a chain that is both required and live', () => {
+    const h = harness();
+    expect(h.service.channelsRequiredOn(CHAIN as never)).toBe(false);
+    (h.service as any).requiredChains = new Set([CHAIN, 'eip155:1']);
+    expect(h.service.channelsRequiredOn(CHAIN as never)).toBe(true);
+    // Required but not live: never enforced, or every paid call there would be refused.
+    expect(h.service.channelsRequiredOn('eip155:1' as never)).toBe(false);
+    (h.service as any).liveChains = new Set();
+    expect(h.service.channelsRequiredOn(CHAIN as never)).toBe(false);
+  });
+
+  it('refuses per-call-only clients on a required chain unless the payer used a lane recently', async () => {
+    const h = harness();
+    const input = {
+      chainId: CHAIN as never,
+      asset: 'asset' as never,
+      payer: `${CHAIN}:${PAYER}` as never,
+    };
+    const used = jest.fn(async () => false);
+    (h.service as any).channels.usedChannelsRecently = used;
+    expect(await h.service.refusesPerCallOnly(input)).toBe(false);
+    expect(used).not.toHaveBeenCalled();
+
+    (h.service as any).requiredChains = new Set([CHAIN]);
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+    expect(used).toHaveBeenCalledWith(`${CHAIN}:${PAYER}`, 'asset', 7);
+
+    used.mockResolvedValueOnce(true);
+    expect(await h.service.refusesPerCallOnly(input)).toBe(false);
+
+    used.mockRejectedValueOnce(new Error('db down'));
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+
+    // 0 days: no exemption, the lane read is skipped.
+    used.mockClear();
+    (h.service as any).policy = { ...DEFAULT_CHANNEL_POLICY, requiredRecentLaneDays: 0 };
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+    expect(used).not.toHaveBeenCalled();
+  });
+
   it('refuses a hold above one hour', async () => {
     const h = harness();
     h.door.collectHoldSeconds.mockResolvedValue(7_200);

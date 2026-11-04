@@ -23,8 +23,29 @@ export const CHANNEL_TERMINAL_UNVERIFIED_REASON = 'channel_terminal_timeout_unve
 /** Injection tokens. */
 export const CHANNEL_POLICY = 'CHANNEL_POLICY';
 export const CHANNEL_LIVE_CHAINS = 'CHANNEL_LIVE_CHAINS';
+export const CHANNEL_REQUIRED_CHAINS = 'CHANNEL_REQUIRED_CHAINS';
 
 export const EVM_CHANNELS_LIVE_CHAINS_ENV = 'EVM_CHANNELS_LIVE_CHAINS';
+/**
+ * The chains where a paid call MUST be paid through the channel door (owner
+ * decision 2026-11-04): a client that does not offer `channel-v1` in
+ * `_meta["assay/paymentSchemes"]` is refused with `PAYMENT_CHANNEL_REQUIRED`
+ * before anything is allocated or signed, so old clients are told to upgrade
+ * instead of paying one on-chain redeem per call. Only chains that are also in
+ * `EVM_CHANNELS_LIVE_CHAINS` are enforced. A client that offers `channel-v1`
+ * keeps the per-call fallback the channel protocol itself defines (no channel
+ * offered, lane cap, signer expiring), and so does a payer that used a lane
+ * recently (`CHANNEL_REQUIRED_RECENT_LANE_DAYS`).
+ */
+export const EVM_CHANNELS_REQUIRED_CHAINS_ENV = 'EVM_CHANNELS_REQUIRED_CHAINS';
+/**
+ * A payer whose lane was touched within `CHANNEL_REQUIRED_RECENT_LANE_DAYS`
+ * days (policy `requiredRecentLaneDays`, default 7, 0 = never) may still pay
+ * per call without offering `channel-v1`: SDK/MCP 1.2.0 stop offering it for
+ * an hour after `CHANNEL_LIMIT`, `CHANNEL_SIGNER_EXPIRING` or
+ * `CHANNEL_NOT_OFFERED`, and a second process on the same key never offers
+ * it. A client that never opened a lane (anything older than 1.2.0) is refused.
+ */
 
 /** The MCP `_meta` keys of the channel door (API-W2 §1). */
 export const ASSAY_PAYMENT_SCHEMES = 'assay/paymentSchemes';
@@ -116,6 +137,13 @@ export function loadChannelPolicy(env: NodeJS.ProcessEnv = process.env): Channel
     tickSeconds: d.tickSeconds,
     aCapAtomic: atomic(env, 'CHANNEL_A_CAP_ATOMIC', d.aCapAtomic, 1n),
     maxOpenPerPayer: integer(env, 'CHANNEL_MAX_OPEN_PER_PAYER', d.maxOpenPerPayer, 1, 16),
+    requiredRecentLaneDays: integer(
+      env,
+      'CHANNEL_REQUIRED_RECENT_LANE_DAYS',
+      d.requiredRecentLaneDays ?? 7,
+      0,
+      30,
+    ),
     terminalTimeoutSeconds: d.terminalTimeoutSeconds,
     collectIntervalSeconds: integer(
       env,

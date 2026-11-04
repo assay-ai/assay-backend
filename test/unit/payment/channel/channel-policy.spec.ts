@@ -331,3 +331,17 @@ describe('channel policy — reservation (POLICY §2.3)', () => {
     ).toBe(true);
   });
 });
+
+describe('CHANNEL_REQUIRED_RECENT_LANE_DAYS', () => {
+  it('defaults to 7, accepts 0..30 and refuses anything else', () => {
+    expect(loadChannelPolicy({}).requiredRecentLaneDays).toBe(7);
+    expect(
+      loadChannelPolicy({ CHANNEL_REQUIRED_RECENT_LANE_DAYS: '0' }).requiredRecentLaneDays,
+    ).toBe(0);
+    expect(
+      loadChannelPolicy({ CHANNEL_REQUIRED_RECENT_LANE_DAYS: '30' }).requiredRecentLaneDays,
+    ).toBe(30);
+    expect(() => loadChannelPolicy({ CHANNEL_REQUIRED_RECENT_LANE_DAYS: '31' })).toThrow(/0 to 30/);
+    expect(() => loadChannelPolicy({ CHANNEL_REQUIRED_RECENT_LANE_DAYS: '-1' })).toThrow();
+  });
+});

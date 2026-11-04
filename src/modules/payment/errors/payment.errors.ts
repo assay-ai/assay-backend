@@ -55,6 +55,7 @@ export enum PaymentErrorCode {
 
   // ── The provider's price is below the platform's paid-call minimum.
   PAYMENT_PRICE_BELOW_MINIMUM = 'PAYMENT_PRICE_BELOW_MINIMUM',
+  PAYMENT_CHANNEL_REQUIRED = 'PAYMENT_CHANNEL_REQUIRED',
 
   // ── The buyer's own on-chain escrow replaces the pooled vault.
   PAYMENT_ESCROW_NOT_OPEN = 'PAYMENT_ESCROW_NOT_OPEN',
@@ -550,6 +551,23 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `${context?.tool ?? 'This tool'}'s provider charges ${context?.priceUsd ?? '?'} per paid ` +
       `call, below the platform minimum of ${context?.minimumUsd ?? '?'}. The provider must ` +
       `raise its price before paid calls to it are accepted. Nothing was charged.`,
+  },
+  /**
+   * A paid call on a chain where paid calls go through the channel door only
+   * (`EVM_CHANNELS_REQUIRED_CHAINS`), from a client that did not offer
+   * `channel-v1`: an SDK or MCP client older than 1.2.0, or a 1.2.0 client
+   * without a usable channel store. Refused before any seq, voucher or hold:
+   * nothing is charged. Not retryable — the client must be upgraded or fixed.
+   */
+  channelRequired: {
+    code: PaymentErrorCode.PAYMENT_CHANNEL_REQUIRED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Paid calls on ${context?.chainId ?? 'this chain'} are paid through payment channels only, ` +
+      'and this client did not offer channel-v1 (_meta["assay/paymentSchemes"]). Upgrade to ' +
+      '@goassay-ai/sdk 1.2.0 or later (Python: goassay 1.2.0 or later) or @goassay-ai/mcp 1.2.0 ' +
+      'or later. On 1.2.0 already: give each process its own channel store file, and pass ' +
+      'channels.store where there is no file system. Nothing was charged.',
   },
   noSettleableChain: {
     code: PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN,
