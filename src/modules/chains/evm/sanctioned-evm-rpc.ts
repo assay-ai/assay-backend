@@ -116,8 +116,41 @@ function boundedRevertData(data: unknown): `0x${string}` | null {
     : null;
 }
 
-export function createSanctionedEvmClient(url: string, httpClient: EgressHttpClient, chain: Chain) {
+/**
+ * Waits before asking again after HTTP 429 (the gateway's rate limit, refused
+ * before any node saw the request), for reads only: a read has no effect, so
+ * asking again is always safe. `eth_sendRawTransaction` is never retried here;
+ * `EvmRelayer` re-sends the same signed bytes itself and decides what an
+ * all-429 send means. Prod 2026-11-04: a single 429 on one lane's read failed
+ * the whole channel pass, every minute.
+ */
+export const EVM_RPC_RATE_LIMIT_READ_RETRY_MS: readonly number[] = Object.freeze([300, 700, 1_500]);
+
+export function createSanctionedEvmClient(
+  url: string,
+  httpClient: EgressHttpClient,
+  chain: Chain,
+  readRetryDelaysMs: readonly number[] = EVM_RPC_RATE_LIMIT_READ_RETRY_MS,
+) {
   let id = 0;
+
+  /** One POST; while the answer is HTTP 429 and `retry` holds, asked again after a wait. */
+  async function post(body: string, retry: boolean) {
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await httpClient.request({
+        url,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+        // See the single-call path below for why this policy is named.
+        policy: INTERNAL_EGRESS_POLICY,
+      });
+      if (response.status !== 429 || !retry || attempt >= readRetryDelaysMs.length) {
+        return response;
+      }
+      await new Promise((resolve) => setTimeout(resolve, readRetryDelaysMs[attempt]));
+    }
+  }
 
   /**
    * Several JSON-RPC calls in ONE HTTP request (a JSON-RPC batch), answered
@@ -132,11 +165,8 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
     if (calls.length === 0) return [];
     const first = id + 1;
     id += calls.length;
-    const response = await httpClient.request({
-      url,
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(
+    const response = await post(
+      JSON.stringify(
         calls.map((call, i) => ({
           jsonrpc: '2.0',
           id: first + i,
@@ -144,8 +174,8 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
           params: call.params,
         })),
       ),
-      policy: INTERNAL_EGRESS_POLICY,
-    });
+      calls.every((call) => call.method !== 'eth_sendRawTransaction'),
+    );
     if (response.status < 200 || response.status >= 300) {
       throw new EvmRpcHttpError(`EVM RPC batch failed: HTTP ${response.status}`, response.status);
     }
@@ -180,33 +210,31 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
       {
         async request({ method, params }) {
           id += 1;
-          const response = await httpClient.request({
-            url,
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-            // `INTERNAL_EGRESS_POLICY`, named rather than defaulted — the same
-            // declaration `http-facilitator.adapter.ts` and
-            // `kora-fee-payer.signer.ts` make, and for the same reason.
-            //
-            // `url` here came from `EVM_RPC_URLS`, read from `process.env` at
-            // boot and never from a request, a database row or a provider,
-            // which is precisely the case `EgressTrust.INTERNAL_ALLOWED`
-            // documents. The default is `PUBLIC_ONLY`, and under it an
-            // operator's own node on a private address is refused: measured on
-            // this tree against `http://127.0.0.1:8545`, every eip155 read came
-            // back `BLOCKED_ADDRESS` and `GET /escrow` degraded to
-            // `chainReadable: false` with nothing on the wire saying why. An
-            // EVM node inside a VPC is the ordinary production shape, so the
-            // strict default made a working deployment unreachable rather than
-            // closing an SSRF — nothing here is attacker-supplied.
-            //
-            // It relaxes the ADDRESS rule and nothing else: the scheme list,
-            // the pinned connect, per-hop redirect re-checking and every limit
-            // still apply, and the hop is still sanctioned by the one socket
-            // `EgressHttpClient` opens.
-            policy: INTERNAL_EGRESS_POLICY,
-          });
+          // The egress policy, `INTERNAL_EGRESS_POLICY` (set in `post`), is
+          // named rather than defaulted — the same
+          // declaration `http-facilitator.adapter.ts` and
+          // `kora-fee-payer.signer.ts` make, and for the same reason.
+          //
+          // `url` here came from `EVM_RPC_URLS`, read from `process.env` at
+          // boot and never from a request, a database row or a provider,
+          // which is precisely the case `EgressTrust.INTERNAL_ALLOWED`
+          // documents. The default is `PUBLIC_ONLY`, and under it an
+          // operator's own node on a private address is refused: measured on
+          // this tree against `http://127.0.0.1:8545`, every eip155 read came
+          // back `BLOCKED_ADDRESS` and `GET /escrow` degraded to
+          // `chainReadable: false` with nothing on the wire saying why. An
+          // EVM node inside a VPC is the ordinary production shape, so the
+          // strict default made a working deployment unreachable rather than
+          // closing an SSRF — nothing here is attacker-supplied.
+          //
+          // It relaxes the ADDRESS rule and nothing else: the scheme list,
+          // the pinned connect, per-hop redirect re-checking and every limit
+          // still apply, and the hop is still sanctioned by the one socket
+          // `EgressHttpClient` opens.
+          const response = await post(
+            JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+            method !== 'eth_sendRawTransaction',
+          );
 
           // A 502 HTML error page parses to nothing useful, and `undefined` as a
           // result reads downstream as a call that succeeded and returned

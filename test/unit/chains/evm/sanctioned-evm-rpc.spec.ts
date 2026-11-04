@@ -264,6 +264,38 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
     await expect(client.getChainId()).rejects.toThrow(/502/);
   });
 
+  it('asks a read again after HTTP 429, and answers once the gateway lets it through', async () => {
+    let calls = 0;
+    const { client: egress, requests } = fakeEgress(() =>
+      ++calls <= 2
+        ? { status: 429, body: 'rate limited' }
+        : { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0xb626' }) },
+    );
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never, [0, 0, 0]);
+
+    await expect(client.getChainId()).resolves.toBe(46630);
+    expect(requests).toHaveLength(3);
+  });
+
+  it('gives up after its retries with the 429 status on the error', async () => {
+    const { client: egress, requests } = fakeEgress(() => ({ status: 429, body: '' }));
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never, [0, 0]);
+
+    const error = await client.getChainId().catch((e: unknown) => e);
+    expect(String(error)).toMatch(/429/);
+    expect(requests).toHaveLength(3);
+  });
+
+  it('never asks eth_sendRawTransaction again: the relayer owns that decision', async () => {
+    const { client: egress, requests } = fakeEgress(() => ({ status: 429, body: '' }));
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never, [0, 0, 0]);
+
+    await expect(
+      client.sendRawTransaction({ serializedTransaction: '0x02' as `0x${string}` }),
+    ).rejects.toThrow();
+    expect(requests).toHaveLength(1);
+  });
+
   it('no file under chains/evm reaches a network primitive directly', () => {
     // The source lock is the primary control for this directory: every network
     // call here must go through the egress client.
