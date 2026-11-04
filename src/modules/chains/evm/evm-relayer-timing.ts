@@ -33,6 +33,11 @@ export const EVM_RELAYER_SEND_RPC_ALLOWANCE_MS = 60_000;
 export interface EvmRelayerTiming {
   readonly receiptTimeoutMs: number;
   readonly maxQueueWaitMs: number;
+  /**
+   * Waits before re-sending the same signed bytes after an HTTP 429; absent =
+   * `RATE_LIMIT_RETRY_DELAYS_MS` (tests pass `[]` or tiny delays).
+   */
+  readonly rateLimitRetryDelaysMs?: readonly number[];
 }
 
 export const DEFAULT_EVM_RELAYER_TIMING: EvmRelayerTiming = {

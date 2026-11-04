@@ -86,6 +86,22 @@ export class EvmRpcError extends Error {
 }
 
 /**
+ * The JSON-RPC endpoint answered with a non-2xx HTTP status, so no JSON-RPC
+ * answer came back. `httpStatus` is the status alone: 429 is the gateway's
+ * rate limit, refused before the request reached the node
+ * (`isRateLimitedRpc`).
+ */
+export class EvmRpcHttpError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number,
+  ) {
+    super(message);
+    this.name = 'EvmRpcHttpError';
+  }
+}
+
+/**
  * `0x` + a 4-byte selector + at most four 32-byte words.
  *
  * Every error in `Errors.sol` is zero-argument, so 10 characters is the whole
@@ -131,7 +147,7 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
       policy: INTERNAL_EGRESS_POLICY,
     });
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(`EVM RPC batch failed: HTTP ${response.status}`);
+      throw new EvmRpcHttpError(`EVM RPC batch failed: HTTP ${response.status}`, response.status);
     }
     const reply = JSON.parse(response.body) as unknown;
     if (!Array.isArray(reply)) throw new Error('EVM RPC batch refused by the node');
@@ -196,7 +212,10 @@ export function createSanctionedEvmClient(url: string, httpClient: EgressHttpCli
           // result reads downstream as a call that succeeded and returned
           // nothing. Refuse before decoding.
           if (response.status < 200 || response.status >= 300) {
-            throw new Error(`EVM RPC ${method} failed: HTTP ${response.status}`);
+            throw new EvmRpcHttpError(
+              `EVM RPC ${method} failed: HTTP ${response.status}`,
+              response.status,
+            );
           }
 
           const reply = JSON.parse(response.body) as {
