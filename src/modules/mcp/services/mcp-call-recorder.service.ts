@@ -39,6 +39,7 @@ const REFUSAL_LAYER: Readonly<Record<string, RefusalLayer>> = Object.freeze({
   [ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD]: RefusalLayer.SERVER,
   [PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN]: RefusalLayer.SERVER,
   [PaymentErrorCode.PAYMENT_PRICE_BELOW_MINIMUM]: RefusalLayer.SERVER,
+  [PaymentErrorCode.PAYMENT_CHANNEL_REQUIRED]: RefusalLayer.SERVER,
 });
 
 /** The same refusal this many times within {@link REPEAT_WINDOW_SECONDS} alerts the owner. */
