@@ -148,6 +148,22 @@ export class VoucherChannelRepository {
     return Number(row?.open ?? 0);
   }
 
+  /**
+   * Whether `payer` used the channel door on `assetId` within `withinDays`: a
+   * lane row touched since then. Proves the payer's client signs channel
+   * vouchers (`EVM_CHANNELS_REQUIRED_CHAINS`): such a client may take the
+   * per-call fallback while its own channel step is paused.
+   */
+  async usedChannelsRecently(payer: string, assetId: string, withinDays: number): Promise<boolean> {
+    const [row] = (await this.dataSource.query(
+      `SELECT EXISTS (SELECT 1 FROM "voucher_channels" c
+          WHERE c."payer" = ANY($1::text[]) AND c."asset_id" = $2
+            AND c."updated_at" > now() - make_interval(days => $3::int)) AS "used"`,
+      [accountSpellings(payer), assetId, withinDays],
+    )) as { used: boolean }[];
+    return row?.used === true;
+  }
+
   /** Σ price of this channel's admitted calls not yet settled on chain (served or in flight). */
   async pendingOf(manager: EntityManager, channelRowId: string): Promise<bigint> {
     const [row] = (await manager.query(

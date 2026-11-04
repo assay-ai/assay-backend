@@ -42,7 +42,7 @@ function build(spendPolicy?: unknown) {
   const channelAdmission = {
     admit,
     requirement: jest.fn(async () => null),
-    channelsRequiredOn: () => false,
+    refusesPerCallOnly: async () => false,
   };
   const h = buildMcpHarness({
     bindings: [buildBinding('provider-a')],

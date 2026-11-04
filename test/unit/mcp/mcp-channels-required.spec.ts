@@ -24,11 +24,13 @@ const SESSION_B: McpSession = { ...SESSION, agentAccount: AGENT };
 const ARGS = { query: 'usd eur' };
 const TOOL = 'Search the web';
 
-function build(required: boolean, pricingMode = PricingMode.PAID) {
+function build(required: boolean, pricingMode = PricingMode.PAID, recentLane = false) {
   const invoker = new ScriptedInvoker({ [`binding-${PROVIDER}`]: async () => ok('1.08') });
-  const channelsRequiredOn = jest.fn((chainId: string) => required && chainId === CHAIN_ID);
+  const refusesPerCallOnly = jest.fn(
+    async (input: { chainId: string }) => required && input.chainId === CHAIN_ID && !recentLane,
+  );
   const channelAdmission = {
-    channelsRequiredOn,
+    refusesPerCallOnly,
     requirement: jest.fn(async () => null),
     admit: jest.fn(async () => {
       throw new Error('the channel door must not be reached');
@@ -134,6 +136,34 @@ describe('McpToolCallService — channels required (EVM_CHANNELS_REQUIRED_CHAINS
     expect(h.seqs.allocated).toEqual(['1']);
   });
 
+  it('lets a payer with a recent lane pay per call without channel-v1 (a paused 1.2.0 client)', async () => {
+    const h = build(true, PricingMode.PAID, true);
+
+    const outcome = await h.calls.call(SESSION_B, TOOL, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+    });
+
+    if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+    expect(outcome.code).toBe(McpFailureCode.PAYMENT_REQUIRED);
+    expect(h.channelAdmission.refusesPerCallOnly).toHaveBeenCalledWith(
+      expect.objectContaining({ chainId: CHAIN_ID, payer: AGENT }),
+    );
+    expect(h.seqs.allocated).toEqual(['1']);
+  });
+
+  it('does not ask the door when the client offers channel-v1', async () => {
+    const h = build(true);
+
+    await h.calls.call(SESSION_B, TOOL, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+      schemes: [CHANNEL_SCHEME],
+    } as never);
+
+    expect(h.channelAdmission.refusesPerCallOnly).not.toHaveBeenCalled();
+  });
+
   it('leaves a chain that is not required on the per-call door', async () => {
     const h = build(false);
 
@@ -154,6 +184,6 @@ describe('McpToolCallService — channels required (EVM_CHANNELS_REQUIRED_CHAINS
 
     if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
     expect(outcome.receipt.charged.amount).toBe('0');
-    expect(h.channelAdmission.channelsRequiredOn).not.toHaveBeenCalled();
+    expect(h.channelAdmission.refusesPerCallOnly).not.toHaveBeenCalled();
   });
 });

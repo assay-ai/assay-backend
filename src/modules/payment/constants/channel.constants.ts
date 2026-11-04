@@ -34,9 +34,18 @@ export const EVM_CHANNELS_LIVE_CHAINS_ENV = 'EVM_CHANNELS_LIVE_CHAINS';
  * instead of paying one on-chain redeem per call. Only chains that are also in
  * `EVM_CHANNELS_LIVE_CHAINS` are enforced. A client that offers `channel-v1`
  * keeps the per-call fallback the channel protocol itself defines (no channel
- * offered, lane cap, signer expiring).
+ * offered, lane cap, signer expiring), and so does a payer that used a lane
+ * recently ({@link CHANNEL_REQUIRED_RECENT_LANE_DAYS}).
  */
 export const EVM_CHANNELS_REQUIRED_CHAINS_ENV = 'EVM_CHANNELS_REQUIRED_CHAINS';
+/**
+ * A payer whose lane was touched within this many days may still pay per call
+ * without offering `channel-v1`: SDK/MCP 1.2.0 stop offering it for an hour
+ * after `CHANNEL_LIMIT`, `CHANNEL_SIGNER_EXPIRING` or `CHANNEL_NOT_OFFERED`,
+ * and a second process on the same key never offers it. A client that never
+ * opened a lane (anything older than 1.2.0) is refused.
+ */
+export const CHANNEL_REQUIRED_RECENT_LANE_DAYS = 7;
 
 /** The MCP `_meta` keys of the channel door (API-W2 §1). */
 export const ASSAY_PAYMENT_SCHEMES = 'assay/paymentSchemes';
