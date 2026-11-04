@@ -41,6 +41,7 @@ import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.
 
 import {
   CHANNEL_LIVE_CHAINS,
+  CHANNEL_REQUIRED_CHAINS,
   CHANNEL_POLICY,
   CHANNEL_SCHEME,
   maxOpenChannelsOn,
@@ -225,7 +226,28 @@ export class ChannelAdmissionService {
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
-  ) {}
+    // `EVM_CHANNELS_REQUIRED_CHAINS` (owner decision 2026-11-04).
+    @Optional()
+    @Inject(CHANNEL_REQUIRED_CHAINS)
+    private readonly requiredChains: ReadonlySet<string> = new Set(),
+  ) {
+    const unenforced = [...this.requiredChains].filter((chain) => !this.liveChains.has(chain));
+    if (unenforced.length > 0) {
+      this.logger.warn(
+        `EVM_CHANNELS_REQUIRED_CHAINS names ${unenforced.join(', ')}, which ` +
+          'EVM_CHANNELS_LIVE_CHAINS does not: channels are not required there',
+      );
+    }
+  }
+
+  /**
+   * Whether a paid call on `chainId` must come from a client that offers
+   * `channel-v1` (`PAYMENT_CHANNEL_REQUIRED` otherwise). Only where the door
+   * is live: a required chain without the door would refuse every paid call.
+   */
+  channelsRequiredOn(chainId: ChainId): boolean {
+    return this.requiredChains.has(chainId) && this.liveChains.has(chainId);
+  }
 
   /**
    * The chain-state gate of the per-call door (`PaymentIntentService.create`):

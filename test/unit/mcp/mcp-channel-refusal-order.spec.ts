@@ -39,7 +39,11 @@ function build(spendPolicy?: unknown) {
   const admit = jest.fn(async () => {
     throw new Error('the channel door must not be reached');
   });
-  const channelAdmission = { admit, requirement: jest.fn(async () => null) };
+  const channelAdmission = {
+    admit,
+    requirement: jest.fn(async () => null),
+    channelsRequiredOn: () => false,
+  };
   const h = buildMcpHarness({
     bindings: [buildBinding('provider-a')],
     providers: [buildProvider('provider-a')],

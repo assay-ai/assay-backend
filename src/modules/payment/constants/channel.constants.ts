@@ -23,8 +23,20 @@ export const CHANNEL_TERMINAL_UNVERIFIED_REASON = 'channel_terminal_timeout_unve
 /** Injection tokens. */
 export const CHANNEL_POLICY = 'CHANNEL_POLICY';
 export const CHANNEL_LIVE_CHAINS = 'CHANNEL_LIVE_CHAINS';
+export const CHANNEL_REQUIRED_CHAINS = 'CHANNEL_REQUIRED_CHAINS';
 
 export const EVM_CHANNELS_LIVE_CHAINS_ENV = 'EVM_CHANNELS_LIVE_CHAINS';
+/**
+ * The chains where a paid call MUST be paid through the channel door (owner
+ * decision 2026-11-04): a client that does not offer `channel-v1` in
+ * `_meta["assay/paymentSchemes"]` is refused with `PAYMENT_CHANNEL_REQUIRED`
+ * before anything is allocated or signed, so old clients are told to upgrade
+ * instead of paying one on-chain redeem per call. Only chains that are also in
+ * `EVM_CHANNELS_LIVE_CHAINS` are enforced. A client that offers `channel-v1`
+ * keeps the per-call fallback the channel protocol itself defines (no channel
+ * offered, lane cap, signer expiring).
+ */
+export const EVM_CHANNELS_REQUIRED_CHAINS_ENV = 'EVM_CHANNELS_REQUIRED_CHAINS';
 
 /** The MCP `_meta` keys of the channel door (API-W2 §1). */
 export const ASSAY_PAYMENT_SCHEMES = 'assay/paymentSchemes';
