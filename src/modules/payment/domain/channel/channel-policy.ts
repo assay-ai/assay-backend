@@ -37,6 +37,12 @@ export interface ChannelPolicy {
   readonly aCapAtomic: bigint;
   /** Open channels per payer across all delegates. */
   readonly maxOpenPerPayer: number;
+  /**
+   * `EVM_CHANNELS_REQUIRED_CHAINS`: a payer whose lane was touched within this
+   * many days may pay per call without offering `channel-v1`
+   * (`CHANNEL_REQUIRED_RECENT_LANE_DAYS`, 0–30, default 7; 0 = never).
+   */
+  readonly requiredRecentLaneDays?: number;
   /** A row not terminal this long after admission is voided (`T_term`). */
   readonly terminalTimeoutSeconds: number;
   /** How often channels are collected on the grid (collect-first runs every grid hour). */
@@ -67,6 +73,7 @@ export const DEFAULT_CHANNEL_POLICY: ChannelPolicy = Object.freeze({
   tickSeconds: 60,
   aCapAtomic: 5_000_000n,
   maxOpenPerPayer: 16,
+  requiredRecentLaneDays: 7,
   terminalTimeoutSeconds: 300,
   collectIntervalSeconds: 3_600,
   urgentReservationBps: 8_000,

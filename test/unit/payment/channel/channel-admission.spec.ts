@@ -288,6 +288,12 @@ describe('ChannelAdmissionService (v3 §5.3, SPEC-W2 §4)', () => {
 
     used.mockRejectedValueOnce(new Error('db down'));
     expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+
+    // 0 days: no exemption, the lane read is skipped.
+    used.mockClear();
+    (h.service as any).policy = { ...DEFAULT_CHANNEL_POLICY, requiredRecentLaneDays: 0 };
+    expect(await h.service.refusesPerCallOnly(input)).toBe(true);
+    expect(used).not.toHaveBeenCalled();
   });
 
   it('refuses a hold above one hour', async () => {

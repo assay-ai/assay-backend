@@ -42,7 +42,6 @@ import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.
 import {
   CHANNEL_LIVE_CHAINS,
   CHANNEL_REQUIRED_CHAINS,
-  CHANNEL_REQUIRED_RECENT_LANE_DAYS,
   CHANNEL_POLICY,
   CHANNEL_SCHEME,
   maxOpenChannelsOn,
@@ -253,7 +252,7 @@ export class ChannelAdmissionService {
   /**
    * Whether a paid call from a client that did NOT offer `channel-v1` is
    * refused (`PAYMENT_CHANNEL_REQUIRED`): on a required chain, unless the payer
-   * used a lane within {@link CHANNEL_REQUIRED_RECENT_LANE_DAYS} — its client
+   * used a lane within `requiredRecentLaneDays` (0 = never) — its client
    * signs channel vouchers and is only paused or sharing its key. A failed
    * read refuses: the refusal charges nothing and the client may retry.
    */
@@ -263,8 +262,10 @@ export class ChannelAdmissionService {
     payer: AccountId;
   }): Promise<boolean> {
     if (!this.channelsRequiredOn(input.chainId)) return false;
+    const days = this.policy.requiredRecentLaneDays ?? 7;
+    if (days === 0) return true;
     const recent = await this.channels
-      .usedChannelsRecently(input.payer, input.asset, CHANNEL_REQUIRED_RECENT_LANE_DAYS)
+      .usedChannelsRecently(input.payer, input.asset, days)
       .catch(() => false);
     return !recent;
   }
