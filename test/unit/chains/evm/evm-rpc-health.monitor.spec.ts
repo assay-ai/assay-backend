@@ -1,3 +1,4 @@
+import { EvmRelayerFloatMonitor } from '@modules/chains/evm/evm-relayer-float.monitor';
 import { EvmRpcHealthMonitor } from '@modules/chains/evm/evm-rpc-health.monitor';
 import { AlertSeverity } from '@shared/alerting';
 
@@ -65,6 +66,29 @@ describe('EvmRpcHealthMonitor', () => {
       throw new Error('sink down');
     });
     await expect(run([{ host: 'a.test', failingForMs: 600_000 }], emit)).resolves.toBe(emit);
+  });
+
+  it('runs on the float monitor\u2019s scheduled pass, even when the clock check throws', async () => {
+    const rpcHealth = { check: jest.fn(async () => undefined) } as unknown as EvmRpcHealthMonitor;
+    const clock = {
+      check: jest.fn(async () => {
+        throw new Error('clock fault');
+      }),
+    } as never;
+    const floats = new EvmRelayerFloatMonitor(
+      {} as never,
+      { emit: async () => undefined } as never,
+      [],
+      null,
+      null,
+      null,
+      clock,
+      rpcHealth,
+    );
+
+    await floats.handleFloatCheck();
+
+    expect(rpcHealth.check).toHaveBeenCalledTimes(1);
   });
 
   it('skips a client without a health report', async () => {

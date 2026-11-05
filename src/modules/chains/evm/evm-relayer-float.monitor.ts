@@ -180,6 +180,14 @@ export class EvmRelayerFloatMonitor {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    try {
+      await this.rpcHealth?.check();
+    } catch (error) {
+      this.logger.error(
+        `the RPC health check threw past its own error handling: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
