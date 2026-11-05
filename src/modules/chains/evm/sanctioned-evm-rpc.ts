@@ -161,26 +161,28 @@ export function createSanctionedEvmClient(
   }
 
   /**
-   * With more than one endpoint, each is asked `eth_chainId` once before it
-   * serves anything: a list is where a testnet URL slips in, and its answers
-   * would read as this chain's. Not asked of a lone endpoint, the deployment's
-   * only choice. Throws only for a wrong chain; an endpoint that cannot answer
-   * fails on the real request anyway.
+   * With more than one endpoint, each must answer `eth_chainId` before it serves
+   * anything: a list is where a testnet URL slips in, and its answers would read
+   * as this chain's. Not asked of a lone endpoint, the deployment's only choice.
+   *
+   * `null` once it is known to be right. Its answer when it would not say, which
+   * the caller treats as this endpoint's failure: unverified is never used.
+   * Throws for a wrong chain.
    */
-  async function assertRightChain(url: string): Promise<void> {
-    if (endpoints.size === 1 || endpoints.chainChecked(url)) return;
+  async function refusalBeforeUse(url: string): Promise<EgressResponse | null> {
+    if (endpoints.size === 1 || endpoints.chainChecked(url)) return null;
     id += 1;
     const response = await postTo(
       url,
       JSON.stringify({ jsonrpc: '2.0', id, method: 'eth_chainId', params: [] }),
     );
-    if (response.status < 200 || response.status >= 300 || refusalInBody(response.body)) return;
+    if (failureOf(response) !== null) return response;
     const { result } = JSON.parse(response.body) as { result?: unknown };
-    if (typeof result !== 'string') return;
-    if (Number(result) !== chain.id) {
+    if (typeof result !== 'string' || Number(result) !== chain.id) {
       throw new EvmRpcWrongChainError();
     }
     endpoints.markChainChecked(url);
+    return null;
   }
 
   /**
@@ -195,8 +197,7 @@ export function createSanctionedEvmClient(
       let lastError: unknown = null;
       for (const url of endpoints.order()) {
         try {
-          await assertRightChain(url);
-          const response = await postTo(url, body);
+          const response = (await refusalBeforeUse(url)) ?? (await postTo(url, body));
           const failure = failureOf(response);
           if (failure === null) {
             endpoints.succeeded(url);
@@ -231,9 +232,16 @@ export function createSanctionedEvmClient(
     let notAsked: unknown = null;
     for (const url of endpoints.order()) {
       try {
-        await assertRightChain(url);
+        const unverified = await refusalBeforeUse(url);
+        if (unverified) {
+          // Before the bytes left: nothing to read back from this endpoint.
+          endpoints.failed(url, failureOf(unverified) as string);
+          refused = unverified;
+          if (unverified.status === 429) rateLimited = unverified;
+          continue;
+        }
       } catch (error) {
-        // Before the bytes left: nothing to read back from this endpoint.
+        // Likewise before the bytes left.
         notAsked = error;
         recordThrown(url, error);
         continue;

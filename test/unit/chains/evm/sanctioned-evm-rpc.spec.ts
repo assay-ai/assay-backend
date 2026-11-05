@@ -446,6 +446,21 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
       expect(client.rpcHealth()[0].lastFailure).toBe('WRONG_CHAIN');
     });
 
+    it('never uses an endpoint that would not say which chain it is on', async () => {
+      const { client: egress, requests } = fakeEgress((request) => {
+        if (methodOf(request) === 'eth_chainId') {
+          return request.url === FIRST ? { status: 429, body: '' } : chainIdReply;
+        }
+        return methodOf(request) === 'eth_sendRawTransaction' ? sent : blockReply;
+      });
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+      await expect(client.getBlockNumber()).resolves.toBe(16n);
+      await expect(client.sendRawTransaction(SEND)).resolves.toBe(hash);
+      expect(asked(requests, 'eth_blockNumber')).toEqual([SECOND]);
+      expect(asked(requests, 'eth_sendRawTransaction')).toEqual([SECOND]);
+    });
+
     it('reports hosts only: a key in the URL never reaches the health report', async () => {
       const { client: egress } = twoEndpoints(() => ({ status: 403, body: '' }));
       const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
