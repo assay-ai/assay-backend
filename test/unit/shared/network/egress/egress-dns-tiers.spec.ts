@@ -284,6 +284,15 @@ describe('configOriginEgressHosts', () => {
     ]);
   });
 
+  it('takes every host of an EVM_RPC_URLS list', () => {
+    const hosts = from({
+      EVM_RPC_URLS: JSON.stringify({
+        'eip155:4663': ['https://first.example.test/key', 'https://second.example.test'],
+      }),
+    });
+    expect([...hosts].sort()).toEqual(['first.example.test', 'second.example.test']);
+  });
+
   it('skips IP literals, malformed values and other schemes', () => {
     const hosts = from({
       EVM_RPC_URLS: '{not json',

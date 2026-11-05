@@ -4,6 +4,10 @@ import { VoucherChannelStatus } from '@database/postgres/entities/voucher-channe
 import { AlertSeverity } from '@shared/alerting';
 import { DEFAULT_CHANNEL_POLICY } from '@modules/payment/domain/channel/channel-policy';
 import { EMPTY_SLOT } from '@modules/payment/domain/channel/channel-voucher';
+import {
+  ChannelNotSentError,
+  ChannelSendDeferredError,
+} from '@modules/payment/ports/channel-door.port';
 import { ChannelSettlementService } from '@modules/payment/services/channel-settlement.service';
 
 const CHAIN = 'eip155:46630';
@@ -66,7 +70,11 @@ function build(options: {
   vouchers?: any[];
   window?: Record<string, unknown>;
   risk?: Record<string, boolean>;
+  collectError?: Error;
+  txHasHash?: boolean;
 }) {
+  const finished: { id: string; status: string }[] = [];
+  const discarded: string[] = [];
   const sent: { kind: string; lane?: string; items?: number }[] = [];
   const alerts: { severity: string; name: string }[] = [];
   const statuses: { id: string; status: string; reason: string }[] = [];
@@ -122,7 +130,11 @@ function build(options: {
     collectedByTx: async () => 0n,
     insertTx: async () => 'tx-1',
     appendTxRef: async () => undefined,
-    finishTx: async () => undefined,
+    finishTx: async (id: string, status: string) => void finished.push({ id, status }),
+    discardUnsentTx: async (id: string) => {
+      discarded.push(id);
+      return options.txHasHash !== true;
+    },
     recordUnpaid: async (row: any) => void unpaid.push(row),
     setLastSkip: async (id: string, reason: string | null) => void skips.push({ id, reason }),
     closeUnsettled: async () => [],
@@ -222,6 +234,7 @@ function build(options: {
       };
     },
     collect: async (_a: unknown, refs: any[], keep: bigint[]) => {
+      if (options.collectError) throw options.collectError;
       sent.push({ kind: 'collect', items: refs.length });
       return {
         txRef: '0xcollect',
@@ -252,6 +265,8 @@ function build(options: {
   );
   return {
     service,
+    finished,
+    discarded,
     sent,
     alerts,
     statuses,
@@ -297,6 +312,41 @@ describe('ChannelSettlementService (v3 §5.4, SPEC-W2 §3)', () => {
     expect(h.sent[0]).toEqual({ kind: 'collect', items: 1 });
     expect(h.intents.bookHeldCollected).toHaveBeenCalledWith('org', 'paid', '0xcollect');
     expect(h.intents.bookHeldCollected).not.toHaveBeenCalledWith('org', 'kept', expect.anything());
+  });
+
+  describe('a collect that was not sent', () => {
+    const matured = new Date((NOW - 3_600) * 1000);
+    const heldCalls = [call(50n, { heldStatus: 'HELD', collectableAt: matured })];
+    const slot = { ...EMPTY_SLOT, settled: 100n, h1: 200n, m1: HOUR - 1, r1: 1_000 };
+
+    it('leaves no record when it was only put off: a fee cap puts it off on every pass', async () => {
+      const h = build({
+        slot,
+        calls: heldCalls,
+        collectError: new ChannelSendDeferredError('fees'),
+      });
+      await h.service.run(ASSET as never);
+      expect(h.discarded).toHaveLength(1);
+      expect(h.finished).toEqual([]);
+    });
+
+    it('marks it DROPPED when a hash was recorded', async () => {
+      const h = build({
+        slot,
+        calls: heldCalls,
+        collectError: new ChannelSendDeferredError('fees'),
+        txHasHash: true,
+      });
+      await h.service.run(ASSET as never);
+      expect(h.finished).toEqual([expect.objectContaining({ status: 'DROPPED' })]);
+    });
+
+    it('keeps the DROPPED record of a send refused for any other reason', async () => {
+      const h = build({ slot, calls: heldCalls, collectError: new ChannelNotSentError('no rpc') });
+      await h.service.run(ASSET as never);
+      expect(h.discarded).toEqual([]);
+      expect(h.finished).toEqual([expect.objectContaining({ status: 'DROPPED' })]);
+    });
   });
 
   it('collects a FROZEN provider anyway (payout to unpaid) and pages it', async () => {

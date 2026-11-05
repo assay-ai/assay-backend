@@ -20,7 +20,7 @@ export const CONFIG_ORIGIN_URL_ENVS: readonly string[] = Object.freeze([
   'KORA_RPC_URL',
 ]);
 
-/** Variables holding a JSON object of URLs (`{"eip155:…": "https://…"}`). */
+/** Variables holding a JSON object of URLs (`{"eip155:…": "https://…"}`, or a list per key). */
 export const CONFIG_ORIGIN_URL_MAP_ENVS: readonly string[] = Object.freeze(['EVM_RPC_URLS']);
 
 /**
@@ -53,7 +53,9 @@ export function configOriginEgressHosts(
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
     for (const value of Object.values(parsed)) {
-      if (typeof value === 'string' && value.trim()) urls.push(value.trim());
+      for (const url of Array.isArray(value) ? (value as unknown[]) : [value]) {
+        if (typeof url === 'string' && url.trim()) urls.push(url.trim());
+      }
     }
   }
 

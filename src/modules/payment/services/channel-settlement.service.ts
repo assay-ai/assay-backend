@@ -909,7 +909,9 @@ export class ChannelSettlementService {
         // Put off (fees, budget) or not sent: these channels take no
         // non-deadline settle this pass (M5). Unknown: kept SENT, read back.
         for (const id of ids) deferred.add(id);
-        if (channelSendNotSent(error)) {
+        const putOff =
+          error instanceof ChannelSendDeferredError && (await this.channels.discardUnsentTx(txId));
+        if (!putOff && channelSendNotSent(error)) {
           await this.channels.finishTx(txId, ChannelTxStatus.DROPPED, 'not sent');
         }
         await this.sendFailed(asset, 'collectChannels', error);

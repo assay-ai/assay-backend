@@ -10,6 +10,7 @@ import {
 
 import { EvmChannelDoor } from '@modules/chains/evm/evm-channel-door.service';
 import { CHANNEL_DOOR_ABI } from '@modules/chains/evm/abi/channel-door.abi';
+import { ChannelSendDeferredError } from '@modules/payment/ports/channel-door.port';
 
 const CHAIN = 'eip155:46630' as never;
 const ASSET = 'eip155:46630/erc20:0x5FbDB2315678afecb367f032d93F642f64180aa3' as never;
@@ -326,6 +327,48 @@ describe('EvmChannelDoor — send outcomes (review 2026-10-31 H1/H2)', () => {
       beforeBroadcast: async (hash) => void recorded.push(hash),
     });
     expect(recorded).toEqual(['0xfeed']);
+  });
+
+  describe('the fee cap prices what a send burns (prod 2026-11-05)', () => {
+    // 500k estimated, so a limit of 625k: 18.75 uETH at 0.03 gwei, above the
+    // 10 uETH per-item cap. The collect's transfer floor is never burned.
+    const expensive = {
+      estimateContractGas: async () => 500_000n,
+      call: async () => ({
+        data: encodeAbiParameters(
+          [{ type: 'uint64' }, { type: 'uint256' }, { type: 'uint256' }],
+          [0n, 30_000_000n, 0n],
+        ),
+      }),
+    };
+    const landed = {
+      hash: '0xfeed',
+      status: 'SUCCESS',
+      revertReason: null,
+      gasUsed: 1n,
+      blockNumber: 1n,
+    };
+
+    it('sends a one-lane collect whose limit alone is above the cap, with its limit intact', async () => {
+      const limits: bigint[] = [];
+      const d = sendingDoor(async (call) => {
+        limits.push(call.gasLimit);
+        return landed;
+      }, expensive);
+
+      await d.collect(ASSET, [REF as never], [0n], 'ORDINARY');
+      expect(limits).toEqual([625_000n]);
+    });
+
+    it('still defers a collect that would burn more than the cap', async () => {
+      const d = sendingDoor(async () => landed, {
+        ...expensive,
+        estimateContractGas: async () => 1_000_000n,
+      });
+
+      const error = await d.collect(ASSET, [REF as never], [0n], 'ORDINARY').catch((e) => e);
+      expect(error).toBeInstanceOf(ChannelSendDeferredError);
+    });
   });
 
   it('a collect whose gas estimate failed still clears the per-payout gas floor (X-8)', async () => {

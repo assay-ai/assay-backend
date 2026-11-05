@@ -17,6 +17,7 @@ import {
   floatDedupeKey,
 } from './evm-relayer-float.constants';
 import { EvmChainClockMonitor } from './evm-chain-clock.monitor';
+import { EvmRpcHealthMonitor } from './evm-rpc-health.monitor';
 import { RedeemerFloatGate } from './evm-redeemer-float.gate';
 import { EVM_REDEEMER_KEYS_ENV, EVM_RELAYER_KEYS_ENV } from './evm-relayer-key-source';
 import { EVM_REDEEMER, EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
@@ -146,6 +147,8 @@ export class EvmRelayerFloatMonitor {
      * than on a cron of its own. Optional: a test of the floats need not build it.
      */
     @Optional() private readonly clock: EvmChainClockMonitor | null = null,
+    /** The RPC endpoints' health, on this pass too. Optional for the same reason. */
+    @Optional() private readonly rpcHealth: EvmRpcHealthMonitor | null = null,
   ) {}
 
   /**
@@ -174,6 +177,14 @@ export class EvmRelayerFloatMonitor {
     } catch (error) {
       this.logger.error(
         `the chain clock check threw past its own error handling: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      await this.rpcHealth?.check();
+    } catch (error) {
+      this.logger.error(
+        `the RPC health check threw past its own error handling: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }

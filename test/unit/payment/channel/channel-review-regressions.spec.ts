@@ -222,6 +222,7 @@ function build(options: {
     insertTx: async () => 'tx-1',
     appendTxRef: async () => undefined,
     finishTx: async () => undefined,
+    discardUnsentTx: async () => true,
     recordUnpaid: async () => undefined,
     claimRequests: async () => [],
     markClaimed: async () => undefined,

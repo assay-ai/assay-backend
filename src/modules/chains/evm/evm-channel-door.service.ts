@@ -118,6 +118,16 @@ const MAX_PER_ITEM_GAS = 400_000n;
 const ESTIMATE_NUM = 125n;
 const ESTIMATE_DEN = 100n;
 
+/**
+ * A send's gas when `eth_estimateGas` failed, and `unconsumed`: the part of its
+ * limit that must be available but is not burned.
+ */
+interface SendGasFallback {
+  readonly base: bigint;
+  readonly perItem: bigint;
+  readonly unconsumed?: bigint;
+}
+
 type Log = { address: string; data: `0x${string}`; topics: readonly `0x${string}`[] };
 
 interface ChannelClient extends EvmReaderClient {
@@ -604,7 +614,10 @@ export class EvmChannelDoor implements ChannelDoorPort {
       args,
       refs.length,
       lane,
-      collectFallbackGas(new Set(refs.map((ref) => getAddress(ref.provider))).size),
+      {
+        ...collectFallbackGas(new Set(refs.map((ref) => getAddress(ref.provider))).size),
+        unconsumed: TRANSFER_FLOOR_OUTSIDE_DELEGATE,
+      },
       options,
     );
     const events = this.channelEvents(chainId, sent.logs);
@@ -883,6 +896,7 @@ export class EvmChannelDoor implements ChannelDoorPort {
     const sent = await this.send(chainId, 'claimUnpaid', data, args, 1, 'ORDINARY', {
       base: collectFallbackGas(1).base,
       perItem: 0n,
+      unconsumed: TRANSFER_FLOOR_OUTSIDE_DELEGATE,
     });
     return { txRef: sent.txRef, landedAt: sent.landedAt };
   }
@@ -1024,7 +1038,7 @@ export class EvmChannelDoor implements ChannelDoorPort {
     args: readonly unknown[],
     count: number,
     lane: SendLane,
-    fallback: { base: bigint; perItem: bigint },
+    fallback: SendGasFallback,
     options: ChannelSendOptions = {},
   ): Promise<ChannelTxResult & { logs: readonly Log[] }> {
     // Everything before `sendCall` reads or decides; nothing is signed. A
@@ -1116,7 +1130,7 @@ export class EvmChannelDoor implements ChannelDoorPort {
     args: readonly unknown[],
     count: number,
     lane: SendLane,
-    fallback: { base: bigint; perItem: bigint },
+    fallback: SendGasFallback,
   ) {
     const urgent = lane !== 'ORDINARY';
     if (lane !== 'DEADLINE' && this.hourly?.paused(chainId, urgent)) {
@@ -1155,7 +1169,15 @@ export class EvmChannelDoor implements ChannelDoorPort {
     const gasLimit = execution + paddedL1Gas(l1Gas);
     // A fee spike defers only ordinary sends; a deadline or urgent send waives
     // the per-item cap, never the hard ceiling.
-    const verdict = backgroundSendVerdict(gasLimit, l2BaseFee, count, urgent);
+    //
+    // Priced on the gas it will burn, not its limit: a collect's limit carries
+    // the transfer floor, which `gasleft()` must reach and nothing consumes
+    // (unused gas is not paid for). Priced on the limit, a one-lane collect at
+    // 0.03 gwei read 18 uETH against a 10 uETH cap and waited on every pass,
+    // while the same collect burned about 7 uETH (prod 2026-11-05).
+    const unconsumed = fallback.unconsumed ?? 0n;
+    const toBurn = unconsumed < execution ? gasLimit - unconsumed : gasLimit;
+    const verdict = backgroundSendVerdict(toBurn, l2BaseFee, count, urgent);
     if (verdict === 'DEFER_CEILING' || verdict === 'DEFER') {
       throw new ChannelSendDeferredError(
         `${functionName} n=${count}: ${gasLimit} gas at ${l2BaseFee} wei is above the ` +

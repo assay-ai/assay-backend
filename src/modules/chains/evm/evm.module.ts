@@ -186,7 +186,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         return new Map(
           [...urls].map(([chainId, url]) => [
             chainId,
-            createSanctionedEvmClient(readRpcUrl(url, chainId), httpClient, evmChainOf(chainId)),
+            createSanctionedEvmClient(readRpcUrls(url, chainId), httpClient, evmChainOf(chainId)),
           ]),
         );
       },
@@ -848,6 +848,21 @@ function assertCoversEnabled(
         `Configured: ${[...configured.keys()].join(', ') || '(none)'}`,
     });
   }
+}
+
+/**
+ * One URL, or an ordered list: the first is asked first, the others take over
+ * when it fails (`EvmRpcEndpoints`).
+ */
+function readRpcUrls(value: unknown, chainId: ChainId): readonly string[] {
+  const urls = Array.isArray(value) ? value : [value];
+  if (urls.length === 0) {
+    throw ChainErrors.configValueInvalid({
+      variable: `${EVM_RPC_URLS_ENV}[${chainId}]`,
+      accepted: 'an https URL per chain, or a non-empty list of them',
+    });
+  }
+  return [...new Set(urls.map((url) => readRpcUrl(url, chainId)))];
 }
 
 function readRpcUrl(value: unknown, chainId: ChainId): string {
