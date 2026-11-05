@@ -152,6 +152,7 @@ function build(options: { lanes?: any[]; calls?: any[]; slot?: any; vouchers?: a
     insertTx: async () => 'tx-1',
     appendTxRef: async () => undefined,
     finishTx: async () => undefined,
+    discardUnsentTx: async () => true,
     recordUnpaid: async () => undefined,
     setLastSkip: async (id: string, reason: string | null) => void skips.push({ id, reason }),
     closeUnsettled: async (id: string, ids: string[], mark: string) => {

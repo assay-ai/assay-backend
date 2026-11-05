@@ -230,6 +230,12 @@ export function wire(
       if (!tx.txRefs.includes(hash)) tx.txRefs.push(hash);
       tx.status = 'SENT';
     },
+    discardUnsentTx: async (id: string) => {
+      const tx = txs.get(id);
+      if (!['PENDING', 'SENT'].includes(tx.status) || tx.txRefs.length > 0) return false;
+      txs.delete(id);
+      return true;
+    },
     finishTx: async (
       id: string,
       status: string,

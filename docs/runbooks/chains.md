@@ -39,7 +39,12 @@ changes what is live fails loudly at boot, where somebody is looking.
 Both of these are boot failures if an enabled eip155 chain is missing from them, and both are
 no-ops when no eip155 chain is enabled:
 
-- `EVM_RPC_URLS` — `{"eip155:46630":"https://…"}`. `https` only; there is no WebSocket transport.
+- `EVM_RPC_URLS` — `{"eip155:46630":"https://…"}`, or an ordered list per chain
+  (`{"eip155:46630":["https://first","https://fallback"]}`). A failed endpoint is asked last for
+  60 s; a send moves on only from a gateway's refusal (401, 402, 403, 429). Every endpoint is
+  trusted with chain reads, so list only operators you trust. Alerts: `evm_rpc_endpoint_failing`
+  (one endpoint, 5 min, WARN), `evm_rpc_all_failing` (all of them, CRITICAL). `https` only; there
+  is no WebSocket transport.
 - `EVM_RELAYER_FLOAT_LOW_WEI`, `EVM_RELAYER_FLOAT_CRITICAL_WEI`, `EVM_RELAYER_GAS_GRANT_MAX_WEI`
   and `EVM_RELAYER_GAS_GRANT_DAILY_MAX_WEI` — the float floor and the grant's two caps. **No
   defaults; unset is a boot failure**, because an unwatched float is worse than a process that

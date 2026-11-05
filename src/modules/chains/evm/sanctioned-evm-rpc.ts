@@ -1,7 +1,13 @@
 import { Chain, createPublicClient, custom } from 'viem';
 
-import { EgressHttpClient, INTERNAL_EGRESS_POLICY } from '@shared/network/egress';
+import { EgressHttpClient, EgressResponse, INTERNAL_EGRESS_POLICY } from '@shared/network/egress';
 
+import {
+  EVM_RPC_WRONG_CHAIN_COOLDOWN_MS,
+  EvmRpcEndpoints,
+  isGatewayRefusalStatus,
+  refusalInBody,
+} from './evm-rpc-endpoints';
 import { EvmSendAnswer, classifySendMessage } from './evm-send-rejected.error';
 
 /**
@@ -101,6 +107,14 @@ export class EvmRpcHttpError extends Error {
   }
 }
 
+/** An endpoint in a chain's list answers for another chain: skipped, and paged as `WRONG_CHAIN`. */
+class EvmRpcWrongChainError extends Error {
+  constructor() {
+    super('EVM RPC endpoint is on another chain');
+    this.name = 'EvmRpcWrongChainError';
+  }
+}
+
 /**
  * `0x` + a 4-byte selector + at most four 32-byte words.
  *
@@ -119,36 +133,144 @@ function boundedRevertData(data: unknown): `0x${string}` | null {
 /**
  * Waits before asking again after HTTP 429 (the gateway's rate limit, refused
  * before any node saw the request), for reads only: a read has no effect, so
- * asking again is always safe. `eth_sendRawTransaction` is never retried here;
- * `EvmRelayer` re-sends the same signed bytes itself and decides what an
- * all-429 send means. Prod 2026-11-04: a single 429 on one lane's read failed
+ * asking again is always safe. Waited out only once every endpoint has been
+ * asked. `eth_sendRawTransaction` is never retried here; `EvmRelayer` re-sends
+ * the same signed bytes itself and decides what an all-429 send means. Prod 2026-11-04: a single 429 on one lane's read failed
  * the whole channel pass, every minute.
  */
 export const EVM_RPC_RATE_LIMIT_READ_RETRY_MS: readonly number[] = Object.freeze([300, 700, 1_500]);
 
 export function createSanctionedEvmClient(
-  url: string,
+  urls: string | readonly string[],
   httpClient: EgressHttpClient,
   chain: Chain,
   readRetryDelaysMs: readonly number[] = EVM_RPC_RATE_LIMIT_READ_RETRY_MS,
 ) {
   let id = 0;
+  const endpoints = new EvmRpcEndpoints(typeof urls === 'string' ? [urls] : urls);
 
-  /** One POST; while the answer is HTTP 429 and `retry` holds, asked again after a wait. */
-  async function post(body: string, retry: boolean) {
+  /** One POST to one endpoint. See the single-call path below for why this policy is named. */
+  function postTo(url: string, body: string) {
+    return httpClient.request({
+      url,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      policy: INTERNAL_EGRESS_POLICY,
+    });
+  }
+
+  /**
+   * With more than one endpoint, each is asked `eth_chainId` once before it
+   * serves anything: a list is where a testnet URL slips in, and its answers
+   * would read as this chain's. Not asked of a lone endpoint, the deployment's
+   * only choice. Throws only for a wrong chain; an endpoint that cannot answer
+   * fails on the real request anyway.
+   */
+  async function assertRightChain(url: string): Promise<void> {
+    if (endpoints.size === 1 || endpoints.chainChecked(url)) return;
+    id += 1;
+    const response = await postTo(
+      url,
+      JSON.stringify({ jsonrpc: '2.0', id, method: 'eth_chainId', params: [] }),
+    );
+    if (response.status < 200 || response.status >= 300 || refusalInBody(response.body)) return;
+    const { result } = JSON.parse(response.body) as { result?: unknown };
+    if (typeof result !== 'string') return;
+    if (Number(result) !== chain.id) {
+      throw new EvmRpcWrongChainError();
+    }
+    endpoints.markChainChecked(url);
+  }
+
+  /**
+   * A read: every endpoint in turn until one answers. A read has no effect, so
+   * asking another is always safe. When all fail and one answered HTTP 429, the
+   * round is asked again after a wait.
+   */
+  async function postRead(body: string) {
     for (let attempt = 0; ; attempt += 1) {
-      const response = await httpClient.request({
-        url,
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body,
-        // See the single-call path below for why this policy is named.
-        policy: INTERNAL_EGRESS_POLICY,
-      });
-      if (response.status !== 429 || !retry || attempt >= readRetryDelaysMs.length) {
+      let lastAnswer: EgressResponse | null = null;
+      let rateLimited: EgressResponse | null = null;
+      let lastError: unknown = null;
+      for (const url of endpoints.order()) {
+        try {
+          await assertRightChain(url);
+          const response = await postTo(url, body);
+          const failure = failureOf(response);
+          if (failure === null) {
+            endpoints.succeeded(url);
+            return response;
+          }
+          endpoints.failed(url, failure);
+          lastAnswer = response;
+          if (response.status === 429) rateLimited = response;
+        } catch (error) {
+          lastError = error;
+          recordThrown(url, error);
+        }
+      }
+      if (rateLimited && attempt < readRetryDelaysMs.length) {
+        await new Promise((resolve) => setTimeout(resolve, readRetryDelaysMs[attempt]));
+        continue;
+      }
+      if (rateLimited ?? lastAnswer) return (rateLimited ?? lastAnswer) as EgressResponse;
+      throw lastError;
+    }
+  }
+
+  /**
+   * A send moves on only from a gateway's refusal, which reached no node. Any
+   * other failure stays "outcome unknown" and is the caller's to read back: the
+   * bytes may be in a pool, and a second node would answer `nonce too low` once
+   * they land, which reads as "not broadcast". `EvmRelayer` re-sends after 429.
+   */
+  async function postSend(body: string) {
+    let refused: EgressResponse | null = null;
+    let rateLimited: EgressResponse | null = null;
+    let notAsked: unknown = null;
+    for (const url of endpoints.order()) {
+      try {
+        await assertRightChain(url);
+      } catch (error) {
+        // Before the bytes left: nothing to read back from this endpoint.
+        notAsked = error;
+        recordThrown(url, error);
+        continue;
+      }
+      let response: EgressResponse;
+      try {
+        response = await postTo(url, body);
+      } catch (error) {
+        recordThrown(url, error);
+        throw error;
+      }
+      const failure = failureOf(response);
+      if (failure === null) {
+        endpoints.succeeded(url);
         return response;
       }
-      await new Promise((resolve) => setTimeout(resolve, readRetryDelaysMs[attempt]));
+      endpoints.failed(url, failure);
+      // `BAD_JSON` on a 2xx is not a refusal: a node may have taken the bytes.
+      const gatewayRefused = isGatewayRefusalStatus(response.status) || failure.startsWith('RPC ');
+      if (!gatewayRefused) return response;
+      refused = response;
+      if (response.status === 429) rateLimited = response;
+    }
+    if (rateLimited ?? refused) return (rateLimited ?? refused) as EgressResponse;
+    throw notAsked;
+  }
+
+  function failureOf(response: EgressResponse): string | null {
+    if (response.status < 200 || response.status >= 300) return `HTTP ${response.status}`;
+    return refusalInBody(response.body);
+  }
+
+  function recordThrown(url: string, error: unknown): void {
+    if (error instanceof EvmRpcWrongChainError) {
+      endpoints.failed(url, 'WRONG_CHAIN', EVM_RPC_WRONG_CHAIN_COOLDOWN_MS);
+    } else {
+      endpoints.failed(url, 'NETWORK');
     }
   }
 
@@ -165,7 +287,7 @@ export function createSanctionedEvmClient(
     if (calls.length === 0) return [];
     const first = id + 1;
     id += calls.length;
-    const response = await post(
+    const response = await postRead(
       JSON.stringify(
         calls.map((call, i) => ({
           jsonrpc: '2.0',
@@ -174,7 +296,6 @@ export function createSanctionedEvmClient(
           params: call.params,
         })),
       ),
-      calls.every((call) => call.method !== 'eth_sendRawTransaction'),
     );
     if (response.status < 200 || response.status >= 300) {
       throw new EvmRpcHttpError(`EVM RPC batch failed: HTTP ${response.status}`, response.status);
@@ -210,7 +331,7 @@ export function createSanctionedEvmClient(
       {
         async request({ method, params }) {
           id += 1;
-          // The egress policy, `INTERNAL_EGRESS_POLICY` (set in `post`), is
+          // The egress policy, `INTERNAL_EGRESS_POLICY` (set in `postTo`), is
           // named rather than defaulted — the same
           // declaration `http-facilitator.adapter.ts` and
           // `kora-fee-payer.signer.ts` make, and for the same reason.
@@ -231,10 +352,9 @@ export function createSanctionedEvmClient(
           // the pinned connect, per-hop redirect re-checking and every limit
           // still apply, and the hop is still sanctioned by the one socket
           // `EgressHttpClient` opens.
-          const response = await post(
-            JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-            method !== 'eth_sendRawTransaction',
-          );
+          const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+          const response =
+            method === 'eth_sendRawTransaction' ? await postSend(payload) : await postRead(payload);
 
           // A 502 HTML error page parses to nothing useful, and `undefined` as a
           // result reads downstream as a call that succeeded and returned
@@ -291,7 +411,7 @@ export function createSanctionedEvmClient(
       },
       { retryCount: 0 },
     ),
-  }).extend(() => ({ rpcBatch }));
+  }).extend(() => ({ rpcBatch, rpcHealth: () => endpoints.health() }));
 }
 
 /**

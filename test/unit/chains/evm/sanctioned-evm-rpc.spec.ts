@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { parseAbi } from 'viem';
 
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
-import { sendAnswerOf } from '@modules/chains/evm/evm-send-rejected.error';
+import { isRateLimitedRpc, sendAnswerOf } from '@modules/chains/evm/evm-send-rejected.error';
 import {
   EgressHttpClient,
   EgressRequest,
@@ -294,6 +294,169 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
       client.sendRawTransaction({ serializedTransaction: '0x02' as `0x${string}` }),
     ).rejects.toThrow();
     expect(requests).toHaveLength(1);
+  });
+
+  describe('an ordered list of endpoints', () => {
+    const FIRST = 'https://first.example.test/secret-key';
+    const SECOND = 'https://second.example.test';
+    const chainIdReply = { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0xb626' }) };
+    const blockReply = { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }) };
+    const SEND = { serializedTransaction: '0x02' as `0x${string}` };
+    const hash = `0x${'ab'.repeat(32)}`;
+    const sent = { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: hash }) };
+
+    function methodOf(request: EgressRequest): string {
+      return (JSON.parse(String(request.body)) as { method: string }).method;
+    }
+    /** `first` answers everything but `eth_chainId` this way; `second` always serves. */
+    function twoEndpoints(first: () => Partial<EgressResponse>) {
+      return fakeEgress((request) => {
+        if (methodOf(request) === 'eth_chainId') return chainIdReply;
+        if (request.url === FIRST) return first();
+        return methodOf(request) === 'eth_sendRawTransaction' ? sent : blockReply;
+      });
+    }
+    const asked = (requests: EgressRequest[], method: string) =>
+      requests.filter((r) => methodOf(r) === method).map((r) => r.url);
+
+    it.each([403, 429, 500, 503])('a read moves on from HTTP %i', async (status) => {
+      const { client: egress, requests } = twoEndpoints(() => ({ status, body: '' }));
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+      await expect(client.getBlockNumber()).resolves.toBe(16n);
+      expect(asked(requests, 'eth_blockNumber')).toEqual([FIRST, SECOND]);
+    });
+
+    it('a read moves on from a thrown request and from a gateway refusal with HTTP 200', async () => {
+      const thrown = fakeEgress((request) => {
+        if (request.url === FIRST) throw new Error('timeout');
+        return methodOf(request) === 'eth_chainId' ? chainIdReply : blockReply;
+      });
+      await expect(
+        createSanctionedEvmClient(
+          [FIRST, SECOND],
+          thrown.client,
+          TEST_CHAIN as never,
+          [],
+        ).getBlockNumber(),
+      ).resolves.toBe(16n);
+
+      const limited = twoEndpoints(() => ({
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32005, message: 'limit' } }),
+      }));
+      await expect(
+        createSanctionedEvmClient(
+          [FIRST, SECOND],
+          limited.client,
+          TEST_CHAIN as never,
+          [],
+        ).getBlockNumber(),
+      ).resolves.toBe(16n);
+    });
+
+    it('a revert is an answer: no other endpoint is asked', async () => {
+      const { client: egress, requests } = twoEndpoints(() => ({
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: 3, message: 'reverted' } }),
+      }));
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+      await expect(client.getBlockNumber()).rejects.toThrow(/code 3/);
+      expect(asked(requests, 'eth_blockNumber')).toEqual([FIRST]);
+    });
+
+    it('asks a failed endpoint last while it cools down, and first again afterwards', async () => {
+      const realNow = Date.now;
+      let now = 1_000_000;
+      Date.now = () => now;
+      try {
+        let down = true;
+        const { client: egress, requests } = twoEndpoints(() =>
+          down ? { status: 403, body: '' } : blockReply,
+        );
+        const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+        await client.getBlockNumber({ cacheTime: 0 });
+        await client.getBlockNumber({ cacheTime: 0 });
+        expect(asked(requests, 'eth_blockNumber')).toEqual([FIRST, SECOND, SECOND]);
+
+        down = false;
+        now += 60_001;
+        await client.getBlockNumber({ cacheTime: 0 });
+        expect(asked(requests, 'eth_blockNumber')).toEqual([FIRST, SECOND, SECOND, FIRST]);
+        expect(client.rpcHealth().every((e) => e.failingSince === null)).toBe(true);
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    it('a send moves on from a gateway refusal: it reached no node', async () => {
+      for (const status of [401, 403, 429]) {
+        const { client: egress, requests } = twoEndpoints(() => ({ status, body: '' }));
+        const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+        await expect(client.sendRawTransaction(SEND)).resolves.toBe(hash);
+        expect(asked(requests, 'eth_sendRawTransaction')).toEqual([FIRST, SECOND]);
+      }
+    });
+
+    it('a send does NOT move on when a node may have taken the bytes', async () => {
+      const unknowns: (() => Partial<EgressResponse>)[] = [
+        () => ({ status: 502, body: '' }),
+        () => ({ status: 503, body: '' }),
+        () => ({ body: '<html>' }),
+        () => {
+          throw new Error('socket hang up');
+        },
+      ];
+      for (const first of unknowns) {
+        const { client: egress, requests } = twoEndpoints(first);
+        const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+        await expect(client.sendRawTransaction(SEND)).rejects.toThrow();
+        expect(asked(requests, 'eth_sendRawTransaction')).toEqual([FIRST]);
+      }
+    });
+
+    it('a send every gateway refused reports 429 when one said so: the relayer reads it as not broadcast', async () => {
+      const { client: egress } = fakeEgress((request) => {
+        if (methodOf(request) === 'eth_chainId') return chainIdReply;
+        return { status: request.url === FIRST ? 429 : 403, body: '' };
+      });
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+      const error = await client.sendRawTransaction(SEND).catch((e: unknown) => e);
+      expect(isRateLimitedRpc(error)).toBe(true);
+    });
+
+    it('never uses an endpoint on another chain, for a read or a send', async () => {
+      const { client: egress, requests } = fakeEgress((request) => {
+        if (methodOf(request) === 'eth_chainId') {
+          return request.url === FIRST
+            ? { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x1' }) }
+            : chainIdReply;
+        }
+        return methodOf(request) === 'eth_sendRawTransaction' ? sent : blockReply;
+      });
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+
+      await expect(client.getBlockNumber()).resolves.toBe(16n);
+      await expect(client.sendRawTransaction(SEND)).resolves.toBe(hash);
+      expect(asked(requests, 'eth_blockNumber')).toEqual([SECOND]);
+      expect(asked(requests, 'eth_sendRawTransaction')).toEqual([SECOND]);
+      expect(client.rpcHealth()[0].lastFailure).toBe('WRONG_CHAIN');
+    });
+
+    it('reports hosts only: a key in the URL never reaches the health report', async () => {
+      const { client: egress } = twoEndpoints(() => ({ status: 403, body: '' }));
+      const client = createSanctionedEvmClient([FIRST, SECOND], egress, TEST_CHAIN as never, []);
+      await client.getBlockNumber();
+
+      expect(JSON.stringify(client.rpcHealth())).not.toContain('secret-key');
+      expect(client.rpcHealth()[0]).toMatchObject({
+        host: 'first.example.test',
+        lastFailure: 'HTTP 403',
+      });
+    });
   });
 
   it('no file under chains/evm reaches a network primitive directly', () => {

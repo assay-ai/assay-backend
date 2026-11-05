@@ -1015,6 +1015,21 @@ export class VoucherChannelRepository {
    * piece the chain answered `AlreadyRefunded` for, booked at its landing's
    * amount — MF-1).
    */
+  /**
+   * Removes a record whose send was put off before anything was signed: no
+   * hash, no attempt, nothing to read back, and a fee-capped collect is put off
+   * on every pass. `false` when it has a hash, which stays on the record.
+   */
+  async discardUnsentTx(id: string): Promise<boolean> {
+    const result = (await this.manager.query(
+      `DELETE FROM "channel_txs"
+        WHERE "id" = $1 AND "status" IN ('PENDING', 'SENT') AND cardinality("tx_refs") = 0
+        RETURNING "id"`,
+      [id],
+    )) as unknown;
+    return affectedRows(result) > 0;
+  }
+
   async finishTx(
     id: string,
     status: ChannelTxStatus.LANDED | ChannelTxStatus.PARTIAL | ChannelTxStatus.DROPPED,
