@@ -38,7 +38,7 @@ export function socketIoServerOptions(
 export class RedisIoAdapter extends IoAdapter {
   private adapterConstructor: ReturnType<typeof createAdapter>;
 
-  private readonly logger = new Logger(RedisIoAdapter.name);
+  private readonly adapterLogger = new Logger(RedisIoAdapter.name);
 
   constructor(
     private readonly app: INestApplication,
@@ -60,11 +60,11 @@ export class RedisIoAdapter extends IoAdapter {
 
     // Log connection events
     subClient.on('connect', () => {
-      this.logger.log('Redis sub client connected');
+      this.adapterLogger.log('Redis sub client connected');
     });
 
     subClient.on('error', (err) => {
-      this.logger.error('Redis sub client error:', err);
+      this.adapterLogger.error('Redis sub client error:', err);
     });
 
     // Wait for sub client to be ready
@@ -77,7 +77,7 @@ export class RedisIoAdapter extends IoAdapter {
     });
 
     this.adapterConstructor = createAdapter(pubClient, subClient);
-    this.logger.log('Redis adapter created successfully');
+    this.adapterLogger.log('Redis adapter created successfully');
   }
 
   /**
@@ -90,7 +90,7 @@ export class RedisIoAdapter extends IoAdapter {
     );
     server.adapter(this.adapterConstructor);
 
-    this.logger.log('Socket.IO server created with Redis adapter');
+    this.adapterLogger.log('Socket.IO server created with Redis adapter');
     return server;
   }
 }
