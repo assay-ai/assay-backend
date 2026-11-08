@@ -95,6 +95,7 @@
     "demo:identity": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/mcp/seed/demo-identity.ts"
   },
   "dependencies": {
+    "@assay/settlement-client": "1.0.0",
     "@bull-board/api": "^7.1.5",
     "@bull-board/express": "^7.1.5",
     "@bull-board/nestjs": "^7.1.5",
@@ -102,24 +103,23 @@
     "@modelcontextprotocol/server": "^2.3.1",
     "@nestjs/bullmq": "^11.0.0",
     "@nestjs/cache-manager": "^2.2.2",
-    "@nestjs/common": "^11.1.9",
+    "@nestjs/common": "^11.2.8",
     "@nestjs/config": "^3.3.0",
-    "@nestjs/core": "^11.1.9",
+    "@nestjs/core": "^11.2.8",
     "@nestjs/event-emitter": "^3.0.1",
     "@nestjs/jwt": "^11.0.2",
     "@nestjs/passport": "^11.0.5",
-    "@nestjs/platform-express": "^11.1.9",
-    "@nestjs/platform-socket.io": "^11.1.9",
+    "@nestjs/platform-express": "^11.2.8",
+    "@nestjs/platform-socket.io": "^11.2.8",
     "@nestjs/schedule": "^6.1.0",
     "@nestjs/swagger": "^8.0.7",
     "@nestjs/typeorm": "^10.0.2",
-    "@nestjs/websockets": "^11.1.9",
+    "@nestjs/websockets": "^11.2.8",
     "@noble/curves": "1.9.7",
     "@socket.io/redis-adapter": "^8.3.0",
     "@solana-program/token": "^0.15.0",
     "@solana/kit": "^7.0.0",
     "@solana/web3.js": "^1.98.0",
-    "@assay/settlement-client": "1.0.0",
     "bullmq": "^5.34.0",
     "cache-manager": "^5.7.6",
     "class-transformer": "^0.5.1",
@@ -134,12 +134,12 @@
     "redis": "^4.7.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "socket.io": "^4.8.1",
+    "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.1",
     "tldts": "7.4.16",
     "typeorm": "^0.3.28",
     "viem": "2.21.55",
-    "yaml": "^2.6.1"
+    "yaml": "^2.8.3"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.2.0",
@@ -149,7 +149,7 @@
     "@modelcontextprotocol/client": "^2.3.1",
     "@nestjs/cli": "^11.0.14",
     "@nestjs/schematics": "^11.0.9",
-    "@nestjs/testing": "^11.1.9",
+    "@nestjs/testing": "^11.2.8",
     "@solana-program/compute-budget": "^0.17.0",
     "@solana-program/memo": "^0.12.0",
     "@solana-program/system": "^0.13.0",
@@ -201,5 +201,16 @@
       "eslint --fix",
       "prettier --write"
     ]
+  },
+  "resolutions": {
+    "body-parser": "^2.4.0",
+    "engine.io": "^6.6.10",
+    "socket.io-parser": "^4.2.7",
+    "**/router/path-to-regexp": "^8.4.2",
+    "qs": "^6.16.0",
+    "yaml": "^2.8.3",
+    "**/socket.io-adapter/ws": "^8.21.0",
+    "**/engine.io-client/ws": "^8.21.0",
+    "**/viem/ws": "^8.21.0"
   }
 }
