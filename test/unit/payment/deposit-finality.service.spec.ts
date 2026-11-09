@@ -9,6 +9,8 @@ import { DepositFinalityService } from '@modules/payment/services/deposit-finali
 import { MoneyUtil } from '@shared/utils/money.util';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import {
+  DEPOSIT_DROP_MIN_AGE_MS,
+  DEPOSIT_DROP_RECHECK_MS,
   DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
   DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
   DEPOSIT_UNCOVERED_BACKOFF_MAX_MS,
@@ -57,6 +59,7 @@ function build(
   const deposits = {
     findSettledAwaitingFinality: jest.fn(async () => [{ ...row }]),
     markFinalityResolved: jest.fn().mockResolvedValue(undefined),
+    deferFinalityCheck: jest.fn().mockResolvedValue(1),
     markFinalityUncovered: jest.fn(async (_org: string, _id: string, since: Date) => {
       row.uncoveredSince = since;
       return 1;
@@ -101,6 +104,9 @@ function build(
   return { service, deposits, ledger, adapter, audit, coverage };
 }
 
+/** A pending credit old enough that "gone at every commitment" may count as a drop. */
+const OLD = { pendingAt: new Date(Date.now() - DEPOSIT_DROP_MIN_AGE_MS - 60_000) };
+
 const LANDED = { amount: '25000000', asset: ASSET_IDS.USDG_ROBINHOOD_TESTNET, decimals: 6 };
 
 describe('DepositFinalityService sweep', () => {
@@ -118,12 +124,43 @@ describe('DepositFinalityService sweep', () => {
   });
 
   it('rejects only a transfer the chain no longer shows at any commitment', async () => {
-    const { service, ledger } = build(() => null);
+    const { service, ledger } = build(() => null, OLD);
 
     await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ rejected: 1 });
     expect(ledger.appendNow).toHaveBeenCalledWith(
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_REJECT, chainTxRef: TX }),
     );
+  });
+
+  // Money #1: one "not found" can come from a lagging or failover endpoint. A
+  // young deposit is never rejected on it: it is re-checked a minute later and
+  // stays pending, whatever the reads say, until the minimum age has passed.
+  it('never rejects a deposit that is merely not visible yet: defers it until the minimum age', async () => {
+    const { service, ledger, deposits } = build(() => null, {
+      pendingAt: new Date(Date.now() - DEPOSIT_DROP_MIN_AGE_MS + 60_000),
+    });
+    const before = Date.now();
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({
+      rejected: 0,
+      skipped: 1,
+    });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(deposits.markFinalityResolved).not.toHaveBeenCalled();
+    expect(deposits.markFinalityUncovered).not.toHaveBeenCalled();
+    expect(deposits.deferFinalityCheck).toHaveBeenCalledWith('org-1', 'dep-1', expect.any(Date));
+    const next = (deposits.deferFinalityCheck.mock.calls[0][2] as Date).getTime();
+    expect(next).toBeGreaterThanOrEqual(before + DEPOSIT_DROP_RECHECK_MS);
+  });
+
+  it('treats a pending credit with no timestamp as young (never rejects on it)', async () => {
+    const { service, ledger } = build(() => null);
+    ledger.readJournal.mockResolvedValue([
+      { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
+    ]);
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ rejected: 0 });
+    expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
   it('confirms a finalized transfer', async () => {
@@ -163,7 +200,7 @@ describe('DepositFinalityService audit rows (B7)', () => {
   });
 
   it('logs a rejected deposit', async () => {
-    const { service, audit } = build(() => null);
+    const { service, audit } = build(() => null, OLD);
 
     await service.promotePendingDeposits(10);
 
@@ -228,7 +265,7 @@ describe('DepositFinalityService notices (B8)', () => {
     );
 
     const failed = jest.fn().mockResolvedValue(undefined);
-    await build(() => null, { notify: failed }).service.promotePendingDeposits(10);
+    await build(() => null, { ...OLD, notify: failed }).service.promotePendingDeposits(10);
     expect(failed.mock.calls[0][0].body).toBe(
       'Your deposit of $25.00 could not be finalized on chain. No balance was affected.',
     );

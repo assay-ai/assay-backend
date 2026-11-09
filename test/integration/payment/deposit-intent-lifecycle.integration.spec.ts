@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DepositIntentEntity } from '@database/postgres/entities/deposit-intent.entity';
 import { DepositIntentStatus } from '@modules/payment/ports/deposit.types';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
+import { DEPOSIT_DROP_MIN_AGE_MS } from '@modules/payment/constants/deposit-intent.constants';
 
 import {
   DepositTestContext,
@@ -214,7 +215,11 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
 
-    const report = await ctx.finality.promotePendingDeposits(50);
+    // Gone at every commitment counts as a drop only once the pending credit is
+    // older than DEPOSIT_DROP_MIN_AGE_MS (a lagging endpoint must not reject it).
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now + DEPOSIT_DROP_MIN_AGE_MS + 1_000);
+    const report = await ctx.finality.promotePendingDeposits(50).finally(() => clock.mockRestore());
     expect(report.rejected).toBeGreaterThanOrEqual(1);
 
     expect(await ctx.pending(agent)).toBe(0n);

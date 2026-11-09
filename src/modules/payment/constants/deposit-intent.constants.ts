@@ -193,6 +193,18 @@ export const DEPOSIT_UNCOVERED_ALERT_AFTER_MS = 15 * 60 * 1000;
 export const DEPOSIT_UNCOVERED_BACKOFF_MIN_MS = 30 * 1000;
 export const DEPOSIT_UNCOVERED_BACKOFF_MAX_MS = 10 * 60 * 1000;
 
+/**
+ * The finality sweep rejects a deposit as dropped only after its transaction
+ * has been unobservable (at `finalized` and at `latest`) for at least this
+ * long since the pending credit was written. One "not found" can come from a
+ * lagging or failover RPC endpoint, and a reject is permanent. A real drop on
+ * the supported chains is rare, so waiting costs nothing but a late notice.
+ */
+export const DEPOSIT_DROP_MIN_AGE_MS = 30 * 60 * 1000;
+
+/** How soon the sweep looks again at a deposit it could not see yet. */
+export const DEPOSIT_DROP_RECHECK_MS = 60 * 1000;
+
 /** How long one uncovered deposit's alert stays quiet after paging. */
 export const DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS = 24 * 60 * 60;
 

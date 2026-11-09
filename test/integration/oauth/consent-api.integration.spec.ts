@@ -388,7 +388,7 @@ describe('OAuth consent API — real database and Redis', () => {
   it('approve → redirectTo continue; the approval is recorded for continue to take', async () => {
     const rid = await newRequest();
     await read(rid);
-    const response = await approve(rid, { agentId: PERSON_A, name: '  Laptop‏ app  ' });
+    const response = await approve(rid, { agentId: PERSON_A, name: '  Laptop\u200F app  ' });
     expect(response.status).toBe(200);
     expect(response.body.data).toEqual({ redirectTo: continueUrl(rid) });
 
@@ -557,7 +557,7 @@ describe('OAuth consent API — real database and Redis', () => {
       (await approve(rid, { agentId: PERSON_A, name: 'x', approvedBy: 'someone-else' })).status,
     ).toBe(400);
     expect((await approve(rid, { agentId: 'not-a-uuid', name: 'x' })).status).toBe(400);
-    expect((await approve(rid, { agentId: PERSON_A, name: '‏‎' })).status).toBe(400);
+    expect((await approve(rid, { agentId: PERSON_A, name: '\u200F\u200E' })).status).toBe(400);
     expect((await approve(rid, { agentId: PERSON_A, name: 'Fine' })).status).toBe(200);
   });
 

@@ -99,7 +99,6 @@
     "@bull-board/api": "^7.1.5",
     "@bull-board/express": "^7.1.5",
     "@bull-board/nestjs": "^7.1.5",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "@modelcontextprotocol/server": "^2.3.1",
     "@nestjs/bullmq": "^11.0.0",
     "@nestjs/cache-manager": "^2.2.2",
@@ -125,9 +124,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.3",
     "express-basic-auth": "^1.2.1",
-    "husky": "^9.1.7",
     "ioredis": "^5.8.2",
-    "lint-staged": "^16.2.7",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "^8.16.3",
@@ -147,6 +144,7 @@
     "@eslint/eslintrc": "^3.2.0",
     "@eslint/js": "^9.18.0",
     "@modelcontextprotocol/client": "^2.3.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@nestjs/cli": "^11.0.14",
     "@nestjs/schematics": "^11.0.9",
     "@nestjs/testing": "^11.2.8",
@@ -166,7 +164,9 @@
     "eslint-plugin-prettier": "^5.2.2",
     "fast-check": "^4.9.0",
     "globals": "^16.0.0",
+    "husky": "^9.1.7",
     "jest": "^30.0.0",
+    "lint-staged": "^16.2.7",
     "prettier": "^3.7.4",
     "source-map-support": "^0.5.21",
     "supertest": "^7.0.0",
@@ -211,6 +211,8 @@
     "yaml": "^2.8.3",
     "**/socket.io-adapter/ws": "^8.21.0",
     "**/engine.io-client/ws": "^8.21.0",
-    "**/viem/ws": "^8.21.0"
+    "**/viem/ws": "^8.21.0",
+    "form-data": "^4.0.6",
+    "typeorm/uuid": "^11.1.1"
   }
 }

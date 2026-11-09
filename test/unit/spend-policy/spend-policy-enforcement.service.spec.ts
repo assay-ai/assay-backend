@@ -542,13 +542,44 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — no policy exists',
     await expect(service.assertCallAllowed(input())).resolves.toBe(1);
   });
 
-  it('permits the call ungoverned (policyVersion null) when seeding fails for any other reason', async () => {
+  // Money #6: it used to permit the call ungoverned (no per-call, hourly,
+  // daily or monthly cap). It now fails closed with a retryable refusal.
+  it('refuses the call, retryable, when seeding fails for any other reason', async () => {
+    const findLive = jest.fn().mockResolvedValue(null);
+    const insert = jest.fn().mockRejectedValue(new Error('database is unreachable'));
+
+    const { service, velocity } = build({ findLive, insert });
+
+    await expect(service.assertCallAllowed(input())).rejects.toMatchObject({
+      errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+      context: { reason: 'UNAVAILABLE', retryAfter: 5 },
+    });
+    expect(velocity.consume).not.toHaveBeenCalled();
+  });
+
+  it('refuses the call, retryable, when no policy can be read even after seeding', async () => {
+    const findLive = jest.fn().mockResolvedValue(null);
+
+    const { service } = build({ findLive });
+
+    await expect(service.assertCallAllowed(input())).rejects.toMatchObject({
+      errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+    });
+  });
+
+  it('refuses a debt replacement too when seeding fails', async () => {
     const findLive = jest.fn().mockResolvedValue(null);
     const insert = jest.fn().mockRejectedValue(new Error('database is unreachable'));
 
     const { service } = build({ findLive, insert });
 
-    await expect(service.assertCallAllowed(input())).resolves.toBeNull();
+    await expect(
+      service.assertReplacementAllowed({
+        organizationId: ORG,
+        agentId: 'agent-1',
+        price: money('1000'),
+      }),
+    ).rejects.toMatchObject({ errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED });
   });
 });
 
