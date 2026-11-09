@@ -185,7 +185,9 @@ export class CallDisputeSlaService {
   /**
    * Upheld disputes whose held payment still has to go back (rail B):
    * `refundHeld`, with the redeemer key, then booked. A failure backs off on
-   * the intent and is retried on a later pass.
+   * the intent and is retried on a later pass. Fewest attempts first, so rows
+   * that keep failing (each backed off) never starve newer refunds of the
+   * batch.
    */
   async refundPending(limit = 64): Promise<number> {
     const rows = (await this.dataSource.query(
@@ -193,7 +195,7 @@ export class CallDisputeSlaService {
          JOIN "payment_intents" i ON i."id" = d."intent_id" AND i."organization_id" = d."organization_id"
         WHERE d."state" = 'UPHELD' AND d."refund_state" = 'PENDING'
           AND (i."held_retry_at" IS NULL OR i."held_retry_at" <= now())
-        ORDER BY d."resolved_at" ASC
+        ORDER BY i."held_attempts" ASC, d."resolved_at" ASC
         LIMIT $1`,
       [limit],
     )) as { id: string }[];

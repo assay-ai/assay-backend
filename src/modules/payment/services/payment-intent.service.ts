@@ -997,7 +997,10 @@ export class PaymentIntentService {
       chainTxRef:
         intent.rail === PaymentRail.RAIL_A_PER_CALL
           ? RAIL_A_BOOK_CREDIT_TX_REF
-          : (txRef ?? `held_collected:seq=${intent.voucherSeq}`),
+          : (txRef ??
+            (intent.voucherFormat === VoucherFormat.CHANNEL
+              ? `channel_collected:${intentId}`
+              : `held_collected:seq=${intent.voucherSeq}`)),
     });
     await this.intents.manager.transaction((manager) =>
       this.intents.markHeldCollected(
@@ -1068,7 +1071,23 @@ export class PaymentIntentService {
         amount: BigInt(intent.price.amount),
         intentId,
       });
-      if (outcome.kind === 'COLLECTED') return 'COLLECTED';
+      if (outcome.kind === 'COLLECTED') {
+        if (outcome.partial) {
+          // Part refunded on chain, the rest collected: booking either side in
+          // full would be wrong. Left HELD and retried with back-off; the
+          // refund service has already logged it for the reconciler.
+          throw PaymentErrors.channelRefundNotSent({
+            intentId,
+            reason: 'partly refunded, the rest collected by the provider',
+          });
+        }
+        // The bucket paid this call out to the provider (a collect after the
+        // refund window lapsed). Book it like the per-call branch does, so the
+        // row leaves HELD and the dispute closes as NOT_REFUNDABLE instead of
+        // being re-read every pass forever.
+        await this.bookHeldCollected(organizationId, intentId, null);
+        return 'COLLECTED';
+      }
       if (outcome.kind === 'TIMED_OUT') return 'TIMED_OUT';
       if (outcome.kind === 'NOT_FOUND') {
         throw PaymentErrors.channelRefundNotSent({ intentId, reason: outcome.reason });
