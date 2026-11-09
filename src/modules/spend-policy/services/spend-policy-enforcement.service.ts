@@ -269,14 +269,6 @@ export class SpendPolicyEnforcementService {
     const { organizationId, agentId, price, requestHash } = input;
 
     const policy = await this.resolveLivePolicy(organizationId, agentId, price);
-    if (!policy) {
-      this.logger.warn(
-        `org ${organizationId} agent ${agentId}: no spend policy could be resolved or seeded; ` +
-          `permitting the call ungoverned`,
-      );
-      return null;
-    }
-
     this.assertPolicyAdmits(policy, agentId, price);
 
     // 4. Velocity — calls/minute, calls/hour, duplicate-hash (attempts).
@@ -390,7 +382,6 @@ export class SpendPolicyEnforcementService {
     readonly price: Money;
   }): Promise<void> {
     const policy = await this.resolveLivePolicy(input.organizationId, input.agentId, input.price);
-    if (!policy) return;
     this.assertPolicyAdmits(policy, input.agentId, input.price);
   }
 
@@ -444,11 +435,18 @@ export class SpendPolicyEnforcementService {
     }
   }
 
+  /**
+   * The live policy, seeding the organization default on first use. Fails
+   * CLOSED (money #6): when no policy can be read or seeded (a database error
+   * other than a lost seed race), the call is refused with a retryable
+   * "unavailable" instead of running with no per-call, hourly, daily or
+   * monthly cap.
+   */
   private async resolveLivePolicy(
     organizationId: string,
     agentId: string,
     price: Money,
-  ): Promise<SpendPolicyEntity | null> {
+  ): Promise<SpendPolicyEntity> {
     const existing = await this.policies.findLive(organizationId, agentId);
     if (existing) return existing;
 
@@ -457,15 +455,24 @@ export class SpendPolicyEnforcementService {
     } catch (error) {
       if (!isUniqueViolation(error)) {
         this.logger.warn(
-          `org ${organizationId}: could not seed a default spend policy. ${describe(error)}`,
+          `org ${organizationId}: could not seed a default spend policy; refusing the call ` +
+            `(retryable). ${describe(error)}`,
         );
-        return null;
+        throw spendPolicyUnavailable();
       }
       // Lost the seed race to a concurrent first call — fall through and
       // re-read what the winner wrote.
     }
 
-    return this.policies.findLive(organizationId, agentId);
+    const seeded = await this.policies.findLive(organizationId, agentId);
+    if (!seeded) {
+      this.logger.warn(
+        `org ${organizationId} agent ${agentId}: no spend policy after seeding; refusing the ` +
+          `call (retryable)`,
+      );
+      throw spendPolicyUnavailable();
+    }
+    return seeded;
   }
 
   /**
@@ -634,6 +641,16 @@ function isUniqueViolation(error: unknown): boolean {
     candidate.driverError?.code === UNIQUE_VIOLATION_CODE
   );
 }
+
+/** Retryable refusal when the spend policy cannot be read or seeded: nothing is charged. */
+function spendPolicyUnavailable(): Error {
+  return McpErrors.velocityLimitExceeded({
+    reason: VelocityViolationKind.UNAVAILABLE,
+    retryAfter: SPEND_POLICY_UNAVAILABLE_RETRY_SECONDS,
+  });
+}
+
+const SPEND_POLICY_UNAVAILABLE_RETRY_SECONDS = 5;
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

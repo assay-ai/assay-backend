@@ -626,8 +626,11 @@ export class ChannelAdmissionService {
       return { intent: created, replayed: true, channel: this.describe(message, key) };
     }
 
-    await input.beforeHold?.();
     try {
+      // Inside the try (money #5): a lost spend lock must abandon the
+      // unsecured intent like any other failure here, or it stays counted
+      // against the payer until the voucher expires.
+      await input.beforeHold?.();
       const secured = await this.intents.secureFunds(input.organizationId, created.id);
       return { intent: secured, replayed: false, channel: this.describe(message, key) };
     } catch (error) {

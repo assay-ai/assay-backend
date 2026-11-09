@@ -442,6 +442,19 @@ describe('ChannelAdmissionService (v3 §5.3, SPEC-W2 §4)', () => {
   });
 });
 
+describe('ChannelAdmissionService — a lost spend lock before the hold (money #5)', () => {
+  it('abandons the unsecured intent when beforeHold throws, and never secures funds', async () => {
+    const h = harness();
+    const lost = new Error('spend lock lost');
+    const error = await (h.service as any)
+      .admit({ ...baseInput(h), beforeHold: jest.fn().mockRejectedValue(lost) })
+      .catch((e: unknown) => e);
+    expect(error).toBe(lost);
+    expect(h.intentService.secureFunds).not.toHaveBeenCalled();
+    expect(h.intentService.abandonUnsecuredVoucher).toHaveBeenCalledWith('org', h.intents[0].id);
+  });
+});
+
 describe('ChannelAdmissionService — review 2026-10-31 regressions', () => {
   it('L4: a replay is answered only to the session the lane is bound to', async () => {
     const h = harness();
