@@ -7,6 +7,14 @@ import { REDACTED, redactSecretsInText } from './redact';
 const OAUTH_REQUEST_PATH = /(\/oauth\/requests\/)[^/?#\s'"]+/gi;
 
 /**
+ * The capability token of an unlisted toolset URL (`/u/{token}[@n]` on the MCP
+ * host, review W-L2): the link is the permission, so logs and error paths keep
+ * the route and the version and drop the token. Any shape after `/u/` is
+ * replaced, not only a well-formed token, so a near-miss is not logged either.
+ */
+const UNLISTED_TOOLSET_PATH = /(\/u\/)[^/?#@\s'"]+/gi;
+
+/**
  * Routes whose whole query string is dropped: `/oauth/authorize` carries
  * `state`, `code_challenge`, `redirect_uri`, `client_id` and `assay_replaces`
  * (a credential id), `continue` carries the rid; the consent API takes none.
@@ -74,7 +82,7 @@ function decodedKey(raw: string): string {
 
 /**
  * A request URL as it may be logged or put in `error.path` (R-OA-27): the
- * consent request id and every query value outside {@link SAFE_QUERY_KEYS}
+ * consent request id, an unlisted toolset token, and every query value outside {@link SAFE_QUERY_KEYS}
  * become {@link REDACTED}, the query of `/oauth/authorize*` and
  * `/oauth/requests/*` is dropped, and the token-shaped value backstop runs over
  * the rest. The path and the query keys are kept, so a log line still names the
@@ -85,7 +93,9 @@ export function redactOAuthUrl(url: string): string {
   const path = queryStart === -1 ? url : url.slice(0, queryStart);
   const query = queryStart === -1 ? null : url.slice(queryStart + 1);
 
-  const safePath = path.replace(OAUTH_REQUEST_PATH, `$1${REDACTED}`);
+  const safePath = path
+    .replace(OAUTH_REQUEST_PATH, `$1${REDACTED}`)
+    .replace(UNLISTED_TOOLSET_PATH, '$1:token');
   const safeQuery =
     query === null || QUERYLESS_PATH.test(path)
       ? ''
@@ -123,6 +133,7 @@ export function redactOAuthText(text: string): string {
     text
       .replace(QUERYLESS_PATH_IN_TEXT, '$1')
       .replace(OAUTH_REQUEST_PATH, `$1${REDACTED}`)
+      .replace(UNLISTED_TOOLSET_PATH, '$1:token')
       .replace(SECRET_QUERY_IN_TEXT, `$1${REDACTED}`),
   );
 }
