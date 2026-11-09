@@ -261,6 +261,23 @@ export class DepositIntentRepository extends OrganizationScopedRepository<Deposi
   }
 
   /**
+   * Pushes the next finality check of this deposit to `nextCheckAt` without
+   * marking it uncovered: the sweep could not observe its transaction yet and
+   * will look again then. Queue marker only.
+   */
+  async deferFinalityCheck(
+    organizationId: string,
+    intentId: string,
+    nextCheckAt: Date,
+  ): Promise<number> {
+    const result = await this.update(
+      { organizationId, id: intentId, finalityResolvedAt: IsNull() },
+      { finalityNextCheckAt: nextCheckAt },
+    );
+    return result.affected ?? 0;
+  }
+
+  /**
    * Whether this buyer account has a settled deposit the finality sweep has
    * held uncovered since `before` or earlier: an unresolved escrow shortfall.
    * `POST /deposits` refuses a new intent then (H-1 pre-flight). Cross-tenant
