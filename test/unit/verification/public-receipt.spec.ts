@@ -120,10 +120,10 @@ describe('public receipt: the mapper', () => {
   });
 
   it('cleans provider-written names and drops a sampling sentence with unexpected characters', () => {
-    expect(cleanName('  Chain‮look​\n  ')).toBe('Chainlook');
+    expect(cleanName('  Chain\u202Elook\u200B\n  ')).toBe('Chainlook');
     expect(cleanName('x'.repeat(500))).toHaveLength(80);
     const r = toPublicReceipt(row({ sampleDisplay: '1 in 125 <script>alert(1)</script>' }), {
-      providerNames: new Map([[PROVIDER, 'Chain‮look']]),
+      providerNames: new Map([[PROVIDER, 'Chain\u202Elook']]),
       toolNames: new Map([[TOOL, 'tool\u0000name']]),
     });
     expect(r.sampling).toBeNull();

@@ -30,8 +30,12 @@ import { DropWatch, droppedByNonce, recordSigned } from './channel-tx-attempts';
 /** What a channel refund did (SPEC-W2 §5). */
 export type ChannelRefundOutcome =
   | { readonly kind: 'REFUNDED'; readonly txRef: string }
-  /** The money left the bucket for the provider before the refund could be sent. */
-  | { readonly kind: 'COLLECTED' }
+  /**
+   * The money left the bucket for the provider before the refund could be
+   * sent. `partial`: some pieces of this call were refunded before the rest
+   * was collected, so the call is neither wholly refunded nor wholly paid out.
+   */
+  | { readonly kind: 'COLLECTED'; readonly partial?: boolean }
   /** Past `maturity + HELD_TIMEOUT`: the refund window is closed on chain. */
   | { readonly kind: 'TIMED_OUT' }
   /** Nothing sent this time (no bucket holds it, or an earlier send is unresolved): retried. */
@@ -176,7 +180,9 @@ export class ChannelRefundService {
       // The open buckets together hold less than what is left: part of it was
       // paid to the provider, or its window closed.
       const outcome: ChannelRefundOutcome =
-        books.slot.h1 + books.slot.h2 < remaining ? { kind: 'COLLECTED' } : { kind: 'TIMED_OUT' };
+        books.slot.h1 + books.slot.h2 < remaining
+          ? { kind: 'COLLECTED', partial: refunded > 0n }
+          : { kind: 'TIMED_OUT' };
       // Before a final answer: an earlier send of this piece may have landed
       // after all (and drained the bucket). Its log with this piece's
       // refundId says so (M-1).

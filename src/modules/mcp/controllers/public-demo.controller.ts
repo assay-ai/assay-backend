@@ -13,6 +13,7 @@ import { Request } from 'express';
 
 import { CacheHeader, NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { SingleFlight } from '@shared/decorators/single-flight.decorator';
+import { clientKey } from '@shared/interceptors/address-rate-limit.interceptor';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { DemoVerdictResponseDto, RunDemoBodyDto, RunDemoResponseDto } from '../dto/public-demo.dto';
@@ -161,8 +162,12 @@ export function demoRunSingleFlightKey(req: Request): string {
  * Without `trust proxy` it is the load balancer itself, one bucket for every
  * visitor: too strict, never open.
  *
+ * IPv6 addresses are grouped by their /64 (`clientKey`, like every other
+ * per-address limiter): one subscriber usually holds a whole /64, and keying
+ * on the /128 gave each rotated address its own window (review W-L1).
+ *
  * Exported so that is a test rather than a comment.
  */
 export function demoRateLimitAddress(request: Request): string {
-  return request.ip ?? 'unknown';
+  return clientKey(request.ip);
 }

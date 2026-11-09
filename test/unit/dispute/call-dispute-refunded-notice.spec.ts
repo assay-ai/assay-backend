@@ -132,6 +132,51 @@ describe('CallDisputeService.settleRefund: the refunded notice', () => {
     expect(notified).toEqual([]);
   });
 
+  // Money #2 (C-1): every non-final outcome backs off, so a row that stays
+  // pending cannot hold the head of the refund queue.
+  it('backs off when the refund answered but the call is still held', async () => {
+    const { service, notified } = build({
+      intents: [HELD_INTENT],
+      refund: jest.fn().mockResolvedValue('NOT_HELD'),
+    });
+    const paymentIntents = (
+      service as unknown as { paymentIntents: { recordHeldFailure: jest.Mock } }
+    ).paymentIntents;
+
+    const after = await service.settleRefund('dispute-1', { chain: true });
+
+    expect(after.refundState).toBe('PENDING');
+    expect(paymentIntents.recordHeldFailure).toHaveBeenCalledWith(
+      'buyer-org',
+      'intent-1',
+      expect.stringContaining('refund still pending'),
+    );
+    expect(notified).toEqual([]);
+  });
+
+  it('closes the dispute NOT_REFUNDABLE once the collect was booked', async () => {
+    const collected = {
+      ...HELD_INTENT,
+      heldStatus: 'COLLECTED',
+      holdReleasedAt: new Date(),
+    } as unknown as PaymentIntentEntity;
+    const { service, query, notified } = build({
+      intents: [HELD_INTENT, collected],
+      refund: jest.fn().mockResolvedValue('COLLECTED'),
+    });
+
+    await service.settleRefund('dispute-1', { chain: true });
+
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('"refund_state" = $3'), [
+      'dispute-1',
+      'NONE',
+      'NOT_REFUNDABLE',
+      null,
+      null,
+    ]);
+    expect(notified).toEqual([]);
+  });
+
   it('sends one notice when two runs settle the same dispute at once (review I1)', async () => {
     const refunded = {
       ...HELD_INTENT,

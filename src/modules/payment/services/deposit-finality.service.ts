@@ -23,6 +23,8 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { formatDollars } from '@shared/utils/money-display.util';
 
 import {
+  DEPOSIT_DROP_MIN_AGE_MS,
+  DEPOSIT_DROP_RECHECK_MS,
   DEPOSIT_UNCOVERED_ALERT_AFTER_MS,
   DEPOSIT_UNCOVERED_ALERT_WINDOW_SECONDS,
   DEPOSIT_UNCOVERED_BACKOFF_MAX_MS,
@@ -227,6 +229,30 @@ export class DepositFinalityService {
         if (!stillThere) {
           const landed = await adapter.observeTransfer(chainIntent, candidate.chainTxRef as TxRef);
           if (landed) {
+            skipped += 1;
+            continue;
+          }
+          // Gone at both commitments is still weak evidence on its own: each
+          // read can be served by a different endpoint of the failover list,
+          // and one that lags the node which saw the settle answers "not
+          // found" for a deposit that is sitting in the escrow. A reject is
+          // permanent, so a drop counts only once the deposit has stayed
+          // unobservable for DEPOSIT_DROP_MIN_AGE_MS since its pending credit
+          // was written. Until then the row is re-checked every
+          // DEPOSIT_DROP_RECHECK_MS (it never blocks the queue), and any pass
+          // that sees it again resumes the normal path.
+          const pendingSince = pending.createdAt?.getTime() ?? Date.now();
+          if (Date.now() - pendingSince < DEPOSIT_DROP_MIN_AGE_MS) {
+            this.logger.warn(
+              `Deposit ${candidate.id}: transaction ${candidate.chainTxRef} not observable at any ` +
+                `commitment yet; not rejecting before it has stayed unobservable for ` +
+                `${Math.round(DEPOSIT_DROP_MIN_AGE_MS / 60_000)} min`,
+            );
+            await this.deposits.deferFinalityCheck(
+              candidate.organizationId,
+              candidate.id,
+              new Date(Date.now() + DEPOSIT_DROP_RECHECK_MS),
+            );
             skipped += 1;
             continue;
           }

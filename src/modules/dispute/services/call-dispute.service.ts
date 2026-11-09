@@ -722,6 +722,13 @@ export class CallDisputeService {
     if (!columns || columns.state === RefundState.PENDING) {
       // The debt changed under us (a replacement voucher in flight): stays
       // PENDING, and deciding again finishes it once collection has settled.
+      // Backed off like every other non-final outcome, so a row that stays
+      // pending is not re-read on every pass at the head of the refund queue.
+      await this.paymentIntents.recordHeldFailure(
+        dispute.organizationId,
+        intentId,
+        `refund still pending (${plan})`,
+      );
       this.logger.warn(`Call dispute ${disputeId}: refund still pending (${plan})`);
       return dispute;
     }

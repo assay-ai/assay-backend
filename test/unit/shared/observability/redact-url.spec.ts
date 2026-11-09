@@ -1,4 +1,4 @@
-import { redactOAuthText, redactOAuthUrl, REDACTED } from '@shared/observability';
+import { redactLoggedUrl, redactOAuthText, redactOAuthUrl, REDACTED } from '@shared/observability';
 
 /**
  * R-OA-27: a consent request id (`rid`) never reaches a log or an error body.
@@ -113,5 +113,34 @@ describe('redactOAuthText', () => {
     ['Cannot GET /api/v1/payments/abc-123', 'Cannot GET /api/v1/payments/abc-123'],
   ])('redacts %s', (text, expected) => {
     expect(redactOAuthText(text)).toBe(expected);
+  });
+});
+
+/**
+ * W-L2: the unlisted toolset token (`/u/{token}` on the MCP host) is the access
+ * capability. Access logs, `error.path` and error messages keep the route and
+ * the version, never the token.
+ */
+describe('unlisted toolset tokens', () => {
+  const TOKEN = 'k3y_unlisted-toolset-0123456789';
+
+  it.each([
+    [`/u/${TOKEN}`, '/u/:token'],
+    [`/u/${TOKEN}@3`, '/u/:token@3'],
+    [`/u/${TOKEN}?tools=a&free=1`, `/u/:token?tools=${REDACTED}&free=${REDACTED}`],
+    [`/U/${TOKEN}/mcp`, '/U/:token/mcp'],
+  ])('access log and error path: %s', (url, expected) => {
+    expect(redactLoggedUrl(url)).toBe(expected);
+    expect(redactOAuthUrl(url)).toBe(expected);
+    expect(redactLoggedUrl(url)).not.toContain(TOKEN);
+  });
+
+  it('error message text', () => {
+    expect(redactOAuthText(`Cannot POST /u/${TOKEN}@2 now`)).toBe('Cannot POST /u/:token@2 now');
+  });
+
+  it('leaves other MCP paths alone', () => {
+    expect(redactLoggedUrl('/@maker/weather@2')).toBe('/@maker/weather@2');
+    expect(redactLoggedUrl('/my/slug')).toBe('/my/slug');
   });
 });
